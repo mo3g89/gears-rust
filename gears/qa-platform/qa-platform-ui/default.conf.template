@@ -1,0 +1,348 @@
+# nginx config for the qa-platform UI image
+# (gears/qa-platform/deploy/docker/qa-platform-ui.Dockerfile copies this to
+# /etc/nginx/conf.d/default.conf, i.e. it is included inside nginx's `http`
+# block -- which is why the `map` below is legal here).
+#
+# Retargeted from legacy's manager-ui/nginx.conf: legacy proxied /api/ to a
+# Kubernetes ClusterIP service, this proxies /qa/v1/ to the `gears` service on
+# the compose network (docker-compose.yml's `ui` service). The SPA try_files,
+# the gzip block and the static-asset caching below are legacy's, unchanged.
+
+# Kept for the $connection_upgrade variable the /qa/v1/ block below sets on
+# every proxied request. Nothing in this deployment actually speaks WebSocket
+# any more: legacy's one WS surface (/api/runs/{name}/ws) became SSE over
+# `GET /qa/v1/runs/{id}/logs` (src/hooks/useRunLogStream.ts:256), and
+# `grep -rn WebSocket qa-platform-ui/src` has exactly one hit -- a doc comment
+# at useRunLogStream.ts:210 naming the hook it replaced -- and no client. Left
+# in place because a request with no Upgrade header maps to `close`, which is
+# what an ordinary proxied request wants anyway -- removing it would be a
+# behaviour change to legacy's file for no gain.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# The SSE log stream's credential, and the ONLY place in this file where a
+# query parameter becomes an `Authorization` header.
+#
+# WHY IT HAS TO EXIST AT ALL. The log viewer reads
+# `GET /qa/v1/runs/{id}/logs` with `EventSource`
+# (src/hooks/useRunLogStream.ts), and `EventSource` cannot send request
+# headers -- its constructor has no `headers` option. The gears read a
+# credential from exactly one place: `extract_bearer_http`
+# (libs/toolkit-http-middleware/src/security.rs:47) takes `&HeaderMap` and
+# looks only at `AUTHORIZATION`, and `security_context_middleware`
+# (libs/toolkit-http-middleware/src/auth.rs:112) hands it `request.headers()`.
+# That function cannot see the request URI, so "authenticate by query
+# parameter" is not a gear setting somebody forgot to switch on -- it is
+# unreachable -- and there is no cookie branch either. nginx is the only thing
+# in the browser's path that can bridge the two, which is why the bridge is
+# here and not in a gear.
+#
+# WHY A `map` AND NOT A BARE `proxy_set_header`. This is the part that is easy
+# to get wrong, and it was measured rather than reasoned. `proxy_set_header
+# Authorization "Bearer $arg_access_token";` REPLACES any inbound
+# `Authorization`, and this route is not reached only by `EventSource`:
+# `useRunLogs` (src/api/hooks.ts:722-732) polls the *same URL* every 5s with a
+# plain `apiGet`, which does carry a real header, and `LogViewer` mounts both
+# hooks side by side (LogViewer.tsx:173,180) -- which is exactly why this route
+# was observed answering 401 and 200 alternately at a 5s cadence before this
+# block existed. Driven against the live stack, before:
+#
+#   curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer <real>" \
+#        localhost:8080/qa/v1/runs/<id>/logs            -> 200 text/event-stream
+#
+# The unconditional form would have overwritten that header with the literal
+# `Bearer ` and turned the one path that already worked into a 401. This map
+# uses the query parameter only when there is one, and otherwise passes the
+# inbound header through untouched.
+#
+# HOW IT FAILS CLOSED. With neither parameter nor header `$sse_authorization`
+# is the empty string, and nginx omits a `proxy_set_header` whose value is
+# empty -- so the gear sees no `Authorization` and answers 401 `MISSING_BEARER`
+# (auth.rs:123). With a parameter the gear does not like, the token is
+# extracted fine and `authenticate` rejects it (auth.rs:118) -- also 401.
+# Nothing here decides whether a token is *good*; it only decides where the
+# gear looks for one.
+#
+# THE BLAST RADIUS IS ONE ROUTE, and that is the point. Only the SSE location
+# below names `$sse_authorization`; the prefix `location /qa/v1/` sets no such
+# header, so no other API path becomes query-authenticatable -- verified live:
+# `localhost:8080/qa/v1/products?access_token=<real>` answers 401. For the same
+# reason this header must NEVER be added to a location the SPA calls with a
+# real `Authorization`: the fallback below protects the one URL it covers, not
+# any other.
+#
+# THE COST, recorded for a human in gears/qa-platform/docs/CONTRACT-DIFF.md
+# section 12.5. It is one exposure, not three, and it is measured rather than
+# feared: **the token lands in this container's nginx access log**, whole and
+# in clear, because the access log format writes the full request line --
+#
+#   "GET /qa/v1/runs/<id>/logs?access_token=eyJhbGciOi... HTTP/1.1" 200
+#
+# -- and therefore in `docker compose logs ui` too, where it accumulates one
+# line per stream open for the life of the container (`docker compose logs ui
+# | grep -c 'access_token=eyJ'` was 60 while this comment was being written,
+# and only ever grows).
+#
+# NOT the browser's history, and that correction belongs here rather than only
+# in the diff document, because this block is what the next person editing it
+# reads. `EventSource` issues a **subresource** request, not a navigation, so
+# this URL never becomes a history entry the way a clicked or typed one does,
+# and the UI never renders it either -- LogViewer's "download" builds a `Blob`
+# object URL from text it already holds (LogViewer.tsx:241-245), not a link to
+# the stream. Do not re-add that claim; it was asserted once and refuted in the
+# same commit.
+#
+# Nothing here can shorten a token's lifetime -- that would need a
+# token-exchange endpoint this deployment does not have. The only bound is the
+# realm's own `"accessTokenLifespan": 300`
+# (gears/qa-platform/deploy/compose/keycloak/realm-qa-platform.json:15), i.e. a
+# leaked line is good for at most five minutes from issue.
+#
+# `$arg_access_token` is NOT percent-decoded by nginx. A JWT's alphabet
+# (base64url plus `.`) never needs encoding, so that is a no-op today; a token
+# that did would arrive still-encoded and be rejected, which is the safe
+# direction.
+map $arg_access_token $sse_authorization {
+    ''      $http_authorization;
+    default "Bearer $arg_access_token";
+}
+
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # HTTPS, when a deploy mounts it, and NOTHING when it does not.
+    #
+    # A `listen 443 ssl` here unconditionally would need a certificate to exist
+    # in the image, which is a committed private key. So the fragment carrying
+    # that listener and its certificate paths is MOUNTED instead --
+    # deploy/compose/ui-tls/tls.conf, by deploy/compose/docker-compose.https.yml
+    # -- and this include is the seam. `tls-conf/` does not exist in this image,
+    # and a wildcard include that matches nothing is legal in nginx and silent
+    # (verified with `nginx -t` in a throwaway nginx:alpine against this exact
+    # line, with no such directory present), so the local stack is byte-for-byte
+    # the plain-HTTP server it has always been.
+    #
+    # Inside THIS server block rather than as a second one, deliberately: the
+    # two listeners then share every location below -- the SPA try_files, the
+    # /qa/v1 proxy and the SSE stream with its `$sse_authorization` bridge --
+    # instead of a copy that can drift from it.
+    #
+    # WHY HTTPS IS NEEDED AT ALL, since it looks like a preference: the login
+    # flow sends `code_challenge_method=S256`, which needs `crypto.subtle`, which
+    # browsers expose only in a secure context (https, or http on
+    # localhost/127.0.0.1). Reached at a bare IP over http this UI cannot log in
+    # -- "Crypto.subtle is available only in secure contexts (HTTPS)" -- and no
+    # amount of config agreement changes that.
+    include /etc/nginx/tls-conf/*.conf;
+
+    # THE SECOND SEAM, same mechanism as tls-conf above and for the same reason:
+    # a wildcard include matching nothing is legal in nginx and silent. Nothing
+    # in this image populates it. The Helm chart mounts Keycloak's three root
+    # prefixes here -- /realms/, /resources/, /admin/ -- so the IdP is served
+    # from this server block, i.e. from the SAME ORIGIN as the SPA and the API.
+    # That is what collapses the login chain's five pins to one.
+    #
+    # NOT `/auth/`, and that is not a style choice: the SPA already routes
+    # /auth/callback as its OIDC redirect target, and an nginx `location /auth/`
+    # shadows it -- the browser would come back from Keycloak straight into
+    # Keycloak. Serving Keycloak at its DEFAULT root path also keeps
+    # PUBLIC_ISSUER_ORIGIN a bare origin, which is the only shape
+    # deploy/docker/entrypoint.sh:137 accepts (it refuses to start on a path).
+    #
+    # The compose stack mounts nothing here, so its behaviour is unchanged.
+    include /etc/nginx/extra-conf/*.conf;
+
+    # Re-resolve `gears` on every request instead of once at startup.
+    #
+    # THIS IS NOT OPTIONAL, and the brief's rationale for dropping legacy's
+    # resolver ("in compose the service name resolves directly") is true only
+    # at configuration-load time. `proxy_pass http://gears:8087;` with a
+    # literal name and no `resolver` is resolved ONCE, when nginx loads its
+    # config, and the answer is cached for the worker's lifetime. Recreating
+    # the `gears` container -- which this stack does routinely; see the
+    # `depends_on` note in docker-compose.yml, and Tasks 13/17/18 all do it --
+    # can hand it a different address, after which every /qa/v1 request 502s
+    # until nginx is reloaded, and nothing in the UI says why.
+    #
+    # Driven, not reasoned: with the literal form live, holding the old
+    # address with a throwaway container so `gears` had to move, `curl
+    # localhost:8087/qa/v1/products` answered 200 while the same path through
+    # this proxy answered 502, and nginx's error log named the stale address
+    # outright --
+    #   connect() failed (111: Connection refused) while connecting to
+    #   upstream, ... upstream: "http://172.22.0.4:8087/qa/v1/products"
+    # -- with `gears` by then on 172.22.0.6.
+    #
+    # A variable in `proxy_pass` is what forces the per-request lookup, and a
+    # variable in `proxy_pass` is in turn what requires `resolver` -- the two
+    # go together, which is why legacy's file had both. 127.0.0.11 is docker's
+    # embedded DNS (verified: it is the sole `nameserver` in this container's
+    # /etc/resolv.conf), replacing legacy's kube-dns address. `ipv6=off`
+    # because this network is IPv4-only (`docker network inspect
+    # compose_default` -> `EnableIPv6 false`, subnet 172.22.0.0/16), so the
+    # AAAA half of every lookup is pure overhead.
+    #
+    # `$gears` carries no path component, so the request URI still passes
+    # through unchanged. Verified from the gear's own side rather than from
+    # nginx's: a Problem+JSON body echoes the path the *gear* received in
+    # `instance`, and through this proxy
+    # `GET /qa/v1/runs/00000000-0000-0000-0000-000000000000` comes back with
+    # `instance: "/qa/v1/runs/00000000-0000-0000-0000-000000000000"`. The whole
+    # experiment is repeatable: stop `gears`, hold its address with
+    # `docker run --rm --network compose_default --ip <old addr> alpine sleep`,
+    # start `gears` again so it lands elsewhere, and curl through :8080
+    # without touching this container. Literal form: 502. This form: 200,
+    # across two forced moves (…0.4 -> …0.6 -> …0.7) with nginx's
+    # `State.StartedAt` unchanged throughout.
+    resolver ${NGINX_RESOLVER} valid=10s ipv6=off;
+    set $gears ${GEARS_UPSTREAM};
+
+    # Emit redirects as paths rather than absolute URLs. This server sits
+    # behind a port mapping (compose publishes 8080 -> 80), and nginx's own
+    # absolute redirects are built from `$host`, which carries no port -- so
+    # any nginx-generated redirect would send the browser to
+    # http://localhost/... , i.e. port 80, where nothing listens. A
+    # path-only Location is resolved by the browser against the origin it
+    # actually used.
+    absolute_redirect off;
+
+    # Static files -- React SPA with client-side routing
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # The run log stream, and nothing else.
+    #
+    # This block exists for one directive: `proxy_buffering off`. The log
+    # viewer reads `GET /qa/v1/runs/{id}/logs` as an SSE stream
+    # (src/hooks/useRunLogStream.ts:256), and an SSE stream is only worth
+    # anything if each event reaches the browser when it is emitted.
+    #
+    # What that directive actually buys, measured rather than assumed. A
+    # throwaway rig (an upstream emitting one `data:` frame per second through
+    # this same nginx 1.31.4-alpine, three locations differing only in these
+    # directives, client `curl -N --compressed`, arrival timestamped per line):
+    #
+    #   proxy_buffering on,  event-stream NOT in gzip_types -> 1/s, no batching
+    #   proxy_buffering on,  event-stream IN     gzip_types -> all 6 in one
+    #                                                          10 ms burst at
+    #                                                          end of stream
+    #   proxy_buffering off, event-stream IN     gzip_types -> 1/s, no batching
+    #
+    # So nginx's own response buffers do NOT accumulate a flushing chunked
+    # upstream -- the frequently-repeated claim that they do did not reproduce.
+    # The thing that actually batches an SSE stream is **gzip**, and
+    # `proxy_buffering off` is what defeats it, because passing the response
+    # through synchronously leaves gzip nothing to accumulate.
+    #
+    # `gzip_types` in this file does not list `text/event-stream`, so the
+    # middle row is not today's behaviour. `proxy_buffering off` is kept
+    # anyway, for two reasons that do not depend on that list staying as it is:
+    # adding `text/event-stream` to `gzip_types` later would silently
+    # reintroduce the middle row, and with buffering on a long-lived stream
+    # served to a slow client is eligible to be spooled to a temporary file
+    # (`proxy_max_temp_file_size`, 1 GB by default), which is not a thing a
+    # log tail should ever do.
+    #
+    # A REGEX, not the prefix `location /qa/v1/runs/` the task brief asked
+    # for, and that is not a style preference. nginx gives a prefix location
+    # ending in `/` that is served by `proxy_pass` special processing: a
+    # request whose URI equals the location string *without* the trailing
+    # slash gets an implicit 301 adding the slash (documented under
+    # `proxy_pass`). `GET /qa/v1/runs?limit=...` -- the Runs page's own list
+    # request (src/api/hooks.ts:405) -- is exactly that URI. While the prefix
+    # form was live, `curl -i 'http://localhost:8080/qa/v1/runs?limit=2'`
+    # through this proxy answered
+    #   HTTP/1.1 301 Moved Permanently
+    #   Location: http://localhost/qa/v1/runs/?limit=2
+    # and headless Chrome on /runs showed the same thing for its own
+    # `?limit=500`, then rendered "Failed to load test runs / Failed to fetch"
+    # -- because that redirect's host comes from `$host`, which drops the port,
+    # so the browser followed it to port 80 and got ERR_CONNECTION_REFUSED.
+    # That port loss is what `absolute_redirect off` above now prevents for
+    # every nginx-generated redirect; this regex prevents the redirect itself.
+    location ~ ^/qa/v1/runs/[^/]+/logs$ {
+        proxy_pass $gears;
+
+        proxy_http_version 1.1;
+        proxy_buffering off;
+
+        # The whole of this stream's authentication. See the
+        # `$sse_authorization` map above for why the value is a map and not the
+        # literal "Bearer $arg_access_token" -- that form would overwrite the
+        # real header the polled `useRunLogs` fallback sends to this very URL --
+        # and for what it costs to accept a token here at all.
+        proxy_set_header Authorization     $sse_authorization;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Legacy's timeouts, kept. An SSE connection is idle between events,
+        # and nginx's default proxy_read_timeout is 60s. That default is not
+        # *currently* fatal -- the gear sends a keep-alive every 30s (Task 11's
+        # report, `sse.rs:94`) -- but it leaves the connection's survival
+        # depending on a gear-side interval this file cannot see, and a run
+        # that emits nothing for over a minute is entirely normal. 3600s
+        # removes that coupling.
+        proxy_read_timeout  3600s;
+        proxy_send_timeout  3600s;
+        proxy_connect_timeout 10s;
+    }
+
+    # Proxy API requests to the gears service (`$gears`, set above -- see there
+    # for why it is a variable rather than a literal). It carries no URI part,
+    # so the request URI is passed through unchanged; the gears serve these
+    # routes under /qa/v1 themselves, so no prefix rewrite is wanted.
+    location /qa/v1/ {
+        proxy_pass $gears;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Generous timeouts for long-running log fetches
+        proxy_read_timeout  3600s;
+        proxy_send_timeout  3600s;
+        proxy_connect_timeout 10s;
+    }
+
+    # Enable gzip compression for static assets
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml text/javascript
+               application/javascript application/json application/xml+rss;
+
+    # Cache static assets aggressively.
+    #
+    # LATENT TRAP, kept verbatim from legacy per the brief, marked here because
+    # nothing else in the file would warn you. This is a REGEX location, and in
+    # nginx a matching regex location beats a matching prefix location -- so
+    # this block, not `location /qa/v1/` above, would serve any API path ending
+    # in one of these extensions, and it has no `proxy_pass`: the request would
+    # be answered off the filesystem (404) instead of reaching the gears.
+    #
+    # Harmless today, and checked rather than assumed: no path built in
+    # `src/api/hooks.ts` ends in a listed extension, and `.json` is deliberately
+    # NOT in the list, so `/qa/v1/openapi.json` is safe. Adding `json` here, or
+    # adding a gear route ending `.js`/`.css`/..., would break that route with
+    # no error message pointing at this block. Prefix the API locations with
+    # `^~` if that ever happens.
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+}

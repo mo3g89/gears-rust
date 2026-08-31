@@ -1,0 +1,168 @@
+{{/* Carries files/ui-tls/tls.conf verbatim (copied into this chart's
+     files/ui-tls/ so .Files.Get can reach it -- Helm's .Files is scoped to
+     the chart directory and cannot read files outside it via ../, the same
+     constraint certs-scripts-configmap.yaml and postgres-initdb-configmap.yaml
+     already work around). Kept byte-identical to the compose original by
+     deploy/helm/tests/test_chart_file_sync.py's fourth table row. Grouped
+     into this file, not its own, because the Deployment below is its only
+     consumer -- same shape as certs-job.yaml grouping its ServiceAccount,
+     Role, RoleBinding and Job together. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qa-platform-ui-tls-conf
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: ui
+data:
+  tls.conf: |
+{{ .Files.Get "files/ui-tls/tls.conf" | indent 4 }}
+---
+{{/* The UI pod is this cluster's ONLY edge: it is the single hostPort 80/443
+     listener across the whole chart, terminates TLS, and proxies both the
+     gears (/qa/v1) and Keycloak (/realms, /resources, /admin) so the SPA,
+     the API and the IdP share one origin. See qa-platform-ui/default.conf.template
+     for the location blocks this Deployment's env and mounted fragments feed.
+
+     NGINX_RESOLVER / GEARS_UPSTREAM, not more. The image's own
+     NGINX_ENVSUBST_FILTER allow-list (qa-platform-ui.Dockerfile) is
+     '^(NGINX_RESOLVER|GEARS_UPSTREAM)$' -- exactly these two -- because
+     envsubst runs unconditionally over every $-prefixed token in
+     default.conf.template, and without an allow-list it would also eat
+     nginx's own $sse_authorization, $uri and $gears. There is deliberately
+     no KEYCLOAK_UPSTREAM here: envsubst only ever touches
+     /etc/nginx/templates/*.template, never a mounted fragment, so
+     ui-extraconf-configmap.yaml's Keycloak upstream is a Helm-rendered
+     literal instead -- adding a KEYCLOAK_UPSTREAM env var here would define
+     a variable nothing expands and nothing reads.
+
+     Two ConfigMap mounts feed the template's two `include` seams:
+       - tls-conf   -> /etc/nginx/tls-conf   (listen 443 ssl + cert paths)
+       - extra-conf -> /etc/nginx/extra-conf (the Keycloak location block)
+     Neither directory exists in the image; an nginx `include` of a wildcard
+     that matches nothing is legal and silent, which is exactly how the
+     plain-compose stack (neither ConfigMap mounted) keeps working unchanged.
+
+     The Secret mount is deliberately NARROWED with `items`. qa-platform-tls
+     also holds ca.key (the dev CA's private key) and the keycloak.crt/key
+     pair; mounting the whole Secret would place ca.key inside this
+     internet-facing pod, and `readOnly: true` on the volume only stops
+     writes to the mount -- it does nothing to stop something inside the
+     container reading a key that was placed there. `items` is what keeps
+     ca.key out of this pod entirely, the same property
+     gears-deployment.yaml's tls-ca mount and the compose stack's
+     volume.subpath both rely on for their own single-key mounts. */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qa-platform-ui
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: ui
+spec:
+  replicas: {{ .Values.ui.replicaCount }}
+  # RECREATE, NOT RollingUpdate, AND THE REASON IS hostPort. This pod binds
+  # hostPort 80 and 443 on the node (the ports block below) -- a NODE-WIDE
+  # resource, held for as long as the pod exists. Kubernetes' default strategy
+  # is RollingUpdate, which at replicas: 1 means maxSurge 1 / maxUnavailable 0:
+  # the scheduler must place the NEW pod before it may delete the OLD one. It
+  # cannot -- the old pod still holds 80/443 -- so the new pod stays Pending
+  # with a `node(s) didn't have free ports for the requested pod ports`
+  # predicate failure and the rollout hangs until progressDeadlineSeconds
+  # (600s by default) marks it failed. The FIRST install works, which is what
+  # makes this a re-deploy-only trap, and deploy-k8s.sh re-deploys on every
+  # run with a fresh image tag -- so it would have hit on the second deploy,
+  # every time.
+  #
+  # Recreate deletes the old pod first and accepts a few seconds of downtime
+  # at the edge. That is the correct trade here: this is a single-node dev
+  # stack with one replica, so there is no highly-available path to protect.
+  # DO NOT "fix" this by raising maxUnavailable on a RollingUpdate instead --
+  # that produces the same delete-then-create ordering with more moving parts,
+  # and nothing stops a future replicas: 2 from reintroducing the port
+  # conflict. The gears and keycloak Deployments bind no hostPort and keep the
+  # default RollingUpdate on purpose.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qa-platform
+      app.kubernetes.io/component: ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qa-platform
+        app.kubernetes.io/component: ui
+    spec:
+      containers:
+        - name: ui
+          image: "{{ .Values.images.ui.repository }}:{{ .Values.images.ui.tag }}"
+          imagePullPolicy: {{ .Values.images.ui.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              hostPort: {{ .Values.ui.hostPort.http }}
+            - name: https
+              containerPort: 443
+              hostPort: {{ .Values.ui.hostPort.https }}
+          env:
+            {{- /* EMITTED ONLY WHEN PINNED. An empty clusterDns must produce NO
+                   env var at all, not an empty one: the image's
+                   15-resolver-from-resolv-conf.envsh hook keeps an already-set
+                   NGINX_RESOLVER and only auto-detects when it is unset or empty,
+                   and `value: ""` here would satisfy neither -- envsubst would
+                   render `resolver ;` and nginx would refuse to start. */}}
+            {{- if .Values.clusterDns }}
+            - name: NGINX_RESOLVER
+              value: {{ .Values.clusterDns | quote }}
+            {{- end }}
+            - name: GEARS_UPSTREAM
+              # FQDN, NOT the short name, and this is not a style choice.
+              # `proxy_pass $gears` defers resolution to REQUEST time through
+              # nginx's own `resolver` -- and nginx's resolver does NOT apply
+              # resolv.conf's `search` domains. A short name that `getent`
+              # resolves fine inside this very pod fails in nginx with
+              # "host not found in upstream", i.e. 502 on every /qa/v1 call.
+              # Measured on the live cluster 2026-08-29.
+              value: http://qa-platform-gears.{{ .Release.Namespace }}.svc.cluster.local:8087
+          volumeMounts:
+            - name: tls-conf
+              mountPath: /etc/nginx/tls-conf
+              readOnly: true
+            - name: extra-conf
+              mountPath: /etc/nginx/extra-conf
+              readOnly: true
+            - name: tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+      volumes:
+        - name: tls-conf
+          configMap:
+            name: qa-platform-ui-tls-conf
+        - name: extra-conf
+          configMap:
+            name: qa-platform-ui-extraconf
+        - name: tls
+          secret:
+            secretName: qa-platform-tls
+            items:
+              - key: ui.crt
+                path: ui.crt
+              - key: ui.key
+                path: ui.key

@@ -1,0 +1,343 @@
+# QA Platform development configuration
+#
+# Minimal config for developing/testing the four qa-platform gears
+# (qa-environments, qa-catalog, qa-runs, qa-insights). Based on mini-chat.yaml
+# but stripped to the essentials these gears need (db + authz-resolver/credstore
+# deps, REST under /qa/v1/...). qa-insights no longer links `event-broker` --
+# its reconcile sweep is the only event-ingest path any deployment has ever
+# used -- so this file needs no section for it.
+#
+# Usage:
+#   cargo run --bin cf-gears-example-server --features qa-platform,static-authn,static-authz,single-tenant,static-credstore -- --config config/qa-platform.yaml run
+
+server:
+  home_dir: "~/.cf-gears"
+
+database:
+  servers:
+    sqlite_qa_platform:
+      engine: "sqlite"
+      params:
+        WAL: "true"
+        synchronous: "NORMAL"
+        busy_timeout: "5000"
+      pool:
+        max_conns: 5
+        acquire_timeout: "30s"
+
+logging:
+  default:
+    console_level: info
+    file: "logs/cf-gears.log"
+    file_level: info
+  sqlx:
+    console_level: debug
+    file: "logs/sql.log"
+    file_level: debug
+  api-gateway:
+    console_level: debug
+    file: "logs/api.log"
+    file_level: debug
+  qa_environments:
+    console_level: debug
+    file: "logs/qa-environments.log"
+    file_level: debug
+  qa_catalog:
+    console_level: debug
+    file: "logs/qa-catalog.log"
+    file_level: debug
+  qa_runs:
+    console_level: debug
+    file: "logs/qa-runs.log"
+    file_level: debug
+  qa_insights:
+    console_level: debug
+    file: "logs/qa-insights.log"
+    file_level: debug
+
+gears:
+  api-gateway:
+    config:
+      bind_addr: "127.0.0.1:8087"
+      enable_docs: true
+      cors_enabled: true
+      openapi:
+        title: "QA Platform Dev API"
+        version: "0.1.0"
+        description: "QA Platform development server"
+      defaults:
+        body_limit_bytes: 64000000
+        rate_limit:
+          rps: 1000
+          burst: 200
+          in_flight: 64
+      auth_disabled: true
+
+  gear-orchestrator:
+    config: {}
+
+  grpc-hub:
+    config:
+      listen_addr: "uds:///tmp/cf-gears-grpc"
+
+  authn-resolver:
+    config:
+      vendor: "constructorfabric"
+
+  authz-resolver:
+    config:
+      vendor: "constructorfabric"
+
+  static-authn-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 100
+      mode: accept_all
+      s2s_credentials:
+        - client_id: "qa-platform"
+          client_secret: "qa-platform-dev-secret"
+
+  static-authz-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 100
+
+  tenant-resolver:
+    config:
+      vendor: "constructorfabric"
+
+  single-tenant-tr-plugin:
+    config:
+      vendor: "constructorfabric"
+
+  simple-user-settings:
+    database:
+      server: "sqlite_qa_platform"
+      file: "settings.db"
+    config:
+      max_field_length: 100
+
+  credstore:
+    database:
+      server: "sqlite_qa_platform"
+      file: "credstore.db"
+    config:
+      vendor: "constructorfabric"
+
+  static-credstore-plugin:
+    config:
+      secrets: []
+
+  # THE DATABASE-BACKED CREDSTORE PLUGIN -- PRESENT BUT NOT SELECTED.
+  # Inert exactly as in gears/qa-platform/config/qa-platform-stack.yaml (see
+  # the long note there for the two switches and the plaintext-at-rest
+  # consequence): the crate is not compiled in by default, and
+  # `credstore.config.vendor` above still names static-credstore-plugin's
+  # vendor. To use it here: build with `--features postgres-credstore` and set
+  # that vendor to "constructorfabric-postgres".
+  #
+  # A SEPARATE SQLITE FILE from the credstore gear's `credstore.db`, unlike the
+  # Postgres stack where both share one database. Migration histories and table
+  # names would not collide, but two independent connection pools writing one
+  # SQLite file invite SQLITE_BUSY for no benefit -- a second file costs
+  # nothing locally.
+  postgres-credstore-plugin:
+    database:
+      server: "sqlite_qa_platform"
+      file: "credstore_values.db"
+    config:
+      vendor: "constructorfabric-postgres"
+      priority: 100
+      secrets: []
+
+  file-parser:
+    config:
+      allowed_local_base_dir: /tmp
+
+  resource-group:
+    database:
+      server: "sqlite_qa_platform"
+      file: "resource_group.db"
+    config: {}
+
+  # qa-insights used to declare `deps = [.., event_broker, cluster]`
+  # (`qa-insights/src/gear.rs`), and that `deps` token compiled the
+  # `event-broker` gear in and initialised it on every boot. This section was
+  # mandatory as long as that was true: `EventBrokerModule::init` reads
+  # `ctx.config()` (required), not `ctx.config_or_default()`
+  # (`event-broker/src/module.rs:64`), and `mode` and `default_storage_backend`
+  # have no serde defaults, so an absent section made the whole server refuse
+  # to start with `Error: initialization failed for gear 'event-broker'` /
+  # `Caused by: gear 'event-broker' not found`.
+  #
+  # The dependency is gone. qa-insights' reconcile sweep was already the only
+  # ingest path any deployment ever exercised -- no deployment registered the
+  # `EventBrokerApi` client its transactional consumer needed -- so the
+  # consumer, the `deps` token and the `event-broker`/`event-broker-sdk`
+  # dependencies were deleted together, and `event-broker` is no longer linked
+  # into this stack at all. With no gear left to read it, this section has
+  # nothing to configure and is gone with it.
+  #
+  # `cluster` comes in the same way and needs nothing here: its init uses
+  # `config_or_default`, and it initialised cleanly with no section at all.
+
+  qa-environments:
+    database:
+      server: "sqlite_qa_platform"
+      file: "qa_environments.db"
+    config: {}
+
+  qa-catalog:
+    database:
+      server: "sqlite_qa_platform"
+      file: "qa_catalog.db"
+    # Defaults: repos_dir/bundles_dir under ./data/qa-catalog/,
+    # bundle_ttl_seconds=3600, branch_refresh_interval_seconds=900.
+    #
+    # Both of qa-catalog's lifecycle tasks (branch-cache refresher, bundle GC)
+    # enumerate their cross-tenant candidates under the gear's own named seam,
+    # `domain::elevated::enumeration_scope()` — an unrestricted, read-only
+    # scope minted locally in this gear — rather than under the gear's system
+    # actor and the PEP as earlier documentation here claimed. The
+    # static-authz plugin never sees that read, so its nil-tenant denial
+    # (gears/system/authz-resolver/plugins/static-authz-plugin/src/domain/
+    # service.rs:74-79) has nothing to deny.
+    #
+    # The write each task performs afterwards IS re-scoped per tenant/row —
+    # `system_actor::for_branch_refresh(tenant_id)` and
+    # `system_actor::for_bundle_delete(tenant_id)`, both non-nil — and DOES
+    # reach the PEP. static-authz derives its decision purely from the
+    # resolved tenant, so a non-nil tenant is granted, clamped to that tenant,
+    # the same as any end-user request naming it. This mechanism is in place
+    # and exercised by qa-catalog's own test suite.
+    #
+    # The refresher stays switched off below — not because the plugin denies
+    # it, but because enabling a ticker that has never run against this
+    # stack's actual deployment is exactly what a dev-stand verification run
+    # exists to catch, and that run has not happened yet. It is ready to flip
+    # once it has.
+    #
+    # The bundle-GC cadence is a const (BUNDLE_GC_INTERVAL in crate::gear), so
+    # unlike the refresher it has no switch here to hold back: with the
+    # enumerate-then-per-tenant-delete mechanism above in place, GC ticks and
+    # its deletes are granted, so expired bundle blobs under
+    # data/qa-catalog/bundles are collected on the ordinary cadence rather
+    # than accumulating. Deleting that directory by hand remains a safe manual
+    # reclaim if ever needed (bundles are ephemeral by design), but should no
+    # longer be necessary.
+    config:
+      branch_refresh_interval_seconds: 0
+
+  qa-runs:
+    database:
+      server: "sqlite_qa_platform"
+      file: "qa_runs.db"
+    # The dispatcher ticker is switched off in this dev stack. It is NOT
+    # switched off because the static-authz plugin denies it: the tick's
+    # cross-tenant enumerating reads (`for_dispatch_enumeration`,
+    # `for_claim_reconciliation`, `for_ttl_sweep`, `for_timeout_sweep`,
+    # `for_watch_scan`) elevate through `domain::elevated::enumeration_scope`
+    # and never reach the PEP at all, so the plugin's nil-tenant denial has
+    # nothing to deny. Each write the tick issues afterwards is re-scoped per
+    # row under the paired tenant-bound factory (`for_dispatch`,
+    # `for_ttl_expiry`, `for_timeout_enforcement`, `for_result_ingest`,
+    # `for_claim_release`) and IS granted by the plugin, clamped to that row's
+    # own tenant, exactly as any end-user request naming that tenant would be.
+    # This mechanism is in place and exercised by qa-runs' own test suite.
+    #
+    # It is switched off because enabling a ticker that has never run against
+    # this stack's actual deployment is exactly what a dev-stand verification
+    # run exists to catch, and that run has not happened yet. It is ready to
+    # flip once it has.
+    #
+    # What being off costs here, unchanged from before: launches still work -
+    # an admissible run dispatches inline on the request path - but a run that
+    # *queues* will not start on its own, and nothing sweeps TTLs, reconciles
+    # claims or enforces deadlines here.
+    #
+    # Updated 2026-08-15 (Task 16c), because the list above is not the worst of
+    # it. The tick is also what attaches a result observer to every live run,
+    # so with the dispatcher off **no run's results are ingested at all**: no
+    # per-test rows, no counters, no verdict, and no live log lines on
+    # `GET /qa/v1/runs/{id}/logs`, which answers 200 and streams nothing. And
+    # because the timeout sweep is off too, a run dispatched inline here never
+    # leaves `running` - there is nothing left that can retire it. Reads still
+    # work; a run's lifecycle does not close.
+    #
+    # Switched off rather than left running, because unlike qa-catalog's
+    # bundle GC this cadence is configurable and the point of leaving it off
+    # is the verification run above, not noise: at the 5 s default a tick left
+    # running unverified would be five seconds between an operator's first
+    # chance to notice something wrong. The code default stays `true`; this is
+    # the dev stack alone.
+    #
+    # The schedule firing ticker (Phase B) is switched off for the same reason
+    # and is a *separate* knob on purpose: it enumerates every tenant's
+    # schedules under the same elevated seam the dispatcher uses, and its
+    # per-tenant fire is granted by the plugin the same way. It too is ready
+    # to enable and verify, and is held back for the same dev-stand reason.
+    #
+    # What that costs here while it is off: schedule CRUD over
+    # `/qa/v1/schedules` works normally - it runs under the caller's own
+    # identity, not the system actor - but **no schedule ever fires**. A
+    # schedule created in this stack is a stored row and nothing else, and the
+    # only way to see one execute is to launch its target by hand through
+    # `POST /qa/v1/runs`.
+    #
+    # `schedule_interval_seconds` is stated beside it rather than left implicit.
+    # It is inert while `scheduler_enabled` is false - that knob is decisive
+    # regardless of the interval (`config::QaRunsConfig::scheduler_runs`) - and
+    # it is here so that flipping the switch once the dev-stand run has
+    # verified it does not also silently adopt a cadence nobody chose. 60 s
+    # matches a five-field cron expression's own resolution.
+    config:
+      dispatcher_enabled: false
+      scheduler_enabled: false
+      schedule_interval_seconds: 60
+
+  qa-insights:
+    database:
+      server: "sqlite_qa_platform"
+      file: "qa_insights.db"
+    # No knob is overridden here, and none needs to be. The gear declares the
+    # `stateful` capability and a `lifecycle(entry = "serve", ...)` clause, and
+    # `enable_tickers` (`QaInsightsConfig`) defaults to `true` in code, so with
+    # no override in this file all three tickers -- reconciler, JIRA poller,
+    # collect -- run in this dev stack on their code-default cadences
+    # (`reconcile_interval_seconds` 300 by default; see `gear.rs`'s header).
+    #
+    # This block used to say two things that are no longer true, made false by
+    # this gear absorbing what qa-platform needed instead of the shared
+    # authz-resolver plugin carrying it:
+    #
+    #   * "the tickers run under the gear's own system actor with a nil
+    #     tenant, which the static-authz plugin denies outright." There is no
+    #     nil-tenant context to be had for a *write*: every tenant-bound
+    #     system-actor factory in `qa-insights/src/domain/system_actor.rs`
+    #     takes a `TenantBound`, whose constructor refuses the nil UUID. The
+    #     one enumeration that IS nil-tenant, `for_ticker_enumeration`, never
+    #     reaches the PDP at all -- it elevates through
+    #     `domain::elevated::enumeration_scope` (see that module's doc), so
+    #     the plugin's nil-tenant denial has nothing to deny either way.
+    #   * "this gear has no tenant registry, so the reconcile sweep has
+    #     nothing to enumerate." It now has one:
+    #     `domain::service::tenants::TenantDirectory` answers "which tenants
+    #     does the ticker sweep?" by reading the tenants this gear already
+    #     holds results for, under the elevated seam above. On a fresh
+    #     deployment with no rows yet, a tenant is invisible to all three
+    #     tickers until `POST /qa/v1/insights/rebuild` seeds one under the
+    #     operator's own context -- after that the sweep finds it by itself
+    #     (`gear.rs`'s header states this plainly).
+    #
+    # Ingest itself is unaffected by any of the above: the reconcile sweep
+    # reading qa-runs is this gear's only ingest path and always has been --
+    # the event-broker consumer it might once have shared that job with was
+    # deleted as dead code, never having been registered by any deployment.
+    config: {}
+
+# OpenTelemetry configuration (resource identity, tracing, metrics)
+opentelemetry:
+  tracing:
+    enabled: false
+  metrics:
+    enabled: false

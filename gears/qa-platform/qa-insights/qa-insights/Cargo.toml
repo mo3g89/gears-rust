@@ -1,0 +1,407 @@
+[package]
+name = "qa-insights"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# Three crates this package names in no line of code, for two different reasons.
+#
+# `cluster-sdk` is a **declared-and-deliberately-unused marker** — see its entry
+# under `[dependencies]` and `infra/leader/mod.rs`' header. `cargo-shear` would
+# otherwise flag it, correctly, as an unused dependency. Copied from
+# `gears/qa-platform/qa-runs/qa-runs/Cargo.toml:33`, which carries the identical
+# entry for the identical reason. **This is package metadata, not workspace
+# metadata**: the workspace's own `[workspace.metadata.cargo-shear] ignored`
+# list covers the *gear* crates named by `deps = [...]` (including `cluster`),
+# which are invisible to the tool because `#[toolkit::gear]` re-exports them;
+# `cluster-sdk` is an ordinary dependency of this package alone, so the ignore
+# belongs here. Task 40 added it in fix round 1, having declared the dependency
+# and asserted in this file's tail that it needed the *workspace* list — which
+# was wrong in both directions: the workspace list holds `cluster`, not
+# `cluster-sdk`, and qa-runs' entry is a package one.
+#
+# `testcontainers`/`testcontainers-modules` are declared as *optional* entries
+# under `[dependencies]` rather than `[dev-dependencies]` because Cargo does not
+# allow optional dev-dependencies, and the `integration` feature must name them
+# via `dep:`. That placement is what keeps a default `cargo test` from building
+# them at all. `cargo-shear`'s "misplaced optional dependency" heuristic flags
+# it; the placement is required, not accidental. Shape copied from
+# `gears/qa-platform/qa-runs/qa-runs/Cargo.toml`, which in turn copied it from
+# `gears/system/cluster/plugins/postgres-cluster-plugin`.
+#
+# **Not verified here:** `cargo-shear` is not installed on this machine, so
+# whether these entries actually silence it is unmeasured. The same caveat is
+# recorded verbatim in qa-runs' copy.
+[package.metadata.cargo-shear]
+ignored = ["cluster-sdk", "testcontainers", "testcontainers-modules"]
+
+[features]
+# Gates the real-Postgres integration tier so a default `cargo test` never needs
+# a Docker daemon. The unit tier is in-memory `SQLite`, which serializes every
+# writer, so the ingest races this gear's projection has to survive cannot be
+# falsified there with *or* without a fix — that is what this tier exists for.
+#
+# Declared at the skeleton (Task 9) rather than at the task that first writes a
+# test under it, because the comment block above is load-bearing for
+# `cargo-shear` and re-deriving it is expensive. **Nothing consumes the feature
+# yet**; the first consumers are the ingest-race guards of Tasks 13-15, whose
+# run command will be `--lib`, not `--test`, for the reason qa-runs records:
+#   cargo test -p qa-insights --features integration --lib
+#
+# A *default* `cargo test` needs no Docker, which is what the gate buys. The
+# lint job is not exempt from *building* it, though — `make clippy` passes
+# `--all-features`, so `testcontainers` compiles there even though no container
+# is ever started.
+integration = ["dep:testcontainers", "dep:testcontainers-modules"]
+
+[dependencies]
+# ---------------------------------------------------------------------------
+# Gear dependencies
+# ---------------------------------------------------------------------------
+# The six **gear crates** named by `deps = [...]` in `#[toolkit::gear]`
+# (`src/gear.rs`). Each token there expands to a hidden
+# `pub use ::<crate> as _gear_dep_<crate>`, so the crate must be nameable here
+# even though no line of hand-written code in this crate mentions it. That is
+# also why each is listed in the workspace's
+# `[workspace.metadata.cargo-shear] ignored`: the re-export is invisible to
+# `cargo-shear`.
+#
+# **They are there for initialisation order.** Cross-gear clients come from
+# `ClientHub` whether or not a token is declared, but `ClientHub::get` at init
+# time only finds a client the other gear has *already registered*, and `deps`
+# is what puts that gear earlier in the topological order. qa-runs measured the
+# failure mode: with a short `deps` list its init died on `client not found:
+# type=dyn qa_catalog_sdk::client::QaCatalogClientV1`
+# (`qa-runs/src/gear.rs`, the `deps` doc). This gear resolves four clients from
+# the hub in Tasks 13 and 40, so the ordering is declared up front rather than
+# discovered then.
+#
+# A seventh token, `event_broker`, and the `event-broker` gear crate below it
+# lived here from Task 40 until they were deleted: no deployment ever
+# registered the `EventBrokerApi` client the transactional consumer it fed
+# needed, so the crate, the consumer and the dependency were code that could
+# not execute (`src/gear.rs`'s header, "Event ingest, and why there is only
+# one path").
+authz-resolver = { workspace = true }
+cluster = { workspace = true }
+oagw = { workspace = true }
+# Intra-subsystem siblings go by relative path, matching qa-runs' own
+# `qa-catalog-sdk = { path = "../../qa-catalog/qa-catalog-sdk" }` — neither has
+# a `[workspace.dependencies]` entry, so `{ workspace = true }` would not
+# resolve.
+qa-catalog = { path = "../../qa-catalog/qa-catalog" }
+# Added by Task 25b together with the `qa_environments` `deps` token and the
+# `ClientHub::get::<dyn QaEnvironmentsClientV1>()` that needs it -- see the
+# `qa-environments-sdk` note below, which was the standing obligation this
+# discharges.
+qa-environments = { path = "../../qa-environments/qa-environments" }
+qa-runs = { path = "../../qa-runs/qa-runs" }
+
+# Task 40: the intended long-term home of `infra::leader`'s `LeaderElector`.
+# **Declared and deliberately unused**, exactly as qa-runs declares it, and the
+# reversal of a decision `infra/leader/mod.rs` recorded at Task 15: that header
+# said a declared-and-unused crate with a `cargo-shear` ignore was "a cost worth
+# paying when there is a consumer, and there is not one until Task 40". Task 40
+# started the three tickers, so `infra::leader::elector()` now has three callers
+# and the marker is what makes the intended replacement
+# (`cluster_sdk::LeaderElectionV1`) discoverable from this file rather than only
+# from a comment.
+#
+# It does **not** make this gear cluster-aware: `NoopLeaderElector` is still the
+# only implementation shipped, `cluster_sdk::LeaderElectionV1` still has no
+# working consumer anywhere (event-broker's `resolve()` is a `todo!()`), and its
+# `is_leader()` is documented "Advisory - do NOT use for correctness-critical
+# mutual exclusion". `infra/leader/mod.rs`' header carries the whole argument.
+# The **gear** crate `cluster` is already above, in the `deps` block: that one is
+# initialisation order, this is the facade a future task will name.
+cluster-sdk = { workspace = true }
+
+# The one cross-gear SDK `init` actually calls today: the AuthZ enforcer, both
+# for the `ClientHub` lookup in `gear::init` and for the `From<EnforcerError>`
+# in `domain::error`.
+authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", path = "../../../system/authz-resolver/authz-resolver-sdk" }
+
+# ---------------------------------------------------------------------------
+# Everything else, and nothing else
+# ---------------------------------------------------------------------------
+# Deliberately shorter than the plan's Task 9 list. Every entry below is
+# referenced by a line of code in *this* commit; the ones the plan named for
+# later tasks were dropped, and each is recorded with its task in this file's
+# tail comment so the later task adds it back rather than rediscovering it.
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+# Task 16: `Router`, `Extension`, `Json` on the REST handlers and routes.
+axum = { workspace = true }
+# Task 16: `StatusCode` in the `OperationBuilder` response declarations, which
+# every sibling gear also imports directly rather than through the prelude.
+http = { workspace = true }
+# Task 30's fix round: `hmac::sign`/`hmac::verify` over the collect-callback's
+# `(repo_id, branch, tenant_id)` triple, so a caller cannot forge which tenant
+# an exact-case-count report is written under (the cross-tenant write Critical
+# 1 of that review found). **Not** `sha2`/`hmac` directly — Dylint `DE0708`
+# (`no_non_fips_hasher`) bans a new non-allow-listed `sha2` import outright, and
+# `aws-lc-rs` is this workspace's mandated FIPS-validated primitive for exactly
+# this shape of problem. Copied from `gears/credstore/credstore`'s
+# `domain::secret::fence` module, the in-repo precedent for "a value's
+# authenticity is checked via an HMAC fingerprint, not via ownership of a
+# session" — `fence.rs`'s own header cites the identical DE0708 reasoning.
+aws-lc-rs = { workspace = true }
+# The wire encoding of the HMAC tag: `hex::encode`/`hex::decode` over the
+# 32-byte `HMAC_SHA256` output, so it can ride a URL query parameter as ASCII.
+hex = { workspace = true }
+# Task 11: the eleven `infra/storage/entity/*.rs` entities. `sea-orm-migration`
+# re-exports the crate, but a `DeriveEntityModel` expansion names `::sea_orm`
+# directly, so the direct dependency is required rather than stylistic.
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+serde = { workspace = true }
+# Task 25b: the encoding axum's `Query` extractor uses, so query DTOs can be
+# driven in a test without building a request (`api::rest::dto`). Was a
+# `[dev-dependencies]` entry until Task 30, which gave it a first production
+# caller: `domain::service::collect::CollectService::collect_url` encodes the
+# collect-callback query string with the same crate, specifically so the
+# encode and decode sides cannot silently drift onto two different escaping
+# rules for the branch-in-a-query-parameter decision that module's header
+# argues for.
+serde_urlencoded = { workspace = true }
+# Task 12: the two `JSONB` columns cross `infra::storage::mapper` as
+# `sea_orm`'s `Json` (i.e. `serde_json::Value`) on one side and a plain
+# `String`/typed struct on the other. `qa-insights-sdk` is deliberately
+# `serde`-free, so neither `SavedView::query_json` nor
+# `ScheduledRunSlackTemplates` can be `derive`d across that seam and the mapper
+# builds the documents by hand. Was a `[dev-dependency]` at Task 11.
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Task 11: every `TIMESTAMPTZ` column is an `OffsetDateTime`, on the entities
+# and on the repository traits' timestamp parameters.
+time = { workspace = true }
+# Task 39: `tokio::time::timeout` around `infra::notify::slack_oagw`'s one
+# `oagw` call — the mechanism behind `SlackOagwClient::REQUEST_TIMEOUT`'s
+# ten-second bound (that module's header has the legacy citation). Promoted
+# here from `[dev-dependencies]` a task earlier than the ledger there forecast
+# ("Task 40 moves it to `[dependencies]`"): that forecast assumed nothing
+# shipped would spawn a task before the three tickers existed, which held until
+# this task needed to *apply* a bound on an `.await` in shipped code, not only
+# declare one. `#[tokio::test]` was and remains the only other reason this
+# crate needs the crate at all, and this is the **only** declaration: the
+# `[dev-dependencies]` entry that survived the promotion was removed in Phase
+# C's final review, since Cargo unifies features across dependency kinds when
+# building tests and a second line bought nothing but a second place to edit.
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+# Task 11: the repository traits speak in contract types -- `TestResultRecord`,
+# `SavedView`, `JiraBug`, `CollectCount`, `NotificationConfig` and the rest.
+qa-insights-sdk = { path = "../qa-insights-sdk" }
+
+# Task 13: the reads the ingest projection makes -- `Run` and `RunTestResult`
+# cross the `RunsReader` port, so this gear's domain names qa-runs' contract
+# types. The **gear** crate `qa-runs` above is the `deps` token; this is the
+# contract.
+qa-runs-sdk = { path = "../../qa-runs/qa-runs-sdk" }
+
+# Task 20: `UniverseTest` crosses the `CatalogReader` port and is the input type
+# of the analytics universe core, so this gear's domain names qa-catalog's
+# contract. Same shape as `qa-runs-sdk` above, and for the same reason. The
+# ledger below forecast this entry for "the `CatalogReader` port's adapter", and
+# Task 20 promoted it a task early because the port and the core need the types
+# whoever writes the adapter.
+#
+# **This said "the *adapter* is Task 40's" in the present tense until Task 25a,
+# which wrote it** -- along with the `ClientHub` lookup, both fifteen tasks
+# before Task 40, because Task 25 issues the first real `list_universe` read and
+# was blocked by its own prerequisite. `src/domain/ports/catalog_reader.rs`'
+# header carries the retraction in full. Corrected here as well as in the ledger
+# 90 lines below, which is where the same claim was fixed first and where fixing
+# it alone left this copy standing.
+qa-catalog-sdk = { path = "../../qa-catalog/qa-catalog-sdk" }
+
+# Task 32: `ServiceGatewayClientV1`, `CreateUpstreamRequest`, `Body` and the
+# apikey auth plugin id — the JIRA egress in `infra::jira::oagw_client`. The
+# ledger below forecast this entry for "Tasks 32/39 — the JIRA and Slack egress";
+# Task 32 is the first half, and Task 39's Slack adapter needs no further entry.
+# The **gear** crate `oagw` is already in the `deps` block above: that one is
+# initialisation order, this is the contract the adapter names.
+oagw-sdk = { workspace = true }
+
+# Task 25a: `QaEnvironmentsClientV1` and `TargetPlatform`, behind the
+# `PlatformReader` port -- the adapter that turns
+# `ExecRow::platform_id` into the label the overview's platform breakdown draws.
+# Same shape as the two SDK entries above, and for the same reason: this gear's
+# domain names a sibling's contract because the port's method signature does.
+#
+# **Task 25b added the gear-crate entry above and the `deps` token**, in the one
+# commit that also added the `ClientHub::get::<dyn QaEnvironmentsClientV1>()`
+# call -- which is exactly what this note asked for while it was an open
+# obligation. Task 25a shipped the port, the adapter and the test double with no
+# holder, so the client was never resolved and the ordering did not yet matter;
+# Task 25b's analytics service is the first holder. Recorded rather than deleted
+# because the failure it avoided has no test: an unregistered client is a
+# `client not found: type=dyn ...` at boot rather than a compile error, which is
+# the exact failure `src/gear.rs`' `deps` doc records qa-runs measuring, and the
+# whole suite was green without it. The cost is the one that kept it out of
+# `deps` until there was a caller: the gear-crate dependency makes
+# qa-environments mandatory in every deployment that links this one.
+qa-environments-sdk = { path = "../../qa-environments/qa-environments-sdk" }
+
+# Task 15: `CancellationToken`, on `infra::leader`'s `LeaderWorkFn`. The plan's
+# ledger forecast this for Task 40, which is when the *tickers* arrive; the
+# elector they run under is created one task earlier, because the reconciler's
+# "only one instance sweeps" contract needs somewhere to be enforced.
+tokio-util = { workspace = true }
+
+toolkit = { workspace = true }
+# Task 16: `api::rest::error`, the single `From<DomainError> for CanonicalError`.
+# `axum` for `IntoResponse` on the error body, `utoipa` for the error schemas the
+# `error_4xx`/`error_500` route declarations register — the same feature pair all
+# three sibling gears enable.
+toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
+# `sqlite` and `pg` both, matching the three sibling gears: the unit tier runs
+# on in-memory SQLite and the deployed backend is Postgres.
+toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
+# Task 11: `#[derive(Scopable)]` plus the `#[secure(...)]` tenancy annotation on
+# every entity. This is what makes `SecureORM` able to scope a query at all.
+toolkit-db-macros = { workspace = true }
+toolkit-macros = { workspace = true }
+# Task 17: the two `OData` collections. `FilterField`/`FieldKind` on the field
+# enums in `infra::storage::odata`, `ODataQuery` on the repository and service
+# read methods, and `Page<T>` as the response body.
+#
+# `features = ["with-utoipa"]` is what gives `Page<T>` its `ToSchema` impl, and
+# it is not optional: `json_response_with_schema::<Page<TestResultDto>>` does not
+# compile without it. Same feature qa-runs enables, for the same route
+# declaration.
+toolkit-odata = { workspace = true, features = ["with-utoipa"] }
+# Task 11: `AccessScope`, which every repository-trait method takes. The ledger
+# below assigned this to Task 12 and named `SecurityContext`; the *traits* take
+# the already-compiled `AccessScope`, so it lands one task earlier.
+toolkit-security = { workspace = true }
+# Task 16: `ToSchema` on the REST DTOs, emitted by `#[toolkit_macros::api_dto]`.
+# `features = ["time"]` is what gives `OffsetDateTime` a schema, and the rebuild
+# request is two instants — without it the request DTO does not compile.
+utoipa = { workspace = true, features = ["time"] }
+
+# The real-Postgres integration tier's container bring-up. Optional, and pulled
+# in only by `--features integration`; see the `[features]` doc above for why
+# these are here rather than in `[dev-dependencies]`.
+testcontainers = { workspace = true, optional = true }
+testcontainers-modules = { workspace = true, optional = true }
+
+# ---------------------------------------------------------------------------
+# Deliberately absent, with the task that adds each back
+# ---------------------------------------------------------------------------
+# The plan's Task 9 dependency list is a forecast of the finished gear, not of
+# this commit, and `cargo-shear` fails on a dependency nothing uses. Dropped
+# here, to be added by the task that first writes a line needing them:
+#
+# **Task 11 promoted five entries to `[dependencies]` and deleted their lines**:
+# `sea-orm`, `toolkit-db-macros`, `time`, `toolkit-security` and
+# `qa-insights-sdk` — the last of which this ledger marked "Task 11/12" and
+# which landed at 11, because the repository traits return SDK models. It also
+# moved `serde_json` as far as `[dev-dependencies]` and no further; its entry
+# below, which therefore stays, says why.
+#
+# **Task 32 promoted `oagw-sdk`**, whose entry read "Tasks 32/39 — the JIRA and
+# Slack egress"; the JIRA half is `infra::jira::oagw_client` and Task 39's Slack
+# adapter names the same crate, so nothing is left of the forecast.
+#
+# **Task 16 promoted the last three**: `toolkit-canonical-errors`, `utoipa` and
+# `http`, all three named by the REST layer this task founds. Nothing forecast
+# for a *later* task was promoted with them.
+#
+# **Task 20 promoted `qa-catalog-sdk`** out of this list, one task earlier than
+# the reason recorded against it: the entry said "the `CatalogReader` port's
+# adapter", and the adapter was then Task 40's, but the port and the universe core
+# both name `qa_catalog_sdk::UniverseTest`. **Task 25a shipped that adapter**, so
+# the entry's original reason is now discharged too, fifteen tasks early -- see
+# `src/domain/ports/catalog_reader.rs`' header for why the Task 40 assignment
+# could not have worked.
+#
+# **Task 25a added `qa-environments-sdk`, which this list never forecast at all.**
+# The plan's Task 9 dependency list has no entry for it because no port over
+# qa-environments was planned: `ExecRow::platform_id` being a `Uuid` where
+# legacy's `platform` was a display name was raised by Task 23 and landed on Task
+# 25. Recorded here because a dependency nothing in the ledger predicted is the
+# one a reader of the ledger will assume is a mistake.
+#
+# **Task 13 promoted `qa-runs-sdk`** out of this list; it now sits above with
+# the reason it is named by a line of code. The `ClientHub` *lookup* it was
+# forecast for was Task 40's — this task needed the types, not the resolution.
+# Task 13 promoted `event-broker-sdk` the same way and for the same reason;
+# that entry, the transactional consumer it built and the `event-broker` gear
+# crate were all deleted once it was established that no deployment ever
+# registered the client the consumer needed (`src/gear.rs`'s header).
+# **Task 40 promoted the last two entries this list forecast for it**, and both
+# are now above with the reason each is named:
+#   * `cluster-sdk`, whose entry read "Task 40 — leader election for the three
+#     tickers. qa-runs carries it as a declared-but-unused marker with a
+#     `cargo-shear` ignore; that is a cost worth paying when `infra::leader`
+#     exists, not before." `infra::leader` exists and its `elector()` now has
+#     three callers, so the marker was paid for; it is still named by no line of
+#     code, which is why `[package.metadata.cargo-shear] ignored` at the top of
+#     this file names it — a **package** ignore, exactly as
+#     `qa-runs/qa-runs/Cargo.toml:33` carries. (Fix round 1: this sentence said
+#     "the workspace `cargo-shear` ignore qa-runs' copy needs", and the entry it
+#     described existed in neither place — the workspace list holds the gear
+#     crate `cluster`, and qa-runs' entry is a package one. `cargo-shear` would
+#     have flagged this package in CI.)
+#   * `tokio-util`, forecast here for "the three tickers' `CancellationToken`"
+#     and in fact **promoted by Task 15**, which needed it for
+#     `infra::leader`'s `LeaderWorkFn` twenty-five tasks early. (`tokio` itself
+#     was promoted by Task 10, to `[dev-dependencies]`, and by **Task 39**, to
+#     `[dependencies]` proper — also earlier than this list said, because
+#     `infra::notify::slack_oagw` needs `tokio::time::timeout` in shipped code.
+#     Task 40 is the task the forecast expected and it needed no promotion:
+#     `JoinSet` and `tokio::time::interval` come from the same entry.)
+#
+# **`tower` went to `[dev-dependencies]` in Task 40**, which this list never
+# forecast: `tests/ingest_idempotence.rs` drives the router `register_rest`
+# returns via `ServiceExt::oneshot` rather than binding a listener. Recorded for
+# the reason `qa-environments-sdk`'s note gives — an unforecast dependency is the
+# one a reader of this ledger assumes is a mistake.
+#
+# Still absent:
+#   csv ......................... Task 26 — the analytics CSV export.
+#   inventory ................... never, unless a build proves otherwise. The
+#                                 three sibling gears declare it, but the
+#                                 `#[toolkit::gear]` expansion emits
+#                                 `::toolkit::inventory::submit!` through
+#                                 toolkit's re-export (`toolkit/src/lib.rs:78`),
+#                                 so a direct dependency is not required.
+#                                 Verified by building this crate without it.
+
+# ---------------------------------------------------------------------------
+# Test-only
+# ---------------------------------------------------------------------------
+[dev-dependencies]
+# `tokio` is **not** here. It lived in this section from Task 10 (the migration
+# module's schema tests' `#[tokio::test]`) until Task 39 promoted it to
+# `[dependencies]` proper — see that entry for why — and the redundant
+# `[dev-dependencies]` line survived alongside it for one commit longer than it
+# was true. Removed in Phase C's final review.
+#
+# `sea-orm` was deliberately **not** added alongside `tokio` at Task 10:
+# `sea-orm-migration` re-exports the whole crate as `sea_orm_migration::sea_orm`,
+# and the schema tests reach `Database`, `ConnectOptions`, `DatabaseConnection`
+# and `Statement` through that re-export. **Task 11 added the direct
+# `[dependencies]` entry**, because the entity derives need it.
+
+# `event-broker-sdk` (with `features = ["db", "test-util"]`, for `MockBroker`
+# and `MockBrokerHandle`) and `chrono` (for the mock broker's
+# `Event::occurred_at`, a `chrono::DateTime<Utc>`) lived here from Task 13 for
+# the transactional consumer's tests. No deployment ever registered the client
+# that consumer needed, so it was deleted along with the event-broker
+# dependency once that was established (`src/gear.rs`'s header); `time` is and
+# remains the only instant type this gear's own domain, schema and SDK use.
+# Task 40: `tower::ServiceExt::oneshot`, which is how
+# `tests/ingest_idempotence.rs` drives the router `register_rest` returns without
+# binding a TCP listener. Test-only by construction — nothing in `src/` names
+# `tower` — and the same crate `axum` already builds on, so it adds no new
+# dependency tree.
+tower = { workspace = true }

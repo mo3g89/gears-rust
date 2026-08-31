@@ -1,0 +1,70 @@
+[package]
+name = "qa-catalog"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+qa-catalog-sdk = { path = "../qa-catalog-sdk" }
+
+authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", path = "../../../system/authz-resolver/authz-resolver-sdk" }
+authz-resolver = { workspace = true }
+# The credstore gear crate itself (not just its SDK): the `deps = [credstore]`
+# declaration in `#[toolkit::gear]` resolves the dependency token against the
+# crate ident (same pattern as `authz-resolver` above; precedent: oagw).
+credstore = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+inventory = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+utoipa = { workspace = true, features = ["time"] }
+axum = { workspace = true, features = ["macros"] }
+http = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+
+toolkit = { workspace = true }
+toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
+toolkit-db-macros = { workspace = true }
+toolkit-security = { workspace = true }
+toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
+toolkit-macros = { workspace = true }
+
+serde-saphyr = { workspace = true }
+regex = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+sha2 = { workspace = true }
+credstore-sdk = { workspace = true }
+gix = { workspace = true }
+# OpenSSH private-key header parsing: distinguishes a passphrase-protected
+# key from an unencrypted one before `ssh-add` is spawned (infra::git::ssh_agent).
+base64 = { workspace = true }
+# Runtime (not dev-only) use: `list_remote_branches` builds its scratch
+# repository in a tempdir (see `infra::git::gix_sync`).
+tempfile = { workspace = true }
+# Lifecycle background tasks (CancellationToken; see `gear::serve`).
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+# In-memory CredStoreClientV1 double for the DB-backed tenant-scoping tier.
+credstore-sdk = { workspace = true, features = ["test-util"] }
+
+[features]
+# Gates the gix end-to-end sync integration test (clones a local fixture repo
+# through the real transport, which spawns `git upload-pack` — requires a `git`
+# binary on PATH). Disabled by default so plain `cargo test` stays hermetic;
+# enable with `--features integration`.
+integration = []

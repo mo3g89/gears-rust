@@ -1,0 +1,201 @@
+{{/* Post-install/post-upgrade hook: runs the gears' `migrate` subcommand,
+     reproducing compose's `db-migrate` service. hook-weight 0 (lower than
+     job-tenant-seed.yaml's 10) is what makes this run first -- Helm executes
+     hooks sharing a hook type in ascending weight order, and waits for one to
+     complete before starting the next. before-hook-creation deletes any
+     leftover Job of the same name from a prior release before creating a new
+     one, the same reason certs-job.yaml uses it: a bare Job spec is
+     immutable, so a second `helm upgrade` would otherwise hit "Job is
+     immutable" trying to recreate it in place.
+
+     `args:`, NEVER `command:` -- AND THIS FILE GOT IT WRONG UNTIL THE FINAL
+     REVIEW. qa-platform.Dockerfile:251-252 sets
+     ENTRYPOINT ["/usr/local/bin/entrypoint.sh"] and CMD to the server's
+     normal `run` invocation. In KUBERNETES, `command:` overrides ENTRYPOINT
+     and `args:` overrides CMD -- the opposite mapping from compose, where a
+     service's `command:` key means CMD and `entrypoint:` means ENTRYPOINT.
+     So compose's db-migrate service `command:` is correct there, and a
+     literal transcription of it into `command:` HERE would replace
+     entrypoint.sh entirely and exec the binary directly.
+
+     THE SYMPTOM IF THAT REGRESSES, because it is not "the container fails to
+     start": the binary comes up fine and reads /etc/cf-gears/
+     qa-platform-stack.yaml AS SHIPPED -- the UNRENDERED config, whose
+     Postgres literals are host: "localhost", user: "qa", password: "qa" --
+     so `migrate` dials 127.0.0.1 inside the Job's own pod, where nothing
+     listens, and the POSTGRES_HOST/USER/PASSWORD env below are never read by
+     anything. entrypoint.sh is what substitutes them: it renders the
+     Postgres fields (and the issuer_pattern, defaulted here since
+     PUBLIC_ISSUER_ORIGIN is unset) into a copy of the config under
+     /var/lib/cf-gears and then execs whatever argv it was handed. With
+     `args:` below, that argv is exactly what compose's db-migrate service
+     passes, and it reaches the binary through the same rendering step.
+
+     job-tenant-seed.yaml's `command:` is NOT the same mistake and must stay
+     as it is: that container genuinely does mean to replace postgres:16's
+     own ENTRYPOINT (docker-entrypoint.sh) with `bash /scripts/seed-tenant.sh`,
+     and its comment says so correctly. keycloak-deployment.yaml carried the
+     identical `command:`-for-CMD bug and is fixed the same way.
+
+     entrypoint.sh requires POSTGRES_HOST/POSTGRES_USER/POSTGRES_PASSWORD and
+     refuses to start without all three (its `: "${VAR:?...}"` lines), so they
+     are set here even though `migrate` itself only needs them for the DB
+     connection, exactly as compose's db-migrate service comment explains.
+
+     NO QA_RUNS_ARGO_CONFIG / QA_ENVIRONMENTS_ARGO_CONFIG, deliberately.
+     compose's db-migrate service sets neither, and entrypoint.sh refuses to
+     start if only one of the pair is set -- migration runs pre_init and the
+     DB migration phases only (libs/toolkit/src/bootstrap/run.rs:124), never
+     reaching anything that reads the Argo executor config, so there is
+     nothing here for that pair to configure.
+
+     NO readOnlyRootFilesystem, same reason gears-deployment.yaml has none:
+     entrypoint.sh writes its rendered config to
+     /var/lib/cf-gears/.rendered-<name> on every start, before it execs the
+     migrate command, and that write needs a writable root filesystem.
+
+     restartPolicy: OnFailure + backoffLimit: 6 (Kubernetes' own default),
+     not certs-job.yaml's Never/0: that Job's initContainer runs entirely
+     against local state (openssl, no network dependency), so a failure there
+     is a real failure worth surfacing immediately. This Job's very first act
+     is entrypoint.sh dialing POSTGRES_HOST, and nothing upstream of this hook
+     guarantees the postgres StatefulSet's pod has passed its readiness probe
+     by the time the hook fires. OnFailure lets the kubelet retry the same
+     container in place with exponential backoff (10s, 20s, 40s, ... capped at
+     300s) instead of every transient "connection refused" immediately failing
+     the Job outright; 6 attempts spans several minutes, comfortably past
+     postgres's own readinessProbe budget (5s initial delay + 20 * 5s period
+     above), while still giving up instead of retrying forever if postgres
+     never comes up.
+
+     HELM RUNS THIS AFTER THE GEARS DEPLOYMENT ALREADY EXISTS, THE REVERSE OF
+     COMPOSE'S ORDERING, AND THAT IS EXPECTED RATHER THAN A BUG. Helm applies
+     every "normal" (non-hook) resource in a release first -- the postgres
+     StatefulSet, the gears Deployment, all of it -- and only afterwards runs
+     post-install/post-upgrade hooks, in ascending hook-weight order. Compose
+     instead orders the `gears` service to start AFTER `tenant-seed`
+     (`depends_on: tenant-seed: condition: service_completed_successfully`),
+     so on a fresh `helm install` the gears pod starts with no migrated
+     schema and no seeded tenant row at all -- this Job and
+     job-tenant-seed.yaml have not run yet.
+
+     THE CONSEQUENCE IS A CRASH LOOP, AND IT IS SELF-HEALING. oagw's
+     post_init calls `TenantResolverClient::get_root_tenant` against a
+     `resource_group` database with no schema and no tenant row, turns the
+     error into an `anyhow!` (gears/system/oagw/oagw/src/gear.rs:242-252),
+     and `run_post_init_phase` propagates it with `?`
+     (libs/toolkit/src/runtime/host_runtime.rs:371-377) -- the exact failure
+     seed-tenant.sh's own header documents for the compose stack. The gears
+     Deployment's pod therefore aborts boot, and Kubernetes restarts it
+     (`restartPolicy: Always`, the Deployment default), CrashLoopBackOff-ing
+     with the usual exponential backoff until this Job and
+     job-tenant-seed.yaml have both completed. Once the seeded row exists,
+     the NEXT restart's post_init succeeds and the pod goes Ready. A handful
+     of CrashLoopBackOff cycles on the gears pod in the minutes after a fresh
+     `helm install` is EXPECTED, not evidence the chart is broken -- see
+     gears-deployment.yaml's own pointer to this comment.
+
+     NO INIT CONTAINER GATE ON THE GEARS DEPLOYMENT -- STILL REJECTED, BUT
+     THE REASON WAS RESTATED IN THE FINAL REVIEW, BECAUSE THE OLD ONE WAS
+     SELF-DEFEATING. The old wording said an initContainer gate deadlocks
+     against `helm upgrade --install --wait`: `--wait` blocks until every
+     normal resource (the gears Deployment included) is Ready BEFORE Helm runs
+     any post-install hook, so a gate waiting on these two Jobs waits on
+     something Helm will not start until the thing it is gating is already
+     Ready. That premise is correct. The conclusion drawn from it was not:
+     THE SAME CYCLE DEFEATS THE CRASH LOOP TOO. The gears Deployment cannot
+     reach Ready before db-migrate and tenant-seed have run, no matter whether
+     it is an initContainer or a CrashLoopBackOff keeping it from Ready -- so
+     `--wait` would have blocked for its whole --timeout and then failed the
+     release WITHOUT THE HOOKS EVER RUNNING, leaving an unmigrated database
+     and a failed release.
+
+     WHAT ACTUALLY FIXES IT: `--wait` IS GONE from deploy-k8s.sh's
+     `helm upgrade --install` invocation (see the comment at that line, which
+     records why it must never be re-added). Helm therefore applies the normal
+     resources, returns as soon as they are CREATED rather than Ready, and
+     runs the post-install hooks -- which are synchronous parts of the same
+     invocation and are still bounded by --timeout. The gears pod crash-loops
+     through that window and self-heals on the first restart after
+     tenant-seed completes, exactly as described above; deploy-k8s.sh's
+     `kubectl rollout status` step after the helm command is what actually
+     blocks on the steady state.
+
+     An initContainer gate would now be POSSIBLE without `--wait`, and is
+     still not worth it: it would need its own RBAC (read the seeded row, or
+     poll the Jobs) and would turn a self-healing crash loop bounded by the
+     kubelet's own backoff into a pod that hangs in Init with no logs. The
+     crash loop is noisier but strictly more diagnosable.
+
+     PRE-INSTALL IS NOT AN ESCAPE FROM THIS EITHER. Moving this Job's hook to
+     `pre-install` would run it before ANY normal resource exists, including
+     the postgres StatefulSet and its Service --
+     `POSTGRES_HOST=qa-platform-postgres` would not even resolve, let alone
+     accept a connection, so a pre-install migrate Job fails harder and
+     earlier than the post-install one does today. Postgres has to be a
+     normal resource (the gears Deployment depends on it too), so
+     pre-install buys nothing here.
+
+     WITHOUT `--wait` THE ORDERING QUESTION NO LONGER GATES ANYTHING. The old
+     text here flagged "does --wait block on normal resources before or after
+     hooks?" as an unverified assumption to measure on the first real install.
+     It is now moot for correctness: with no `--wait`, Helm applies the normal
+     resources and proceeds straight to the post-install hooks, and the only
+     thing that blocks on Ready is deploy-k8s.sh's own `kubectl rollout
+     status` AFTER `helm` has returned -- i.e. after these hooks have already
+     completed. */}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qa-platform-db-migrate
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: db-migrate
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qa-platform
+        app.kubernetes.io/component: db-migrate
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: db-migrate
+          image: "{{ .Values.images.gears.repository }}:{{ .Values.images.gears.tag }}"
+          imagePullPolicy: {{ .Values.images.gears.pullPolicy }}
+          # `args:` -- overrides the image's CMD and is handed to
+          # entrypoint.sh as argv. See this file's header on why `command:`
+          # here would bypass entrypoint.sh and migrate against localhost.
+          args:
+            - /usr/local/bin/cf-gears-example-server
+            - --config
+            - /etc/cf-gears/qa-platform-stack.yaml
+            - migrate
+          env:
+            - name: POSTGRES_HOST
+              value: qa-platform-postgres
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: qa-platform-postgres
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: qa-platform-postgres
+                  key: POSTGRES_PASSWORD
+            - name: RUST_LOG
+              value: {{ .Values.gears.logLevel | quote }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cf-gears
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: qa-platform-gears-config

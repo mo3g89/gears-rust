@@ -1,0 +1,122 @@
+[package]
+name = "qa-environments"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+# Kubernetes observation of a platform's own cluster (`infra::observer`).
+#
+# Off by default. ADR-0001 forbids `kube`/`k8s-openapi` in any qa-platform crate;
+# the waiver amendment of 2026-08-28 permits this adapter only behind a
+# non-default feature, so a default build still has no Kubernetes in its tree.
+# Verify with:
+#   cargo tree -p qa-environments -i kube                              # errors
+#   cargo tree -p qa-environments --features platform-observation -i kube
+#
+# * `kube` — the API client. `client` for HTTP and `rustls-tls`/`aws-lc-rs` for
+#   TLS, matching qa-runs' `argo` feature so both gears agree on one TLS stack.
+#   No `runtime`: nothing here watches or streams.
+# * `k8s-openapi` — `core::v1::ConfigMap` (detection) and `core::v1::Secret` (D4).
+# * `hyper-util`/`rustls` — not called directly for requests (`kube` owns the
+#   client); `infra::observer::errors` downcasts through them to classify a
+#   transport failure (connect vs. TLS/certificate) by the *type* of the
+#   error `kube` returns, never by matching its message text. Both already
+#   resolve to the exact versions `kube`'s own `rustls-tls` stack uses (one
+#   entry each in Cargo.lock), which is what makes the downcast succeed.
+platform-observation = ["dep:kube", "dep:k8s-openapi", "dep:hyper-util", "dep:rustls"]
+
+[dependencies]
+qa-environments-sdk = { path = "../qa-environments-sdk" }
+
+authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", path = "../../../system/authz-resolver/authz-resolver-sdk" }
+authz-resolver = { workspace = true }
+# The credstore gear crate itself (not just its SDK): the `deps = [credstore]`
+# declaration in `#[toolkit::gear]` resolves the dependency token against the
+# crate ident (same pattern as `authz-resolver` above; precedent: qa-catalog).
+credstore = { workspace = true }
+credstore-sdk = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+inventory = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+utoipa = { workspace = true, features = ["time"] }
+axum = { workspace = true, features = ["macros"] }
+http = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+
+toolkit = { workspace = true }
+toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
+toolkit-db-macros = { workspace = true }
+toolkit-security = { workspace = true }
+toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
+toolkit-macros = { workspace = true }
+
+# ── The `platform-observation` feature's dependencies, all optional ────────────
+kube = { workspace = true, features = ["client", "rustls-tls", "aws-lc-rs"], optional = true }
+k8s-openapi = { workspace = true, features = ["latest"], optional = true }
+# `client-legacy` is the feature that exposes `client::legacy::Error` — the
+# concrete type kube's own HTTP stack raises for every connect-time failure,
+# and the only reliable way to ask "was this actually a connect failure"
+# (`Error::is_connect()`) without matching on `kube::Error`'s message text.
+hyper-util = { workspace = true, features = ["client-legacy"], optional = true }
+# Referenced only to downcast a transport failure's cause chain and check
+# for `rustls::Error` — the type `kube`'s TLS stack (`hyper-rustls` +
+# `tokio-rustls`) raises a certificate/handshake failure as. Never used to
+# build a TLS config or connection of our own.
+rustls = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Only exercised by `infra::observer::errors`' TLS-classification tests,
+# which need a real (self-signed, deliberately SAN-mismatched) TLS server to
+# fail a real handshake against — `hyper_util::client::legacy::Error` and
+# `rustls::Error` are both raised deep inside `kube`'s own HTTP stack with no
+# public constructor, so the only way to produce a genuine one is to make a
+# real connection that really fails that way.
+rcgen = { workspace = true }
+tokio-rustls = { workspace = true }
+# Only for base64-encoding a test cert into a test kubeconfig's
+# `certificate-authority-data`; not a general-purpose helper.
+base64 = { workspace = true }
+# Parses a config document in the format it really arrives in, so
+# `config::observation_config_tests` can pin that an `--argo` deployment's
+# YAML deserializes in a build WITHOUT `platform-observation` too (the
+# `deny_unknown_fields` + feature-gated-field trap the 2026-08-28 review
+# flagged). A JSON stand-in would exercise the same serde attributes but not
+# the same document.
+serde_yaml = { workspace = true }
+
+# Captures the RAW `tracing` output inside a test, so "the kubeconfig never
+# reaches a log line" is asserted against what was really emitted.
+#
+# `tracing-test` (the usual choice here, e.g. gears/system/account-management)
+# is deliberately NOT used for this: it keeps only captured lines that contain
+# the test's span name, so a multi-line field value — which is exactly the
+# shape a leaked kubeconfig has — survives capture only as its FIRST line. A
+# leak on any later line reads as "no leak". Measured: with a deliberate
+# `info!(document = %material.expose())` in `write_generated_secret`, a
+# `tracing-test` assertion on the canary PASSED. A plain buffer does not have
+# that hole.
+tracing-subscriber = { workspace = true }
+# `service_fn` (the `util` feature), to drive `kube_observer::check_health`
+# against an in-process stub `tower::Service` via `kube::Client::new` — a
+# hermetic double for the API server that needs no real cluster, so the
+# namespace-list failure branch (and node parsing/sorting) can be exercised
+# without a network dependency.
+tower = { workspace = true, features = ["util"] }

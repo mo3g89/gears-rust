@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    --radius: 0.5rem;
+    --chart-1: 12 76% 61%;
+    --chart-2: 173 58% 39%;
+    --chart-3: 197 37% 24%;
+    --chart-4: 43 74% 66%;
+    --chart-5: 27 87% 67%;
+  }
+
+  /* Graphite + vivid blue: cool graphite canvas (~#13161d), near-white text,
+     bright blue accent, visible borders/dividers and row hover. */
+  .dark {
+    --background: 222 20% 11%;       /* graphite ~#13161d */
+    --foreground: 213 30% 95%;       /* near-white, crisp */
+    --card: 223 22% 8%;
+    --card-foreground: 213 30% 95%;
+    --popover: 223 22% 8%;
+    --popover-foreground: 213 30% 95%;
+    --primary: 212 100% 66%;         /* vivid blue */
+    --primary-foreground: 223 30% 7%;
+    --secondary: 221 18% 24%;
+    --secondary-foreground: 213 30% 95%;
+    --muted: 221 16% 18%;
+    --muted-foreground: 215 18% 73%; /* secondary text, legible */
+    --accent: 221 18% 24%;           /* row hover/selection, distinct */
+    --accent-foreground: 0 0% 100%;
+    --destructive: 355 75% 68%;      /* one-dark red #e06c75, punchier */
+    --destructive-foreground: 223 30% 7%;
+    --border: 221 16% 30%;           /* clearly visible dividers */
+    --input: 221 16% 34%;
+    --ring: 212 100% 66%;            /* focus ring = vivid blue */
+    --chart-1: 207 82% 66%;          /* blue   #61afef */
+    --chart-2: 95 38% 62%;           /* green  #98c379 */
+    --chart-3: 39 67% 69%;           /* yellow #e5c07b */
+    --chart-4: 286 60% 67%;          /* purple #c678dd */
+    --chart-5: 355 65% 65%;          /* red    #e06c75 */
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}

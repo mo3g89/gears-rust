@@ -1,0 +1,81 @@
+{{/* Post-install/post-upgrade hook: seeds the one Resource Group row the
+     gears need to boot, reproducing compose's `tenant-seed` service.
+     hook-weight 10 -- higher than job-db-migrate.yaml's 0 -- is what makes
+     Helm run this AFTER migrate finishes, the same ordering compose expresses
+     with `depends_on: db-migrate: condition: service_completed_successfully`:
+     Helm runs hooks of one type in ascending weight order and waits for each
+     to complete before starting the next. before-hook-creation deletes any
+     leftover Job of the same name from a prior release before creating a new
+     one, same reason certs-job.yaml and job-db-migrate.yaml use it.
+
+     images.postgres, NOT images.gears: this runs seed-tenant.sh, which shells
+     out to `psql`, a binary the gears image does not carry -- the exact
+     reason compose's tenant-seed service also runs on postgres:16 rather
+     than the gears image. Same tag as the postgres StatefulSet, so client
+     and server never disagree about anything.
+
+     PGHOST/PGUSER/PGPASSWORD are the standard libpq variables seed-tenant.sh
+     itself reads (see its header) -- not POSTGRES_*, and not the same names
+     job-db-migrate.yaml sets, because this container runs psql directly
+     rather than going through entrypoint.sh's rendering.
+
+     restartPolicy: OnFailure + backoffLimit: 6, same reasoning as
+     job-db-migrate.yaml: this Job's first act is also dialing Postgres (via
+     psql), and nothing guarantees it is reachable the instant the container
+     starts. Unlike a transient connection failure, though, running against a
+     schema db-migrate has not yet created is NOT something a retry alone
+     fixes here -- seed-tenant.sh's own step 0 checks for that explicitly and
+     dies with a named cause rather than a bare "relation does not exist", but
+     the hook-weight ordering above is what is actually relied on to keep that
+     from happening in practice; OnFailure only covers Postgres being slow to
+     accept connections. */}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qa-platform-tenant-seed
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: tenant-seed
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qa-platform
+        app.kubernetes.io/component: tenant-seed
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: tenant-seed
+          image: "{{ .Values.images.postgres.repository }}:{{ .Values.images.postgres.tag }}"
+          # `command:` here plays the role compose's `entrypoint:` key plays --
+          # a Pod container spec has no `entrypoint` field of its own;
+          # `command:` is what overrides the postgres:16 image's ENTRYPOINT
+          # (docker-entrypoint.sh), same as compose's tenant-seed service.
+          command: ["bash", "/scripts/seed-tenant.sh"]
+          env:
+            - name: PGHOST
+              value: qa-platform-postgres
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: qa-platform-postgres
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: qa-platform-postgres
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: qa-platform-seed-scripts
+            defaultMode: 0755

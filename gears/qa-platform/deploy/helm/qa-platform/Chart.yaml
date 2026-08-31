@@ -1,0 +1,6 @@
+apiVersion: v2
+name: qa-platform
+description: The qa-platform stack (gears, UI, Keycloak, Postgres) running in-cluster
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
