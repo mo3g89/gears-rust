@@ -337,6 +337,9 @@ jobs:
       - name: Test qa-catalog with the real git transport (integration)
         run: make test-qa-catalog-git
 
+      - name: Test qa-platform feature-gated adapters (argo, runner-secret)
+        run: make test-qa-platform-features
+
       - name: Test toolkit-db (sqlite integration)
         run: make test-sqlite
 

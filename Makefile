@@ -491,7 +491,7 @@ dev: dev-fmt dev-clippy dev-test
 
 # -------- Tests --------
 
-.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-fips test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git
+.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-fips test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git test-qa-platform-features
 
 # Run all tests
 test: install-tools
@@ -587,6 +587,19 @@ test-qa-insights-pg: install-tools
 test-qa-catalog-git: install-tools
 	@command -v git >/dev/null || (echo "git is required for test-qa-catalog-git" && exit 1)
 	cargo nextest run -p qa-catalog --features integration --tests
+
+## Run the unit tier of the two feature-gated adapters the shipped image
+## enables (`deploy/cargo-features.argo`: runner-secret, qa-runs-argo).
+## `make test-no-macros` is `cargo nextest run --workspace` with per-crate
+## DEFAULT features, so `#[cfg(feature = "argo")]` and
+## `#[cfg(feature = "runner-secret")]` code is neither compiled nor run there.
+## 39 tests under qa-runs::infra::executor::argo and 13 under
+## qa-environments' runner-secret writer are what this adds.
+## `--lib` only: `qa-runs/tests/argo_cluster.rs`'s 5 are `#[ignore]`d and want
+## a live cluster.
+test-qa-platform-features: install-tools
+	cargo nextest run -p qa-runs --features argo --lib
+	cargo nextest run -p qa-environments --features runner-secret --lib
 
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
 ## Covers:
@@ -956,7 +969,7 @@ ci_test: fmt clippy
 ci_docs: lychee gts-docs
 
 # Run CI pipeline locally, requires docker
-ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git lychee gts-docs dylint
+ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git test-qa-platform-features lychee gts-docs dylint
 
 ## Build the cf-gears-example-server release binary using a toolchain from the rust-toolchain.toml
 .cargo-build:
