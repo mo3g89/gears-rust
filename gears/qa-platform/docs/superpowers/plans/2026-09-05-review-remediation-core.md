@@ -63,7 +63,7 @@ gate.
 **Finding:** #47.
 
 Today `grep -n 'qa-catalog\|qa-insights\|qa-environments' Makefile` returns
-nothing but the `test-qa-runs-pg` comment block. 13 `#[cfg(feature =
+nothing but the `test-qa-runs-pg` comment block. 9 `#[cfg(feature =
 "integration")]` tests in qa-insights (five are the Postgres dialect guards over
 the analytics `GROUP BY` / `COUNT(DISTINCT)` reads) and 6 in qa-catalog (the only
 real-git-transport and two-tier-lock coverage) are invoked by no target and no
@@ -100,7 +100,8 @@ test-qa-insights-pg: install-tools
 ## and concurrent syncs through the two-tier locks. They clone a local fixture
 ## repo through the real transport, which spawns `git upload-pack`, so a `git`
 ## binary must be on PATH. These live in `tests/`, not in-lib, so the flag is
-## `--test`, not `--lib`.
+## `--tests` (all test-target files), not `--lib`. Not `--test`, which is
+## singular and takes one target name — it would run only one of the two files.
 test-qa-catalog-git: install-tools
 	@command -v git >/dev/null || (echo "git is required for test-qa-catalog-git" && exit 1)
 	cargo nextest run -p qa-catalog --features integration --tests
@@ -119,7 +120,7 @@ make test-qa-insights-pg
 make test-qa-catalog-git
 ```
 
-Expected: qa-insights runs 13 tests, qa-catalog runs 6. **If either reports
+Expected: qa-insights runs 9 tests, qa-catalog runs 6. **If either reports
 "0 tests run", the target is wrong — stop and fix it before continuing.** A
 target that selects nothing is the exact defect this task exists to remove.
 
@@ -175,7 +176,7 @@ ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-u
 git add Makefile .github/workflows/ci.yml
 git commit -m "ci(qa-platform): run qa-insights' and qa-catalog's integration tiers
 
-Both tiers existed and were invoked by no target and no job. 13 tests in
+Both tiers existed and were invoked by no target and no job. 9 tests in
 qa-insights -- five of them the Postgres dialect guards over the analytics
 GROUP BY reads -- and 6 in qa-catalog, the only real-git-transport and
 two-tier-lock coverage, ran nowhere. Review finding #47."
