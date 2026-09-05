@@ -1,0 +1,18 @@
+{{/* Plain HTTP, no TLS -- Keycloak never terminates TLS in this deployment.
+     Name and port are a fixed interface: later tasks (UI nginx proxy, gears'
+     issuer verification) address this Service as qa-platform-keycloak:8080. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: qa-platform-keycloak
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: keycloak
+spec:
+  selector:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

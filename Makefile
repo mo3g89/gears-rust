@@ -435,6 +435,41 @@ slides:
 web-docs-preview:
 	@bash tools/scripts/docs-preview.sh
 
+# -------- qa-platform UI --------
+
+.PHONY: ui-install ui-lint ui-test ui-build ui-contract
+
+UI_DIR := gears/qa-platform/qa-platform-ui
+
+## Install UI dependencies from the lockfile
+ui-install:
+	@command -v npm >/dev/null || (echo "npm is required for the qa-platform UI" && exit 1)
+	cd $(UI_DIR) && npm ci
+
+## Lint the UI
+ui-lint: ui-install
+	cd $(UI_DIR) && npm run lint
+
+## Run the UI unit tests (vitest). Added with the first test suite in this project
+## (Task 10's `src/api/adapters.test.ts`): a suite reachable only through `npx vitest` is
+## a suite no later task and no CI job will run, and `ui-lint`/`ui-build` are already the
+## vocabulary this repo gates the UI with. Kept separate from `ui-build` rather than made
+## a prerequisite, so a type error and a failing assertion stay distinguishable.
+ui-test: ui-install
+	cd $(UI_DIR) && npm test
+
+## Type-check and build the UI
+ui-build: ui-install
+	cd $(UI_DIR) && npm run build
+
+## Regenerate UI types from a running gears stack and fail if they drift. Requires the compose
+## stack up on localhost:8087 (`docker compose up -d` in gears/qa-platform/deploy/compose) — it
+## hits a live /openapi.json, so it is not wired into a CI job that has no gears.
+ui-contract: ui-install
+	cd $(UI_DIR) && npm run gen:api
+	git diff HEAD --exit-code -- $(UI_DIR)/src/api/generated/openapi.d.ts \
+	  || (echo "UI wire types are stale: regenerate with 'make ui-contract' and commit" && exit 1)
+
 # -------- Development and auto fix --------
 
 .PHONY: dev dev-fmt dev-clippy dev-test
@@ -456,7 +491,7 @@ dev: dev-fmt dev-clippy dev-test
 
 # -------- Tests --------
 
-.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-fips
+.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-fips test-qa-runs-pg
 
 # Run all tests
 test: install-tools
@@ -506,6 +541,28 @@ test-usage-collector-pg: install-tools
 ## Docker churn without masking one.
 test-cluster-pg: install-tools
 	cargo nextest run -p cf-postgres-cluster-plugin --features integration --retries 1
+
+## Run the qa-runs gear's real-Postgres suite (Docker required; the fixture
+## spins up its own postgres container per test via testcontainers -- see
+## `infra::storage::test_db::pg_db`).
+##
+## These are the only tests that can falsify Task 16b step 1's SERIALIZABLE
+## escalation and step 3's counter repair. The rest of the gear's tier is
+## in-memory SQLite, which admits one writer at a time, so the races they cover
+## cannot occur there with a fix or without one -- which is exactly why this
+## target has to exist rather than relying on `make test`.
+##
+## `--retries 1` for the reason `test-cluster-pg` has it, arrived at the same
+## way: one failure of this target was observed on a busy host and could not be
+## reproduced in eighteen subsequent runs, so which test failed is not known.
+## Every test here spins up its own container and the contended ones assert
+## outcomes that depend on a bounded retry budget absorbing an abort, so both the
+## container setup and the assertions are load-sensitive. A genuine logic
+## regression fails both attempts; this absorbs a busy host without masking one.
+## An earlier round decided against this on the grounds that most sibling targets
+## omit it; that was decided before a failure had been seen.
+test-qa-runs-pg: install-tools
+	cargo nextest run -p qa-runs --features integration --retries 1
 
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
 ## Covers:
@@ -875,7 +932,7 @@ ci_test: fmt clippy
 ci_docs: lychee gts-docs
 
 # Run CI pipeline locally, requires docker
-ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg lychee gts-docs dylint
+ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg test-qa-runs-pg lychee gts-docs dylint
 
 ## Build the cf-gears-example-server release binary using a toolchain from the rust-toolchain.toml
 .cargo-build:

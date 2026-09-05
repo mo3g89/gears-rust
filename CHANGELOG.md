@@ -9,6 +9,96 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+### Changed
+
+- **qa-environments: `tracing` span fields renamed** as part of the
+  `TargetPlatform` -> `Environment` rename. `platform.id` -> `environment.id`
+  and `platform.name` -> `environment.name` on the REST handler spans;
+  `platform_id` -> `environment_id` on the domain-service spans. Thirteen sites
+  in total, all within `qa-environments`; `qa-runs` and `qa-insights` span
+  fields are unchanged.
+
+  **Action required for observability owners.** No compiler, test or lint sees a
+  span-field rename, so any dashboard, saved search or alert keyed on the old
+  field names goes silently quiet rather than failing. Re-key them before this
+  release is deployed. The change is otherwise behaviour-neutral: no log line is
+  dropped, no severity changes, and the values carried are identical.
+
+- **qa-platform-ui: the Runs page's FQL filter keyword `platform` is renamed to
+  `environment`, with `platform` kept as a deprecated alias — not an error.** Unlike the
+  OData `$filter` field name above (which nothing types by hand), this keyword is typed
+  by an operator and persisted in their browser's `localStorage['qa:fql:saved:runs']`.
+  Silently rejecting the old spelling would turn a saved `platform = staging` filter into
+  a query that matches zero runs (or, negated, into one that silently matches every run) —
+  worse than the visible parse error the UI already has a slot for. Both spellings are
+  accepted and mean the same thing; `environment` is the one the field-list and help text
+  now advertise. No action is required, and no saved filter needs re-typing.
+
+### Changed — breaking
+
+- **qa-runs, qa-insights: REST wire field `platform_id` renamed to
+  `environment_id`** (Task 25 of the `TargetPlatform` -> `Environment` rename;
+  ruling B3 left this open for the user, who has now asked for it). The
+  physical database column is unchanged and still named `platform_id` — only
+  the wire moved.
+
+  **This is a breaking API change, and a client that still sends
+  `platform_id` now gets a 400 naming the rename** on every endpoint that
+  accepts one as a request field or query parameter: `POST`/`PUT` bodies
+  parsed as `LaunchRunReq` or `NewScheduleReq`, `GET /qa/v1/queue`'s
+  `platform_id` query parameter, and an `OData` `$filter`/`$orderby` of
+  `platform_id` on the runs or queue collections. (Ruling G-4, closing a
+  Critical review finding: an earlier version of this entry claimed the 400
+  without the trap that makes it real — the three request DTOs above did not
+  reject the old name and silently left the new field `None` instead. They do
+  now.) A client reading `platform_id` out of a *response* finds it absent,
+  replaced by `environment_id`.
+
+  Renamed fields and query parameters, by gear:
+
+  - `qa-runs`: `RunDto.platform_id`, `QueueEntryDto.platform_id`,
+    `LaunchRunReq.platform_id`, `ScheduleDto.platform_id`,
+    `NewScheduleReq.platform_id`, `QueueQuery.platform_id`, and the
+    `GET /qa/v1/queue?platform_id=` query parameter — all now
+    `environment_id`. Also the `OData` `$filter`/`$orderby` field name on both
+    the runs and the queue collections (`RunFilterField`/`QueueFilterField`,
+    ruling G-3): `platform_id` -> `environment_id`. **A saved `$filter` query
+    using `platform_id eq ...` must be re-typed as `environment_id eq ...`** —
+    the old field name is no longer recognised and the request is refused.
+  - `qa-insights`: `TestResultDto.platform_id`, `DashboardRunDto.platform_id`,
+    `FailedTestCardDto.platform_id`, `JiraBugDto.platform_id` — all now
+    `environment_id`. The analytics overview's platform breakdown is also
+    renamed: `PlatformGroupSummaryDto` -> `EnvironmentGroupSummaryDto`, whose
+    `platform_id`/`platform` fields become `environment_id`/`environment`,
+    and `GroupedSummariesDto.platform` becomes `.environment`. Also (ruling
+    G-3) `AnalyticsListItemDto.last_platform_id`/`.last_platform` and the
+    equivalent pair on the plan-tests analytics DTO become
+    `last_environment_id`/`last_environment`. **The CSV branch of
+    `GET /qa/v1/analytics/export`** (`?format=csv`) renders the same pair as a
+    column and is renamed the same way: the `lists` section's `last_platform`
+    header becomes `last_environment` (ruling G-4, closing Important-2 — the
+    JSON branch of this endpoint had been renamed already; the CSV branch of
+    the *same* endpoint had been missed). The `group_by` query parameter's
+    fourth value is renamed too: `group_by=platform` -> `group_by=environment`
+    on both analytics query-parameter endpoints, and the response's own
+    `group_by` field echoes the new spelling back. `group_by=platform` is now
+    refused with the same 400 an unrecognised value always gets, listing the
+    new vocabulary; it is not silently accepted as before.
+
+  Neither database column moves; ruling B3's reasoning about the primary key
+  and its two named foreign-key constraints still stands.
+
+  **`qa-platform-ui` now sends and reads `environment_id` too.** An earlier version
+  of this entry said the UI's call sites were a separate task's job and had not been
+  touched; that task (Task 26) renamed the UI's own vocabulary but, by a scoping gap,
+  did not carry this wire rename into `api/adapters.ts`/`api/hooks.ts`, so the browser
+  kept sending `platform_id` into the very 400 this entry describes — launching a run,
+  creating or editing a schedule, and the run-queue filter were all broken until a
+  follow-up fix round closed it. Fixed now: every request builder sends
+  `environment_id`, every response read (including the `grouped.environment[]` rows,
+  `last_environment(_id)`, and the queue's `?environment_id=` parameter) reads it back,
+  and the wire-serialized key — not just the TypeScript field name — is pinned by test.
+
 ## [0.1.5](https://github.com/constructorfabric/gears-rust/compare/cf-gears-standalone-cluster-plugin-v0.1.4...cf-gears-standalone-cluster-plugin-v0.1.5) - 2026-08-09
 
 ### Other

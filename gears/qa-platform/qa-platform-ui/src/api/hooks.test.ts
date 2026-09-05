@@ -1,0 +1,155 @@
+// @vitest-environment jsdom
+//
+// Bug: the Analytics "Refresh" button calls `refetch()` directly
+// (`AnalyticsDashboard.tsx:1078`), and React Query's `refetch()` deliberately ignores a
+// query's `enabled` flag. `AnalyticsDashboard` disables `useAnalyticsOverview` by gating
+// its `enabled` argument on `selectedProductId && selectedVersion`, but that gate is a
+// react-query concern, not an HTTP one — `refetch()` walks straight past it and the hook
+// falls back to `{ product_id: '', version: '', ... }` (`AnalyticsDashboard.tsx:697-704`),
+// which used to reach `apiGet` and produce
+// `GET /qa/v1/analytics/overview?product_id=&version=&scope=all` -> 400.
+//
+// The fix has to live in the hook itself (`src/api/hooks.ts`), not in the caller's
+// `enabled` wiring, because `enabled` is exactly what `refetch()` bypasses. So this suite
+// drives the hooks directly with `refetch()` — never toggling `enabled` — and asserts the
+// mocked `apiGet` was never called for an incomplete query.
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { renderHook, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('./client', () => ({
+  apiGet: vi.fn(),
+  apiGetBlob: vi.fn(),
+  apiPost: vi.fn(),
+  apiDelete: vi.fn(),
+  apiPut: vi.fn(),
+  apiPatch: vi.fn(),
+}));
+
+import { apiGet } from './client';
+import { useAnalyticsOverview, useAnalyticsBuildTests } from './hooks';
+import type { AnalyticsOverviewQuery, AnalyticsBuildTestsQuery } from './types';
+
+const mockedApiGet = vi.mocked(apiGet);
+
+function makeWrapper() {
+  // One fresh client per test, retries off -- a retry would just repeat whatever
+  // the first call already proved.
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return function Wrapper({ children }: { children: ReactNode }) {
+    return createElement(QueryClientProvider, { client }, children);
+  };
+}
+
+const EMPTY_OVERVIEW_QUERY: AnalyticsOverviewQuery = {
+  product_id: '',
+  version: '',
+  scope: 'all',
+};
+
+const FULL_OVERVIEW_QUERY: AnalyticsOverviewQuery = {
+  product_id: 'prod-1',
+  version: '1.2.3',
+  scope: 'all',
+};
+
+const EMPTY_BUILD_TESTS_QUERY: AnalyticsBuildTestsQuery = {
+  product_id: '',
+  version: '',
+  scope: 'all',
+  build: 'build-9',
+};
+
+const FULL_BUILD_TESTS_QUERY: AnalyticsBuildTestsQuery = {
+  product_id: 'prod-1',
+  version: '1.2.3',
+  scope: 'all',
+  build: 'build-9',
+};
+
+beforeEach(() => {
+  mockedApiGet.mockReset();
+  // `useAnalyticsOverview`'s adapter wants an object it can pick fields off of;
+  // `useAnalyticsBuildTests`'s calls `.map` straight on the response, so it needs an
+  // array. Branching on the path keeps one mock honest for both "still fetches
+  // normally" cases without asserting anything about response *content*, which these
+  // tests are not about.
+  mockedApiGet.mockImplementation(async (path: string) =>
+    path.includes('/analytics/build-tests') ? [] : ({} as never)
+  );
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('useAnalyticsOverview', () => {
+  it('never sends an HTTP request when refetch() is called on an empty product_id/version query, even though the caller left `enabled` true', async () => {
+    // Mirrors AnalyticsDashboard.tsx:697-704's fallback object exactly: `enabled` is
+    // passed as `true` here on purpose, the same way a stale closure or a caller that
+    // forgets to gate `enabled` would leave it. The hook itself must still refuse.
+    const { result } = renderHook(() => useAnalyticsOverview(EMPTY_OVERVIEW_QUERY, true), {
+      wrapper: makeWrapper(),
+    });
+
+    result.current.refetch();
+    result.current.refetch();
+
+    await waitFor(() => expect(result.current.isError || result.current.isFetched).toBe(true));
+
+    expect(mockedApiGet).not.toHaveBeenCalled();
+  });
+
+  it('still fetches normally once product_id and version are both present', async () => {
+    const { result } = renderHook(() => useAnalyticsOverview(FULL_OVERVIEW_QUERY, true), {
+      wrapper: makeWrapper(),
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(mockedApiGet).toHaveBeenCalledTimes(1);
+    const [path] = mockedApiGet.mock.calls[0] as [string];
+    expect(path).toContain('product_id=prod-1');
+    expect(path).toContain('version=1.2.3');
+  });
+
+  it('reproduces the exact production shape -- enabled:false (as AnalyticsDashboard passes when the gate is unmet) plus a direct refetch() call, the way the Refresh button drives it -- and still sends nothing', async () => {
+    const { result } = renderHook(() => useAnalyticsOverview(EMPTY_OVERVIEW_QUERY, false), {
+      wrapper: makeWrapper(),
+    });
+
+    // The button's handler is exactly `() => refetch()`; React Query's refetch()
+    // ignores `enabled` by design, which is the entire bug.
+    result.current.refetch();
+
+    await waitFor(() => expect(result.current.isError || result.current.isFetched).toBe(true));
+
+    expect(mockedApiGet).not.toHaveBeenCalled();
+  });
+});
+
+describe('useAnalyticsBuildTests', () => {
+  it('never sends an HTTP request when refetch() is called on an empty product_id/version query', async () => {
+    const { result } = renderHook(() => useAnalyticsBuildTests(EMPTY_BUILD_TESTS_QUERY, true), {
+      wrapper: makeWrapper(),
+    });
+
+    result.current.refetch();
+
+    await waitFor(() => expect(result.current.isError || result.current.isFetched).toBe(true));
+
+    expect(mockedApiGet).not.toHaveBeenCalled();
+  });
+
+  it('still fetches normally once product_id and version are both present', async () => {
+    const { result } = renderHook(() => useAnalyticsBuildTests(FULL_BUILD_TESTS_QUERY, true), {
+      wrapper: makeWrapper(),
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(mockedApiGet).toHaveBeenCalledTimes(1);
+  });
+});

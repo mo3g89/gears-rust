@@ -1,0 +1,88 @@
+[package]
+name = "qa-catalog"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+qa-catalog-sdk = { path = "../qa-catalog-sdk" }
+# The plugin contract: `QaProductRegistry` resolves and hands out
+# `Arc<dyn QaProductPluginV1>`, and the plugin-binding migration's test
+# recomposes the backfilled instance id from `QaProductPluginSpecV1`'s own
+# type id. Nothing here depends on any *particular* product plugin.
+qa-product-sdk = { path = "../../qa-product-sdk" }
+
+authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", path = "../../../system/authz-resolver/authz-resolver-sdk" }
+authz-resolver = { workspace = true }
+# The credstore gear crate itself (not just its SDK): the `deps = [credstore]`
+# declaration in `#[toolkit::gear]` resolves the dependency token against the
+# crate ident (same pattern as `authz-resolver` above; precedent: oagw).
+credstore = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+inventory = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+utoipa = { workspace = true, features = ["time"] }
+axum = { workspace = true, features = ["macros"] }
+http = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+# GTS instance-id validation (`GtsInstanceId::try_new`) for the
+# `plugin_instance_id` a caller supplies, and `GtsSchema::TYPE_ID` in the
+# migration's id-composition test.
+gts = { workspace = true }
+# Task 13: the product-plugin catalogue is enumerated from the GTS instance
+# registry, because `ClientHub` has no enumeration API. SDK only -- qa-catalog
+# takes no `types_registry` *gear* dep, so a deployment without that gear still
+# boots and fails only at this one endpoint (design 4.2's own principle: a
+# missing plugin must not take down healthy gears).
+types-registry-sdk = { workspace = true }
+
+toolkit = { workspace = true }
+toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
+toolkit-db-macros = { workspace = true }
+toolkit-security = { workspace = true }
+toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
+toolkit-macros = { workspace = true }
+
+serde-saphyr = { workspace = true }
+regex = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+sha2 = { workspace = true }
+credstore-sdk = { workspace = true }
+gix = { workspace = true }
+# OpenSSH private-key header parsing: distinguishes a passphrase-protected
+# key from an unencrypted one before `ssh-add` is spawned (infra::git::ssh_agent).
+base64 = { workspace = true }
+# Runtime (not dev-only) use: `list_remote_branches` builds its scratch
+# repository in a tempdir (see `infra::git::gix_sync`).
+tempfile = { workspace = true }
+# Lifecycle background tasks (CancellationToken; see `gear::serve`).
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+# In-memory CredStoreClientV1 double for the DB-backed tenant-scoping tier.
+credstore-sdk = { workspace = true, features = ["test-util"] }
+# `MockTypesRegistryClient` + `make_test_instance`, for the product-plugin
+# catalogue tests. The SDK's `testing` module is gated behind `test-util`.
+types-registry-sdk = { workspace = true, features = ["test-util"] }
+
+[features]
+# Gates the gix end-to-end sync integration test (clones a local fixture repo
+# through the real transport, which spawns `git upload-pack` — requires a `git`
+# binary on PATH). Disabled by default so plain `cargo test` stays hermetic;
+# enable with `--features integration`.
+integration = []

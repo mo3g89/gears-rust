@@ -1,0 +1,195 @@
+{{/* One container running all four qa-platform gears
+     (cf-gears-example-server, built by qa-platform.Dockerfile). Env, mounts
+     and RBAC mirror docker-compose.yml's `gears` service plus
+     docker-compose.argo.yml's overlay -- except there is no overlay here:
+     this chart runs the real Argo executor unconditionally, because
+     in-cluster IS the Argo deployment.
+
+     NO readOnlyRootFilesystem, and this is deliberate rather than an
+     oversight. entrypoint.sh (line ~95) writes its rendered config to
+     /var/lib/cf-gears/.rendered-<name> -- the PARENT of the PVC mount at
+     /var/lib/cf-gears/data, not a path the PVC itself covers -- and that
+     write happens on every container start, before the server ever execs.
+     Setting readOnlyRootFilesystem: true here makes that write fail and the
+     container refuses to start. Nothing else about the image needs a
+     writable root filesystem, but this one write does, so the securityContext
+     below stops short of that flag.
+
+     IF YOU ARE READING THIS BECAUSE THIS POD IS CrashLoopBackOff ON A FRESH
+     INSTALL: that is expected, not a broken chart. Helm creates this
+     Deployment before it ever runs the db-migrate/tenant-seed post-install
+     hooks (job-db-migrate.yaml, job-tenant-seed.yaml), the reverse of
+     compose's ordering, so this pod's first few boots race a database that
+     has neither schema nor a seeded tenant row and abort in oagw's
+     post_init. It self-heals once both hooks complete. Full rationale --
+     including why deploy-k8s.sh must NOT pass `--wait` to
+     `helm upgrade --install` (with `--wait`, this pod's inability to reach
+     Ready before the hooks run blocks the hooks from ever running at all),
+     and why an initContainer gate here is still not worth adding -- is in
+     job-db-migrate.yaml's header comment. */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qa-platform-gears
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+spec:
+  replicas: {{ .Values.gears.replicaCount }}
+  # THE DEFAULT 600s IS MEASURED FROM THE WRONG INSTANT FOR THIS POD, which is
+  # why it is raised here and nowhere else in the chart.
+  #
+  # progressDeadlineSeconds counts from the Deployment's LAST PROGRESS EVENT,
+  # not from when anyone starts watching it. Helm creates this Deployment as a
+  # normal resource and only THEN runs the db-migrate/tenant-seed post-install
+  # hooks, and this pod cannot make progress until both have finished -- so the
+  # clock starts at creation and the entire hook window is spent on it. By the
+  # time deploy-k8s.sh's `kubectl rollout status` begins, the remaining budget
+  # is 600s MINUS however long the hooks took, not 600s.
+  #
+  # That interacts badly with `kubectl rollout status`: it does not merely wait
+  # for its own --timeout, it returns an ERROR THE MOMENT it observes
+  # Progressing=False with reason=ProgressDeadlineExceeded. So raising
+  # deploy-k8s.sh's ROLLOUT_TIMEOUT cannot buy back what the deadline already
+  # spent -- the ceiling is the deadline, and the symptom is a FALSE FAIL on a
+  # stack that was about to self-heal: hooks take four minutes, the deadline
+  # fires around the six-minute mark, and the deploy is reported broken while
+  # the kubelet's next restart would have brought the pod up.
+  #
+  # 1800s = the 600s hook window `helm --timeout 10m` allows, plus the 600s
+  # rollout budget deploy-k8s.sh gives this Deployment, plus 600s of slack for
+  # a cold node (image pull, exponential restart backoff capped at 300s). It is
+  # a CEILING ON A FALSE FAILURE, not a licence to hang: deploy-k8s.sh's own
+  # `rollout status --timeout` is what actually bounds the wait, and it is
+  # strictly smaller. Do not lower this below that timeout plus the helm
+  # timeout, or the deadline becomes the binding constraint again.
+  #
+  # NOT SET ON ui OR keycloak, deliberately. Neither waits on a hook: the UI
+  # pod is Ready as soon as nginx binds, and Keycloak's own probe budget
+  # (30s initial + 30 * 10s) is 330s, comfortably inside the default 600s
+  # measured from its own creation. Raising their deadlines would only delay
+  # a genuine failure being reported.
+  progressDeadlineSeconds: 1800
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qa-platform
+      app.kubernetes.io/component: gears
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qa-platform
+        app.kubernetes.io/component: gears
+    spec:
+      serviceAccountName: qa-platform-gears
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+{{/* Gated on BOTH enabled AND a non-empty uiServiceClusterIP, not `required`
+     on the latter alone. deploy-k8s.sh's two-pass install (Task 11) depends
+     on this rendering with NO hostAliases block when uiServiceClusterIP is
+     still "" -- pass 1 has to succeed and create the qa-platform-ui Service
+     before anything can read its ClusterIP, and pass 2 supplies it. A
+     `required` on uiServiceClusterIP made pass 1 itself fail at render
+     (Helm's `required` treats "" as missing, same trap Task 5 already hit on
+     keycloakRealmJson), which is a chart-level deadlock: the block that
+     needs the IP would block the very install step that produces it. See
+     NOTES.txt for the operator-facing warning this trade costs -- enabling
+     hostAliases without ever supplying uiServiceClusterIP now silently
+     renders no hostAliases at all instead of failing loudly. */}}
+{{- if and .Values.gears.hostAliases.enabled .Values.uiServiceClusterIP }}
+      hostAliases:
+        - ip: {{ .Values.uiServiceClusterIP }}
+          hostnames: [{{ include "qa-platform.publicHost" . | quote }}]
+{{- end }}
+      containers:
+        - name: gears
+          image: "{{ .Values.images.gears.repository }}:{{ .Values.images.gears.tag }}"
+          imagePullPolicy: {{ .Values.images.gears.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gears.port }}
+          env:
+            - name: POSTGRES_HOST
+              value: qa-platform-postgres
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: qa-platform-postgres
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: qa-platform-postgres
+                  key: POSTGRES_PASSWORD
+            # THE BARE ORIGIN, deliberately not the qa-platform.issuer helper.
+            # entrypoint.sh:137 validates this against `^https?://host[:port]$`
+            # and appends `/realms/qa-platform` itself when building
+            # issuer_pattern -- a value already carrying that suffix (what
+            # qa-platform.issuer produces, for the UI build arg and
+            # verification checks) fails that regex and the container refuses
+            # to start.
+            - name: PUBLIC_ISSUER_ORIGIN
+              value: {{ required "publicOrigin is required -- set it with --set publicOrigin=https://host" .Values.publicOrigin | quote }}
+            - name: QA_RUNS_ARGO_CONFIG
+              value: /etc/qa-platform/qa-runs-argo.yaml
+            - name: QA_ENVIRONMENTS_ARGO_CONFIG
+              value: /etc/qa-platform/qa-environments-argo.yaml
+            - name: RUST_LOG
+              value: {{ .Values.gears.logLevel | quote }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cf-gears
+              readOnly: true
+            - name: argo-qa-runs
+              mountPath: /etc/qa-platform/qa-runs-argo.yaml
+              subPath: qa-runs-argo.yaml
+              readOnly: true
+            - name: argo-qa-environments
+              mountPath: /etc/qa-platform/qa-environments-argo.yaml
+              subPath: qa-environments-argo.yaml
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/cf-gears/data
+            # ca.crt only, never keycloak.crt/keycloak.key or ca.key -- the
+            # Secret's `items` list below projects exactly this one key into
+            # the directory, the same "expose ca.crt and nothing else"
+            # property docker-compose.yml's volume.subpath comment measures.
+            - name: tls-ca
+              mountPath: /etc/keycloak-tls
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+      volumes:
+        - name: config
+          configMap:
+            name: qa-platform-gears-config
+        - name: argo-qa-runs
+          configMap:
+            name: qa-platform-gears-argo-qa-runs
+        - name: argo-qa-environments
+          configMap:
+            name: qa-platform-gears-argo-qa-environments
+        - name: data
+          persistentVolumeClaim:
+            claimName: qa-platform-gears-data
+        - name: tls-ca
+          secret:
+            secretName: qa-platform-tls
+            items:
+              - key: ca.crt
+                path: ca.crt

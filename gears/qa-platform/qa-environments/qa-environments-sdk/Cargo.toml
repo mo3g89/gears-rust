@@ -1,0 +1,33 @@
+[package]
+name = "qa-environments-sdk"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SDK for qa-environments gear: client trait, models, and error definitions"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The observation contract this gear's `Environment` now carries verbatim:
+# `ObservedAttrs` (the plugin's attribute map, stored as itself so
+# `project_roles`/`retain_declared` need no conversion at any boundary) and
+# `HealthState`. `qa-product-sdk` depends on nothing in qa-platform and names
+# neither `kube` nor `k8s-openapi`, so ADR-0001's containment is untouched by
+# this edge — verify with `cargo tree -p qa-environments -i kube`.
+qa-product-sdk = { path = "../../qa-product-sdk" }
+
+uuid = { workspace = true }
+time = { workspace = true }
+async-trait = { workspace = true }
+toolkit-canonical-errors = { workspace = true }
+toolkit-security = { workspace = true }
+# `Environment::config` is `EnvironmentHandle`'s `config` channel, which the
+# plugin contract types as `&serde_json::Value` — so the JSON value itself
+# crosses this boundary and there is nothing to convert. This crate still
+# derives no `Serialize`/`Deserialize` on any model: the convention SDK models
+# keep is "no wire form here", not "no JSON type", and the (de)serialisation
+# for the column lives beside the entity in `infra/storage/mapper.rs`.
+serde_json = { workspace = true }

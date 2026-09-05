@@ -1,0 +1,160 @@
+{{/* Mounted into the SECOND seam Task 2 added to default.conf.template
+     (`include /etc/nginx/extra-conf/*.conf;`, right after the tls-conf
+     include). That seam matches nothing in the image itself -- this
+     ConfigMap is what populates it in-cluster, so Keycloak ends up served
+     from the SAME server block as the SPA and /qa/v1, i.e. the same origin,
+     which is what collapses the login chain's separate issuer/certificate
+     pair down to one.
+
+     TWO PREFIXES, because Keycloak runs at its default root path (see
+     keycloak-deployment.yaml's header for why KC_HTTP_RELATIVE_PATH is never
+     set):
+       /realms/    -- OIDC discovery, authorize, token, JWKS. The login flow.
+       /resources/ -- the login page's own CSS/JS. Without it the page
+                      renders bare (unstyled HTML, no working form).
+
+     `/admin/` USED TO BE A THIRD PREFIX AND IS DELIBERATELY GONE. It was
+     justified as "the admin REST API deploy/argo/provision-workflow-secret.sh
+     calls to read back the qa-platform-workflow client secret", and that
+     justification was simply false: that script reads the secret out of the
+     realm JSON with `jq`
+     (deploy/argo/provision-workflow-secret.sh:76-81 -- `jq -r --arg c
+     "$CLIENT_ID" '.clients[] | select(.clientId==$c) | .secret // empty'`)
+     and never issues an HTTP request to Keycloak at all. Nothing else in
+     this tree calls the admin API either.
+
+     What the prefix DID do is publish Keycloak's admin console and full
+     admin REST API on the SAME public origin as the application, reachable
+     by anyone who can reach the UI, behind the committed dev credentials
+     admin/admin (values.yaml's keycloak.adminUser/adminPassword, and the
+     realm fixture). That is a whole-cluster credential -- the master realm's
+     admin can rewrite every client, every redirect URI and every user in
+     every realm -- exposed for a caller that does not exist. Removing the
+     prefix does not disable the console; it un-publishes it. Anything that
+     genuinely needs it can still reach it in-cluster at
+     http://qa-platform-keycloak:8080/admin/, or through
+     `kubectl -n <ns> port-forward svc/qa-platform-keycloak 8080:8080`.
+
+     verify-k8s.sh's check 16 was the ONLY consumer of the proxied /admin/
+     path (it authenticated as master-realm admin over the public origin to
+     read back the qa-platform-ui client's redirectUris). It now reads the
+     same fact out of the qa-platform-realm ConfigMap -- the exact document
+     Keycloak imports -- so it asserts more directly and needs no admin
+     credential over the wire. If you re-add /admin/ here, you are re-opening
+     that surface; do not do it to make a check convenient.
+
+     NOT `/auth/`. The SPA already routes /auth/callback as its own OIDC
+     redirect target (src/auth -- see qa-platform-ui/default.conf.template's
+     own header); an nginx `location /auth/` would shadow that route and the
+     browser would come back from Keycloak straight into Keycloak instead of
+     the SPA.
+
+     A REGEX LOCATION, on purpose, and that interacts with precedence.
+     default.conf.template already carries one regex location
+     (`~ ^/qa/v1/runs/[^/]+/logs$`, the SSE stream), one prefix location
+     (`location /qa/v1/`), and a trailing-extension regex
+     (`~* \.(js|css|png|...)$`, the static-asset cache block at the bottom
+     of the file), and its own comment block above the SSE regex warns that
+     nginx gives a matching regex location precedence over a matching
+     prefix location regardless of source order. Checked against that trap
+     before adding this one -- and the checking split into two different
+     answers, because the trap is not the same shape against every existing
+     location:
+       - Against `^/qa/v1/runs/[^/]+/logs$` and `location /qa/v1/`: no
+         overlap exists at all. `^/(realms|resources)/` can only
+         match a URI starting with one of those two literal segments;
+         none of `/qa/v1/...`, `/qa/v1/runs/<id>/logs` or `/` (the SPA's own
+         prefix location) starts with any of them. Nothing to keep safe
+         here, because there is no shared match to arbitrate.
+       - Against the trailing-extension regex, THE OVERLAP IS REAL, not
+         hypothetical: Keycloak's default `keycloak.v2` login theme serves
+         genuine `.css` and `.js` files under `/resources/` (its
+         stylesheets and scripts), which is exactly what that regex
+         matches on suffix. A naive "these locations never collide" claim
+         here would be false, and worse, it would look like a green light
+         to reorder these `include`s later. What actually keeps this
+         working is FIRST-MATCH REGEX ORDERING: nginx tests regex locations
+         in the order they appear in the merged configuration and stops at
+         the first one that matches a given URI -- not the most specific,
+         the first. This ConfigMap's `include` sits at
+         `default.conf.template` line 158 (the SECOND seam), strictly
+         ahead of the SSE regex (~269), the `/qa/v1/` prefix (~303) and the
+         suffix regex (~344, itself already after the SSE regex). So for a
+         request like `GET /resources/.../login.css`, THIS regex is tested
+         and matches first, and the suffix regex is never reached for that
+         request at all. THE INVARIANT TO PRESERVE: this `include` must
+         stay ahead of the suffix regex in the merged config. Move it after
+         line ~344, or reorder the two seams so tls-conf/extra-conf no
+         longer precede the rest of the server block, and Keycloak's own
+         CSS/JS would instead be served by the suffix regex's
+         `expires 30d; add_header Cache-Control "public, immutable";` with
+         no `proxy_pass` -- i.e. answered off this container's filesystem
+         (404, since Keycloak's assets are not baked into the UI image) --
+         and the login page would render bare exactly the way the
+         "/resources/ missing" comment above already warns about, from a
+         different cause than that comment names.
+
+     The upstream is a Helm-rendered LITERAL, not `${KEYCLOAK_UPSTREAM}`.
+     envsubst (invoked by nginx:alpine's entrypoint) only processes
+     /etc/nginx/templates/*.template; a mounted fragment under
+     /etc/nginx/extra-conf is never touched by it, so a `${...}` placeholder
+     here would reach nginx unexpanded and fail as a bad proxy_pass target.
+     Deliberately no NGINX_ENVSUBST_FILTER entry for a KEYCLOAK_UPSTREAM
+     variable either -- there is nothing for it to allow-list.
+
+     BUT IT REACHES `proxy_pass` THROUGH AN nginx VARIABLE (`set $kc ...;
+     proxy_pass $kc;`), NEVER AS A BARE LITERAL, and that distinction is the
+     whole point of default.conf.template's own long comment above its
+     `resolver` line -- reintroducing a literal here reintroduced exactly the
+     failure mode that comment warns about. A literal name in `proxy_pass` is
+     resolved ONCE, AT CONFIG LOAD, by nginx itself; if the name does not
+     resolve at that instant nginx does not start degraded, it REFUSES TO
+     LOAD THE CONFIG AT ALL:
+
+       $ docker run --rm -v .../literal.conf:/etc/nginx/conf.d/default.conf \
+             nginx:alpine nginx -t
+       nginx: [emerg] host not found in upstream "qa-platform-keycloak" ...
+       nginx: configuration file /etc/nginx/nginx.conf test failed
+
+     (measured 2026-08-29 in a real nginx:alpine, with the same
+     `resolver <cluster-dns>` line the chart supplies). Since this pod IS the
+     cluster's only edge, any UI pod start while CoreDNS is not yet answering
+     -- a node reboot, a CoreDNS roll, a cold cluster bring-up, or simply the
+     UI pod winning the scheduling race against kube-dns -- takes the whole
+     edge into CrashLoopBackOff and keeps it there, with a message that names
+     Keycloak rather than DNS. The same run with `set $kc ...; proxy_pass
+     $kc;` reports "syntax is ok / test is successful": a variable in
+     `proxy_pass` defers resolution to REQUEST TIME, through the `resolver`,
+     so an unresolvable Keycloak degrades to a 502 on /realms while the SPA
+     and /qa/v1 keep serving. `proxy_pass $kc;` carries no URI part, so the
+     full normalized request URI is passed through unchanged -- identical
+     routing to the literal form it replaces.
+
+     X-Forwarded-* is mandatory, not cosmetic: Keycloak runs with
+     KC_PROXY_HEADERS=xforwarded (keycloak-deployment.yaml) and builds its
+     issuer and redirect URLs from these headers. Without X-Forwarded-Proto
+     it advertises `http://...`, and every token's `iss` then fails the
+     gears' issuer_pattern check -- a 401 whose message names none of this. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qa-platform-ui-extraconf
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: ui
+data:
+  keycloak.conf: |
+    location ~ ^/(realms|resources)/ {
+        # FQDN for the same reason GEARS_UPSTREAM is one: `proxy_pass $kc`
+        # resolves at request time through nginx's `resolver`, which does not
+        # apply resolv.conf search domains. The short name 502s every
+        # /realms/ request -- which is what the browser reports as
+        # "Could not reach the sign-in service". Measured 2026-08-29.
+        set $kc http://qa-platform-keycloak.{{ .Release.Namespace }}.svc.cluster.local:8080;
+        proxy_pass $kc;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP         $remote_addr;
+    }

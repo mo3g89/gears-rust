@@ -1,0 +1,106 @@
+{{/* Carries gears/qa-platform/config/qa-platform-stack.yaml verbatim (copied
+     into this chart's files/ so .Files.Get can reach it -- Helm's .Files is
+     scoped to the chart directory and cannot read files outside it via ../,
+     the same constraint postgres-initdb-configmap.yaml's and
+     certs-scripts-configmap.yaml's copies hit). Do not edit the embedded copy
+     here: edit gears/qa-platform/config/qa-platform-stack.yaml and re-copy
+     it. The two copies are kept byte-identical by
+     deploy/helm/tests/test_chart_file_sync.py.
+
+     This file is mounted read-only at /etc/cf-gears in gears-deployment.yaml
+     -- the same path qa-platform.Dockerfile bakes it into and
+     GEARS_CONFIG_FILE defaults to, so no env override is needed. entrypoint.sh
+     treats it strictly as a read-only template: it renders the Postgres
+     fields and the issuer_pattern into a SEPARATE file under
+     /var/lib/cf-gears (a path this ConfigMap does not cover) before exec'ing
+     the server, so mounting this directory read-only is safe -- see
+     qa-platform.Dockerfile's comment on RENDERED_CONFIG_FILE. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qa-platform-gears-config
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+data:
+  qa-platform-stack.yaml: |
+{{/*
+  THE ONE TRANSFORM APPLIED TO THE COMMITTED CONFIG, and it is not cosmetic.
+
+  `issuer_pattern` and `discovery_url` are DIFFERENT settings. The first says
+  which `iss` claim to trust; the second says where to GO for the metadata and
+  JWKS that validate it. entrypoint.sh rewrites the first from
+  PUBLIC_ISSUER_ORIGIN and does not touch the second, because in compose the
+  second is already correct: the IdP really is the `keycloak` service on 8443.
+
+  In this deployment there is no such host. Keycloak is a ClusterIP Service on
+  plain http behind the UI's nginx, and the only TLS anywhere is at the edge --
+  so the sole https discovery URL that exists is the public origin, reached
+  back through that edge (the pod -> node hostPort hairpin, measured working).
+  oidc-authn-plugin enforces UrlSecurityPolicy::STRICT, so an in-cluster http
+  address is rejected at config load and is not an alternative.
+
+  HOW IT FAILS WITHOUT THIS, because the symptom names none of it: login
+  SUCCEEDS and the browser holds a valid token, then EVERY API call returns 503
+  `cf.core.err.service_unavailable.v1` and the gears log says "identity
+  provider unreachable" -- the token cannot be validated without the JWKS.
+  Measured on the live cluster 2026-08-29.
+
+  BOTH occurrences are replaced -- the trusted-issuer block and `s2s_oauth`.
+  Rewriting only one leaves the gears able to validate a user's token but
+  unable to mint their own service token. `required` below fails the render if
+  the committed file ever stops carrying the string this depends on, so a
+  silent no-op becomes a loud template error instead of a 503 at runtime.
+
+  Done HERE rather than in entrypoint.sh so that shared script -- and with it
+  the compose stack -- stays untouched.
+*/}}
+{{- $cfg := .Files.Get "files/qa-platform-stack.yaml" }}
+{{- $from := "https://keycloak:8443/realms/qa-platform" }}
+{{- $to := printf "%s/realms/qa-platform" .Values.publicOrigin }}
+{{- if not (contains $from $cfg) }}
+{{- fail (printf "files/qa-platform-stack.yaml no longer contains %q -- the OIDC discovery rewrite would silently no-op, and the gears would 503 every authenticated request. Update this template together with the config." $from) }}
+{{- end }}
+{{- $cfg = $cfg | replace $from $to }}
+{{/*
+  THE SECOND AND THIRD TRANSFORMS: qa-insights' collect callback.
+
+  `collect_report_base_url` is the origin a WORKFLOW POD posts its exact case
+  counts back to, so the committed loopback address (correct for `cargo run`)
+  is wrong here for the same reason compose's is: a pod's 127.0.0.1 is the pod.
+  The value it becomes is the in-cluster Service -- byte-for-byte the one
+  gears-argo-configmaps.yaml already computes for `bundle_base_url`, because it
+  is the same journey by the same pod to the same Service, and the two must not
+  be able to disagree.
+
+  `collect_report_signing_secret` is the ONLY access control on
+  `POST /qa/v1/collect/{repo_id}` (that route is `.public()` and genuinely
+  anonymous -- see qa-insights' own routes/collect.rs), so the committed dev
+  literal must not reach a cluster: anyone who could reach the route would be
+  able to write case counts for any tenant they named. An unset
+  `collectReportSigningSecret` therefore becomes a per-render random value
+  rather than the literal.
+
+  WHY A PER-RENDER RANDOM IS SAFE HERE, since a rotating secret usually is not:
+  the URL is signed and the report is verified by the SAME running gears
+  process, minutes apart, and nothing persists a tag across a restart. Nor does
+  a changed value churn anything -- this Deployment carries no configmap
+  checksum annotation, so a re-rendered ConfigMap does not roll the pod, and
+  the gears render this file into their own copy once at start-up. Set the
+  value to keep it stable across upgrades anyway (see values.yaml).
+
+  BOTH are `fail`-guarded like the rewrite above: a silent no-op here is a
+  collect cycle that runs hourly, forever, delivering nothing -- which is
+  exactly the state this pair of transforms was added to end.
+*/}}
+{{- $collectFrom := "http://127.0.0.1:8087" }}
+{{- $collectTo := printf "http://qa-platform-gears.%s.svc.cluster.local:%d" .Release.Namespace (.Values.gears.port | int) }}
+{{- if not (contains $collectFrom $cfg) }}
+{{- fail (printf "files/qa-platform-stack.yaml no longer contains %q -- qa-insights' collect_report_base_url would keep the committed loopback value, and a workflow pod cannot reach its own 127.0.0.1, so every exact case count would be dropped. Update this template together with the config." $collectFrom) }}
+{{- end }}
+{{- $secretFrom := "dev-collect-report-signing-secret" }}
+{{- $secretTo := .Values.collectReportSigningSecret | default (randAlphaNum 32) }}
+{{- if not (contains $secretFrom $cfg) }}
+{{- fail (printf "files/qa-platform-stack.yaml no longer contains %q -- the committed dev signing key would ship to this cluster, and it is the only access control on the anonymous collect-report route. Update this template together with the config." $secretFrom) }}
+{{- end }}
+{{ $cfg | replace $collectFrom $collectTo | replace $secretFrom $secretTo | indent 4 }}

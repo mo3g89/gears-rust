@@ -1,0 +1,24 @@
+[package]
+name = "qa-insights-sdk"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SDK for qa-insights gear: client trait, models, and error definitions"
+
+[lints]
+workspace = true
+
+# Deliberately the same five dependencies as `qa-environments-sdk`, and
+# deliberately no more. In particular there is no `serde`/`serde_json` here (see
+# the crate doc in `src/lib.rs`) and no sibling SDK: no `*-sdk` crate anywhere in
+# this workspace depends on another `*-sdk` crate, and this one does not start
+# that. See `models::DashboardStats` for the one place that constraint changed a
+# type's shape.
+[dependencies]
+uuid = { workspace = true }
+time = { workspace = true }
+async-trait = { workspace = true }
+toolkit-canonical-errors = { workspace = true }
+toolkit-security = { workspace = true }

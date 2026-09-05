@@ -1,0 +1,49 @@
+[package]
+name = "qa-product-sdk"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Contract every QA Platform product plugin implements: descriptors, observation, run access, and the leak-conformance harness"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+credstore-sdk = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+gts = { workspace = true }
+gts-macros = { workspace = true }
+schemars = { workspace = true }
+toolkit = { workspace = true }
+toolkit-gts = { workspace = true }
+# Optional, and used only by the leak-conformance harness (`testing.rs`),
+# which is its sole consumer in this crate.
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+uuid = { workspace = true }
+
+[features]
+# Gates `qa_product_sdk::testing` (the `assert_no_leak` harness and `Canary`).
+# Every plugin crate enables this in its own `[dev-dependencies]` to call
+# `assert_no_leak` from its test suite; a production build of a plugin does
+# not compile the harness and does not link its `Canary`/subscriber code.
+#
+# What it does *not* buy: keeping `tracing`/`tracing-subscriber` out of the
+# build graph. Cargo unifies features across a workspace build, and
+# `tracing-subscriber` arrives transitively through `cf-gears-toolkit`'s
+# default `otel` feature for every gear in this workspace regardless of what
+# this crate declares. The feature gates *this crate's code*, not the
+# dependency tree.
+test-util = ["dep:tracing", "dep:tracing-subscriber"]
+
+[dev-dependencies]
+tokio = { workspace = true }
+# Self-dependency so this crate's own tests (`testing_tests.rs`, embedded in
+# `testing.rs` behind `#[cfg(test)]`) compile with `test-util` enabled,
+# mirroring `cf-gears-oagw`'s and `bss-ledger`'s own `path = "."` dev-dependency
+# pattern for a crate exercising its own optional test-only feature.
+qa-product-sdk = { path = ".", features = ["test-util"] }
