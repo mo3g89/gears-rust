@@ -392,6 +392,8 @@ jobs:
       # `in_schema("bss")` form both gears actually pass, ran in no job.
       - name: Test coord with Postgres (integration)
         run: make test-coord-pg
+      - name: Test qa-runs with Postgres (integration)
+        run: make test-qa-runs-pg
 
       - name: Test toolkit-db (sqlite integration)
         run: make test-sqlite

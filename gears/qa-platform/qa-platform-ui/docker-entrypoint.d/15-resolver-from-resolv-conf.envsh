@@ -1,0 +1,94 @@
+#!/bin/sh
+# Derive nginx's `resolver` address from the container's own /etc/resolv.conf.
+#
+# # Why this exists at all
+#
+# `default.conf.template`'s `location /qa/v1/` reaches the gears through a
+# VARIABLE `proxy_pass $gears`, which defers name resolution to REQUEST time and
+# therefore requires an explicit `resolver` line. That line needs an ADDRESS, not
+# a name -- and the correct address is a property of where the container runs:
+#
+#   * under Kubernetes it is the kube-dns / CoreDNS Service ClusterIP, which
+#     differs per cluster (10.43.0.10 on a default k3s, 10.96.0.10 on a default
+#     kubeadm, arbitrary otherwise);
+#   * under Docker it is 127.0.0.11, Docker's embedded DNS.
+#
+# The value used to be a chart value (`clusterDns`) whose default was one
+# particular cluster's ClusterIP, plus an `ENV NGINX_RESOLVER=127.0.0.11` in the
+# Dockerfile -- Docker's address, baked into an image that also ships to
+# Kubernetes. Both are the same mistake: an environment-specific address decided
+# at build or template time. /etc/resolv.conf answers it correctly in every one of
+# those environments, because whoever started the container wrote it. So the image
+# asks rather than being told.
+#
+# # Why `.envsh`, and why 15
+#
+# nginx's `/docker-entrypoint.sh` iterates `/docker-entrypoint.d/*` and treats the
+# two suffixes differently:
+#
+#     *.envsh) . "$f" ;;      # SOURCED -- its exports survive into later scripts
+#     *.sh)    "$f" ;;        # executed in a subshell -- exports are lost
+#
+# So this MUST be `.envsh`: an `export` from a `.sh` would never reach the
+# envsubst step. It must also sort before `20-envsubst-on-templates.sh`, the
+# script that substitutes ${NGINX_RESOLVER} into the config. 15 sits between the
+# image's own `10-listen-on-ipv6-by-default.sh` and that 20 -- and after the
+# image's `15-local-resolvers.envsh`, which is a different file and sorts first.
+#
+# # BEING SOURCED IS WHY THIS FILE LOOKS THE WAY IT DOES
+#
+# Everything below runs in the ENTRYPOINT'S OWN SHELL, not a child. That makes
+# three ordinary habits actively dangerous, and all three are avoided:
+#
+#   * NO `set -e` / `set -u`. They would persist for every entrypoint script that
+#     runs after this one, so an unset variable in nginx's own
+#     `20-envsubst-on-templates.sh` would abort start-up -- a failure originating
+#     here and surfacing there.
+#   * NO `exit`. It would terminate the entrypoint, not this file. nginx would
+#     never start, with no error naming the resolver.
+#   * NO early `return`. It works when sourced, but the one thing worse than
+#     `exit` here is `return` silently falling through TO an `exit` on a shell
+#     that rejects it. A single if/else needs neither.
+#
+# # An explicit value still wins
+#
+# A non-empty NGINX_RESOLVER is left alone -- the chart may pin one (values.yaml
+# `clusterDns`), and `test_nginx_template.sh` sets it directly. Auto-detection is
+# the default, not an override.
+
+if [ -n "${NGINX_RESOLVER:-}" ]; then
+    echo "15-resolver: NGINX_RESOLVER is already set to '${NGINX_RESOLVER}' -- keeping it"
+else
+    # First `nameserver` line only. A resolv.conf may list several and nginx
+    # accepts several, but taking one keeps the failure mode simple to read, and
+    # every container runtime puts the authoritative one first.
+    # QA_RESOLV_CONF exists ONLY so the no-nameserver branch below is reachable
+    # from a test. Nothing sets it in production, and the default is the real
+    # file. Without a seam this branch could not be exercised without a
+    # container and a mount namespace -- and an untestable branch in a start-up
+    # path is how this project has repeatedly shipped guards that cannot fail.
+    _qa_resolv="${QA_RESOLV_CONF:-/etc/resolv.conf}"
+    _qa_ns=''
+    if [ -r "$_qa_resolv" ]; then
+        _qa_ns="$(awk '$1 == "nameserver" { print $2; exit }' "$_qa_resolv" 2>/dev/null)"
+    fi
+
+    if [ -n "$_qa_ns" ]; then
+        NGINX_RESOLVER="$_qa_ns"
+        export NGINX_RESOLVER
+        echo "15-resolver: NGINX_RESOLVER=${NGINX_RESOLVER} (first nameserver in /etc/resolv.conf)"
+    else
+        # DELIBERATELY LEFT UNSET RATHER THAN GUESSED. envsubst then renders
+        # `resolver ;`, which nginx refuses at start-up naming that line -- loud,
+        # immediate, and pointing at the right place. A guessed address would
+        # instead start cleanly and 502 every /qa/v1 call with "host not found in
+        # upstream" buried in the log, which is the failure this file exists to
+        # make impossible.
+        echo "15-resolver: WARNING -- no 'nameserver' line in /etc/resolv.conf and NGINX_RESOLVER is unset." >&2
+        echo "15-resolver: nginx needs a resolver ADDRESS to resolve the gears upstream at request time," >&2
+        echo "15-resolver: and will refuse to start rather than run without one. Set it explicitly (Helm" >&2
+        echo "15-resolver: value 'clusterDns') to your cluster's DNS Service ClusterIP:" >&2
+        echo "15-resolver:   kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}'" >&2
+    fi
+    unset _qa_ns _qa_resolv
+fi

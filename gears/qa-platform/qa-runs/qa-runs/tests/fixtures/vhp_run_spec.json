@@ -1,0 +1,65 @@
+{
+  "env": {
+    "APP_BUILD": {
+      "value": "b4217"
+    },
+    "APP_VERSION": {
+      "value": "7.1.2"
+    },
+    "E2E_K8S_NAMESPACE": {
+      "value": "vhp-sv"
+    },
+    "E2E_RETRIES": {
+      "value": "5"
+    },
+    "E2E_VHP_BASE_URL": {
+      "value": "https://sv.jele.io"
+    },
+    "KUBECONFIG": {
+      "value": "/.kube/kubeconfig"
+    },
+    "PIPELINE_LOG_LEVEL": {
+      "value": "info"
+    },
+    "TEST_VERSION": {
+      "value": "main"
+    },
+    "VPADM_BASE_DOMAIN": {
+      "value": "sv.jele.io"
+    }
+  },
+  "mounts": [
+    {
+      "credstore_ref": "credstore://qa/environments/sv-staging/kubeconfig",
+      "kind": "secret",
+      "mode": 256,
+      "path": "/.kube/kubeconfig"
+    }
+  ],
+  "nodes": [
+    {
+      "bundle_ref": "bundle://one",
+      "name": "repo-00000000-0000-0000-0000-000000000b01",
+      "test_files": [
+        "tests/test_login.py",
+        "tests/test_billing.py"
+      ]
+    },
+    {
+      "bundle_ref": "bundle://one",
+      "name": "repo-00000000-0000-0000-0000-000000000b02",
+      "test_files": [
+        "tests/api/test_tokens.py"
+      ]
+    }
+  ],
+  "run_id": "00000000-0000-0000-0000-000000001601",
+  "run_name": "vhp-golden",
+  "runner": {
+    "command": [],
+    "image": null,
+    "image_pull_policy": null
+  },
+  "service_account": null,
+  "timeout_seconds": 0
+}

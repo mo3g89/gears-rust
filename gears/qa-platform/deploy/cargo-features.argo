@@ -1,0 +1,1 @@
+qa-platform,oidc-authn,static-authz,tenant-resolver-rg,static-credstore,postgres-credstore,runner-secret,qa-runs-argo

@@ -1,0 +1,128 @@
+{{/* Keycloak runs `start-dev` on its embedded H2 database -- deliberately, not
+     an oversight. That is only safe because keycloak-realm-configmap.yaml's
+     realm-qa-platform.json pins the qa-platform-workflow client's secret: a
+     pod restart discards H2, `--import-realm` re-imports the realm, and the
+     re-import produces the SAME client secret every time, so the
+     pre-provisioned Kubernetes Secret in the argo namespace (a later task)
+     stays valid across restarts. Do not add KC_DB/a database here -- that
+     would break the "same secret every restart" premise, not improve it.
+
+     NO KC_HTTP_RELATIVE_PATH. Keycloak stays at its default root path:
+       - entrypoint.sh:137 validates PUBLIC_ISSUER_ORIGIN against a bare
+         `^https?://host[:port]$` pattern and refuses to start on anything
+         carrying a path -- a `/auth` relative path would make the gears'
+         issuer value unrepresentable.
+       - The SPA already routes `/auth/callback` as its own OIDC redirect
+         target; serving Keycloak under `/auth/` would shadow that route.
+     KC_HOSTNAME is therefore the bare origin (.Values.publicOrigin), no path
+     and no port appended beyond what publicOrigin itself carries.
+
+     NO KC_HTTPS_CERTIFICATE_FILE / KC_HTTPS_CERTIFICATE_KEY_FILE. Keycloak
+     does not terminate TLS in this deployment -- the UI's nginx is the only
+     TLS terminator, and it proxies Keycloak's /realms/ and /resources/
+     prefixes (ui-extraconf-configmap.yaml). /admin/ is deliberately NOT
+     proxied -- see that file for why publishing the admin console on the
+     application's public origin behind admin/admin was removed. This
+     container serves plain HTTP.
+
+     KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true is carried over from the compose
+     stack deliberately -- keep it.
+
+     Readiness and liveness both probe
+     /realms/qa-platform/.well-known/openid-configuration, not `/` --
+     legacy's chart records that probing an expensive page gates liveness on
+     something that is not liveness. That endpoint only answers once
+     --import-realm has finished importing realm-qa-platform.json, so
+     initialDelaySeconds/failureThreshold are generous enough on both probes
+     that a slow import is not misread as a failed probe.
+
+     LIVENESS'S BUDGET MUST NEVER BE TIGHTER THAN READINESS'S. A failed
+     readiness probe only marks the pod NotReady (non-destructive); a failed
+     liveness probe kills and restarts the container. If liveness's
+     initialDelaySeconds + periodSeconds*failureThreshold is smaller than
+     readiness's, a slow --import-realm gets killed by liveness before
+     readiness would have given up waiting -- and because storage is
+     ephemeral H2 (see above), that restart discards everything and reruns
+     --import-realm from scratch. On a cold node (image pull, JVM warm-up,
+     import, loaded host) that can loop rather than converge, with a symptom
+     that names none of this. Both probes are mirrored to the same values for
+     exactly this reason -- do not tighten liveness relative to readiness. */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qa-platform-keycloak
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qa-platform
+      app.kubernetes.io/component: keycloak
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qa-platform
+        app.kubernetes.io/component: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: "{{ .Values.images.keycloak.repository }}:{{ .Values.images.keycloak.tag }}"
+          # `args:`, NEVER `command:`. A Kubernetes container's `command:`
+          # overrides the image's ENTRYPOINT; `args:` overrides its CMD.
+          # docker-compose.yml's `command:` for this same image means CMD, so
+          # a literal transcription of it into `command:` here silently
+          # discards the image's own entrypoint (/opt/keycloak/bin/kc.sh) and
+          # tries to exec `start-dev` as a program. /opt/keycloak/bin is not on
+          # PATH, so the container never starts at all.
+          #   MEASURED 2026-08-29, both directions:
+          #     docker run --entrypoint start-dev quay.io/keycloak/keycloak:26.0 --import-realm
+          #       -> exec: "start-dev": executable file not found in $PATH
+          #     docker run <this file's exact env> quay.io/keycloak/keycloak:26.0 start-dev --import-realm
+          #       -> Keycloak 26.0.8 ... started in 3.809s. Listening on: http://0.0.0.0:8080
+          # job-db-migrate.yaml carries the same correction for the same
+          # reason; job-tenant-seed.yaml's `command:` is correct as-is,
+          # because that one genuinely does mean to replace postgres:16's
+          # docker-entrypoint.sh.
+          args: ["start-dev", "--import-realm"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: {{ .Values.keycloak.adminUser | quote }}
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              value: {{ .Values.keycloak.adminPassword | quote }}
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_PROXY_HEADERS
+              value: "xforwarded"
+            - name: KC_HOSTNAME
+              value: {{ required "publicOrigin is required -- set it with --set publicOrigin=https://host" .Values.publicOrigin | quote }}
+            - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
+              value: "true"
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /realms/qa-platform/.well-known/openid-configuration
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /realms/qa-platform/.well-known/openid-configuration
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+      volumes:
+        - name: realm
+          configMap:
+            name: qa-platform-realm

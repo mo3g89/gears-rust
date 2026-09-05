@@ -1,0 +1,19 @@
+{{/* .Values.keycloakRealmJson is NOT a template-time render of render-realm.sh
+     -- it is set by deploy-k8s.sh (Task 11) with --set-file, from a copy the
+     deploy script already rendered for this release's publicOrigin before
+     invoking Helm. Keycloak 26.0.8 will not expand a `${env.VAR}` placeholder
+     in an import file (measured: it aborts start-up), so the substitution has
+     to happen before this ConfigMap is even built, not at Keycloak start-up
+     and not in this template. See render-realm.sh's header for the full
+     rationale, including why the workflow client's secret is pinned here
+     rather than provisioned per-restart. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qa-platform-realm
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: keycloak
+data:
+  realm-qa-platform.json: |
+{{ .Values.keycloakRealmJson | indent 4 }}

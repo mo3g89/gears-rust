@@ -87,12 +87,24 @@ members = [
     "gears/credstore/credstore-sdk",
     "gears/credstore/credstore",
     "gears/credstore/plugins/static-credstore-plugin",
+    "gears/credstore/plugins/postgres-credstore-plugin",
     "gears/file-parser/file-parser-sdk",
     "gears/file-parser/file-parser",
     "gears/file-storage/file-storage-sdk",
     "gears/file-storage/file-storage",
     "gears/github-mirror/github-mirror-sdk",
     "gears/github-mirror/github-mirror",
+    "gears/qa-platform/qa-product-sdk",
+    "gears/qa-platform/qa-environments/qa-environments-sdk",
+    "gears/qa-platform/qa-environments/qa-environments",
+    "gears/qa-platform/qa-catalog/qa-catalog-sdk",
+    "gears/qa-platform/qa-catalog/qa-catalog",
+    "gears/qa-platform/qa-runs/qa-runs-sdk",
+    "gears/qa-platform/qa-runs/qa-runs",
+    "gears/qa-platform/qa-insights/qa-insights-sdk",
+    "gears/qa-platform/qa-insights/qa-insights",
+    "gears/qa-platform/plugins/qa-plugin-k8s",
+    "gears/qa-platform/plugins/qa-vhp-product-plugin",
     "gears/system/account-management/account-management",
     "gears/system/account-management/account-management-sdk",
     "gears/system/account-management/plugins/static-idp-plugin",
@@ -424,6 +436,7 @@ serde_json = "1.0"
 toml = "0.8"
 serde-saphyr = "0.0.22"
 humantime-serde = "1.1"
+serde_yaml = "0.9"
 secrecy = { version = "0.10", features = ["serde"] }
 serde_urlencoded = "0.7"
 # Query-string codec shared by the generated REST client and its server
@@ -623,6 +636,10 @@ ureq = "3.3"
 
 # Time handling
 time = { version = "0.3.47", features = ["serde", "formatting", "parsing"] }
+# Cron expression parsing and next-occurrence evaluation (qa-runs schedules).
+# Note: `cron::Schedule` yields `chrono::DateTime`, not `time::OffsetDateTime`,
+# so callers must convert at the boundary.
+cron = "0.17"
 
 # Cryptographic utilities
 sha2 = "0.10"
@@ -693,6 +710,7 @@ testcontainers = { version = "0.27", default-features = false, features = ["aws-
 testcontainers-modules = { version = "0.15", default-features = false, features = ["aws-lc-rs", "postgres", "mysql"] }
 httpmock = "0.8"
 flate2 = "1"
+tar = "0.4"
 
 # Async utilities
 futures-core = "0.3"
@@ -708,6 +726,22 @@ matchit = "0.9"
 rust-embed = "8"
 bytes = "1.11"
 mime = "0.3"
+
+# Git engine (qa-catalog repo sync; ADR
+# gears/qa-platform/docs/ADR/0005-cpt-cf-qa-adr-git-egress.md).
+# Feature-trimmed from gix's defaults to what the sync adapter needs:
+#   - `sha1`                                    object hashing (part of gix defaults)
+#   - `blocking-network-client`                 blocking clone/fetch + ls-refs
+#   - `blocking-http-transport-reqwest-rust-tls` https transport via reqwest 0.13,
+#     whose `rustls` feature selects the aws-lc-rs provider — the same reqwest
+#     version and rustls provider as the rest of the workspace (no `ring`).
+#   - `worktree-mutation`                       checkout into the working copy
+gix = { version = "0.86", default-features = false, features = [
+    "sha1",
+    "blocking-network-client",
+    "blocking-http-transport-reqwest-rust-tls",
+    "worktree-mutation",
+] }
 
 # Document parsing libraries
 docx-rust = "0.1.11"
@@ -760,9 +794,17 @@ ignored = [
     "account-management",
     "authn-resolver",
     "authz-resolver",
+    # `cluster` joins this list because of qa-insights, which names it as a
+    # `#[toolkit::gear(deps = [...])]` token rather than calling into it.
+    # (`event-broker` itself also declares `deps = [cluster]` but uses
+    # `cluster` in hand-written code too, so it never needed the entry.)
+    "cluster",
     "credstore",
     "grpc_hub",
     "oagw",
+    "qa-catalog",
+    "qa-environments",
+    "qa-runs",
     "resource-group",
     "tenant-resolver",
     "types-registry",

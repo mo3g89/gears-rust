@@ -1,0 +1,143 @@
+[package]
+name = "qa-plugin-k8s"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Kubernetes mechanics shared by QA Platform product plugins whose target is a cluster: client construction from kubeconfig material, ConfigMap and node reads, Secret materialisation, and the failure classifier that keeps credential bytes off every published surface"
+
+[lints]
+workspace = true
+
+[dependencies]
+qa-product-sdk = { path = "../../qa-product-sdk" }
+credstore-sdk = { workspace = true }
+tracing = { workspace = true }
+
+# ── Kubernetes, and why there is no feature gate ──────────────────────────────
+#
+# ADR-0001 forbids `kube`/`k8s-openapi` in any qa-platform crate. Its
+# 2026-08-28 waiver amendment permitted `qa-environments`' observer behind a
+# non-default feature (`platform-observation`, renamed `runner-secret` when
+# Task 19b deleted the observer half); PRODUCT-PLUGINS-DESIGN.md §4.1
+# amends it again, and ADR-0001's 2026-09-04 amendment records what that did.
+# The containment here is structural rather than conventional, so the feature
+# gate has nothing left to buy — a build that does not want Kubernetes simply
+# does not depend on this crate. (The `test-support` feature further down gates
+# test doubles, not Kubernetes: both entries below are unconditional either
+# way.)
+#
+# Stated precisely, because the looser version of this sentence was wrong and
+# shipped: **this crate is the only qa-platform crate that names these types
+# UNCONDITIONALLY**, and its only dependent is a product plugin whose target is
+# a cluster. It is not the only crate that names them. `qa-environments` still
+# does behind `runner-secret` -- Task 19b renamed it and cut it down to
+# decision D4's runner-`Secret` writer -- and `qa-runs` still does
+# behind `argo` (which nothing in the plan removes — it is the subject of the
+# 2026-08-27 waiver and stays until the serverless runtime exists). Outside
+# qa-platform and outside that ADR's scope, `libs/toolkit-k8s-auth` names them
+# unconditionally and `chat-engine`/`mini-chat` name them behind their own
+# `k8s` features.
+#
+# * `kube` — the API client. `client` for HTTP and `rustls-tls`/`aws-lc-rs`
+#   for TLS, matching `qa-runs`' `argo` feature so both agree on one TLS
+#   stack. No `runtime`: nothing here watches or streams.
+# * `k8s-openapi` — `core::v1::{ConfigMap, Namespace, Node}` (observation) and
+#   `core::v1::Secret` (decision D4's writer).
+# * `hyper-util`/`rustls` — not called directly for requests (`kube` owns the
+#   client); `errors` downcasts through them to classify a transport failure
+#   (connect vs. TLS/certificate) by the *type* of the error `kube` returns,
+#   never by matching its message text. Both already resolve to the exact
+#   versions `kube`'s own `rustls-tls` stack uses (one entry each in
+#   Cargo.lock), which is what makes the downcast succeed.
+kube = { workspace = true, features = ["client", "rustls-tls", "aws-lc-rs"] }
+k8s-openapi = { workspace = true, features = ["latest"] }
+# `client-legacy` is the feature that exposes `client::legacy::Error` — the
+# concrete type kube's own HTTP stack raises for every connect-time failure,
+# and the only reliable way to ask "was this actually a connect failure"
+# (`Error::is_connect()`) without matching on `kube::Error`'s message text.
+hyper-util = { workspace = true, features = ["client-legacy"] }
+# Referenced only to downcast a transport failure's cause chain and check for
+# `rustls::Error` — the type `kube`'s TLS stack (`hyper-rustls` +
+# `tokio-rustls`) raises a certificate/handshake failure as. Never used to
+# build a TLS config or connection of our own.
+rustls = { workspace = true }
+
+# ── The `test-support` feature's dependencies ─────────────────────────────────
+#
+# Optional, and compiled only when `test-support` is on. They are *runtime*
+# dependencies rather than dev-dependencies because the doubles they build are
+# public API: `qa-vhp-product-plugin`'s test suite drives them, and a
+# dev-dependency is not visible outside its own package.
+#
+# * `http` / `tower` — `service_fn` and `http::Request`/`Response`, to answer
+#   `kube::Client::new` with an in-process route table instead of a socket.
+# * `tokio` — the loopback listener behind `StubApiServer`, which exists so a
+#   caller can drive `KubeClient::from_kubeconfig` itself rather than skip it.
+# * `tracing-subscriber` — the raw log buffer the leak assertions capture
+#   into, shared with the plugin crates rather than copied into each.
+# * `serde` / `serde_json` — serialise the `ConfigMap` and `Status` fixtures,
+#   so a stub body is a real `k8s-openapi` object's own encoding rather than
+#   hand-written JSON that can drift from what the reads parse. `serde` itself
+#   is named only for the `Serialize` bound that encoding is generic over.
+#
+# `http` and `tower` are no longer dev-dependencies: the stub `tower::Service`
+# that used to live in `kube_client`'s test module now lives in `test_support`
+# and is the only thing in this crate that names either.
+http = { workspace = true, optional = true }
+tower = { workspace = true, features = ["util"], optional = true }
+tokio = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+# Gates `qa_plugin_k8s::test_support`: the route-table `KubeClient`
+# constructor, the loopback stub API server, and the `ConfigMap`/`Status`
+# fixture builders. Every plugin crate that drives a `KubeClient` in its own
+# tests enables this in its `[dev-dependencies]`; a production build of a
+# plugin does not compile the doubles.
+#
+# What it does *not* buy: keeping `http`/`tower`/`tokio`/`serde`/`serde_json`
+# out of the build graph. Cargo unifies features across a workspace build and
+# every one of them arrives transitively through `kube` and `cf-gears-toolkit`
+# for every gear here regardless. The feature gates *this crate's code*, not the
+# dependency tree — the same honest limit `qa-product-sdk`'s `test-util`
+# records about its own gate.
+test-support = [
+    "dep:http",
+    "dep:tower",
+    "dep:tokio",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tracing-subscriber",
+]
+
+[dev-dependencies]
+# Self-dependency so this crate's own tests compile with `test-support`
+# enabled, mirroring `qa-product-sdk`'s own `path = "."` dev-dependency for
+# exactly the same reason: the doubles this crate's tests drive are the ones
+# it publishes to other plugin crates, so the tests must exercise the gated
+# code rather than a `cfg(test)` copy of it.
+qa-plugin-k8s = { path = ".", features = ["test-support"] }
+tokio = { workspace = true }
+# Serialises this crate's own fixture `NodeList` body. The `ConfigMap` and
+# `Status` fixtures go through `test_support`'s builders instead, which is
+# also where the stub `tower::Service` those bodies are answered from lives.
+serde_json = { workspace = true }
+# Only exercised by `errors`' TLS-classification tests, which need a real
+# (self-signed, deliberately SAN-mismatched) TLS server to fail a real
+# handshake against — `hyper_util::client::legacy::Error` and `rustls::Error`
+# are both raised deep inside `kube`'s own HTTP stack with no public
+# constructor, so the only way to produce a genuine one is to make a real
+# connection that really fails that way.
+rcgen = { workspace = true }
+tokio-rustls = { workspace = true }
+# Only for base64-encoding a test cert into a test kubeconfig's
+# `certificate-authority-data`; not a general-purpose helper.
+base64 = { workspace = true }
+# Builds the subscriber those tests install; the buffer it writes into is
+# `test_support::RawBuffer`, which records why `tracing-test` is not used
+# here.
+tracing-subscriber = { workspace = true }

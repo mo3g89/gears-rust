@@ -1,0 +1,148 @@
+[package]
+name = "qa-environments"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+# Decision D4's runner-`Secret` writer (`infra::runner_secret_writer`).
+#
+# **Renamed from `platform-observation` by Task 19b (ruling F-19.)** It used to
+# gate an adapter that observed an environment's own cluster AND wrote the
+# runner `Secret`; Task 15 moved observation to the product plugin and Task 19
+# deleted what was left of it, so this now gates the `Secret` writer and
+# nothing else. A feature named for work it no longer does is this branch's
+# signature defect in cargo form.
+#
+# Off by default. ADR-0001 forbids `kube`/`k8s-openapi` in any qa-platform
+# crate; the waiver amendment of 2026-08-28 permits this adapter only behind a
+# non-default feature, so a default build still has no Kubernetes in its tree.
+# Verify with:
+#   cargo tree -p qa-environments -i kube                    # errors
+#   cargo tree -p qa-environments --all-features -i kube     # kube <- this crate
+#
+# **The containment claim is narrower than Task 19 originally promised, and
+# deliberately so.** The plan wanted `--all-features` to show no `kube` at all;
+# that is unachievable while this gear writes a Kubernetes `Secret`, and the
+# only way to make such a test pass would have been to delete a production
+# feature `deploy/remote/verify-k8s.sh` says every workflow run depends on.
+# `kube_reaches_this_crate_only_through_the_runner_secret_writer` asserts what
+# is true instead.
+#
+# * `kube` — the API client. `client` for HTTP and `rustls-tls`/`aws-lc-rs` for
+#   TLS, matching qa-runs' `argo` feature so both gears agree on one TLS stack.
+#   No `runtime`: nothing here watches or streams.
+# * `k8s-openapi` — `core::v1::Secret` (D4). `ConfigMap` went with detection.
+# * `hyper-util`/`rustls` — not called directly for requests (`kube` owns the
+#   client); the writer downcasts through them to classify a transport failure
+#   (connect vs. TLS/certificate) by the *type* of the error `kube` returns,
+#   never by matching its message text. Both already resolve to the exact
+#   versions `kube`'s own `rustls-tls` stack uses (one entry each in
+#   Cargo.lock), which is what makes the downcast succeed.
+runner-secret = ["dep:kube", "dep:k8s-openapi", "dep:hyper-util", "dep:rustls"]
+
+[dependencies]
+qa-environments-sdk = { path = "../qa-environments-sdk" }
+# The observation contract: `ObservedAttrs` and `HealthState` are what the
+# `observed_attrs` and `health_state` columns hold, read back through
+# `infra::storage::mapper`. Kube-free and depends on nothing in qa-platform,
+# so ADR-0001's containment is unaffected (`cargo tree -p qa-environments -i kube`).
+qa-product-sdk = { path = "../../qa-product-sdk" }
+# `QaProductPluginResolverV1` only: the one capability this gear needs from
+# qa-catalog, resolved from the `ClientHub` at observation time rather than at
+# `init` (see `infra::product_plugin`). Not a `deps = [...]` gear token --
+# qa-catalog is not required for this gear to BOOT, only to observe.
+qa-catalog-sdk = { path = "../../qa-catalog/qa-catalog-sdk" }
+
+authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", path = "../../../system/authz-resolver/authz-resolver-sdk" }
+authz-resolver = { workspace = true }
+# The credstore gear crate itself (not just its SDK): the `deps = [credstore]`
+# declaration in `#[toolkit::gear]` resolves the dependency token against the
+# crate ident (same pattern as `authz-resolver` above; precedent: qa-catalog).
+credstore = { workspace = true }
+credstore-sdk = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+inventory = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+utoipa = { workspace = true, features = ["time"] }
+axum = { workspace = true, features = ["macros"] }
+http = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+
+toolkit = { workspace = true }
+toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
+toolkit-db-macros = { workspace = true }
+toolkit-security = { workspace = true }
+toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
+toolkit-macros = { workspace = true }
+
+# ── The `runner-secret` feature's dependencies, all optional ──────────────────
+kube = { workspace = true, features = ["client", "rustls-tls", "aws-lc-rs"], optional = true }
+k8s-openapi = { workspace = true, features = ["latest"], optional = true }
+# `client-legacy` is the feature that exposes `client::legacy::Error` — the
+# concrete type kube's own HTTP stack raises for every connect-time failure,
+# and the only reliable way to ask "was this actually a connect failure"
+# (`Error::is_connect()`) without matching on `kube::Error`'s message text.
+hyper-util = { workspace = true, features = ["client-legacy"], optional = true }
+# Referenced only to downcast a transport failure's cause chain and check
+# for `rustls::Error` — the type `kube`'s TLS stack (`hyper-rustls` +
+# `tokio-rustls`) raises a certificate/handshake failure as. Never used to
+# build a TLS config or connection of our own.
+rustls = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `Canary::vhp_shaped()` -- the three planted credential shapes the plugin
+# SDK's own leak harness uses. The observation tests plant it in the credential
+# material a fake plugin is handed and assert it reaches neither
+# `observed_attrs` nor `health_detail`, so using the harness's own markers
+# rather than a hand-rolled string keeps the two suites testing the same thing.
+qa-product-sdk = { path = "../../qa-product-sdk", features = ["test-util"] }
+
+# Only exercised by `infra::runner_secret_errors`' TLS-classification tests,
+# which need a real (self-signed, deliberately SAN-mismatched) TLS server to
+# fail a real handshake against — `hyper_util::client::legacy::Error` and
+# `rustls::Error` are both raised deep inside `kube`'s own HTTP stack with no
+# public constructor, so the only way to produce a genuine one is to make a
+# real connection that really fails that way.
+rcgen = { workspace = true }
+tokio-rustls = { workspace = true }
+# Only for base64-encoding a test cert into a test kubeconfig's
+# `certificate-authority-data`; not a general-purpose helper.
+base64 = { workspace = true }
+# Parses a config document in the format it really arrives in, so
+# `config::observation_config_tests` can pin that an `--argo` deployment's
+# YAML deserializes in a build WITHOUT `runner-secret` too (the
+# `deny_unknown_fields` + feature-gated-field trap the 2026-08-28 review
+# flagged). A JSON stand-in would exercise the same serde attributes but not
+# the same document.
+serde_yaml = { workspace = true }
+
+# Captures the RAW `tracing` output inside a test, so "the kubeconfig never
+# reaches a log line" is asserted against what was really emitted.
+#
+# `tracing-test` (the usual choice here, e.g. gears/system/account-management)
+# is deliberately NOT used for this: it keeps only captured lines that contain
+# the test's span name, so a multi-line field value — which is exactly the
+# shape a leaked kubeconfig has — survives capture only as its FIRST line. A
+# leak on any later line reads as "no leak". Measured: with a deliberate
+# `info!(document = %material.expose())` in `write_generated_secret`, a
+# `tracing-test` assertion on the canary PASSED. A plain buffer does not have
+# that hole.
+tracing-subscriber = { workspace = true }

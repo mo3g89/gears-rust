@@ -27,11 +27,18 @@ oop-example = ["dep:calculator-gateway", "dep:calculator"]
 single-tenant = ["dep:single-tenant-tr-plugin"]
 static-tenants = ["dep:static-tr-plugin"]
 static-authn = ["dep:static-authn-plugin"]
+oidc-authn = ["dep:oidc-authn-plugin"]
 static-authz = ["dep:static-authz-plugin"]
 static-license = ["dep:static-license-plugin"]
 tr-authz = ["dep:tr-authz-plugin"]
 tenant-resolver-rg = ["dep:rg-tr-plugin"]
 static-credstore = ["credstore", "dep:static-credstore-plugin"]
+# The database-backed credstore plugin. OFF by default: with it absent the
+# stack behaves exactly as before, and with it present but
+# `credstore.config.vendor` left alone the in-memory plugin still wins the
+# vendor match, so this feature alone changes no secret resolution -- it only
+# lets the plugin's own gear (and its migration) exist.
+postgres-credstore = ["credstore", "dep:postgres-credstore-plugin"]
 mini-chat = ["dep:mini-chat"]
 chat-engine = ["dep:chat-engine"]
 k8s = ["mini-chat/k8s", "chat-engine?/k8s"]
@@ -54,6 +61,48 @@ timescaledb-usage-collector = ["dep:timescaledb_usage_collector_plugin"]
 # feature doc comment for what it pulls in).
 magika = ["file_parser/magika"]
 bss-pricing = ["dep:bss_pricing"]
+# The four QA Platform gears plus the VHP product plugin. The plugin is part
+# of this feature rather than a switch of its own because after Task 19 there
+# is no other way for a qa-platform deployment to observe a VHP environment or
+# dispatch a run against one -- the product-agnostic gears carry no VHP
+# knowledge at all, so a `qa-platform` build without it is a stack that can
+# store environments and do nothing with them.
+#
+# ADR-0001: this is what puts `kube`/`k8s-openapi` in a `--features
+# qa-platform` build, which it was not in before. That is the containment
+# PRODUCT-PLUGINS-DESIGN.md 4.1 amended ADR-0001 to: `kube` is named
+# unconditionally by exactly one qa-platform crate (`qa-plugin-k8s`) and
+# reaches a binary only through a product plugin that links it. Not "by one
+# crate in the workspace" — `qa-environments` and `qa-runs` still name it
+# behind `platform-observation` and `argo` respectively, and `--features
+# "$(cat gears/qa-platform/deploy/cargo-features.argo)"` puts all three in the
+# tree today. `qa-platform` is still off by default here (`default = []`), so
+# the waiver's "reachable only through a cargo feature that is off by default"
+# holds unchanged; what changed is that the Kubernetes edge now arrives with
+# the product plugin instead of with the separate `platform-observation` switch
+# below, which Task 19 deletes.
+#
+# The cost, recorded in ADR-0001's 2026-09-04 amendment rather than only here:
+# because `qa-plugin-k8s` has no feature gate and this list names the plugin
+# unconditionally, there is no longer any way to build the `qa-platform`
+# feature without `kube`. Before Phase C there was, and that build is what the
+# feature gate bought.
+qa-platform = ["dep:qa-environments", "dep:qa-catalog", "dep:qa-runs", "dep:qa-insights", "dep:qa-vhp-product-plugin"]
+# The Argo Workflows execution adapter inside qa-runs. OFF unless named
+# explicitly, which is ADR-0001's 2026-08-27 waiver condition 1: "the
+# kube/k8s-openapi dependency is optional and reachable only through a cargo
+# feature that is off by default". `qa-runs?/argo` (with the `?`) does NOT pull
+# qa-runs in on its own -- naming this feature without `qa-platform` compiles
+# nothing extra -- which is the same shape as `k8s = ["chat-engine?/k8s"]`
+# above. Passed by gears/qa-platform/deploy/remote/sync.sh --argo through the
+# image's CARGO_FEATURES build arg, and by nothing else.
+qa-runs-argo = ["qa-runs?/argo"]
+# Decision D4's runner-`Secret` writer in qa-environments
+# (`infra::runner_secret_writer`) -- the only Kubernetes client left in that
+# gear, since Task 19b deleted the observer this used to gate. Same shape as `qa-runs-argo` above: `qa-environments?/`
+# (with the `?`) does NOT pull qa-environments in on its own, so naming this
+# feature without `qa-platform` compiles nothing extra.
+runner-secret = ["qa-environments?/runner-secret"]
 
 [dependencies]
 mimalloc = { version = "0.1" }
@@ -78,6 +127,7 @@ rg-tr-plugin = { package = "cf-gears-rg-tr-plugin", path = "../../gears/system/t
 
 # Optional authn/authz plugins
 static-authn-plugin = { package = "cf-gears-static-authn-plugin", path = "../../gears/system/authn-resolver/plugins/static-authn-plugin", optional = true }
+oidc-authn-plugin = { package = "cf-gears-oidc-authn-plugin", path = "../../gears/system/authn-resolver/plugins/oidc-authn-plugin", optional = true }
 static-authz-plugin = { package = "cf-gears-static-authz-plugin", path = "../../gears/system/authz-resolver/plugins/static-authz-plugin", optional = true }
 tr-authz-plugin = { package = "cf-gears-tr-authz-plugin", path = "../../gears/system/authz-resolver/plugins/tr-authz-plugin", optional = true }
 
@@ -86,6 +136,7 @@ static-license-plugin = { package = "cf-gears-static-license-plugin", path = "..
 
 # Optional credstore plugins
 static-credstore-plugin = { package = "cf-gears-static-credstore-plugin", path = "../../gears/credstore/plugins/static-credstore-plugin", optional = true }
+postgres-credstore-plugin = { package = "cf-gears-postgres-credstore-plugin", path = "../../gears/credstore/plugins/postgres-credstore-plugin", optional = true }
 
 resource_group = { package = "cf-gears-resource-group", path = "../../gears/system/resource-group/resource-group", optional = true }
 
@@ -124,6 +175,13 @@ timescaledb_usage_collector_plugin = { package = "cf-gears-timescaledb-usage-col
 # Optional BSS Plan & Price Modeling gear
 bss_pricing = { package = "cf-gears-bss-pricing", path = "../../gears/bss/pricing/pricing", optional = true }
 
+# Optional QA Platform: qa-environments + qa-catalog + qa-runs + qa-insights gears
+qa-environments = { path = "../../gears/qa-platform/qa-environments/qa-environments", optional = true }
+qa-catalog = { path = "../../gears/qa-platform/qa-catalog/qa-catalog", optional = true }
+qa-runs = { path = "../../gears/qa-platform/qa-runs/qa-runs", optional = true }
+qa-insights = { path = "../../gears/qa-platform/qa-insights/qa-insights", optional = true }
+qa-vhp-product-plugin = { path = "../../gears/qa-platform/plugins/qa-vhp-product-plugin", optional = true }
+
 # Optional example module
 users-info = { path = "../../examples/toolkit/users-info/users-info", optional = true }
 calculator-gateway = { path = "../../examples/oop-gears/calculator-gateway/calculator-gateway", optional = true }
@@ -132,3 +190,19 @@ calculator = { path = "../../examples/oop-gears/calculator/calculator", optional
 [dev-dependencies]
 tempfile = { workspace = true }
 serde-saphyr = { workspace = true }
+serde_json = { workspace = true }
+# `tests/qa_product_plugin_boot.rs` only. It discovers this binary's own gear
+# inventory, runs the VHP product plugin gear's `init` against
+# `config/qa-platform.yaml`, and asserts the ClientHub resolves the plugin
+# under its GTS instance id -- so it needs the plugin contract
+# (`qa-product-sdk`) and a recording `TypesRegistryClient` of its own
+# (`types-registry-sdk`, `async-trait`, `toolkit-canonical-errors`) plus the
+# `Uuid`/`CancellationToken` a `GearCtx` is built from. Cargo forbids optional
+# dev-dependencies, so these compile even without `qa-platform`; the test file
+# itself is `#![cfg(feature = "qa-platform")]` and compiles to nothing.
+qa-product-sdk = { path = "../../gears/qa-platform/qa-product-sdk" }
+types-registry-sdk = { workspace = true }
+toolkit-canonical-errors = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+tokio-util = { workspace = true }

@@ -1,0 +1,32 @@
+qa-platform is deployed.
+
+Postgres is reachable in-cluster at qa-platform-postgres:5432 (headless Service).
+Public origin: {{ .Values.publicOrigin }}
+Public host:   {{ include "qa-platform.publicHost" . }}
+Issuer:        {{ include "qa-platform.issuer" . }}
+{{- if not .Values.keycloakRealmJson }}
+
+WARNING: keycloakRealmJson is empty. The qa-platform-realm ConfigMap was
+created with an empty realm-qa-platform.json, which Keycloak will fail to
+import at start-up (an opaque error with nothing pointing back at this) --
+and that realm is what pins the qa-platform-workflow client's secret, the
+premise the whole ephemeral-H2-across-restarts design rests on (spec §3.3).
+Render the realm for this release's publicOrigin and re-install/upgrade with
+its output:
+  ./render-realm.sh '{{ .Values.publicOrigin }}' <out-dir>
+  helm upgrade --install qa-platform ... \
+    --set-file keycloakRealmJson=<out-dir>/realm-qa-platform.json
+{{- end }}
+{{- if and .Values.gears.hostAliases.enabled (not .Values.uiServiceClusterIP) }}
+
+WARNING: gears.hostAliases.enabled is true but uiServiceClusterIP is empty.
+No hostAliases entry was rendered onto the gears Deployment (see
+gears-deployment.yaml's comment on why this is a silent no-op rather than a
+`required` failure), so the gears pod has no override for
+{{ include "qa-platform.publicHost" . }} and falls back to the pod -> node
+hostPort hairpin -- which NOTES-hairpin.md's measurement is the reason this
+flag exists to fall back FROM. Resolve the ClusterIP and re-upgrade with it:
+  kubectl -n {{ .Release.Namespace }} get svc qa-platform-ui -o jsonpath='{.spec.clusterIP}'
+  helm upgrade --install qa-platform ... \
+    --set uiServiceClusterIP=<that address>
+{{- end }}

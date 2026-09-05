@@ -83,6 +83,18 @@ Provide the single public API entrypoint for Gears, including request routing, a
 
 The architecture diagram uses placeholder business gears `A-E` to illustrate that multiple independent product domains can coexist on the same platform contracts. Each business gear owns its domain models, user journeys, and business rules, while shared platform gears provide reusable execution, AI, governance, and integration capabilities.
 
+### QA Environments
+#### Responsibility
+Target platform registry for the QA Platform subsystem: platform metadata with credstore-referenced kubeconfigs, platform/pipeline variables for run environment assembly, and lease state (parallel/exclusive occupancy) consumed by the qa-runs dispatcher.
+#### High Level Scenarios
+- [x] p1 - manage target platforms (CRUD, credstore kubeconfig references)
+- [x] p1 - platform and pipeline variables for environment assembly
+- [x] p1 - lease acquire/release with parallel/exclusive semantics (SDK-only) and read-only REST lease view
+- [ ] p2 - platform version polling via the execution plane
+#### More details
+- [PRD](../gears/qa-platform/docs/PRD.md)
+- [Design](../gears/qa-platform/docs/DESIGN.md)
+
 ## Gen AI Gears
 
 **Gen AI Gears** provide the core AI capabilities of Gears and represent the primary value layer for building AI-powered SaaS applications. These gears encapsulate domain-specific GenAI functionality such as conversational orchestration, model inference, retrieval-augmented generation (RAG), agent execution, prompt management, and tool invocation. They are responsible for transforming user intent and contextual data into AI-generated outputs while enforcing platform-level constraints such as tenancy, security, policy, and usage limits.

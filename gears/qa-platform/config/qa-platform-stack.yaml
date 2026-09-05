@@ -1,0 +1,726 @@
+# QA Platform deployable stack configuration
+#
+# Full config for the four qa-platform gears (qa-environments, qa-catalog,
+# qa-runs, qa-insights) running against Postgres with every background task
+# on. Based on config/qa-platform.yaml (the dev config), which is SQLite-only
+# and switches every background task off because it runs under a nil-tenant
+# system actor the static-authz plugin denied outright. Tasks 1-2 originally
+# discharged that denial with a `system_grants` list on static-authz-plugin;
+# that config surface has since been reverted. Each gear now elevates its own
+# nil-tenant enumeration through its own `domain::elevated::enumeration_scope`
+# instead, so this file's switches are on without static-authz-plugin naming
+# any of it.
+#
+# Usage:
+#   cargo run --bin cf-gears-example-server --features qa-platform,oidc-authn,static-authz,tenant-resolver-rg,static-credstore -- --config gears/qa-platform/config/qa-platform-stack.yaml run
+#
+# `oidc-authn`, not `static-authn`: Phase C (Task 13) replaced the
+# static-authn-plugin block below with oidc-authn-plugin and set
+# `auth_disabled: false`. The feature is new -- `oidc-authn` did not exist in
+# apps/cf-gears-example-server/Cargo.toml before that task, even though the
+# plugin crate did.
+#
+# Run this way and the IdP has to be reachable at the `discovery_url` in the
+# oidc-authn-plugin block, which names the compose service `keycloak`; outside
+# compose that name does not resolve. The stack this file is written for is
+# gears/qa-platform/deploy/compose/docker-compose.yml.
+#
+# `tenant-resolver-rg`, not `single-tenant`: Phase C (Task 14) replaced
+# single-tenant-tr-plugin with rg-tr-plugin. That command line ALSO needs a
+# tenant-typed group already present in the `resource_group` database, or the
+# boot aborts in oagw's post_init before anything listens -- see the
+# `resource-group` gear section near the bottom of this file for the mechanism,
+# and gears/qa-platform/deploy/compose/seed-tenant.sh for the seed itself.
+
+server:
+  home_dir: "~/.cf-gears"
+
+# The first Postgres configuration in this repo -- every other committed
+# config is SQLite, so there is no existing convention to copy. Field shape
+# follows the documented example at config/quickstart-windows.yaml:293-317.
+#
+# host/user/password are LITERAL values, not `${POSTGRES_HOST}`-style
+# placeholders, even though that is what config/quickstart-windows.yaml's own
+# comment (line 16) claims this file supports. That claim does not hold here:
+# `${VAR}` expansion is opt-in per config struct (the struct must
+# `#[derive(ExpandVars)]`, mark fields `#[expand_vars]`, and its gear must
+# load config via `ctx.config_expanded()` / `config_expanded_or_default()`,
+# see libs/toolkit/src/context.rs:254-295), and `GlobalDatabaseConfig` /
+# `DbConnConfig` (libs/toolkit-db/src/config.rs:49 and :67) derive only
+# `Debug, Clone, Deserialize, Serialize` -- no `ExpandVars`, and nothing in
+# toolkit-db's manager.rs, options.rs or config.rs calls `expand_vars()`. A
+# `${POSTGRES_HOST}` written here would arrive at Postgres as the literal
+# four-character-plus string, not an expanded value. So this block is pinned
+# to the values Step 4's local Postgres uses. A real deployment overrides
+# this file rather than relying on expansion that does not happen -- that is
+# what the compose file (Task 4) and the Helm chart (Task 17) are for.
+database:
+  servers:
+    pg_qa_platform:
+      engine: "postgres"
+      host: "localhost"
+      port: 5432
+      user: "qa"
+      password: "qa"
+      params:
+        application_name: "qa_platform"
+      pool:
+        max_conns: 20
+        acquire_timeout: "30s"
+
+logging:
+  default:
+    console_level: info
+    file: "logs/cf-gears.log"
+    file_level: info
+  sqlx:
+    console_level: debug
+    file: "logs/sql.log"
+    file_level: debug
+  api-gateway:
+    console_level: debug
+    file: "logs/api.log"
+    file_level: debug
+  qa_environments:
+    console_level: debug
+    file: "logs/qa-environments.log"
+    file_level: debug
+  qa_catalog:
+    console_level: debug
+    file: "logs/qa-catalog.log"
+    file_level: debug
+  qa_runs:
+    console_level: debug
+    file: "logs/qa-runs.log"
+    file_level: debug
+  qa_insights:
+    console_level: debug
+    file: "logs/qa-insights.log"
+    file_level: debug
+
+gears:
+  api-gateway:
+    config:
+      bind_addr: "0.0.0.0:8087"
+      enable_docs: true
+      cors_enabled: true
+      openapi:
+        title: "QA Platform Dev API"
+        version: "0.1.0"
+        description: "QA Platform development server"
+      defaults:
+        body_limit_bytes: 64000000
+        rate_limit:
+          rps: 1000
+          burst: 200
+          in_flight: 64
+      # Auth is ON. Phase C (Task 13) flipped this from `true` and replaced
+      # the static-authn-plugin block below with oidc-authn-plugin; every
+      # request to a `.authenticated()` route now needs a real Keycloak JWT.
+      #
+      # `require_auth_by_default` is left at its own default, which is `true`
+      # (gears/system/api-gateway/src/config.rs:3-5), and every qa-platform
+      # route declares `.authenticated()` -- so "no bearer token" is a 401 from
+      # the gateway's auth middleware before any handler runs
+      # (gears/system/api-gateway/src/middleware/auth.rs:202-217), not a
+      # request that quietly proceeds anonymously.
+      #
+      # THE EXCEPTIONS, so the next reader's enumeration starts complete.
+      # Public by design and harmless: `/docs` and `/openapi.json` (marked
+      # public at gears/system/api-gateway/src/gear.rs:228-229 -- which is also
+      # why `make ui-contract` still works without a token) and the health
+      # probes. `/metrics` is NOT public and answers 401.
+      #
+      # And one route under `/qa/v1` itself: **`POST /qa/v1/collect/{repo_id}`
+      # is declared `.public()`**
+      # (qa-insights/qa-insights/src/api/rest/routes/collect.rs:115), so an
+      # unauthenticated caller gets past authentication and is then refused by
+      # the route's own signature check -- measured as 400/422 for a malformed
+      # query or body and 403 for a complete request whose `sig` does not
+      # verify, and never a 2xx. The exact code is not the point; failing
+      # closed is. It is not a hole, and the reason is worth stating rather
+      # than trusting: it is
+      # authenticated by an HMAC `sig` query parameter instead of a bearer
+      # token, and `CollectService::verify_signature` refuses outright -- before
+      # computing anything -- when `collect_report_signing_secret` is empty or
+      # shorter than its floor, on the stated grounds that an empty HMAC key is
+      # a publicly known key rather than "no protection". This file does not set
+      # that secret, so the route currently refuses every request and qa-insights
+      # WARNs about it once at startup. Anyone who sets the secret to enable
+      # exact collected case counts is turning on a genuinely public,
+      # signature-authenticated endpoint, and should pick the secret
+      # accordingly.
+      #
+      # The tenant-resolver plugin below is rg-tr-plugin since Task 14 (it was
+      # single-tenant-tr-plugin when this comment was written). Nothing in this
+      # api-gateway block depends on which one it is: the tenant a `/qa/v1`
+      # request is scoped by is `SecurityContext.subject_tenant_id`, set by
+      # oidc-authn-plugin's claim mapper from the token's `tenant_id` claim,
+      # and no `/qa/v1` handler consults the tenant resolver at all -- none of
+      # the four qa-platform gears so much as depends on
+      # `tenant-resolver-sdk`. (The one request path in this stack that does
+      # consult it is credstore's, under `/credstore/v1`.) See the
+      # rg-tr-plugin block for what the swap does change.
+      auth_disabled: false
+
+  gear-orchestrator:
+    config: {}
+
+  grpc-hub:
+    config:
+      listen_addr: "uds:///tmp/cf-gears-grpc"
+
+  authn-resolver:
+    config:
+      vendor: "constructorfabric"
+
+  authz-resolver:
+    config:
+      vendor: "constructorfabric"
+
+  # THE FIRST oidc-authn-plugin CONFIGURATION IN THIS REPOSITORY. It replaced
+  # static-authn-plugin (`mode: accept_all` plus a dev s2s credential pair),
+  # which minted a SecurityContext for any caller. Every field below was taken
+  # from the plugin's own input structs in
+  # gears/system/authn-resolver/plugins/oidc-authn-plugin/src/config.rs, and
+  # the IdP is the `keycloak` service in
+  # gears/qa-platform/deploy/compose/docker-compose.yml.
+  #
+  # THE ISSUER/DISCOVERY SPLIT IS THE ONE THING TO UNDERSTAND HERE.
+  # `issuer_pattern` matches an `http://` URL while `discovery_url` is
+  # `https://`, and that is deliberate, not an oversight:
+  #
+  #   * The plugin will not FETCH over plaintext http. `UrlSecurityPolicy`
+  #     admits only https unless `allow_insecure_http` is set (`src/infra/
+  #     url_policy.rs:36-44`), and the only thing that sets it is
+  #     `allow_insecure_http_for_tests()` (:21) -- `#[doc(hidden)]`, named for
+  #     tests, reachable from no config field. That policy is applied to
+  #     `discovery_url` at config load (`src/config.rs:469-475`), to
+  #     `s2s_oauth.discovery_url` likewise (:114-116), and to the `jwks_uri`
+  #     the discovery document itself reports, at fetch time
+  #     (`src/infra/oidc.rs:249-260`). All three are https below.
+  #
+  #   * The token's `iss` is not a URL the plugin ever fetches. It is an
+  #     identity: matched against this list, then required to byte-equal the
+  #     `issuer` field of the discovery document actually fetched
+  #     (`src/infra/jwks.rs:292-300` -- mismatch is `UntrustedIssuer`, with no
+  #     config lever). The keys that verify the signature come from
+  #     `discovery_url` regardless of what `iss` says (the validator resolves
+  #     the decoding key from `resolved.discovery_base`,
+  #     `src/domain/validator.rs:176`, and re-checks `iss` only against the
+  #     token's own peeked value, :185). So an http-shaped *name* buys an
+  #     attacker nothing: minting a token with this `iss` still needs
+  #     Keycloak's private key, and the key material is still fetched over a
+  #     TLS connection pinned by config to a CA in this file.
+  #
+  #     That jwks.rs check is also why docker-compose.yml has to set
+  #     `KC_HOSTNAME` and `KC_HOSTNAME_BACKCHANNEL_DYNAMIC`. Left to Keycloak's
+  #     defaults, the document the gears fetch says
+  #     `issuer: https://keycloak:8443/...` while a token minted through the
+  #     published port says `iss: http://localhost:8180/...`, and every valid
+  #     token 401s. Those two settings make the `issuer` identical for both
+  #     callers (the http one) while leaving `jwks_uri` per-origin. Do not
+  #     change the URL below without reading that comment.
+  #
+  #   * An exact `issuer:` entry could not express this. Exact entries ARE
+  #     url-validated at config load (`src/config.rs:432-437`), so an http
+  #     issuer fails there; `issuer_pattern` entries are regexes and are
+  #     deliberately not (:441-455). The pattern is written WITHOUT `^...$`
+  #     because `MatcherCompiled::anchored_regex` already wraps it in them
+  #     (`src/config.rs:365-369`) -- the doc example at :871 includes its own
+  #     anchors, which are therefore redundant rather than required.
+  oidc-authn-plugin:
+    config:
+      # `vendor` and `priority` mirror the block this replaced, and match what
+      # authn-resolver selects on. Both have defaults ("constructorfabric" /
+      # 100, `src/config.rs:63-69`); stated explicitly to match every other
+      # plugin block in this file.
+      vendor: "constructorfabric"
+      priority: 100
+      # `jwt` is the one REQUIRED sub-struct (`src/config.rs:31`, no serde
+      # default). `JwtConfigInput` is at :759.
+      jwt:
+        # Narrowed from the plugin's default of ["RS256","ES256"]
+        # (`src/config.rs:798-803`) to the one algorithm this realm signs with
+        # -- the realm's `defaultSignatureAlgorithm` is RS256 and observed
+        # tokens carry `"alg":"RS256"`. RS256 and ES256 are the only accepted
+        # values; `none` is rejected outright (:809-830).
+        supported_algorithms: ["RS256"]
+        # The plugin's own default is also 60s (:805-807). Values above 300s
+        # are a hard config-load error (:142-144).
+        clock_skew_leeway: "60s"
+        # Audience validation is on, and this is the field most likely to
+        # reject every token if it drifts from the realm. `qa-platform-api`
+        # comes from the realm's `qa-platform-audience` protocol mapper
+        # (`oidc-audience-mapper`, `included.custom.audience`). Observed `aud`
+        # on a real token is `["qa-platform-api","account"]` -- "account" is
+        # Keycloak's own, from the built-in audience-resolve mapper. A
+        # multi-valued `aud` matches if ANY entry matches
+        # (`src/domain/validator.rs:443-450`), so listing only the deliberate
+        # one is both sufficient and tighter than listing both.
+        require_audience: true
+        expected_audience: ["qa-platform-api"]
+        trusted_issuers:
+          - issuer_pattern: "http://localhost:8180/realms/qa-platform"
+            discovery_url: "https://keycloak:8443/realms/qa-platform"
+        # `claim_mapping` is required, and inside it `subject_tenant_id` is the
+        # only field with no serde default (`src/config.rs:886`) -- so no valid
+        # oidc-authn config can be written without naming the tenant claim.
+        #
+        # BOTH `sub` AND `tenant_id` MUST PARSE AS UUIDs. The mapper runs them
+        # through `Uuid::parse_str` and answers `Unauthorized` when either
+        # fails (`src/domain/claim_mapper.rs:81` and :103). Keycloak's `sub` is
+        # a UUID already; `tenant_id` is a UUID only because the realm's
+        # `tenant-id` mapper is fed a user attribute containing one.
+        #
+        # `subject_type` is deliberately omitted (it is `Option`, defaulting to
+        # None, :884-885). Leaving it unset keeps the mapped SecurityContext
+        # the same shape `auth_disabled` produced, which had no subject_type
+        # either -- and the `subject_type` values the gears' internal system
+        # actors carry (`qa_runs.system`, ...) never reach static-authz-plugin
+        # at all now; each gear elevates those nil-tenant reads itself, through
+        # its own `domain::elevated::enumeration_scope`, before authorization
+        # would even be consulted.
+        claim_mapping:
+          subject_id: "sub"
+          subject_tenant_id: "tenant_id"
+          token_scopes: "scope"
+        # `first_party_clients` is deliberately NOT set, even though
+        # `qa-platform-ui` is the first-party client. Listing it there replaces
+        # the token's real scopes with a wildcard `["*"]`
+        # (`src/domain/claim_mapper.rs:151-152`). Nothing in this stack reads
+        # token scopes today -- api-gateway's `route_policies` is off and
+        # static-authz clamps by tenant, ignoring scopes -- so it would change
+        # no behaviour now while quietly pre-granting everything to whoever
+        # turns scope enforcement on later. The honest mapping is the token's
+        # own `scope` claim, observed as "email profile".
+      # `custom_ca_certificate_paths` is what makes the https above work with
+      # a self-signed IdP certificate: the paths are read in `Gear::init` and
+      # merged into the shared outbound client's ROOT trust store
+      # (`src/gear.rs:122-136`), in addition to the platform roots. A missing or
+      # unparseable file fails init loudly rather than falling back to the
+      # system roots.
+      #
+      # THIS IS `ca.crt`, THE CA -- NOT `keycloak.crt`, THE SERVER CERTIFICATE.
+      # Both live in the `keycloak-tls` volume that the `keycloak-certs`
+      # one-shot service generates, and rustls will not substitute one for the
+      # other: a non-CA certificate is not accepted as a trust anchor, and a CA
+      # certificate is not accepted as an end-entity certificate (measured:
+      # `invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))`, which
+      # reaches the caller as a 503 "identity provider unreachable" and reads
+      # like the IdP being down). See
+      # gears/qa-platform/deploy/compose/keycloak-tls/gen-cert.sh.
+      http_client:
+        request_timeout: "5s"
+        custom_ca_certificate_paths:
+          - "/etc/keycloak-tls/ca.crt"
+      # `s2s_oauth` IS MANDATORY AND UNEXERCISED, which is an awkward
+      # combination worth stating plainly. It has no serde default
+      # (`src/config.rs:60`) and neither do its `discovery_url` (:1060) or
+      # `default_subject_type` (:1069); `resolve()` additionally rejects either
+      # being blank (:111-122) and runs `discovery_url` through the same https
+      # policy as above. So a config cannot omit it.
+      #
+      # Nothing in this build ever calls it: the only caller of
+      # `exchange_client_credentials` outside the plugins and their own tests
+      # is mini-chat (`gears/mini-chat/mini-chat/src/gear.rs:506` and :857),
+      # which this feature set does not compile in. It is therefore configured
+      # to be *valid*, not to be used, and no Keycloak client backs it. Wiring
+      # a real service account here is a decision for whoever first needs S2S.
+      s2s_oauth:
+        discovery_url: "https://keycloak:8443/realms/qa-platform"
+        default_subject_type: "qa-platform.service"
+      # discovery_cache, jwks_cache, retry_policy and circuit_breaker are all
+      # `#[serde(default)]` (`src/config.rs:35-56`) and left to their code
+      # defaults. Note for anyone debugging a Keycloak restart: the JWKS cache
+      # keeps a 24h stale TTL and refreshes on an unknown `kid`
+      # (`src/config.rs:949-958`), so a realm re-import -- which generates a
+      # NEW signing keypair, since the realm file deliberately does not pin one
+      # -- converges without a gears restart. `circuit_breaker` defaults to
+      # enabled, 5 failures, 30s reset (:1041-1048), which is why a Keycloak
+      # that is down produces 503s that clear about half a minute after it
+      # returns rather than instantly.
+
+  static-authz-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 100
+      # No `system_grants` here -- that config surface was reverted along with
+      # the rest of static-authz-plugin's qa-platform-specific changes. Every
+      # nil-tenant read this stack's tickers need is elevated in the gear that
+      # needs it, through that gear's own `domain::elevated::enumeration_scope`
+      # (qa-runs, qa-insights, qa-catalog each have one); static-authz-plugin
+      # never sees those requests and stays the stock upstream plugin.
+
+  tenant-resolver:
+    config:
+      vendor: "constructorfabric"
+
+  # rg-tr-plugin REPLACED single-tenant-tr-plugin here in Task 14. The feature
+  # that compiles it in is `tenant-resolver-rg`
+  # (apps/cf-gears-example-server/Cargo.toml:25) -- see the CARGO_FEATURES
+  # comment in gears/qa-platform/deploy/docker/qa-platform.Dockerfile.
+  #
+  # THE KEY IS HYPHENATED. The plugin's own doc example writes it
+  # `rg_tr_plugin:` with underscores (rg-tr-plugin/src/lib.rs:13), and that
+  # example is wrong: config is looked up as `gears.<gear name>`
+  # (libs/toolkit/src/context.rs:234, and :250-252 passes `self.gear_name`),
+  # the gear's registered name is `rg-tr-plugin` (its `#[toolkit::gear(name =
+  # ...)]` at src/gear.rs:23), and the one committed config that runs this
+  # plugin spells it with hyphens too (config/e2e-tr-authz.yaml:281). An
+  # underscored key would NOT fail loudly -- `init` calls
+  # `config_or_default()`, so a block it cannot find is silently replaced by
+  # `RgTrPluginConfig::default()`, which happens to carry exactly the two
+  # values below. The block would look like it worked.
+  #
+  # Both fields are the plugin's own defaults (src/config.rs:16-22); stated
+  # explicitly because this is the only tenant-resolver plugin compiled in, so
+  # `priority` is uncontested and its value should be visible rather than
+  # implied.
+  #
+  # WHAT THIS SWAP DOES AND DOES NOT CHANGE -- measured, not assumed, because
+  # the obvious reading is wrong. It does NOT change the tenant a `/qa/v1`
+  # request resolves to. That tenant comes from the token's `tenant_id` claim
+  # via oidc-authn-plugin's `claim_mapping.subject_tenant_id` above, lands in
+  # `SecurityContext.subject_tenant_id`, and is what the qa-platform gears
+  # scope their rows by; Task 13 is what made it real. Nor does it change any
+  # authorization decision, including the nil-tenant reads each gear elevates
+  # itself through its own `domain::elevated::enumeration_scope`:
+  # static-authz-plugin is the only authz plugin compiled in, and it does not
+  # depend on tenant-resolver at all -- no `tenant-resolver-sdk` in its
+  # Cargo.toml and `deps = [types_registry]` only (its src/gear.rs:18-20).
+  # The plugin that would route authorization through tenant hierarchy is
+  # tr-authz-plugin, behind the `tr-authz` feature, which this build does not
+  # enable.
+  #
+  # The two things it DOES change are both real. (1) oagw resolves the root
+  # tenant at boot -- see the seeding note on `resource-group` below, which is
+  # now a hard bootstrap dependency rather than an idle gear section. (2)
+  # credstore's tenant directory (its src/infra/tenant_resolver.rs) now walks
+  # a real RG ancestor chain instead of single-tenant-tr-plugin's flat "the
+  # context tenant is the only tenant, and it is its own root", so `shared`
+  # secrets can inherit down a tenant tree. Nothing in this stack resolves a
+  # secret today, so that is capability, not behaviour change.
+  rg-tr-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 50
+
+  simple-user-settings:
+    database:
+      server: "pg_qa_platform"
+      dbname: "settings"
+    config:
+      max_field_length: 100
+
+  credstore:
+    database:
+      server: "pg_qa_platform"
+      dbname: "credstore"
+    config:
+      # The DATABASE-BACKED plugin, not static-credstore-plugin's
+      # "constructorfabric". Selection is an exact vendor-string match
+      # (libs/toolkit/src/plugins/mod.rs, `choose_plugin_instance`), so this one
+      # line decides whether a stored secret survives the gears container being
+      # recreated. It said "constructorfabric" until 2026-08-27, and every
+      # secret in the stack lived in a HashMap: the human lost their SSH key
+      # four times in one day, twice to a deploy minutes after re-entering it.
+      #
+      # Reverting to the in-memory backend is this string plus dropping
+      # `postgres-credstore` from CARGO_FEATURES in TWO places -- see the note
+      # on the `postgres-credstore-plugin` stanza below.
+      vendor: "constructorfabric-postgres"
+
+  static-credstore-plugin:
+    config:
+      secrets: []
+
+  # THE DATABASE-BACKED CREDSTORE PLUGIN -- SELECTED, and it is what
+  # `credstore.config.vendor` above resolves to.
+  #
+  # Selection is an exact vendor-string match (libs/toolkit/src/plugins/mod.rs,
+  # `choose_plugin_instance`), so this stanza's `vendor` and the credstore
+  # gear's `vendor` have to stay byte-equal. static-credstore-plugin stays
+  # compiled in and keeps its own vendor ("constructorfabric"); it simply does
+  # not win.
+  #
+  # THE SWITCH LIVES IN THREE PLACES AND ALL THREE MUST AGREE:
+  #   1. `vendor` here and on the `credstore` gear above
+  #   2. `postgres-credstore` in deploy/docker/qa-platform.Dockerfile's
+  #      `ARG CARGO_FEATURES` default -- without the feature the crate is not
+  #      in the image, its `#[toolkit::gear]` registration never runs, and this
+  #      whole section resolves to nothing (the DB phase and the init phase
+  #      iterate REGISTERED gears -- libs/toolkit/src/runtime/host_runtime.rs
+  #      -- not config keys, so an unmatched key opens no connection and runs
+  #      no migration; the credstore gear then fails to find its vendor)
+  #   3. `postgres-credstore` in deploy/compose/docker-compose.argo.yml's
+  #      `CARGO_FEATURES:` default, which is a SECOND COPY of the feature list
+  #      -- and the one that governs every `--argo` deploy, i.e. the remote
+  #
+  # WHAT THIS COSTS, on the record: secret values are stored UNENCRYPTED in
+  # `credstore.credstore_plugin_values.secret_value` (BYTEA). That matches the
+  # system this replaces -- vhp-testrunner keeps SSH private keys in
+  # `ssh_keys.private_key TEXT`, plaintext, with no encryption crate in its
+  # dependency tree -- and this codebase has no at-rest encryption anywhere to
+  # build on. So a `pg_dump` of this stack is a file of private keys, exactly
+  # as a dump of the legacy database already is. Ratified by the human with
+  # legacy as the stated benchmark.
+  #
+  # Only the two runtime-written classes are persisted: `private` (owner_id =
+  # Some) and `tenant` (owner_id = None). Config-seeded `shared` and `global`
+  # have no runtime write path and are rebuilt from config on every boot, so
+  # they stay in memory and the tenant -> shared -> global read fallback chain
+  # is unchanged.
+  #
+  # `dbname: credstore` REUSES the credstore gear's database on purpose. It is
+  # safe because each gear's applied-migration list lives in its own table
+  # (`toolkit_migrations__postgres_credstore_plugin__87147a49` versus
+  # `toolkit_migrations__credstore__<hash8>`), and the two entity tables --
+  # `credstore_plugin_values` here, `credstore_secrets` in the gear -- do not
+  # collide. Verified against a throwaway PostgreSQL 16. No initdb change is
+  # needed: `credstore` is already in
+  # deploy/compose/initdb/01-create-qa-platform-databases.sh.
+  #
+  # DO NOT set this gear's log level to `trace`. sea-orm annotates its driver
+  # entry points with `#[instrument(level = "trace")]` and the span carries
+  # every bound parameter, so TRACE renders stored secret bytes into the log.
+  # `debug` is safe and is proven so by a break-tested leak test in the crate
+  # (src/infra/storage/leak_tests.rs), and the TRACE exposure is pinned by
+  # tests/sea_orm_trace_exposure.rs so it cannot regress silently.
+  postgres-credstore-plugin:
+    database:
+      server: "pg_qa_platform"
+      dbname: "credstore"
+    config:
+      vendor: "constructorfabric-postgres"
+      priority: 100
+      secrets: []
+
+  file-parser:
+    config:
+      allowed_local_base_dir: /tmp
+
+  # SINCE TASK 14 THIS GEAR'S DATA IS A BOOT REQUIREMENT, NOT JUST A DEPENDENCY.
+  # rg-tr-plugin above answers every tenant query out of the rows in this
+  # database, and oagw -- a NON-optional dependency of cf-gears-example-server,
+  # so compiled into every build regardless of CARGO_FEATURES -- calls
+  # `TenantResolverClient::get_root_tenant` in its `post_init`
+  # (gears/system/oagw/oagw/src/gear.rs:247-252), wraps any error in an
+  # `anyhow!`, and `run_post_init_phase` propagates that with `?`
+  # (libs/toolkit/src/runtime/host_runtime.rs:371-377). So with no tenant-typed
+  # group in this database the server ABORTS ITS BOOT rather than starting
+  # degraded, and the REST API that could create that group is the API of the
+  # server that just exited.
+  #
+  # That circle is why deploy/compose gained a `tenant-seed` one-shot service
+  # (deploy/compose/seed-tenant.sh) that runs BEFORE `gears`, and why the
+  # `gears` service now waits on it. The row it seeds has
+  # `id = 00000000-df51-5b42-9538-d2b56b7ee953`, which is not an arbitrary
+  # choice twice over: it is the token's `tenant_id` claim (so requests and
+  # tenant rows agree -- the RG create path sets `tenant_id = group.id` for a
+  # tenant-typed group, gears/system/resource-group/.../group_service.rs:566-569),
+  # AND it is `toolkit_security::constants::DEFAULT_TENANT_ID`
+  # (libs/toolkit-security/src/constants.rs:12), which is the tenant oagw's own
+  # bootstrap SecurityContext is built with, unconditionally and with no config
+  # lever (its gear.rs:242-246). That second reason is what rules out the
+  # alternative of pointing the realm's claim at a server-generated id: oagw
+  # would still look for DEFAULT_TENANT_ID at boot and still not find it.
+  #
+  # `config: {}` is inert and stays inert -- this gear reads no configuration
+  # at all (there is no config struct in gears/system/resource-group/
+  # resource-group/src, and its gear.rs never calls `ctx.config*`), so the
+  # section exists only to carry the `database` block.
+  resource-group:
+    database:
+      server: "pg_qa_platform"
+      dbname: "resource_group"
+    config: {}
+
+  # qa-insights used to declare `deps = [.., event_broker, cluster]`
+  # (`qa-insights/src/gear.rs`), and that `deps` token compiled the
+  # `event-broker` gear in and initialised it on every boot. This section was
+  # mandatory as long as that was true: `EventBrokerModule::init` reads
+  # `ctx.config()` (required), not `ctx.config_or_default()`
+  # (`event-broker/src/module.rs:64`), and `mode` and `default_storage_backend`
+  # have no serde defaults, so an absent section made the whole server refuse
+  # to start with `Error: initialization failed for gear 'event-broker'` /
+  # `Caused by: gear 'event-broker' not found`.
+  #
+  # The dependency is gone. qa-insights' reconcile sweep was already the only
+  # ingest path any deployment ever exercised -- no deployment registered the
+  # `EventBrokerApi` client its transactional consumer needed -- so the
+  # consumer, the `deps` token and the `event-broker`/`event-broker-sdk`
+  # dependencies were deleted together, and `event-broker` is no longer linked
+  # into this stack at all. With no gear left to read it, this section has
+  # nothing to configure and is gone with it.
+  #
+  # `cluster` comes in the same way and needs nothing here: its init uses
+  # `config_or_default`, and it initialised cleanly with no section at all.
+
+  qa-environments:
+    database:
+      server: "pg_qa_platform"
+      dbname: "qa_environments"
+    config:
+      # Restated at its code default (`QaEnvironmentsConfig::default`) purely
+      # so this mapping is not empty: the anchor at the bottom of this block is
+      # a COMMENT, and a `config:` whose only content is comments parses as
+      # null, not as an empty mapping.
+      max_variables: 500
+      #
+      # THE ARGO BLOCK IS NOT WRITTEN HERE, AND THE ANCHOR BELOW IS WHY.
+      # `qa-environments.argo.kubeconfig_path` names the kubeconfig this gear
+      # uses to write each platform's runner `Secret` into the ARGO cluster
+      # (decision D4) -- a different cluster from any platform's own. Its path
+      # is a per-deployment fact (`/etc/qa-platform/k3s-kubeconfig.yaml` is a
+      # bind mount that only docker-compose.argo.yml creates), and this file is
+      # baked into the image, so it cannot be edited per deployment. Committing
+      # a path here would point every non-argo stack -- including the local one
+      # -- at a file that is not mounted.
+      #
+      # `deploy/docker/entrypoint.sh` therefore INSERTS a YAML fragment after
+      # the anchor line below when $QA_ENVIRONMENTS_ARGO_CONFIG names one,
+      # exactly as it does for qa-runs twenty lines down. The fragment lives in
+      # `deploy/compose/.generated/qa-environments-argo.yaml`, rendered by
+      # `deploy/compose/render-argo.sh` and mounted by
+      # `deploy/compose/docker-compose.argo.yml`.
+      #
+      # WITHOUT IT, D4 IS INERT AND SILENT: `kubeconfig_path` defaults to
+      # `None`, `secret_writer::argo_client` falls back to `Config::infer()`,
+      # and inside this container there is no service-account token, no
+      # $KUBECONFIG and no ~/.kube/config -- so every Secret write fails, every
+      # cycle, forever, while observation (which uses each platform's OWN
+      # kubeconfig) keeps working and makes the stack look healthy. That is the
+      # 2026-08-28 final review's finding I2.
+      #
+      # DO NOT DELETE OR REINDENT THE NEXT LINE. entrypoint.sh requires it to
+      # appear exactly once and refuses to start if it does not.
+      # QA_ENVIRONMENTS_ARGO_ANCHOR
+
+  qa-catalog:
+    database:
+      server: "pg_qa_platform"
+      dbname: "qa_catalog"
+    # The dev config sets `branch_refresh_interval_seconds: 0` because the
+    # refresher runs under a nil-tenant system actor the static-authz plugin
+    # would otherwise deny outright. Both tasks run here because qa-catalog
+    # elevates its own nil-tenant enumeration -- the branch-cache refresher's
+    # cross-tenant `(repository, tenant)` listing, and the bundle GC's listing
+    # of tenants with expired bundles -- through
+    # `domain::elevated::enumeration_scope`; every write that follows,
+    # including the bundle delete, is still re-scoped per tenant and goes
+    # through the PEP as normal (`src/domain/elevated.rs`).
+    config:
+      branch_refresh_interval_seconds: 900
+
+  qa-runs:
+    database:
+      server: "pg_qa_platform"
+      dbname: "qa_runs"
+    # Both switches are ON here, unlike the dev config. Its comments explain the
+    # denial that made them useless; qa-runs now elevates the six
+    # platform-scoped factories' reads itself, through
+    # `domain::elevated::enumeration_scope` (`src/domain/elevated.rs`). Every
+    # write still runs tenant-bound.
+    #
+    # With the dispatcher on, results are ingested, so the dashboard and
+    # analytics have data. That is the whole point of this file.
+    config:
+      dispatcher_enabled: true
+      scheduler_enabled: true
+      schedule_interval_seconds: 60
+      # `executor` defaults to `mock`, which is why a stack rendered from this
+      # file as committed reports one fabricated passing test named
+      # `test_mock_default` for every run. Setting it to `argo` needs a binary
+      # built with `--features qa-runs-argo`; a default build fails at boot
+      # rather than falling back, deliberately (see `qa-runs/src/gear.rs`,
+      # `argo_executor`).
+      #
+      # THE ARGO BLOCK IS NOT WRITTEN HERE, AND THE ANCHOR BELOW IS WHY.
+      # A committed `executor: argo` would break every deployment built without
+      # the feature -- including the local compose stack, which must stay
+      # kube-free -- and this file is baked into the image, so it cannot be
+      # edited per deployment. `deploy/docker/entrypoint.sh` therefore INSERTS a
+      # YAML fragment after the anchor line below when $QA_RUNS_ARGO_CONFIG
+      # names one, exactly as it already substitutes the database block and the
+      # issuer pattern. The fragment lives in
+      # `deploy/compose/.generated/qa-runs-argo.yaml`, rendered by
+      # `deploy/compose/render-argo.sh` and mounted by
+      # `deploy/compose/docker-compose.argo.yml`; read render-argo.sh for what
+      # every value in it means, and `qa-runs/src/config.rs`
+      # (`ArgoExecutorConfig`) for the knobs themselves.
+      #
+      # DO NOT DELETE OR REINDENT THE NEXT LINE. entrypoint.sh requires it to
+      # appear exactly once and refuses to start if it does not -- which is the
+      # difference between "the argo config did not arrive" and a stack that
+      # boots happily on the mock while an operator believes it is running real
+      # tests.
+      # QA_RUNS_ARGO_ANCHOR
+
+  qa-insights:
+    database:
+      server: "pg_qa_platform"
+      dbname: "qa_insights"
+    # The three tickers (reconciler, jira-poller, collect). qa-insights
+    # elevates the tenant enumeration behind all three itself, through
+    # `domain::elevated::enumeration_scope` (`src/domain/elevated.rs`).
+    #
+    # WARNING, carried from the qa-insights plan's release-gate items: starting
+    # the jira-poller ticker under the default `NoopLeaderElector` makes EVERY
+    # replica a leader, and its auto-rerun is bounded only by a local write --
+    # "a race, not a lock", in that gear's own words. Single-replica compose is
+    # safe. Do not raise the gears replica count above 1 without deciding that.
+    config:
+      enable_tickers: true
+      reconcile_interval_seconds: 300
+      jira_poller_interval_seconds: 300
+      collect_interval_seconds: 3600
+      # WHERE A COLLECT WORKFLOW REPORTS ITS EXACT CASE COUNTS, and the key
+      # that authorises the write. Both were absent from every deployment of
+      # this stack until 2026-09-03, and together that is why
+      # `qa_test_case_collect` had never held a row: `CollectService::
+      # collect_url` builds a syntactically valid RELATIVE path when the first
+      # is empty (see that field's own doc, "an empty value does not fail
+      # loudly on its own"), and `verify_signature` refuses every report,
+      # fail-closed, when the second is empty or under 16 characters. The
+      # runner now names both in its own log rather than failing mid-job with
+      # nowhere to report it (`deploy/runner/entrypoint.sh`, the collect
+      # branch).
+      #
+      # THE VALUES HERE ARE THE LOCAL ONES. `cargo run` on this config serves
+      # the gears on 127.0.0.1:8087, and the secret is a committed literal for
+      # the same reason `password: "qa"` above is one: a dev stack that works
+      # as shipped. The Helm chart replaces BOTH -- a workflow pod cannot reach
+      # a loopback address, and a committed secret is not a secret -- and
+      # fails the render if either string stops appearing here
+      # (`deploy/helm/qa-platform/templates/gears-config-configmap.yaml`).
+      collect_report_base_url: "http://127.0.0.1:8087"
+      collect_report_signing_secret: "dev-collect-report-signing-secret"
+
+  # THE PRODUCT PLUGIN -- the odd one out, and stated here on purpose.
+  #
+  # It needs no `database:` block because it owns no tables, so it has never
+  # needed a stanza to boot: `init` uses `ctx.config_or_default()` and a missing
+  # section yields exactly the two values below. **This is not a boot failure
+  # and must not be sold as one** -- what it buys is operator visibility, one
+  # file where every gear that has settings shows them.
+  #
+  # Task 19 is the change that makes a deployment care. After it the plugin is
+  # the ONLY path to an observation (`verify-k8s.sh` check 9 reads the binary
+  # for it), so "which product plugin is this stack running, at what priority"
+  # stops being a rhetorical question.
+  #
+  # Both values restate `plugins/qa-vhp-product-plugin/src/gear.rs`'
+  # `DEFAULT_VENDOR`/`DEFAULT_PRIORITY`, the same way `qa-environments`' block
+  # restates `max_variables` purely so the mapping is not empty.
+  qa-vhp-product-plugin:
+    config:
+      vendor: "virtuozzo-vhp"
+      priority: 100
+
+# OpenTelemetry configuration (resource identity, tracing, metrics)
+opentelemetry:
+  tracing:
+    enabled: false
+  metrics:
+    enabled: false
