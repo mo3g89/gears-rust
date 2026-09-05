@@ -491,7 +491,7 @@ dev: dev-fmt dev-clippy dev-test
 
 # -------- Tests --------
 
-.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-fips test-qa-runs-pg
+.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-cluster-pg test-fips test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git
 
 # Run all tests
 test: install-tools
@@ -563,6 +563,30 @@ test-cluster-pg: install-tools
 ## omit it; that was decided before a failure had been seen.
 test-qa-runs-pg: install-tools
 	cargo nextest run -p qa-runs --features integration --retries 1
+
+## Run qa-insights' real-Postgres integration tier.
+## Five of these are dialect guards over the analytics reads: Postgres refuses a
+## selected column that is not grouped or aggregated, where SQLite picks an
+## arbitrary row and says nothing — so a grouping key dropped from
+## `grouped_status_counts` passes the SQLite tier and fails at runtime on a
+## deployment. The gear ships to Postgres in the Helm chart, so this is the tier
+## that can falsify that change.
+## `--lib` because the tests need `pub(crate)` services and `#[cfg(test)]`
+## fixtures, exactly as qa-runs' do.
+test-qa-insights-pg: install-tools
+	cargo nextest run -p qa-insights --features integration --lib --retries 1
+
+## Run qa-catalog's real-git-transport integration tier.
+## `tests/multi_branch.rs` (4) and `tests/gix_sync_integration.rs` (2) are the
+## only coverage of the real git transport, the multi-branch snapshot layout,
+## and concurrent syncs through the two-tier locks. They clone a local fixture
+## repo through the real transport, which spawns `git upload-pack`, so a `git`
+## binary must be on PATH. These live in `tests/`, not in-lib, so the flag is
+## `--tests` (all test-target files), not `--lib`. Not `--test`, which is
+## singular and takes one target name — it would run only one of the two files.
+test-qa-catalog-git: install-tools
+	@command -v git >/dev/null || (echo "git is required for test-qa-catalog-git" && exit 1)
+	cargo nextest run -p qa-catalog --features integration --tests
 
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
 ## Covers:
@@ -932,7 +956,7 @@ ci_test: fmt clippy
 ci_docs: lychee gts-docs
 
 # Run CI pipeline locally, requires docker
-ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg test-qa-runs-pg lychee gts-docs dylint
+ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git lychee gts-docs dylint
 
 ## Build the cf-gears-example-server release binary using a toolchain from the rust-toolchain.toml
 .cargo-build:

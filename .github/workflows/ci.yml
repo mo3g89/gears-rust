@@ -331,6 +331,12 @@ jobs:
       - name: Test qa-runs with Postgres (integration)
         run: make test-qa-runs-pg
 
+      - name: Test qa-insights with Postgres (integration)
+        run: make test-qa-insights-pg
+
+      - name: Test qa-catalog with the real git transport (integration)
+        run: make test-qa-catalog-git
+
       - name: Test toolkit-db (sqlite integration)
         run: make test-sqlite
 
