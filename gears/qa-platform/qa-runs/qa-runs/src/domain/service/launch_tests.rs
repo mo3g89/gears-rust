@@ -625,9 +625,21 @@ async fn files_dropped_by_the_exclude_filter_do_not_make_the_run_exclusive() {
     );
 }
 
-/// `exclusivity.rs:177-179`: resolution never fails a launch.
+/// **Superseded by review finding #9.** This used to assert the opposite of
+/// what it now does: `exclusivity.rs:177-179`'s "resolution never fails a
+/// launch" was, before this finding, applied to *every* `TEST_META` failure,
+/// including a fault that is not "the file is absent" -- and swallowing a
+/// fault the same way as an absent file is exactly the defect finding #9
+/// describes. A wholly unavailable catalog during the scan is indistinguishable
+/// from any other non-absent failure (both are `Internal` through this SDK),
+/// so it now fails the launch closed rather than silently resolving parallel.
+///
+/// The claim `exclusivity.rs:177-179` makes still holds for a genuinely
+/// *missing* input -- see `an_entirely_unreadable_file_set_resolves_default_not_test_meta_false`
+/// and `an_unresolvable_nested_plan_contributes_nothing_and_does_not_fail_the_launch`
+/// -- it just no longer extends to a fault.
 #[tokio::test]
-async fn a_catalog_failure_while_resolving_exclusivity_resolves_parallel_and_still_launches() {
+async fn a_catalog_fault_while_resolving_exclusivity_fails_the_launch() {
     let harness = Builder::new()
         .catalog(
             MockCatalog::new()
@@ -637,16 +649,22 @@ async fn a_catalog_failure_while_resolving_exclusivity_resolves_parallel_and_sti
         .build()
         .await;
 
-    let outcome = harness
+    let err = harness
         .service
         .launch(&ctx(OWNER_TENANT), plan_request())
         .await
-        .expect("a catalog failure while scanning must not fail the launch");
+        .unwrap_err();
 
-    assert!(matches!(outcome, LaunchOutcome::Started { .. }));
-    let created = &harness.runs.created()[0];
-    assert!(!created.resolved_exclusive);
-    assert_eq!(created.exclusive_tier, ExclusiveTier::Default);
+    assert!(
+        matches!(err, DomainError::Catalog(_)),
+        "a catalog fault while scanning TEST_META must fail the launch rather than \
+         silently resolving it parallel; got {err:?}"
+    );
+    assert!(
+        harness.runs.created().is_empty(),
+        "resolution runs before the run row is created, so a resolution failure must \
+         leave no row behind"
+    );
 }
 
 /// `exclusivity.rs:397-398`: "No `force_sync`: admission must stay cheap - the
@@ -757,6 +775,91 @@ async fn a_partially_unreadable_group_still_lets_the_readable_files_vote() {
         harness.catalog.meta_calls(),
         3,
         "one failed batch, then one call per file"
+    );
+}
+
+/// **A `Forbidden` from the catalog must not resolve an exclusive suite as
+/// parallel.**
+///
+/// The per-file `TEST_META` fallback used to count every failure as
+/// "unreadable", and an unreadable file casts no vote. So a policy that denies
+/// this gear's system actor the catalog read turned a suite whose files
+/// declare `exclusive: True` into a **parallel** run -- a destructive test
+/// losing its platform-to-itself guarantee, silently, on a deployment whose
+/// only fault is a missing grant.
+///
+/// Omitting a genuinely *missing* file is correct and stays
+/// (`a_missing_file_is_omitted_and_the_rest_still_vote` below). This is about
+/// the other failures. Review finding #9.
+#[tokio::test]
+async fn a_forbidden_test_meta_read_fails_the_launch_rather_than_going_parallel() {
+    let harness = Builder::new()
+        .catalog(
+            MockCatalog::new()
+                .with_plan(plan_fixture("Smoke", &["tests/destructive.py"]))
+                .with_meta(
+                    "tests/destructive.py",
+                    meta_fixture("tests/destructive.py", &[], Some(true)),
+                )
+                .deny_test_meta(),
+        )
+        .build()
+        .await;
+
+    let err = harness
+        .service
+        .launch(&ctx(OWNER_TENANT), plan_request())
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, DomainError::Forbidden),
+        "a denied catalog read must surface, not silently resolve parallel; got {err:?}"
+    );
+    assert!(
+        harness.runs.created().is_empty(),
+        "resolution runs before the run row is created, so a resolution failure must \
+         leave no row behind"
+    );
+}
+
+/// The half that must not regress: a genuinely missing file is still omitted,
+/// and the files that *are* readable still vote.
+///
+/// Without this, the fix above could be "propagate everything", which would
+/// break the source system's behaviour on an input it handles correctly
+/// (`manager/src/services/exclusivity.rs:411-432`). This is the same fixture
+/// shape as `a_partially_unreadable_group_still_lets_the_readable_files_vote`
+/// above, named and pinned separately because it is the test that must stay
+/// green while `a_forbidden_test_meta_read_fails_the_launch_rather_than_going_parallel`
+/// turns red-to-green (review finding #9).
+#[tokio::test]
+async fn a_missing_file_is_omitted_and_the_rest_still_vote() {
+    let harness = Builder::new()
+        .catalog(
+            MockCatalog::new()
+                .with_plan(plan_fixture(
+                    "Smoke",
+                    &["tests/gone.py", "tests/destructive.py"],
+                ))
+                .with_meta(
+                    "tests/destructive.py",
+                    meta_fixture("tests/destructive.py", &[], Some(true)),
+                ),
+        )
+        .build()
+        .await;
+
+    harness
+        .service
+        .launch(&ctx(OWNER_TENANT), plan_request())
+        .await
+        .unwrap();
+
+    let created = &harness.runs.created()[0];
+    assert!(
+        created.resolved_exclusive,
+        "the readable file declared exclusive: True, so the suite must be exclusive"
     );
 }
 
@@ -1970,9 +2073,13 @@ async fn queueing_a_platformless_run_is_an_internal_error_not_a_nil_platform_eve
 /// makes the system-actor module's enumeration/write split safe, because it is why
 /// a nil-tenant context cannot write. The mechanism is real:
 /// `PolicyEnforcer::access_scope` requires constraints by default, an empty set is
-/// `EnforcerError::CompileFailed`, and `DomainError`'s `From` maps that to
-/// `Forbidden`. But `ctx(Uuid::nil())` appeared in no shipped test, so a
-/// load-bearing claim rested entirely on reading two other crates.
+/// `EnforcerError::CompileFailed(ConstraintCompileError::ConstraintsRequiredButAbsent)`
+/// -- named explicitly because `CompileFailed` has a second shape,
+/// `AllConstraintsFailed`, that `DomainError`'s `From` maps to `Internal`
+/// instead (the deny/fault split this plan made; see that `impl From` in
+/// `domain/error.rs`) -- and this shape is the one `From` maps to `Forbidden`.
+/// But `ctx(Uuid::nil())` appeared in no shipped test, so a load-bearing claim
+/// rested entirely on reading two other crates.
 ///
 /// The cross-gear catalog reads *do* happen first — they are authorized on the far
 /// side and the double here is permissive — so what this pins is that nothing is

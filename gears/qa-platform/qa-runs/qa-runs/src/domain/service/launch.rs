@@ -28,20 +28,31 @@
 //! therefore the queue's FIFO position — must be taken before minutes of I/O, or
 //! two concurrent launches serialise behind each other's bundle builds.
 //!
-//! # Resolution never fails a launch
+//! # A missing input never fails a launch; an unreadable one now does
 //!
 //! `manager/src/services/exclusivity.rs:177-179`: *"Never fails. A plan that
 //! cannot be resolved (wrong branch, deleted repo) yields the default and is
 //! logged: the launch then fails for that reason at dispatch, where the error
 //! belongs and where the caller already expects it."* Ported in
-//! [`LaunchService::resolve_exclusivity`], which swallows catalog failures,
-//! logs, and resolves parallel.
+//! [`LaunchService::resolve_exclusivity`] for every input that is genuinely
+//! **absent**: an unresolvable nested `plan.yaml`, or a `TEST_META` file the
+//! catalog has none for. Those still swallow, log, and resolve parallel.
 //!
-//! That is a statement about the **exclusivity scan** and not about the whole
-//! launch. Reading a plan in order to know *which files a run contains* is a
-//! different question, and a launch whose target cannot be resolved at all
-//! still fails — as it does in the source system, where the same read is a
-//! `BAD_REQUEST` (`manager/src/routes/runs.rs:670-680`).
+//! **That statement was, until review finding #9, applied to every
+//! `TEST_META` failure, not only an absent one.** A `Forbidden`, a database
+//! failure and an internal error were all counted the same as "this file has
+//! no opinion" — which is not what they mean, and resolved a suite whose
+//! files declare `exclusive: True` as parallel on a deployment whose only
+//! fault was a missing grant. That is now propagated instead: see
+//! [`LaunchService::gather_group_meta`] for the match that draws the line, and
+//! [`LaunchService::resolve`] for where it surfaces (`DomainError::Forbidden`
+//! for a denial, [`DomainError::Catalog`] for anything else non-absent).
+//!
+//! That distinction is about the **exclusivity scan** and not about the whole
+//! launch's other reads. Reading a plan in order to know *which files a run
+//! contains* is a different question, and a launch whose target cannot be
+//! resolved at all still fails — as it does in the source system, where the
+//! same read is a `BAD_REQUEST` (`manager/src/routes/runs.rs:670-680`).
 //!
 //! # Composition order, and what a failure costs at each step
 //!
@@ -50,7 +61,7 @@
 //! | validate parameters | nothing written, nothing fetched |
 //! | read the platform | launch fails; no run row |
 //! | read the target, group, guard | launch fails; no run row |
-//! | resolve exclusivity | **cannot fail**; resolves parallel and logs |
+//! | resolve exclusivity | an absent input resolves parallel and logs; a `TEST_META` read that failed for any other reason now fails the launch (finding #9) |
 //! | create the run row | launch fails; no run row (the insert is the write) |
 //! | admit | run row is marked terminal, then the error is returned |
 //! | dispatch inline | the error propagates; Task 14 owns the claim release |
@@ -63,7 +74,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::PolicyEnforcer;
-use qa_catalog_sdk::{CustomPlanEntry, QaCatalogClientV1, TestFileMeta};
+use qa_catalog_sdk::{CustomPlanEntry, QaCatalogClientV1, QaCatalogError, TestFileMeta};
 use qa_environments_sdk::{Environment, QaEnvironmentsClientV1};
 use qa_product_sdk::access::RunVarContract;
 use qa_runs_sdk::{
@@ -1442,16 +1453,24 @@ fn test_name_stem(test_file: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Exclusivity: the tier cascade, which never fails a launch
+// Exclusivity: the tier cascade
 // ---------------------------------------------------------------------------
 
 impl<R: RunsRepository> LaunchService<R> {
     /// `launch ?? plan.yaml ?? OR(TEST_META over the files that will run) ??
-    /// parallel`, and **it cannot fail**.
+    /// parallel`.
     ///
-    /// `manager/src/services/exclusivity.rs:177-179`. A catalog failure while
-    /// gathering inputs logs a warning and contributes nothing; the launch then
-    /// fails later at dispatch for the real reason, if at all.
+    /// `manager/src/services/exclusivity.rs:177-179` says this cascade cannot
+    /// fail a launch, and a missing input still does not: an *absent* file, or
+    /// an unresolvable nested `plan.yaml`, logs a warning and contributes
+    /// nothing, same as legacy. **That is no longer the whole story.** A
+    /// `TEST_META` read that fails for a reason other than the file being
+    /// absent - a denial, a database failure, an internal error - now
+    /// propagates and fails the launch (review finding #9): the alternative
+    /// was silently resolving a suite whose files declare `exclusive: True` as
+    /// parallel because this deployment's opinion about those files was
+    /// unknown, not absent. See [`Self::gather_group_meta`] for the match that
+    /// draws this line.
     ///
     /// Two short-circuits, both ported and both observable:
     ///
@@ -1497,7 +1516,7 @@ impl<R: RunsRepository> LaunchService<R> {
         ctx: &SecurityContext,
         launch_override: Option<bool>,
         facts: &TargetFacts,
-    ) -> Resolution {
+    ) -> Result<Resolution, DomainError> {
         match &facts.exclusivity {
             ExclusivitySource::SinglePlan {
                 plan_flag,
@@ -1520,7 +1539,7 @@ impl<R: RunsRepository> LaunchService<R> {
             // has no meaning for it. `resolve(None, None, &[], &[], &[])` is the
             // core's own spelling of "nothing decided", which yields
             // `Default`/parallel.
-            ExclusivitySource::None => exclusivity::resolve(None, None, &[], &[], &[]),
+            ExclusivitySource::None => Ok(exclusivity::resolve(None, None, &[], &[], &[])),
             ExclusivitySource::NestedPlans(nested) => {
                 // The launch tier wins outright for a custom plan too: legacy
                 // checks the override **before** it dispatches on the intent at
@@ -1529,7 +1548,7 @@ impl<R: RunsRepository> LaunchService<R> {
                 // entered and no nested plan is read. Routed through the core so
                 // the `Launch` tier is still stamped in one place.
                 if launch_override.is_some() {
-                    return exclusivity::resolve(launch_override, None, &[], &[], &[]);
+                    return Ok(exclusivity::resolve(launch_override, None, &[], &[], &[]));
                 }
                 self.resolve_nested_exclusivity(ctx, facts, nested).await
             }
@@ -1546,7 +1565,7 @@ impl<R: RunsRepository> LaunchService<R> {
         plan_flag: Option<bool>,
         include: &[String],
         exclude: &[String],
-    ) -> Resolution {
+    ) -> Result<Resolution, DomainError> {
         if launch_override.is_some() || plan_flag.is_some() {
             // No file is fetched. Passing an empty `files` is not a
             // simplification: with an upper tier holding an opinion,
@@ -1554,10 +1573,16 @@ impl<R: RunsRepository> LaunchService<R> {
             // property `a_launch_override_ignores_every_lower_tier_input` asserts
             // against the core directly. Both tiers go in the same call so the
             // launch-vs-plan precedence stays settled in the core.
-            return exclusivity::resolve(launch_override, plan_flag, &[], &[], &[]);
+            return Ok(exclusivity::resolve(
+                launch_override,
+                plan_flag,
+                &[],
+                &[],
+                &[],
+            ));
         }
 
-        let (files, unreadable) = self.gather_file_meta(ctx, facts).await;
+        let (files, unreadable) = self.gather_file_meta(ctx, facts).await?;
         let resolution = exclusivity::resolve(None, None, &files, include, exclude);
 
         // Ported from `manager/src/services/exclusivity.rs:440-448`, whose own
@@ -1608,7 +1633,7 @@ impl<R: RunsRepository> LaunchService<R> {
             );
         }
 
-        resolution
+        Ok(resolution)
     }
 
     /// A custom plan: `custom_plan_tier`
@@ -1691,12 +1716,17 @@ impl<R: RunsRepository> LaunchService<R> {
     /// giving up either property, and is the obvious optimisation if a custom plan
     /// ever composes enough plans for this to matter.
     ///
-    /// # It still cannot fail a launch
+    /// # An unresolvable `plan.yaml` still cannot fail a launch; an unreadable `TEST_META` file now can
     ///
     /// A nested plan whose `plan.yaml` will not load — wrong branch, deleted
     /// repository, another tenant's `repo_id` — warns and contributes nothing
-    /// (`:540-546`, and the whole-function contract at `:177-179`). The launch
-    /// then fails at dispatch for the real reason, if at all.
+    /// (`:540-546`, and the whole-function contract at `:177-179`), unchanged
+    /// by review finding #9: that is `get_plan`, not `get_test_meta`, and is out
+    /// of that finding's scope. The launch then fails at dispatch for the real
+    /// reason, if at all. What *can* now fail this function is the other branch
+    /// — [`Self::scan_nested_plan`]'s `TEST_META` read, when it fails for a
+    /// reason other than the file being absent. See the module doc's "A
+    /// missing input never fails a launch; an unreadable one now does".
     ///
     /// # The cross-tenant question, and where the answer is enforced
     ///
@@ -1754,13 +1784,16 @@ impl<R: RunsRepository> LaunchService<R> {
         ctx: &SecurityContext,
         facts: &TargetFacts,
         nested: &[NestedPlan],
-    ) -> Resolution {
+    ) -> Result<Resolution, DomainError> {
         let mut plan_flags: Vec<bool> = Vec::new();
         let mut test_meta_flags: Vec<bool> = Vec::new();
         let mut unresolved = 0usize;
 
         for plan in nested {
-            match self.resolve_one_nested_plan(ctx, &facts.branch, plan).await {
+            match self
+                .resolve_one_nested_plan(ctx, &facts.branch, plan)
+                .await?
+            {
                 NestedContribution::Declared(flag) => plan_flags.push(flag),
                 NestedContribution::Scanned(flag) => test_meta_flags.push(flag),
                 NestedContribution::Nothing { unresolved: true } => unresolved += 1,
@@ -1785,10 +1818,10 @@ impl<R: RunsRepository> LaunchService<R> {
             );
         }
 
-        exclusivity::combine_nested(
+        Ok(exclusivity::combine_nested(
             exclusivity::aggregate_test_meta(&plan_flags),
             exclusivity::aggregate_test_meta(&test_meta_flags),
-        )
+        ))
     }
 
     /// One nested plan's contribution: its `plan.yaml` first, its own files
@@ -1806,7 +1839,7 @@ impl<R: RunsRepository> LaunchService<R> {
         ctx: &SecurityContext,
         branch: &str,
         plan: &NestedPlan,
-    ) -> NestedContribution {
+    ) -> Result<NestedContribution, DomainError> {
         // No nested plan named, so there is nothing to resolve and this is *not*
         // legacy's unresolved case - see `NestedPlan::plan_path`. The files fall
         // straight through to the scan.
@@ -1823,9 +1856,14 @@ impl<R: RunsRepository> LaunchService<R> {
             // (`manager/src/services/exclusivity.rs:549-550`). A plan that
             // declared nothing falls through to its own scan (`:551-561`).
             Ok(resolved) => match resolved.exclusive {
-                Some(flag) => NestedContribution::Declared(flag),
+                Some(flag) => Ok(NestedContribution::Declared(flag)),
                 None => self.scan_nested_plan(ctx, branch, plan).await,
             },
+            // Unchanged by review finding #9: this is `get_plan` (the nested
+            // `plan.yaml` lookup), not `get_test_meta`, and is out of this
+            // task's scope. It keeps legacy's "an unresolvable nested plan
+            // contributes nothing" (`exclusivity.rs:540-546`) rather than
+            // failing the launch.
             Err(error) => {
                 warn!(
                     repo_id = %plan.repo_id,
@@ -1834,7 +1872,7 @@ impl<R: RunsRepository> LaunchService<R> {
                     %error,
                     "exclusivity: nested plan not resolvable; it contributes nothing",
                 );
-                NestedContribution::Nothing { unresolved: true }
+                Ok(NestedContribution::Nothing { unresolved: true })
             }
         }
     }
@@ -1850,10 +1888,10 @@ impl<R: RunsRepository> LaunchService<R> {
         ctx: &SecurityContext,
         branch: &str,
         plan: &NestedPlan,
-    ) -> NestedContribution {
+    ) -> Result<NestedContribution, DomainError> {
         let (files, unreadable) = self
             .gather_group_meta(ctx, plan.repo_id, branch, &plan.files)
-            .await;
+            .await?;
 
         // No tag filter, and there is nowhere here to get one from - see
         // `ExclusivitySource`.
@@ -1863,7 +1901,7 @@ impl<R: RunsRepository> LaunchService<R> {
             .collect();
 
         if let Some(flag) = exclusivity::aggregate_test_meta(&flags) {
-            return NestedContribution::Scanned(flag);
+            return Ok(NestedContribution::Scanned(flag));
         }
 
         // Legacy's `unreadable > 0 && flags.is_empty()` (`exclusivity.rs:440-448`),
@@ -1891,7 +1929,7 @@ impl<R: RunsRepository> LaunchService<R> {
                  none of the rest declared anything; it contributes nothing",
             );
         }
-        NestedContribution::Nothing { unresolved: false }
+        Ok(NestedContribution::Nothing { unresolved: false })
     }
 
     /// Fetch `TEST_META` for every in-scope file, **omitting the ones that could
@@ -1917,16 +1955,22 @@ impl<R: RunsRepository> LaunchService<R> {
     /// ones.
     ///
     /// **The cost when the catalog is wholly unavailable, stated rather than
-    /// implied.** The fallback cannot tell "one file is missing" from "the
-    /// catalog is down" - both arrive as one `QaCatalogError` - so an outage
-    /// costs `1 + N` failed calls per group instead of one. That is strictly
-    /// worse than the source system, which reads N files from a local checkout
+    /// implied.** The per-file retry *can* tell "one file is missing" from
+    /// "the catalog is down" - `QaCatalogError` is `toolkit_canonical_errors::CanonicalError`,
+    /// whose `NotFound` is the absent-file case and every other variant is not
+    /// (review finding #9) - so the two are no longer paid for identically. An
+    /// absent file costs one failed call and is omitted, exactly as before.
+    /// An outage costs at most `1 + N` failed calls per group, same as before,
+    /// but it no longer buys a silent parallel resolution for it: the first
+    /// non-absent failure aborts the retry and fails the launch closed, so the
+    /// `N` is now a bounded upper bound on the cost of *discovering* the outage,
+    /// not the cost of *ignoring* it. That is strictly worse in round trips than
+    /// the source system, which reads N files from a local checkout
     /// (`manager/src/services/exclusivity.rs:412-421`) where this makes N
-    /// cross-gear calls. It is bounded by the plan's own file count and only
-    /// ever paid on a path that is already failing, and the alternative is
-    /// resolving a destructive suite as parallel - but it is not free, and a
-    /// future `get_test_meta` that reported per-file failures would remove the
-    /// fallback entirely.
+    /// cross-gear calls - but the alternative this replaces was resolving a
+    /// destructive suite as parallel on an outage, which is worse than an extra
+    /// round trip. A future `get_test_meta` that reported per-file failures
+    /// would remove the retry entirely.
     ///
     /// # A pytest node selector is stripped before the read
     ///
@@ -1951,19 +1995,19 @@ impl<R: RunsRepository> LaunchService<R> {
         &self,
         ctx: &SecurityContext,
         facts: &TargetFacts,
-    ) -> (Vec<FileMeta>, usize) {
+    ) -> Result<(Vec<FileMeta>, usize), DomainError> {
         let mut metas = Vec::new();
         let mut unreadable = 0usize;
 
         for (repo_id, paths) in &facts.groups {
             let (group_metas, group_unreadable) = self
                 .gather_group_meta(ctx, *repo_id, &facts.branch, paths)
-                .await;
+                .await?;
             metas.extend(group_metas);
             unreadable += group_unreadable;
         }
 
-        (metas, unreadable)
+        Ok((metas, unreadable))
     }
 
     /// One group's half of [`Self::gather_file_meta`]: the batch-then-per-file
@@ -1976,13 +2020,24 @@ impl<R: RunsRepository> LaunchService<R> {
     /// defaulted" — applies identically to it. Duplicating it for the second
     /// caller is exactly how the two would drift apart on the one property that
     /// must not drift.
+    ///
+    /// # Why this returns `Result` and not just a bigger `unreadable` count
+    ///
+    /// Review finding #9: a per-file read that fails for a reason **other**
+    /// than the file being absent must not be folded into `unreadable`. An
+    /// unreadable file is omitted and costs that file's vote only; a denied or
+    /// faulted read means this deployment's opinion about every file in the
+    /// group is unknown, and silently treating that as "no opinion" is what
+    /// let a missing grant resolve a destructive suite as parallel. So a
+    /// non-absent failure now aborts the scan and propagates, rather than
+    /// being counted alongside a genuinely missing file.
     async fn gather_group_meta(
         &self,
         ctx: &SecurityContext,
         repo_id: Uuid,
         branch: &str,
         paths: &[String],
-    ) -> (Vec<FileMeta>, usize) {
+    ) -> Result<(Vec<FileMeta>, usize), DomainError> {
         let mut metas = Vec::new();
         let mut unreadable = 0usize;
 
@@ -2011,20 +2066,77 @@ impl<R: RunsRepository> LaunchService<R> {
                         .catalog
                         .get_test_meta(ctx, repo_id, branch, std::slice::from_ref(path))
                         .await;
-                    match single {
-                        Ok(one) if !one.is_empty() => {
-                            metas.extend(one.into_iter().map(file_meta));
-                        }
-                        // Unreadable, or answered with nothing. Either way
-                        // it contributes no vote and is counted, never
-                        // defaulted.
-                        _ => unreadable += 1,
+                    match resolve_single_file_read(repo_id, branch, path, single)? {
+                        SingleFileRead::Voted(votes) => metas.extend(votes),
+                        SingleFileRead::Unreadable => unreadable += 1,
                     }
                 }
             }
         }
 
-        (metas, unreadable)
+        Ok((metas, unreadable))
+    }
+}
+
+/// What one file's `TEST_META` read, already known to have failed the batch,
+/// contributes to [`LaunchService::gather_group_meta`]'s per-file retry.
+enum SingleFileRead {
+    /// The read succeeded and returned meta for the file.
+    Voted(Vec<FileMeta>),
+    /// The file is genuinely absent, or the catalog answered with nothing for
+    /// it. Contributes no vote and is counted, never defaulted -- this is the
+    /// source system's behaviour (`exclusivity.rs:411-432`) and it is
+    /// correct.
+    Unreadable,
+}
+
+/// Classify one file's per-file `TEST_META` read and, on a non-absent
+/// failure, log and translate it.
+///
+/// A free function rather than inlined in [`LaunchService::gather_group_meta`]'s
+/// loop: the four-way match plus its `return` pushed that method over
+/// `clippy::cognitive_complexity`'s threshold, and the classification itself
+/// needs no `&self` - it only reads the arguments it is given.
+///
+/// # Review finding #9's split, once, here
+///
+/// [`QaCatalogError::NotFound`] is the only outcome that means "this file has
+/// no opinion", because it is the only one the absent-file path can produce
+/// (see the previous task's fix to `qa-catalog`'s `plans.rs`, which made
+/// `FileNotFound` mean absent and nothing else). Everything else -- a denial,
+/// a database failure, an internal error -- is NOT "no opinion": counting it
+/// as unreadable is what resolved a suite whose files declare
+/// `exclusive: True` as **parallel** when the only fault was a missing grant,
+/// a destructive test silently losing its platform-to-itself guarantee. That
+/// is the dangerous direction, and it fails closed now: a `PermissionDenied`
+/// surfaces as [`DomainError::Forbidden`] (403), the same split this plan
+/// already made for a flattened authorization error (`DomainError`'s
+/// `EnforcerError` conversion); every other cause -- `QaCatalogError`'s
+/// catch-all included, since every variant is `#[non_exhaustive]` and a future
+/// one must not silently become a dropped vote -- goes through
+/// [`catalog_error`] (500).
+fn resolve_single_file_read(
+    repo_id: Uuid,
+    branch: &str,
+    path: &str,
+    result: Result<Vec<TestFileMeta>, QaCatalogError>,
+) -> Result<SingleFileRead, DomainError> {
+    match result {
+        Ok(one) if !one.is_empty() => Ok(SingleFileRead::Voted(
+            one.into_iter().map(file_meta).collect(),
+        )),
+        Ok(_) | Err(QaCatalogError::NotFound { .. }) => Ok(SingleFileRead::Unreadable),
+        Err(error) => {
+            warn!(
+                %repo_id, branch = %branch, path = %path, %error,
+                "exclusivity: the TEST_META read failed for a reason other than the file \
+                 being absent; failing the launch rather than resolving it parallel",
+            );
+            Err(match error {
+                QaCatalogError::PermissionDenied { .. } => DomainError::Forbidden,
+                other => catalog_error(&other),
+            })
+        }
     }
 }
 
@@ -2348,7 +2460,7 @@ impl<R: RunsRepository> LaunchService<R> {
 
         let exclusivity = self
             .resolve_exclusivity(ctx, request.exclusive, &facts)
-            .await;
+            .await?;
 
         let timeout_seconds = resolve_timeout_seconds(
             request.timeout_seconds,
@@ -2393,8 +2505,10 @@ impl<R: RunsRepository> LaunchService<R> {
     ///    *stored* parameters, so a raw `"  FOO  "` would become a variable
     ///    literally named `"  FOO  "`.
     /// 2. **Resolve.** Platform (which is the ownership check), then the target,
-    ///    grouped by repository, guarded, with the branch resolved once.
-    ///    Exclusivity cannot fail this step.
+    ///    grouped by repository, guarded, with the branch resolved once. Then
+    ///    exclusivity, which can now fail this step: a `TEST_META` read that
+    ///    failed for a reason other than the file being absent propagates
+    ///    (review finding #9) rather than silently resolving parallel.
     /// 3. **Create the run row**, under a bounded name retry.
     /// 4. **Admit.** A refusal retires the row (see [`Self::abandon`]) and is
     ///    returned to the caller.
@@ -2407,9 +2521,13 @@ impl<R: RunsRepository> LaunchService<R> {
     /// [`DomainError::AmbiguousBranch`] for a multi-repository custom plan with
     /// no explicit branch, [`DomainError::Environments`] /
     /// [`DomainError::Catalog`] when the platform or the target cannot be
-    /// resolved, [`DomainError::QueueFull`] / [`DomainError::ConcurrencyLimit`]
-    /// when admission refuses, and [`DomainError::Database`] on a persistence
-    /// failure.
+    /// resolved, and the same two from resolving exclusivity: a `TEST_META`
+    /// read that fails for a reason other than the file being absent now
+    /// surfaces as [`DomainError::Forbidden`] (a denial) or
+    /// [`DomainError::Catalog`] (anything else) rather than being swallowed
+    /// (review finding #9). [`DomainError::QueueFull`] /
+    /// [`DomainError::ConcurrencyLimit`] when admission refuses, and
+    /// [`DomainError::Database`] on a persistence failure.
     #[instrument(skip(self, ctx, request), fields(kind = request.target.kind().as_str()))]
     pub async fn launch(
         &self,

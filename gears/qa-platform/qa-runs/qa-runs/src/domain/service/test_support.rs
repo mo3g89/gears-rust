@@ -761,6 +761,18 @@ fn catalog_unsupported(method: &str) -> QaCatalogError {
     QaCatalogError::internal(format!("MockCatalog::{method} is not used by these tests")).create()
 }
 
+/// The resource type a per-file `TEST_META` failure maps through in the real
+/// gear (`qa-catalog/src/api/rest/error.rs`'s `CatalogResourceError`, shared by
+/// `DomainError::FileNotFound` and `DomainError::Forbidden`). Declared here so
+/// [`MockCatalog::get_test_meta`]'s `NotFound` and `PermissionDenied` carry the
+/// same *category* qa-catalog would produce -- the category
+/// `LaunchService::gather_group_meta` discriminates on (review finding #9) --
+/// rather than one double answering `internal` for every cause.
+#[toolkit::api::canonical_prelude::resource_error(toolkit_gts::gts_id!(
+    "cf.qa.catalog.entry.v1~"
+))]
+struct MockCatalogEntryError;
+
 /// In-memory `QaCatalogClientV1` serving one repository default branch, one
 /// discovered plan, one custom plan, and per-file `TEST_META`.
 pub(super) struct MockCatalog {
@@ -785,6 +797,12 @@ pub(super) struct MockCatalog {
     /// When set, every `get_test_meta` call fails outright — the "catalog is
     /// down" case, as opposed to "one file is missing".
     pub(super) meta_unavailable: bool,
+    /// When set, every `get_test_meta` call answers `PermissionDenied` — a
+    /// policy that denies this gear's system actor the catalog read, as
+    /// opposed to a fault. Review finding #9: this must fail the launch, never
+    /// resolve it parallel. Checked before [`Self::meta_unavailable`], though
+    /// a test should only ever set one.
+    pub(super) meta_denied: bool,
     /// Branches `get_plan`/`get_test_meta` were asked for, in order.
     pub(super) branches_seen: Mutex<Vec<String>>,
     /// Number of `get_test_meta` calls, so a short-circuit can be proven by
@@ -805,6 +823,7 @@ impl MockCatalog {
             custom_plan: None,
             metas: Vec::new(),
             meta_unavailable: false,
+            meta_denied: false,
             branches_seen: Mutex::new(Vec::new()),
             meta_calls: Mutex::new(0),
             sync_calls: Mutex::new(0),
@@ -853,6 +872,16 @@ impl MockCatalog {
 
     pub(super) fn meta_unavailable(mut self) -> Self {
         self.meta_unavailable = true;
+        self
+    }
+
+    /// Every `get_test_meta` call answers `PermissionDenied`, as it would if a
+    /// policy denied this gear's system actor the catalog read. Review finding
+    /// #9's fixture: the file this deployment cannot read may still declare
+    /// `exclusive: True`, and the point is that the launch must fail rather
+    /// than resolve as if nobody had an opinion.
+    pub(super) fn deny_test_meta(mut self) -> Self {
+        self.meta_denied = true;
         self
     }
 
@@ -1059,6 +1088,18 @@ impl QaCatalogClientV1 for MockCatalog {
     /// the first file it cannot read
     /// (`qa-catalog/src/domain/service/plans.rs`, the `read_to_string` arm).
     /// The launch path's per-file fallback exists because of this.
+    ///
+    /// **The failure category matters and is chosen deliberately, not just
+    /// its presence.** A path absent from `self.metas` answers `NotFound` --
+    /// what a genuinely missing file looks like through this SDK
+    /// (`qa-catalog/src/api/rest/error.rs`'s `DomainError::FileNotFound` ->
+    /// `CatalogResourceError::not_found`) -- and `gather_group_meta` omits it.
+    /// [`Self::meta_denied`] answers `PermissionDenied`, and
+    /// [`Self::meta_unavailable`] answers a plain `Internal`; `gather_group_meta`
+    /// must fail the launch on both, per review finding #9. Before that
+    /// finding, every one of these three cases used `internal(...)` and so
+    /// were indistinguishable -- which is exactly the defect this double must
+    /// not reintroduce.
     async fn get_test_meta(
         &self,
         _ctx: &SecurityContext,
@@ -1068,6 +1109,11 @@ impl QaCatalogClientV1 for MockCatalog {
     ) -> Result<Vec<TestFileMeta>, QaCatalogError> {
         *self.meta_calls.lock().unwrap() += 1;
         self.branches_seen.lock().unwrap().push(branch.to_owned());
+        if self.meta_denied {
+            return Err(MockCatalogEntryError::permission_denied()
+                .with_reason("ACCESS_DENIED")
+                .create());
+        }
         if self.meta_unavailable {
             return Err(QaCatalogError::internal("catalog unavailable").create());
         }
@@ -1081,9 +1127,11 @@ impl QaCatalogClientV1 for MockCatalog {
             match found {
                 Some(meta) => out.push(meta),
                 None => {
-                    return Err(
-                        QaCatalogError::internal(format!("file not found: {file}")).create()
-                    );
+                    return Err(MockCatalogEntryError::not_found(format!(
+                        "file not found: {file}"
+                    ))
+                    .with_resource(file.clone())
+                    .create());
                 }
             }
         }
