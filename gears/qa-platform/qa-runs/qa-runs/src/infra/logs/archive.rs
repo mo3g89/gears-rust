@@ -42,34 +42,64 @@
 //! `"[node] "` prefixes (`domain::repos::run_logs_repo`), and
 //! `infra::executor::argo::watch`'s re-attach guard suppresses a node's
 //! replayed output only while a fresh re-read's first line still matches the
-//! archived `first_line` for that node. If this cap ever evicts a node's
-//! true first archived line — the line the guard was built to compare
-//! against — the archive's first line for that node stops being the pod's
-//! actual first line. The next re-attach's first-line guard then mismatches
-//! by construction, suppression is disabled *for that node* for the rest of
-//! the run (that guard's own doc: "the archive's first line will never match
-//! the retained window again"), and the run re-duplicates its whole retained
-//! window on every re-attach after that. Neither Task 13 nor this crate's
-//! plan anticipated a *cap* being the thing that moves the window; it is
-//! named here because the connection is easy to miss from either file alone.
+//! archived `first_line` for that node. Eviction interacts with that guard
+//! two different ways, depending on *which* flush window it hits.
 //!
-//! This is not fixed here, and does not need to be: it fails toward
-//! duplication, which is the direction `LineSkip`'s own header already
-//! documents this crate accepting — "safe, because emitting everything is
-//! the duplication direction, never the loss direction." A cap that could
-//! instead cause an *over*-skip would not be safe by that same argument; this
-//! one cannot, for the reason in the next paragraph.
+//! **Eviction on a node's very first flush window.** If this cap ever
+//! evicts a node's true first archived line — the line the guard was built
+//! to compare against — the archive's first line for that node stops being
+//! the pod's actual first line. The next re-attach's first-line guard then
+//! mismatches by construction, suppression is disabled *for that node* for
+//! the rest of the run (that guard's own doc: "the archive's first line will
+//! never match the retained window again"), and the run re-duplicates its
+//! whole retained window on every re-attach after that.
+//!
+//! **Eviction on a later flush window, once the node has already flushed
+//! successfully at least once — the common case, since it only takes one
+//! flush tick's worth of quiet before a run turns chatty.** The node's true
+//! first archived line was written by that earlier, un-evicted flush and is
+//! untouched, so the first-line guard matches normally and suppression is
+//! not disabled. What eviction leaves behind instead is a *hole*: the
+//! archived text for that node stops being a contiguous prefix of what the
+//! pod printed, because the evicted lines never reached the archive at all —
+//! they are exactly the marker's `dropped` count, not a gap `lines_for` can
+//! see (`lines_for` only counts what is actually there). `consume` still
+//! suppresses exactly `lines_for(node)` lines of a fresh, gapless re-read
+//! counted from byte 0. That re-suppresses the same lines the marker already
+//! recorded as gone — no *new* loss, they were already gone — but it stops
+//! short of where the archive's own tail (the lines *after* the hole)
+//! actually sits in that re-read, so the tail is re-emitted and re-archived:
+//! duplicated, not lost. This is not silent either: `consume`'s *last*-line
+//! guard compares the last suppressed line against archived
+//! `last_line_for(node)`, and a hole makes that comparison fail, firing the
+//! same `error!` the pre-fix-inflated-count case already fires for.
+//!
+//! Neither Task 13 nor this crate's plan anticipated a *cap* being the thing
+//! that moves the window or opens a hole; both are named here because the
+//! connection is easy to miss from either file alone. Neither is fixed here,
+//! and neither needs to be — both fail toward duplication, which is the
+//! direction `LineSkip`'s own header already documents this crate accepting:
+//! "safe, because emitting everything is the duplication direction, never
+//! the loss direction." A cap that could instead cause an *over-count* —
+//! `lines_for(node)` answering more than the archive truly holds for that
+//! node, which would make `consume` suppress lines the archive never
+//! actually has — would not be safe by that same argument; this one cannot,
+//! for the reason in the next paragraph. That is narrower than "cannot cause
+//! a positional mismatch": the hole case just above **is** one, and it is
+//! safe for the reason already given there — detected by the last-line
+//! guard, and duplicating rather than losing — not because a hole cannot
+//! occur.
 //!
 //! [`broadcast::truncation_marker`](crate::infra::logs::broadcast::truncation_marker)'s
 //! own text — `"[qa-runs] log truncated: …"` — happens to parse as a
 //! `"[node] "` prefix too, filed under a phantom node named `qa-runs`. That
-//! cannot produce an over-skip: `LogResume::lines_for` is only ever consulted
-//! with a real node name (`repo-{uuid}`, `ExecutionNode::name`'s one
-//! production source), so the phantom's count is never read by anything.
+//! cannot inflate a real node's count: `LogResume::lines_for` is only ever
+//! consulted with a real node name (`repo-{uuid}`, `ExecutionNode::name`'s
+//! one production source), so the phantom's count is never read by anything.
 //! **Do not "fix" the marker's wording so it stops parsing as a bracketed
 //! prefix** — nothing needs that, and the real hazard runs the other way: a
 //! marker that ever collided with an actual node name would turn a harmless
-//! phantom into a real over-skip, which is loss.
+//! phantom into a real over-count, which is loss.
 //!
 //! # What is actually true about the cap, stated rather than asserted
 //!
@@ -255,6 +285,16 @@ impl Pending {
             self.dropped = self.dropped.saturating_add(1);
         }
     }
+
+    /// How many lines [`RunLogArchive::write`] actually archives for this
+    /// buffer: `lines` plus one more exactly when a marker is written, since
+    /// `lines` itself never counts it (this type's own `dropped` doc). The
+    /// one place both `write` (the value it sends to `append_log`) and
+    /// `flush`'s success log read this, rather than each recomputing it —
+    /// so an operator's log line always matches what the stored row holds.
+    fn archived_lines(&self) -> i64 {
+        self.lines.saturating_add(i64::from(self.dropped > 0))
+    }
 }
 
 /// Reports `tenant_id` and `lines`, and `text`'s **length**, never `text`
@@ -419,12 +459,21 @@ where
     /// `dropped` is summed along with `lines` — see [`MAX_PENDING_BYTES_PER_RUN`]'s
     /// own doc and this module's header for what that sum's position claim
     /// does and does not mean when both sides evicted independently.
+    ///
+    /// Re-runs [`Pending::enforce_cap`] on the merged buffer before putting
+    /// it back. Without this, a merge of two buffers each already within the
+    /// cap on their own can land at up to twice it — `MAX_PENDING_BYTES_PER_RUN`'s
+    /// own doc says it bounds `Pending::text`, and that claim has to stay
+    /// true across this path too, not just across `record`. `enforce_cap`
+    /// updates `dropped` itself as it evicts, so a trim here is folded into
+    /// the same count `write` reads later — nothing extra to reconcile.
     fn restore(&self, run_id: Uuid, mut taken: Pending) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(newer) = state.pending.remove(&run_id) {
             taken.text.push_str(&newer.text);
             taken.lines += newer.lines;
             taken.dropped = taken.dropped.saturating_add(newer.dropped);
+            taken.enforce_cap();
         }
         state.pending.insert(run_id, taken);
     }
@@ -459,10 +508,9 @@ where
             .await?;
 
         let conn = self.db.conn()?;
-        // The marker counts as one archived line when it is written at all —
-        // `taken.lines` itself never counts it (`Pending::dropped`'s own
-        // doc), so it is added here, exactly once, regardless of how many
-        // separate eviction rounds `taken.dropped` actually summarizes.
+        // `Pending::archived_lines` adds the marker's one line exactly when
+        // `taken.dropped` says one is written below, regardless of how many
+        // separate eviction rounds it actually summarizes.
         let text: Cow<'_, str> = if taken.dropped > 0 {
             Cow::Owned(format!(
                 "{}\n{}",
@@ -472,7 +520,7 @@ where
         } else {
             Cow::Borrowed(taken.text.as_str())
         };
-        let lines = taken.lines.saturating_add(i64::from(taken.dropped > 0));
+        let lines = taken.archived_lines();
         self.runs
             .append_log(&conn, &scope, run_id, taken.tenant_id, &text, lines)
             .await
@@ -527,7 +575,11 @@ where
         // a `clear_in_flight` statement placed after the `match`.
         match self.write(run_id, &taken).await {
             Ok(()) => {
-                debug!(run_id = %run_id, lines = taken.lines, "archived run log");
+                // `taken.archived_lines()`, not `taken.lines` — the latter
+                // never counts the marker `write` may have added, and this
+                // is the number an operator would otherwise compare against
+                // the stored row and find one short.
+                debug!(run_id = %run_id, lines = taken.archived_lines(), "archived run log");
                 Ok(())
             }
             Err(error) => {
@@ -1044,6 +1096,57 @@ mod tests {
             truncation_marker(dropped),
             "the marker must name exactly how many lines were evicted, not a \
              stale or approximate count"
+        );
+    }
+
+    /// **Fix round 1: `restore` must not merely concatenate past the cap.**
+    /// Two buffers each individually within `MAX_PENDING_BYTES_PER_RUN` can
+    /// sum to roughly twice it once merged by a failed flush's `restore`;
+    /// nothing else would trim that until the next `record`, so a run gone
+    /// quiet right after the failure would sit oversized indefinitely.
+    /// `restore` re-runs `enforce_cap` on the merged buffer to close that gap.
+    #[tokio::test]
+    #[allow(
+        clippy::integer_division,
+        reason = "a whole number of 1 KiB lines, not a byte-exact target"
+    )]
+    async fn a_restore_merge_past_the_cap_is_trimmed_back_down() {
+        let fx = fixture().await;
+        let line = "x".repeat(1024);
+        // ~60% of the cap each, individually under it, so neither batch's own
+        // `record` calls trigger eviction on their own -- only the merge does.
+        let batch = MAX_PENDING_BYTES_PER_RUN / 1024 * 3 / 5;
+
+        for _ in 0..batch {
+            fx.archive.record(fx.tenant, fx.run_id, &line);
+        }
+        assert!(
+            fx.archive.pending_len(fx.run_id) <= MAX_PENDING_BYTES_PER_RUN,
+            "the first batch alone must not already be over the cap"
+        );
+
+        let gate = fx.mock.block_next_append();
+        let flush = fx.archive.flush(fx.run_id);
+        let arrive_while_the_write_is_in_flight = async {
+            // Only proceeds once the first flush has already taken the first
+            // batch out of the pending map and is blocked inside its write —
+            // same synchronization the merge-order tests above use.
+            gate.wait_for_entry().await;
+            for _ in 0..batch {
+                fx.archive.record(fx.tenant, fx.run_id, &line);
+            }
+            gate.release();
+        };
+        let (flush_result, ()) = tokio::join!(flush, arrive_while_the_write_is_in_flight);
+        assert!(
+            flush_result.is_err(),
+            "the gated append must fail, which is what drives restore's merge",
+        );
+
+        let pending = fx.archive.pending_len(fx.run_id);
+        assert!(
+            pending <= MAX_PENDING_BYTES_PER_RUN,
+            "restore must trim the merged buffer back under the cap, was {pending}"
         );
     }
 }
