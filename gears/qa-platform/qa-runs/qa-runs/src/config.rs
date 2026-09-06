@@ -457,37 +457,94 @@ pub struct ArgoExecutorConfig {
 
     /// How long a pod-log follow (`infra::executor::argo::watch::Watcher::follow`)
     /// may go **without a single line** before giving up on that pod. Default
-    /// 28,800 (8 hours). Review findings #20/#21: `follow: true` held a task
+    /// 600 (10 minutes). Review findings #20/#21: `follow: true` held a task
     /// forever on a wedged API-server connection, because nothing bounded it.
+    /// Exposed to operators in the Helm chart (`argo.logFollowIdleSeconds`,
+    /// `gears-argo-configmaps.yaml`), beside its neighbours below.
     ///
     /// # This is an idle bound, not a lifetime bound — and the difference is the
     /// # whole point
     ///
     /// `follow: true` on a *healthy* run is meant to stay open for as long as
-    /// the node runs, which `cpt-cf-qa-nfr-run-duration` puts at up to eight
-    /// hours, and a single long test within that run can legitimately produce
-    /// no log line for a long stretch (a slow fixture, a network fetch, a test
-    /// that just doesn't print). A deadline on the *whole* follow would cut
-    /// that off mid-run and lose every line after it — trading the hang this
-    /// field fixes for a log-loss bug wearing its clothes, which is exactly what
-    /// the preceding three tasks on this file spent six fix rounds preventing
-    /// (see `LineSkip`'s own doc). So this resets on every line: a fresh line
-    /// resets the clock, and only a stretch of true silence this long trips it.
+    /// the node runs, and a single long test within that run can legitimately
+    /// produce no log line for a while (a slow fixture, a network fetch, a
+    /// test that just doesn't print). A deadline on the *whole* follow would
+    /// cut that off mid-run and lose every line after it — trading the hang
+    /// this field fixes for a log-loss bug wearing its clothes, which is
+    /// exactly what the preceding three tasks on this file spent six fix
+    /// rounds preventing (see `LineSkip`'s own doc). So this resets on every
+    /// line: a fresh line resets the clock, and only a stretch of true
+    /// silence this long trips it.
     ///
-    /// # Where 8 hours comes from
+    /// # Where 600 comes from, and why not `cpt-cf-qa-nfr-run-duration`'s eight hours
     ///
-    /// Reused, not reasoned anew: `api::rest::sse::MAX_STREAM_DURATION` already
-    /// draws this exact number from `cpt-cf-qa-nfr-run-duration` for a related
-    /// bound (that one total, this one idle) — "eight hours is
-    /// `cpt-cf-qa-nfr-run-duration`'s longest contemplated run, so a legitimate
-    /// stream is not cut short by a run merely being long". The same fact
-    /// carries over here even more conservatively: that constant cuts off a
-    /// *chatty* stream at 8 hours regardless of output; this one only fires on
-    /// 8 hours of **total silence**, which a platform that contemplates no run
-    /// longer than 8 hours has no legitimate reason to produce. Silence that
-    /// long is already indistinguishable from wedged, whatever the pod's true
-    /// state — there is no NFR or knob elsewhere in this file that argues for a
-    /// shorter number without also risking a healthy quiet stretch.
+    /// **Fix round 1 corrected this derivation; read this section as the
+    /// correction, not the original reasoning.** The shipped version reused
+    /// `api::rest::sse::MAX_STREAM_DURATION`'s eight hours, on the argument
+    /// that `cpt-cf-qa-nfr-run-duration`'s longest contemplated run cannot
+    /// legitimately go silent longer than the run itself. That is true and
+    /// still the wrong bound for what this field gates: `MAX_STREAM_DURATION`
+    /// justifies itself as a *total* ceiling on a client-facing SSE
+    /// connection, and this crate's own numbers elsewhere never treat eight
+    /// hours as "how long is silence still plausible" — `default_timeout_seconds:
+    /// 3600`, `max_timeout_seconds: 86_400`, and
+    /// `domain::timeout::kind_timeout_fallback`'s per-kind defaults
+    /// (300/600/1800/3600) all put the *typical* run, and the *typical single
+    /// step within it*, at far less. Reusing the SSE constant's digits
+    /// imported its number without its reasoning.
+    ///
+    /// **The decisive problem: `run`'s whole loop is blocked for the entire
+    /// idle wait, not just this one pod.** `follow` is called from
+    /// `drain_pods`, synchronously, inside `run`'s own loop — never spawned
+    /// concurrently — and `drain_pods` iterates pods one at a time (this
+    /// module's own "Known limitation" header). So one wedged pod does not
+    /// merely leak a task: for as long as this field allows, it holds up
+    /// this run's `Finished` event *and every sibling pod's own follow*. Eight
+    /// hours here was not a generous safety margin, it was an eight-hour
+    /// stall on the whole observation, not a leaked task — a residual this
+    /// field's very first version underweighted.
+    ///
+    /// The right anchor is **the longest silence still plausible *inside* one
+    /// run**, not the longest run. A pod that is genuinely still executing has
+    /// its own silence already bounded by Argo's `activeDeadlineSeconds`
+    /// (`domain::timeout`'s whole module resolves this per run): once that
+    /// fires, Argo kills the pod, the log stream reaches end-of-file, and
+    /// `follow` returns on its own through the pre-existing "log stream ended
+    /// early" path — no idle timeout needed for a pod that is merely slow.
+    /// What is *not* already bounded that way is a wedged **connection** to an
+    /// otherwise-healthy pod, which is a transport failure, not a
+    /// test-duration one — the same class [`Self`]'s own note below on
+    /// `kube::Config::read_timeout` (295 s, connector-level, resets on any
+    /// byte) already partially covers.
+    ///
+    /// **600 seconds**, taken from `QaRunsConfig::orphan_timeout_seconds`'s
+    /// own default (`config.rs`, the claim reconciler's floor) — this
+    /// codebase's own existing answer to "how long is silence long enough to
+    /// call the thing on the other end dead" — and in the same order of
+    /// magnitude as `kube`'s own 295 s, not two orders of magnitude above it.
+    ///
+    /// # The trade this makes, stated honestly
+    ///
+    /// Tightening from eight hours to 600 seconds is not free. A pod that is
+    /// genuinely healthy but quiet for longer than this has its *individual*
+    /// follow abandoned: no further `Log`/`TestResult` events reach the sink
+    /// from that pod for the rest of *this* `watch()` call (the pod is marked
+    /// drained and is not retried within the same call — see
+    /// [`Watcher::follow`](crate::infra::executor::argo::watch::Watcher::follow)'s
+    /// own doc). That is a loss of granularity, not of correctness: `run`'s
+    /// own loop resumes (it was blocked, not ended) and the workflow's
+    /// eventual terminal phase, whenever Argo reports one, still produces a
+    /// correct `Finished` — delayed by at most this many seconds beyond
+    /// whatever it would otherwise have taken. If something else later ends
+    /// this whole observation for an unrelated reason (a real API error,
+    /// cancellation, a process restart), the dispatcher's own periodic
+    /// re-attach (`domain::service::dispatch::reattach_watchers`, its 5 s
+    /// tick) opens a fresh `watch()`, and `LogResume` suppresses whatever this
+    /// pod's log had already archived before the gap — wasteful, a full
+    /// re-read of that pod's log, but not lossy: nothing already emitted is
+    /// repeated or dropped. That second mechanism already existed before this
+    /// task; tightening this field does not change it, only how often a
+    /// legitimately-quiet pod's *chatter* (not its *outcome*) gets cut short.
     ///
     /// Read through `.max(1)` at the call site (`Watcher::follow`), the same
     /// guard [`Self::status_poll_seconds`] gets, so a misconfigured `0` cannot
@@ -505,8 +562,9 @@ pub struct ArgoExecutorConfig {
     /// keep-alive, a partial chunk) without ever completing one more log
     /// *line* — `kube`'s timeout resets on each such byte and never fires,
     /// while this field's clock is line-granular and does not. This field is
-    /// also the one this codebase can see, name in a log line, and change
-    /// without a `kube` upgrade, where 295 s is presently none of those.
+    /// also the one this codebase can see, name in a log line, change per
+    /// deployment (the Helm chart row above), and change without a `kube`
+    /// upgrade, where 295 s is presently none of those.
     pub log_follow_idle_seconds: u64,
 }
 
@@ -525,7 +583,7 @@ impl Default for ArgoExecutorConfig {
             bundle_auth: None,
             secret_name_prefix: "qa-platform-".to_owned(),
             secret_key: "value".to_owned(),
-            log_follow_idle_seconds: 8 * 60 * 60,
+            log_follow_idle_seconds: 600,
         }
     }
 }

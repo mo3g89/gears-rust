@@ -65,6 +65,7 @@
         workflow_service_account: {{ .Values.argo.workflowServiceAccount | quote }}
         workflow_ttl_seconds: {{ .Values.argo.workflowTtlSeconds }}
         status_poll_seconds: {{ .Values.argo.statusPollSeconds }}
+        log_follow_idle_seconds: {{ .Values.argo.logFollowIdleSeconds }}
         # A workflow pod reaches the gears through the in-cluster Service
         # directly -- unlike compose's bundle_base_url (which had to go
         # through the ui container's nginx because docker-compose.yml binds

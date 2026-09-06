@@ -41,6 +41,15 @@ argo:
   # gears-argo-configmaps.yaml.
   workflowTtlSeconds: 3600
   statusPollSeconds: 3
+  # `ArgoExecutorConfig::log_follow_idle_seconds`'s own default (`config.rs`) --
+  # 600, not the 8 hours an earlier round of Task 17 shipped: see that field's
+  # doc for why 600 (anchored on `orphan_timeout_seconds`, this codebase's own
+  # "how long is silence long enough to call it dead") replaced the SSE
+  # constant's number this adapter's own follow loop is not actually bound by
+  # the same way. Without a row here the deployment default IS this value with
+  # no operator override -- a deployment whose pods legitimately go quieter
+  # than 600s needs to raise this, not just live with the shipped number.
+  logFollowIdleSeconds: 600
   # Must equal whatever provisions the workflow pod's bundle-download
   # credential (deploy/argo/provision-workflow-secret.sh's own defaults, or
   # its in-cluster equivalent) -- the adapter only ever emits a

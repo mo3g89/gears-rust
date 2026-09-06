@@ -587,6 +587,10 @@ impl Watcher {
 
     /// Emit the terminal event, re-reading the object first so `status.nodes`
     /// and `status.message` are the final ones.
+    ///
+    /// Not raced against `self.cancel`, same as [`Self::open_log`]: one
+    /// bounded request/response, covered by `kube::Config::read_timeout`
+    /// (295 s, connector-level) rather than by anything this file adds.
     async fn finish(&self, observed: DynamicObject) {
         let workflow = match self.workflows.get_opt(&self.name).await {
             Ok(Some(fresh)) => fresh,
@@ -617,6 +621,14 @@ impl Watcher {
     /// Returns `false` once the observer has gone away, which is not a failure
     /// and must stop the task rather than be reported as one
     /// (`run_executor.rs:743-749`).
+    ///
+    /// The pod `list` call below is not raced against `self.cancel` either,
+    /// same reason as [`Self::open_log`]: one bounded request/response,
+    /// covered by `kube::Config::read_timeout` rather than by anything this
+    /// file adds. What *is* raced is the per-pod [`Self::follow`] this method
+    /// calls in a loop — see that method's own doc for why one wedged pod
+    /// here suspends every pod after it, which is exactly why `follow`'s idle
+    /// deadline is anchored where it is.
     async fn drain_pods(&mut self) -> bool {
         let selector = format!("workflows.argoproj.io/workflow={}", self.name);
         let pods = match self
@@ -672,38 +684,59 @@ impl Watcher {
     /// harmless) but not the sink's `Log` event, which is what
     /// `append_log`'s `CONCAT` would otherwise duplicate.
     ///
-    /// # Two ways this now gives up early, and why neither is an error
+    /// # Two ways this now gives up early, and they do not have the same blast radius
     ///
     /// Review findings #20/#21: `follow: true` on a wedged API-server
     /// connection used to hold this task for the life of the process, because
-    /// nothing bounded the read and nothing could ask it to stop.
+    /// nothing bounded the read and nothing could ask it to stop. Fix round 1
+    /// corrected this section: the first version said "both stop this pod's
+    /// follow only", which is true of the idle case and false of the
+    /// cancelled one.
     ///
-    /// * **Cancelled** — the same token [`Self::run`] selects on. Whatever
-    ///   this pod's log had left to give is not read; the observer is on its
-    ///   way down anyway (this is the executor's own shutdown signal, not a
-    ///   per-run one — see [`super::ArgoRunExecutor`]'s `cancel` doc), so
-    ///   losing an unread tail here is no worse than losing it to the process
-    ///   exiting mid-read, which was already possible before this task.
+    /// * **Cancelled** — the same token [`Self::run`] selects on — **ends the
+    ///   whole observation, not just this pod.** The `return false` sits
+    ///   inside the `select!` itself, before the flush below, so neither
+    ///   `emit_results` nor `drained.insert` runs; `drain_pods` stops at this
+    ///   pod without looking at any sibling still to come, and `run`'s own
+    ///   `if !self.drain_pods().await { return; }` ends the task with no
+    ///   `Finished` emitted. Deliberate: this is the executor's own shutdown
+    ///   signal (see [`super::ArgoRunExecutor`]'s `cancel` doc), not a verdict
+    ///   about this one pod, so there is nothing left worth finishing for
+    ///   *any* pod, and losing an unread tail here is no worse than losing it
+    ///   to the process exiting mid-read, which was already possible before
+    ///   this task.
     /// * **Idle deadline elapsed** — [`crate::config::ArgoExecutorConfig::log_follow_idle_seconds`],
     ///   reset on every line, not on the whole follow — see that field's own
     ///   doc for why a *lifetime* bound here would turn this fix into log
     ///   loss on a healthy long-running node, which is exactly the mistake the
     ///   preceding task's six fix rounds spent guarding against on this same
-    ///   file. Treated exactly like the pre-existing "log stream ended early"
-    ///   branch below: this pod is marked drained and `run` moves on. Nothing
+    ///   file — **stops only this pod.** Treated exactly like the pre-existing
+    ///   "log stream ended early" branch below: the flush still runs (an
+    ///   unfinished test flushes as its last real observed status, `RUNNING`,
+    ///   never a fabricated terminal one — see [`markers`]'s "one-test lag"),
+    ///   this pod is marked drained, and this call returns `true`. Nothing
     ///   about this call can tell "wedged forever" apart from "quiet a moment
     ///   too long", so giving up is a bet, not a proof — the residual is that
     ///   a pod whose *next* line was only one line away from arriving loses
-    ///   it identically to one that would never write again. That line is not
-    ///   lost forever, only until whatever next causes a fresh `watch()` call
-    ///   for this run — a control-plane restart is the one this crate already
-    ///   re-attaches for (`cpt-cf-qa-nfr-run-duration`'s row) — there is no
-    ///   in-process retry within this same call.
+    ///   it identically to one that would never write again, for the rest of
+    ///   *this* `watch()` call: `drained` never forgets a pod once it is set,
+    ///   so this pod is not retried again until a fresh `Watcher` exists.
+    ///   That line is not lost forever, only until whatever later ends this
+    ///   whole observation (for an unrelated reason — a real API error,
+    ///   cancellation, a process restart) and the dispatcher's own periodic
+    ///   re-attach (`domain::service::dispatch::reattach_watchers`, its 5 s
+    ///   tick) opens a fresh `watch()` — a mechanism this crate already had,
+    ///   unchanged by this task, and not itself triggered by the idle case.
     ///
-    /// Both stop *this pod's* follow only. `run`'s own loop continues, so a
-    /// workflow that later goes terminal by Argo's own account still gets a
-    /// `Finished` — reported from the live object, independent of whatever
-    /// this pod's log did or did not finish saying.
+    /// `run` does not run concurrently with `follow` — it is synchronously
+    /// blocked inside `drain_pods` for however long this call takes, so
+    /// "resumes" is the honest word, not "continues": once the idle case
+    /// returns, `run`'s own loop resumes, and a workflow that later goes
+    /// terminal by Argo's own account still gets a `Finished` — reported from
+    /// the live object, independent of whatever this pod's log did or did not
+    /// finish saying, delayed by at most
+    /// [`ArgoExecutorConfig::log_follow_idle_seconds`](crate::config::ArgoExecutorConfig::log_follow_idle_seconds)
+    /// beyond whatever it would otherwise have taken.
     #[allow(
         clippy::cognitive_complexity,
         reason = "Task 17 wrapped the read in a `tokio::select!` (its own cancelled arm) and \
@@ -974,6 +1007,7 @@ mod tests {
     //! moment its route table returns, which cannot produce "accepts and
     //! never writes" — the shape review finding #21 needed a red test for.
 
+    use std::future::Future;
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use std::time::Duration;
@@ -1495,5 +1529,264 @@ mod tests {
             still_attached,
             "giving up on an idle pod is not the same as the observer going away"
         );
+    }
+
+    /// A response body that yields one line every `interval`, `count` times,
+    /// then ends — the shape a healthy, merely slow-cadence pod actually has.
+    /// Exists only for
+    /// [`a_healthy_intermittent_follow_reaches_eof_with_every_line_emitted`];
+    /// see that test's own doc for the regression no all-[`PendingBody`] test
+    /// can catch.
+    struct IntermittentBody {
+        remaining: usize,
+        interval: Duration,
+        line: &'static str,
+        timer: Option<Pin<Box<tokio::time::Sleep>>>,
+    }
+
+    impl IntermittentBody {
+        fn new(count: usize, interval: Duration, line: &'static str) -> Self {
+            Self {
+                remaining: count,
+                interval,
+                line,
+                timer: None,
+            }
+        }
+    }
+
+    impl HttpBody for IntermittentBody {
+        type Data = Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            // `IntermittentBody` has no self-referential fields (`timer` is a
+            // heap-pinned `Sleep`, itself `Unpin` regardless of what it
+            // pins), so getting a plain `&mut` out of the `Pin` is sound.
+            let this = self.get_mut();
+            if this.remaining == 0 {
+                return Poll::Ready(None);
+            }
+            let interval = this.interval;
+            let timer = this
+                .timer
+                .get_or_insert_with(|| Box::pin(tokio::time::sleep(interval)));
+            match timer.as_mut().poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(()) => {
+                    this.remaining -= 1;
+                    this.timer = None;
+                    Poll::Ready(Some(Ok(Frame::data(Bytes::from(format!(
+                        "{}\n",
+                        this.line
+                    ))))))
+                }
+            }
+        }
+    }
+
+    /// A `kube::Client` whose response body emits `count` lines, `interval`
+    /// apart, then ends — [`silent_client`]'s opposite: this one always
+    /// produces something, eventually, and never stalls.
+    fn intermittent_client(count: usize, interval: Duration, line: &'static str) -> Client {
+        let service = tower::service_fn(
+            move |_request: http::Request<kube::client::Body>| async move {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(IntermittentBody::new(count, interval, line))
+                        .expect("building a stub response with an intermittent body"),
+                )
+            },
+        );
+        Client::new(service, "ns")
+    }
+
+    /// A `kube::Client` whose every request's response future never resolves
+    /// at all — modelling a connection stuck before its headers even arrive,
+    /// unlike [`silent_client`] (which answers with headers instantly and
+    /// only the *body* never completes). Used to put `Watcher::run` to sleep
+    /// **inside its own `get_opt` await**, rather than its between-poll
+    /// sleep, which is a different `select!` arm than
+    /// [`a_cancelled_watcher_returns_from_run_promptly`] exercises.
+    fn never_responding_client() -> Client {
+        let service = tower::service_fn(
+            move |_request: http::Request<kube::client::Body>| async move {
+                std::future::pending::<
+                    Result<http::Response<kube::client::Body>, std::convert::Infallible>,
+                >()
+                .await
+            },
+        );
+        Client::new(service, "ns")
+    }
+
+    /// **The property that actually distinguishes an idle bound from a total
+    /// one, pinned directly — fix round 1, Important #1.**
+    ///
+    /// `a_follow_with_no_output_gives_up_within_the_idle_deadline` only proves
+    /// `follow` does not hang forever; its body ([`PendingBody`]) never
+    /// produces a single frame, so it cannot tell an idle bound apart from a
+    /// bound on the *whole loop* — under `tokio::time::timeout(idle,
+    /// whole_loop)` that test would still pass at exactly the same 1 s. That
+    /// is precisely the regression `ArgoExecutorConfig::log_follow_idle_seconds`'s
+    /// own doc and `LineSkip`'s six fix rounds on this same file both exist to
+    /// prevent, and nothing in the suite would have gone red if a future edit
+    /// collapsed the per-iteration timeout into one around the loop.
+    ///
+    /// This body ([`IntermittentBody`]) emits a line every 300 ms, ten times
+    /// (3 s total) — comfortably longer than the 1 s idle deadline this test
+    /// configures, but never silent for longer than 300 ms at a stretch.
+    /// Under an **idle** bound each line resets the clock, so the follow
+    /// reaches end-of-file and every line is emitted; under a bound on the
+    /// whole loop, this would be killed well before the third line. Green
+    /// today; would go red under a `timeout(idle, async { loop { ... } })`
+    /// rewrite that collapsed the two.
+    #[tokio::test]
+    async fn a_healthy_intermittent_follow_reaches_eof_with_every_line_emitted() {
+        const LINES: usize = 10;
+        let client = intermittent_client(LINES, Duration::from_millis(300), "chatty line");
+        let (sink, mut stream) = ExecutionStream::channel(32);
+        let watcher_config = ArgoExecutorConfig {
+            log_follow_idle_seconds: 1,
+            ..ArgoExecutorConfig::default()
+        };
+        let mut watcher = Watcher {
+            workflows: Api::namespaced_with(client.clone(), "ns", &workflow_resource()),
+            pods: Api::namespaced(client, "ns"),
+            config: watcher_config,
+            name: "wf-1".to_owned(),
+            sink,
+            started: false,
+            drained: std::collections::HashSet::new(),
+            resume: LogResume::default(),
+            cancel: CancellationToken::new(),
+        };
+
+        let reached_eof =
+            tokio::time::timeout(Duration::from_secs(10), watcher.follow("pod-1", "node-1"))
+                .await
+                .expect(
+                    "a healthy pod that is merely chatty at a slow cadence must not be killed by \
+             the idle bound at all -- if this elapses, the idle-vs-total distinction has \
+             been lost",
+                );
+        assert!(
+            reached_eof,
+            "reaching end-of-file is not the observer going away; this must report true"
+        );
+
+        drop(watcher);
+        let mut emitted = Vec::new();
+        while let Some(event) = stream.recv().await {
+            if let ExecutionEvent::Log { line, .. } = event {
+                emitted.push(line);
+            }
+        }
+        assert_eq!(
+            emitted.len(),
+            LINES,
+            "an idle bound resets on every line and must never cut a healthy, merely-slow \
+             follow short: got {emitted:?}"
+        );
+    }
+
+    /// **`follow`'s own cancel arm, exercised directly — fix round 1,
+    /// Important #3.** `a_follow_with_no_output_gives_up_within_the_idle_
+    /// deadline` never cancels its token, so it cannot tell `follow`'s
+    /// cancelled arm apart from its idle-timeout arm — reverting the
+    /// cancelled arm alone still leaves that test green, because the idle
+    /// deadline it configures is what actually ends the call.
+    ///
+    /// `log_follow_idle_seconds: 3600` is deliberate, mirroring
+    /// `a_cancelled_watcher_returns_from_run_promptly`'s own
+    /// `status_poll_seconds: 3600`: absent the cancel arm, this call would
+    /// still be waiting out the idle deadline an hour later, so the bounding
+    /// `timeout` below turns a reverted arm into a fast, clean FAIL rather
+    /// than an hour-long hang.
+    ///
+    /// Asserts `false`, not `true`: cancellation ends the whole observation
+    /// (see [`Watcher::follow`]'s own doc on the two arms' different blast
+    /// radius), the same `false` a dropped observer reports.
+    #[tokio::test]
+    async fn a_cancelled_follow_returns_false_without_waiting_for_the_idle_deadline() {
+        let client = silent_client();
+        let (sink, _stream) = ExecutionStream::channel(8);
+        let cancel = CancellationToken::new();
+        let mut watcher = Watcher {
+            workflows: Api::namespaced_with(client.clone(), "ns", &workflow_resource()),
+            pods: Api::namespaced(client, "ns"),
+            config: ArgoExecutorConfig {
+                log_follow_idle_seconds: 3600,
+                ..ArgoExecutorConfig::default()
+            },
+            name: "wf-1".to_owned(),
+            sink,
+            started: false,
+            drained: std::collections::HashSet::new(),
+            resume: LogResume::default(),
+            cancel: cancel.clone(),
+        };
+
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+
+        let observer_gone =
+            tokio::time::timeout(Duration::from_secs(5), watcher.follow("pod-1", "node-1"))
+                .await
+                .expect(
+                    "follow() must return promptly once cancelled, not wait out the idle deadline",
+                );
+
+        assert!(
+            !observer_gone,
+            "cancellation must report false, the same as the observer going away -- not \
+             true, which is what the idle-timeout arm reports"
+        );
+    }
+
+    /// **`run`'s cancel arm around its own status read, exercised directly —
+    /// fix round 1, Important #3.** `a_cancelled_watcher_returns_from_run_
+    /// promptly`'s client answers `get_opt` instantly, so cancellation there
+    /// can only ever be observed at the between-poll sleep — reverting that
+    /// arm alone still leaves that test green, because the sleep's own arm is
+    /// what actually ends the call. This one uses [`never_responding_client`]
+    /// so `run` is genuinely blocked inside `get_opt` when cancellation
+    /// fires, exercising the other arm.
+    #[tokio::test]
+    async fn a_cancelled_watcher_stuck_in_the_status_read_still_returns_promptly() {
+        let client = never_responding_client();
+        let (sink, _stream) = ExecutionStream::channel(8);
+        let cancel = CancellationToken::new();
+        let mut watcher = Watcher {
+            workflows: Api::namespaced_with(client.clone(), "ns", &workflow_resource()),
+            pods: Api::namespaced(client, "ns"),
+            config: ArgoExecutorConfig::default(),
+            name: "wf-1".to_owned(),
+            sink,
+            started: false,
+            drained: std::collections::HashSet::new(),
+            resume: LogResume::default(),
+            cancel: cancel.clone(),
+        };
+
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), watcher.run())
+            .await
+            .expect(
+                "run() must return promptly even while its status read never completes on \
+                 its own",
+            );
     }
 }

@@ -80,7 +80,7 @@ integration = ["dep:testcontainers", "dep:testcontainers-modules"]
 # ships in nothing and is not what ADR-0001's criterion is about. `-e normal`
 # restricts the query to the edges a released binary actually has.
 #
-# The seven extra crates and why each is needed:
+# The four extra crates and why each is needed:
 #
 # * `kube` — the API client. `client` for HTTP, `rustls-tls`/`aws-lc-rs` for
 #   TLS (matching `chat-engine`'s `k8s` feature, the in-repo precedent), and
@@ -92,29 +92,20 @@ integration = ["dep:testcontainers", "dep:testcontainers-modules"]
 # * `regex` — the runner's log-marker grammar
 #   (`manager/src/services/argo.rs:2736-2996`).
 # * `base64` — `=== TEST_CASE: <base64-json> ===` markers (`argo.rs:2921`).
-# * `tower`, `http-body`, `bytes` — **test-only**, for `watch`'s own
-#   `#[cfg(test)]` module (Task 17, review findings #20/#21): a loopback
-#   `kube::Client` built over a hand-rolled `tower::Service` that either
-#   answers instantly (the cancellation test) or accepts a request and never
-#   writes a body frame (the idle-deadline test, informed by
-#   `qa-plugin-k8s`'s `test_support::StubApiServer` but needing a body that
-#   never completes, which that server's always-answer-in-one-shot design
-#   cannot produce). They belong here and not in `[dev-dependencies]` for the
-#   same reason `testcontainers` does two entries up: **Cargo does not allow
-#   optional dev-dependencies**, and `argo`'s tests need them named via `dep:`
-#   without pulling them into a default `cargo test`. All three are already in
-#   `kube`'s own dependency graph under this feature, so this adds no new
-#   crate to a released `--features argo` build — only a name this module can
-#   use directly.
-argo = [
-    "dep:kube",
-    "dep:k8s-openapi",
-    "dep:regex",
-    "dep:base64",
-    "dep:tower",
-    "dep:http-body",
-    "dep:bytes",
-]
+#
+# `tower`, `http-body` and `bytes` — `watch`'s own `#[cfg(test)]` module's
+# loopback `kube::Client` doubles (Task 17, review findings #20/#21; see that
+# module's doc for what they build and why `qa-plugin-k8s`'s own stub server
+# could not be reused as-is) — are **not** here. Fix round 1 moved them to
+# `[dev-dependencies]` below: a dev-dependency never ships, so it does not
+# need to be optional or named in this feature at all, and every real use of
+# all three is confined to `argo/watch.rs`'s `#[cfg(test)] mod tests` (the
+# module itself gated on this same `argo` feature). The first version put
+# them here on the reasoning "Cargo does not allow optional dev-dependencies"
+# — true, but the wrong conclusion: that rule only bites a dependency that
+# *needs* to be optional, and a dev-dependency's whole point is that it never
+# ships, so there was nothing to make optional in the first place.
+argo = ["dep:kube", "dep:k8s-openapi", "dep:regex", "dep:base64"]
 
 [dependencies]
 qa-runs-sdk = { path = "../qa-runs-sdk" }
@@ -229,14 +220,18 @@ kube = { workspace = true, features = [
 k8s-openapi = { workspace = true, features = ["latest"], optional = true }
 regex = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
-# Test-only, for `infra::executor::argo::watch`'s own loopback `kube::Client`
-# doubles (Task 17) — see the `[features]` note's entry for these three.
-# `util` is the feature `tower::service_fn` lives behind.
-tower = { workspace = true, features = ["util"], optional = true }
-http-body = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
 
 [dev-dependencies]
+# For `infra::executor::argo::watch`'s own loopback `kube::Client` doubles
+# (Task 17, fix round 1) — see the `[features]` note's `argo` entry for why
+# these live here rather than as optional entries in `[dependencies]`. Never
+# ships: real use is confined to that module's `#[cfg(test)]`, itself gated on
+# the non-default `argo` feature, so a default `cargo test` builds neither the
+# module nor these three. `util` is the feature `tower::service_fn` lives
+# behind.
+tower = { workspace = true, features = ["util"] }
+http-body = { workspace = true }
+bytes = { workspace = true }
 # Log-output assertions. Several guarantees in this crate are discharged by a
 # `tracing` event and nothing else — the frozen guide's mandatory expiry alert,
 # `lease_occupancy`'s fail-closed ERROR, and the dispatcher's one-WARN-per-pass
