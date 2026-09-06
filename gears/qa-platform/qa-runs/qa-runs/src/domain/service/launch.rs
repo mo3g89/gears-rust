@@ -55,14 +55,25 @@
 //! `TEST_META` file used to be folded into "unreadable" — reachable on the
 //! identical missing-grant input, one hop upstream of the fix finding #9
 //! originally shipped. [`LaunchService::resolve_one_nested_plan`] now applies
-//! the same split, through the same [`classify_catalog_failure`] both call
-//! sites share.
+//! the same split, through the same [`classify_catalog_failure`] every call
+//! site in this module now shares.
 //!
 //! That distinction is about the **exclusivity scan** and not about the whole
 //! launch's other reads. Reading a plan in order to know *which files a run
 //! contains* is a different question, and a launch whose target cannot be
 //! resolved at all still fails — as it does in the source system, where the
 //! same read is a `BAD_REQUEST` (`manager/src/routes/runs.rs:670-680`).
+//!
+//! **Whole-branch review I5: the three target-resolution reads were still
+//! answering that different question with a different rule.** `get_repo`,
+//! `get_plan` and `get_custom_plan` mapped every `QaCatalogError` — a denial
+//! included — straight to [`DomainError::Catalog`] and a 500, while the nested
+//! read one paragraph up answered 403 for the same missing grant. Both fail the
+//! launch, so nothing was unsafe; what was wrong is that this file then held
+//! two rules for "which variant means a deny" that had to agree, which is the
+//! drift the paragraph above exists to have already stopped. They route through
+//! [`classify_catalog_failure`] as well now, and it is the only such rule left
+//! in this module.
 //!
 //! # Composition order, and what a failure costs at each step
 //!
@@ -992,6 +1003,13 @@ fn tags_declare_validation(tags: &[String]) -> bool {
         .any(|tag| tag.trim().eq_ignore_ascii_case("validation"))
 }
 
+/// The 500 half of [`classify_catalog_failure`], and its only caller.
+///
+/// Kept separate rather than inlined because [`DomainError::Catalog`]'s
+/// `String` payload is built the same way for every non-deny cause, and a
+/// second `DomainError::Catalog(error.to_string())` written at a call site is
+/// how a site drifts back out of the shared classification -- which is the
+/// defect whole-branch review I5 found here.
 fn catalog_error(error: &qa_catalog_sdk::QaCatalogError) -> DomainError {
     DomainError::Catalog(error.to_string())
 }
@@ -999,21 +1017,39 @@ fn catalog_error(error: &qa_catalog_sdk::QaCatalogError) -> DomainError {
 /// Translate a `QaCatalogError` that is **not** the absence case into the
 /// `DomainError` it fails a launch with.
 ///
-/// Shared by [`resolve_single_file_read`] (a `TEST_META` read) and
-/// [`LaunchService::resolve_one_nested_plan`] (a `get_plan` read, review
-/// finding #9's fix-round-1 addition): the same missing grant can deny either
-/// call, and the classification is written once, here, rather than re-derived
-/// per call site -- two copies of "which `QaCatalogError` variant means a
-/// deny" that must always agree is exactly the drift this codebase's
-/// `EnforcerError` split (`domain/error.rs`) exists to avoid repeating.
+/// **Every** catalog read in this file routes its failure through here. The
+/// classification is written once rather than re-derived per call site -- two
+/// copies of "which `QaCatalogError` variant means a deny" that must always
+/// agree is exactly the drift this codebase's `EnforcerError` split
+/// (`domain/error.rs`) exists to avoid repeating, and this module's header
+/// warns about twice.
 ///
 /// A `PermissionDenied` surfaces as [`DomainError::Forbidden`] (403), the same
 /// split already made for that flattened authorization error; every other
 /// cause -- including a future `QaCatalogError` variant, since every one is
-/// `#[non_exhaustive]` -- goes through [`catalog_error`] (500). Both callers
-/// route their own `NotFound` (the absent case) elsewhere before ever reaching
-/// this function, so it never has to, and must not, treat an absent resource
-/// as a failure.
+/// `#[non_exhaustive]` -- goes through [`catalog_error`] (500).
+///
+/// # Two kinds of caller, and what `NotFound` means to each
+///
+/// **Whole-branch review I5 added the second kind, and this section is the
+/// correction that owes.** The previous version named exactly two callers --
+/// [`resolve_single_file_read`] and
+/// [`LaunchService::resolve_one_nested_plan`] -- and said both "route their own
+/// `NotFound` (the absent case) elsewhere before ever reaching this function,
+/// so it never has to, and must not, treat an absent resource as a failure".
+/// The three target-resolution reads (`get_repo`, `get_plan`,
+/// `get_custom_plan`) now come here too, and they do **not** route `NotFound`
+/// elsewhere: for them an absent repository, plan or custom plan is not an
+/// optional thing to fall through on, it is the target of the launch, so the
+/// launch fails.
+///
+/// That is not a behaviour change from routing them here -- they reached
+/// [`catalog_error`] directly before, so their `NotFound` was already a
+/// [`DomainError::Catalog`] 500 and still is; the only thing that moved is
+/// their `PermissionDenied`, from 500 to 403, which is the disagreement I5
+/// found. So the rule is: this function classifies a failure, and whether an
+/// absence *is* a failure stays the caller's question. A caller for which it is
+/// not must still answer it before calling.
 fn classify_catalog_failure(error: qa_catalog_sdk::QaCatalogError) -> DomainError {
     match error {
         QaCatalogError::PermissionDenied { .. } => DomainError::Forbidden,
@@ -1089,7 +1125,7 @@ impl<R: RunsRepository> LaunchService<R> {
             .get_repo(ctx, repo_id)
             .await
             .map(|repo| repo.default_branch)
-            .map_err(|error| catalog_error(&error))
+            .map_err(classify_catalog_failure)
     }
 
     /// Resolve a plan-backed target (`Plan` or `Test`).
@@ -1117,7 +1153,7 @@ impl<R: RunsRepository> LaunchService<R> {
             .catalog
             .get_plan(ctx, repo_id, &branch, path)
             .await
-            .map_err(|error| catalog_error(&error))?;
+            .map_err(classify_catalog_failure)?;
 
         // Rule 2. A plan-backed target is one repository by construction, so
         // the grouping is a single group and rule 3's guard cannot fire.
@@ -1175,7 +1211,7 @@ impl<R: RunsRepository> LaunchService<R> {
             .catalog
             .get_custom_plan(ctx, plan_id)
             .await
-            .map_err(|error| catalog_error(&error))?;
+            .map_err(classify_catalog_failure)?;
 
         // Rule 2 first, because rule 3's guard is a question about the grouping.
         // Bundling groups by repository; exclusivity groups by *nested plan*

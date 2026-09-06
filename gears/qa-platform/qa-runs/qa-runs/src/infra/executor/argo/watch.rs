@@ -618,9 +618,16 @@ impl Watcher {
 
     /// Follow every not-yet-drained pod's log to end-of-file.
     ///
-    /// Returns `false` once the observer has gone away, which is not a failure
-    /// and must stop the task rather than be reported as one
-    /// (`run_executor.rs:743-749`).
+    /// Returns `false` when this observation must end without a verdict — the
+    /// observer has gone away (`run_executor.rs:743-749`), the executor was
+    /// cancelled, or [`Self::follow`] gave up on a pod with its log unread
+    /// (whole-branch review C1). None of the three is a failure, and none may
+    /// be reported as one; what they share is that [`Self::run`]'s
+    /// `if !self.drain_pods().await { return; }` must end the task **before**
+    /// [`Self::finish`], because a `Finished` emitted over an unread log is
+    /// what retires the run out of re-attach range. That guard sits on both
+    /// call sites, the `is_terminal` one included — checked, because only the
+    /// second one is on the path that would otherwise emit the event.
     ///
     /// The pod `list` call below is not raced against `self.cancel` either,
     /// same reason as [`Self::open_log`]: one bounded request/response,
@@ -684,59 +691,103 @@ impl Watcher {
     /// harmless) but not the sink's `Log` event, which is what
     /// `append_log`'s `CONCAT` would otherwise duplicate.
     ///
-    /// # Two ways this now gives up early, and they do not have the same blast radius
+    /// # Three ways this ends early, and only end-of-file is a completed read
     ///
     /// Review findings #20/#21: `follow: true` on a wedged API-server
     /// connection used to hold this task for the life of the process, because
-    /// nothing bounded the read and nothing could ask it to stop. Fix round 1
-    /// corrected this section: the first version said "both stop this pod's
-    /// follow only", which is true of the idle case and false of the
-    /// cancelled one.
+    /// nothing bounded the read and nothing could ask it to stop. Task 17
+    /// bounded it. **Whole-branch review C1 corrected what the bound then
+    /// did**, and this section is that correction: its two previous versions
+    /// both said the idle give-up "stops only this pod" and cost "a loss of
+    /// granularity, not of correctness", and offered the dispatcher's 5 s
+    /// re-attach as the safety net. That is true of an observation that ends
+    /// *abnormally*. It was false of this one, which ended by reporting a
+    /// verdict — see the trace below, which is what the fix was derived from.
     ///
-    /// * **Cancelled** — the same token [`Self::run`] selects on — **ends the
-    ///   whole observation, not just this pod.** The `return false` sits
-    ///   inside the `select!` itself, before the flush below, so neither
-    ///   `emit_results` nor `drained.insert` runs; `drain_pods` stops at this
-    ///   pod without looking at any sibling still to come, and `run`'s own
-    ///   `if !self.drain_pods().await { return; }` ends the task with no
-    ///   `Finished` emitted. Deliberate: this is the executor's own shutdown
-    ///   signal (see [`super::ArgoRunExecutor`]'s `cancel` doc), not a verdict
-    ///   about this one pod, so there is nothing left worth finishing for
-    ///   *any* pod, and losing an unread tail here is no worse than losing it
-    ///   to the process exiting mid-read, which was already possible before
-    ///   this task.
+    /// Only `Ok(Ok(None))` — a genuine end-of-file, which a pod's log reaches
+    /// when the pod itself is done — falls through to the flush below, marks
+    /// this pod drained, and returns `true`. It is the one case in which this
+    /// pod provably has nothing more to say, so it is the one case in which
+    /// acting as though it does not is true. **Every other exit `return
+    /// false`s from inside the loop**, before `emit_results` and before
+    /// `drained.insert`. Three of them are ways of giving up, listed below; the
+    /// fourth is `handle_line` reporting that the observer itself has gone,
+    /// which is `ExecutionSink::emit`'s own `false` and needs no verdict
+    /// because there is nobody left to give one to.
+    ///
+    /// * **Cancelled** — the same token [`Self::run`] selects on. This is the
+    ///   executor's own shutdown signal (see [`super::ArgoRunExecutor`]'s
+    ///   `cancel` doc), not a verdict about this one pod, so there is nothing
+    ///   left worth finishing for *any* pod, and losing an unread tail here is
+    ///   no worse than losing it to the process exiting mid-read, which was
+    ///   already possible before Task 17.
     /// * **Idle deadline elapsed** — [`crate::config::ArgoExecutorConfig::log_follow_idle_seconds`],
     ///   reset on every line, not on the whole follow — see that field's own
-    ///   doc for why a *lifetime* bound here would turn this fix into log
-    ///   loss on a healthy long-running node, which is exactly the mistake the
-    ///   preceding task's six fix rounds spent guarding against on this same
-    ///   file — **stops only this pod.** Treated exactly like the pre-existing
-    ///   "log stream ended early" branch below: the flush still runs (an
-    ///   unfinished test flushes as its last real observed status, `RUNNING`,
-    ///   never a fabricated terminal one — see [`markers`]'s "one-test lag"),
-    ///   this pod is marked drained, and this call returns `true`. Nothing
-    ///   about this call can tell "wedged forever" apart from "quiet a moment
-    ///   too long", so giving up is a bet, not a proof — the residual is that
-    ///   a pod whose *next* line was only one line away from arriving loses
-    ///   it identically to one that would never write again, for the rest of
-    ///   *this* `watch()` call: `drained` never forgets a pod once it is set,
-    ///   so this pod is not retried again until a fresh `Watcher` exists.
-    ///   That line is not lost forever, only until whatever later ends this
-    ///   whole observation (for an unrelated reason — a real API error,
-    ///   cancellation, a process restart) and the dispatcher's own periodic
-    ///   re-attach (`domain::service::dispatch::reattach_watchers`, its 5 s
-    ///   tick) opens a fresh `watch()` — a mechanism this crate already had,
-    ///   unchanged by this task, and not itself triggered by the idle case.
+    ///   doc for why a *lifetime* bound here would turn this fix into log loss
+    ///   on a healthy long-running node. Nothing about this call can tell
+    ///   "wedged forever" apart from "quiet a moment too long", so the give-up
+    ///   is a bet; what changed in C1 is what the bet costs when it is wrong.
+    /// * **The stream errored mid-read** — a reset on a long-lived
+    ///   `follow: true` connection, which is ordinary rather than exotic. Same
+    ///   disposition, and it is the same defect: the rest of this pod's log is
+    ///   unread, and nothing here knows how much of it there was.
     ///
-    /// `run` does not run concurrently with `follow` — it is synchronously
-    /// blocked inside `drain_pods` for however long this call takes, so
-    /// "resumes" is the honest word, not "continues": once the idle case
-    /// returns, `run`'s own loop resumes, and a workflow that later goes
-    /// terminal by Argo's own account still gets a `Finished` — reported from
-    /// the live object, independent of whatever this pod's log did or did not
-    /// finish saying, delayed by at most
+    /// ## What `break` did instead, traced against the run's own state
+    ///
+    /// Stated as a trace because this file has now been wrong five times about
+    /// an absolute it reasoned to from the design rather than read off the
+    /// code. Each link below was read at its own definition:
+    ///
+    /// 1. `break` fell through to `emit_results(parser.finish())` and
+    ///    `self.drained.insert(pod_name)`, and returned `true`.
+    /// 2. `drained` is never cleared (see its field doc), so this `Watcher`
+    ///    never followed that pod again.
+    /// 3. `run` therefore reached its `is_terminal` branch normally and called
+    ///    [`Self::finish`], which emits [`ExecutionEvent::Finished`].
+    /// 4. `IngestService::finish` records the terminal state, so the run
+    ///    leaves `infra::storage::runs_sea_repo::active_states` — which is
+    ///    `dispatching | running` and nothing else.
+    /// 5. `watch_candidates_query` filters on exactly that condition, so
+    ///    `domain::service::dispatch::reattach_watchers` no longer had the run
+    ///    as a candidate. The re-attach the old prose promised was not delayed;
+    ///    it could not happen at all.
+    ///
+    /// The loss was not granularity. Every line after the gap was absent from
+    /// the archive and from SSE, every `=== TEST_CASE: … ===` marker after it
+    /// was never parsed so those tests produced no row, the five counters are
+    /// tallied from stored rows and so reported a partial set, and the verdict
+    /// still came from Argo's workflow phase — so a runner that exits 0 despite
+    /// failures yielded a run reported **Succeeded with a truncated,
+    /// all-passing result set**. Reproduced before the fix by
+    /// `an_idle_give_up_neither_drains_the_pod_nor_finishes_the_run`, which
+    /// observed exactly `[Started, Finished { outcome: Succeeded, .. }]` from a
+    /// pod that had emitted nothing at all.
+    ///
+    /// ## What it costs now, which is a loop and is meant to be visible
+    ///
+    /// `return false` ends this observation with no `Finished`, which is what
+    /// `domain::service::watch`'s `drain` already calls *"nothing more to
+    /// say"*, **never** *"this failed"*: the slot is released, the run stays in
+    /// `active_states`, and `reattach_watchers` re-attaches on its next 5 s
+    /// tick with a fresh [`LogResume`], which suppresses whatever was already
+    /// archived. So a pod that was merely quiet resumes and loses nothing.
+    ///
+    /// A pod whose connection is *genuinely* wedged does not resume: it wedges
+    /// the next attach too, and the pair re-attach every
     /// [`ArgoExecutorConfig::log_follow_idle_seconds`](crate::config::ArgoExecutorConfig::log_follow_idle_seconds)
-    /// beyond whatever it would otherwise have taken.
+    /// until the control-plane timeout sweep reclaims the run. That loop is the
+    /// price, and it is the disposition `drain`'s own doc already accepts for a
+    /// forgotten execution — *"re-watched once per tick until the control-plane
+    /// timeout sweep reclaims it, which is a bounded cost paid for never
+    /// inventing a verdict"*. It is also loud: every pass logs the `warn!`
+    /// below naming the pod, the node and the deadline, where the old
+    /// behaviour logged one line and then silently shipped a wrong verdict.
+    ///
+    /// One thing the old prose got right and is worth keeping: `run` does not
+    /// run concurrently with `follow` — it is synchronously blocked inside
+    /// `drain_pods` for however long this call takes — so a wedged pod delays
+    /// its siblings' follows too, which is why the deadline is anchored per
+    /// line rather than per follow.
     #[allow(
         clippy::cognitive_complexity,
         reason = "Task 17 wrapped the read in a `tokio::select!` (its own cancelled arm) and \
@@ -773,9 +824,19 @@ impl Watcher {
                 // End of log. The pod is finished, so this is the point at
                 // which the last test's observation exists.
                 Ok(Ok(None)) => break,
+                // A reset on a `follow: true` stream, which is ordinary. The
+                // rest of this pod's log is unread, so this ends the whole
+                // observation rather than reporting one: see the doc above.
                 Ok(Err(error)) => {
-                    warn!(pod = %pod_name, %error, "log stream ended early");
-                    break;
+                    warn!(
+                        execution_ref = %self.name,
+                        pod = %pod_name,
+                        node = %node,
+                        %error,
+                        "this pod's log stream ended early; ending the observation without a \
+                         verdict so the dispatcher's re-attach can read the rest"
+                    );
+                    return false;
                 }
                 Err(_elapsed) => {
                     warn!(
@@ -783,11 +844,11 @@ impl Watcher {
                         pod = %pod_name,
                         node = %node,
                         idle_seconds = idle.as_secs(),
-                        "this pod's log produced no line within the idle deadline; giving up \
-                         on it for this watch call rather than holding the task open \
-                         indefinitely (review findings #20/#21)"
+                        "this pod's log produced no line within the idle deadline; ending the \
+                         observation without a verdict so the dispatcher's re-attach can read \
+                         the rest (review findings #20/#21, whole-branch review C1)"
                     );
-                    break;
+                    return false;
                 }
             }
         }
@@ -1501,6 +1562,17 @@ mod tests {
     /// to make `follow()` return on its own, not merely make this test's own
     /// harness give up on it — wrapping it would make the red run indistinguishable
     /// from a passing assertion failure instead of the hang the fix is for.
+    ///
+    /// **Whole-branch review C1 flipped what this asserts.** It used to assert
+    /// `true` — "giving up on an idle pod is not the same as the observer
+    /// going away" — which was the sentence that made the defect look
+    /// deliberate. The give-up now ends the whole observation, so the two
+    /// report the same `false`; the assertions that distinguish them are in
+    /// `a_cancelled_follow_returns_false_without_waiting_for_the_idle_deadline`
+    /// (which arm fired) and
+    /// `an_idle_give_up_neither_drains_the_pod_nor_finishes_the_run` (what the
+    /// run is left in). What this test still owns on its own is the bound: the
+    /// call returns at all, unwrapped, without the pod being marked drained.
     #[tokio::test]
     async fn a_follow_with_no_output_gives_up_within_the_idle_deadline() {
         let client = silent_client();
@@ -1509,9 +1581,9 @@ mod tests {
             workflows: Api::namespaced_with(client.clone(), "ns", &workflow_resource()),
             pods: Api::namespaced(client, "ns"),
             config: ArgoExecutorConfig {
-                // A tiny override for this test, not the 8-hour production
-                // default — see that field's own doc for why the default
-                // itself must stay generous.
+                // A tiny override for this test, not the 600-second
+                // production default — see that field's own doc for why the
+                // default itself must stay generous.
                 log_follow_idle_seconds: 1,
                 ..ArgoExecutorConfig::default()
             },
@@ -1523,11 +1595,241 @@ mod tests {
             cancel: CancellationToken::new(),
         };
 
-        let still_attached = watcher.follow("pod-1", "node-1").await;
+        let still_observing = watcher.follow("pod-1", "node-1").await;
 
         assert!(
-            still_attached,
-            "giving up on an idle pod is not the same as the observer going away"
+            !still_observing,
+            "an idle give-up ends the observation rather than reporting a verdict over an \
+             unread log -- whole-branch review C1"
+        );
+        assert!(
+            watcher.drained.is_empty(),
+            "a pod whose log was never read is not drained, and saying it is is what stops \
+             this watch call from retrying it: {:?}",
+            watcher.drained
+        );
+    }
+
+    /// A response body chosen per request path: a complete JSON payload for
+    /// the two object reads `Watcher::run` makes, and — for the pod log — a
+    /// stream that either never produces a frame or produces one line and
+    /// then fails at the transport level.
+    ///
+    /// One enum rather than three bodies because `kube::Client::new` fixes a
+    /// single response-body type for the whole service, and
+    /// `kube::client::Body`'s own `wrap_body` is `pub(crate)`, so a
+    /// never-completing body cannot be expressed in kube's own type — see
+    /// [`silent_client`], which pays the same price by serving `PendingBody`
+    /// to *every* path and so cannot serve a workflow read beside it.
+    enum ScriptedBody {
+        /// One whole payload, then end-of-stream.
+        Whole(Option<Bytes>),
+        /// Headers arrived, no byte of the body ever will — a wedged
+        /// connection, the case the idle deadline exists for.
+        Wedged,
+        /// One line, then a transport error mid-stream — a reset on a
+        /// `follow: true` stream, which is the ordinary way a long-lived log
+        /// connection dies.
+        LineThenReset { line_sent: bool },
+    }
+
+    impl HttpBody for ScriptedBody {
+        type Data = Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            match self.get_mut() {
+                ScriptedBody::Whole(payload) => {
+                    Poll::Ready(payload.take().map(|bytes| Ok(Frame::data(bytes))))
+                }
+                // Never wakes its `Context`, same as [`PendingBody`]: what
+                // drives the test forward is `follow`'s own timer.
+                ScriptedBody::Wedged => Poll::Pending,
+                ScriptedBody::LineThenReset { line_sent } => {
+                    if *line_sent {
+                        Poll::Ready(Some(Err(std::io::Error::other("connection reset by peer"))))
+                    } else {
+                        *line_sent = true;
+                        Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(
+                            b"one line before the reset\n",
+                        )))))
+                    }
+                }
+            }
+        }
+    }
+
+    /// A `kube::Client` serving a whole miniature cluster: a terminal
+    /// workflow, a `PodList` holding one Running pod, and that pod's log
+    /// stream from `log_body`.
+    ///
+    /// The workflow is **`Succeeded`** deliberately — that is what puts
+    /// `Watcher::run` on its `is_terminal` path, which is the only path that
+    /// reaches `finish` and so the only one that can emit
+    /// `ExecutionEvent::Finished`. A test that used a Running workflow could
+    /// not tell "no `Finished` because the observation ended first" apart
+    /// from "no `Finished` because the workflow had not ended yet".
+    fn one_pod_cluster(log_body: fn() -> ScriptedBody) -> Client {
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let path = request.uri().path().to_owned();
+            async move {
+                // `/log` first: a pod log's path contains `/pods` too.
+                let body = if path.ends_with("/log") {
+                    log_body()
+                } else if path.contains("/pods") {
+                    ScriptedBody::Whole(Some(Bytes::from(one_running_pod_list_json())))
+                } else {
+                    ScriptedBody::Whole(Some(Bytes::from(succeeded_workflow_json())))
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(body)
+                        .expect("building a stub response"),
+                )
+            }
+        });
+        Client::new(service, "ns")
+    }
+
+    /// A `Workflow` `DynamicObject`, `status.phase: Succeeded` — terminal, so
+    /// `Watcher::run` reaches `finish` unless the drain stopped it first.
+    fn succeeded_workflow_json() -> Vec<u8> {
+        br#"{"apiVersion":"argoproj.io/v1alpha1","kind":"Workflow",
+             "metadata":{"name":"wf-1","namespace":"ns"},
+             "status":{"phase":"Succeeded"}}"#
+            .to_vec()
+    }
+
+    /// A `PodList` holding one pod in a phase `drain_pods` will follow. No
+    /// node annotation, so `node_of` falls back to the pod name.
+    fn one_running_pod_list_json() -> Vec<u8> {
+        br#"{"apiVersion":"v1","kind":"PodList","metadata":{},
+             "items":[{"metadata":{"name":"pod-1","namespace":"ns"},
+                       "status":{"phase":"Running"}}]}"#
+            .to_vec()
+    }
+
+    /// Run one `Watcher` against [`one_pod_cluster`] to completion and report
+    /// what it drained and what it emitted.
+    ///
+    /// Returns the pod names marked drained and every event, in that order,
+    /// because the sink has to be dropped before the channel can be read to
+    /// end and `drained` lives on the same struct as the sink.
+    async fn observe_one_pod_cluster(
+        log_body: fn() -> ScriptedBody,
+        idle_seconds: u64,
+    ) -> (Vec<String>, Vec<ExecutionEvent>) {
+        let client = one_pod_cluster(log_body);
+        let (sink, mut stream) = ExecutionStream::channel(32);
+        let mut watcher = Watcher {
+            workflows: Api::namespaced_with(client.clone(), "ns", &workflow_resource()),
+            pods: Api::namespaced(client, "ns"),
+            config: ArgoExecutorConfig {
+                // Nothing here should ever reach the between-poll sleep; if
+                // it does, the bounding timeout below fails fast instead of
+                // the test hanging for an hour.
+                status_poll_seconds: 3600,
+                log_follow_idle_seconds: idle_seconds,
+                ..ArgoExecutorConfig::default()
+            },
+            name: "wf-1".to_owned(),
+            sink,
+            started: false,
+            drained: std::collections::HashSet::new(),
+            resume: LogResume::default(),
+            cancel: CancellationToken::new(),
+        };
+
+        tokio::time::timeout(Duration::from_secs(20), watcher.run())
+            .await
+            .expect("run() must return rather than hold this observation open");
+
+        let drained: Vec<String> = watcher.drained.iter().cloned().collect();
+        drop(watcher);
+        let mut events = Vec::new();
+        while let Some(event) = stream.recv().await {
+            events.push(event);
+        }
+        (drained, events)
+    }
+
+    /// **A pod that goes quiet past the idle deadline must not take the run's
+    /// remaining log and test results with it — Critical, whole-branch review
+    /// C1.**
+    ///
+    /// The give-up used to `break`, which falls through to `emit_results`,
+    /// marks the pod drained, and returns `true`; `run` then reached `finish`
+    /// and emitted `Finished`. `IngestService::finish` records the terminal
+    /// state, the run leaves `active_states()`
+    /// (`infra::storage::runs_sea_repo::active_states`, `dispatching |
+    /// running`), and `reattach_watchers`' candidate query filters on exactly
+    /// that — so there was no re-attach, ever, and every line and every
+    /// `=== TEST_CASE: … ===` marker after the gap was permanently absent
+    /// while the verdict still came from Argo's workflow phase.
+    ///
+    /// These two assertions are the ones that pin it, and each fails against
+    /// the pre-fix code: `drained` non-empty is what forecloses a retry
+    /// within this call, and `Finished` is what forecloses re-attach across
+    /// calls.
+    #[tokio::test]
+    async fn an_idle_give_up_neither_drains_the_pod_nor_finishes_the_run() {
+        let (drained, events) = observe_one_pod_cluster(|| ScriptedBody::Wedged, 1).await;
+
+        assert!(
+            drained.is_empty(),
+            "an idle give-up is not a completed read: marking the pod drained is what stops \
+             this watch call from ever retrying it, got {drained:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::Finished { .. })),
+            "an observation abandoned mid-log must not report a verdict: a `Finished` here \
+             retires the run out of `active_states()` and permanently forecloses the \
+             re-attach that recovers the rest of the log, got {events:?}"
+        );
+    }
+
+    /// **The same defect one line up: a mid-stream reset — whole-branch
+    /// review I4.**
+    ///
+    /// A ledger note claimed this branch was "recovered on the next
+    /// re-attach". It was not, for exactly the reason above: the recovery it
+    /// named cannot happen once `Finished` has retired the run. A reset on a
+    /// `follow: true` stream is ordinary, so this was the commoner of the two
+    /// paths into the same loss.
+    ///
+    /// `log_follow_idle_seconds: 3600` so the idle arm provably cannot be
+    /// what ends this call — the reset arrives on the second poll of the
+    /// body, long before it.
+    #[tokio::test]
+    async fn a_mid_stream_reset_neither_drains_the_pod_nor_finishes_the_run() {
+        let (drained, events) =
+            observe_one_pod_cluster(|| ScriptedBody::LineThenReset { line_sent: false }, 3600)
+                .await;
+
+        assert!(
+            drained.is_empty(),
+            "a reset leaves the rest of the log unread; marking the pod drained claims the \
+             opposite, got {drained:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::Finished { .. })),
+            "a truncated read must not report a verdict, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ExecutionEvent::Log { line, .. } if line.contains("one line before the reset")
+            )),
+            "whatever did arrive before the reset is still an observation and must reach \
+             the sink, got {events:?}"
         );
     }
 

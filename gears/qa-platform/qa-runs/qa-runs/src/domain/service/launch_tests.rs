@@ -1270,6 +1270,41 @@ async fn a_denied_nested_plan_yaml_read_fails_the_launch_rather_than_going_paral
     );
 }
 
+/// **The third place the same grant is read, and until whole-branch review I5
+/// it answered a different status.** `plan_target_facts`' own `get_plan` --
+/// the read that resolves *which files the run contains*, not the exclusivity
+/// scan the two tests above are about -- mapped every `QaCatalogError` through
+/// `catalog_error` to `DomainError::Catalog` and a 500, so one missing grant
+/// produced a 403 through the nested read and a 500 through this one.
+///
+/// Neither is unsafe (both fail the launch) and that is precisely why nothing
+/// caught it: what this pins is that the module now holds ONE rule for "which
+/// `QaCatalogError` variant is a deny", which is the drift this file's header
+/// warns about twice.
+#[tokio::test]
+async fn a_denied_target_plan_read_is_forbidden_rather_than_a_catalog_fault() {
+    let harness = Builder::new()
+        .catalog(MockCatalog::new().with_denied_plan(REPO_ID, "tests/plan.yaml"))
+        .build()
+        .await;
+
+    let err = harness
+        .service
+        .launch(&ctx(OWNER_TENANT), plan_request())
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, DomainError::Forbidden),
+        "a denied target plan.yaml read is the same missing grant the nested read answers \
+         403 for, and this module classifies it in one place; got {err:?}"
+    );
+    assert!(
+        harness.runs.created().is_empty(),
+        "resolution runs before the run row is created"
+    );
+}
+
 /// Every nested plan unresolvable: parallel at tier `Default`, and still no
 /// error. `Default` is the honest answer — nothing was asked and answered — and
 /// it is what the aggregate warning exists to make visible.

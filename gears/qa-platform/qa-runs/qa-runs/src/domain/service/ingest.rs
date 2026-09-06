@@ -125,6 +125,12 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::{LogArchive, LogFanout, SerializedDb, actions, resources};
+// A domain module reaching into `api::rest` for a constant is the layering
+// complaint whole-branch review I2 records and defers: the number is
+// write-side policy that happens to live beside the read-side cap it is
+// derived from. Importing it is still strictly better than a second copy of
+// `256` here, which is the drift this crate keeps re-discovering.
+use crate::api::rest::sse::ASSUMED_ARCHIVE_PREFIX_BYTES;
 use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::{
     ExecutionEvent, ExecutionStream, NodeOutcome, TestObservation,
@@ -953,6 +959,42 @@ where
         prefixed.push('[');
         prefixed.extend(node.chars().map(flatten_log_char));
         prefixed.push_str("] ");
+        // The one place the archive prefix's real width exists. `api::rest::sse`
+        // reserves `ASSUMED_ARCHIVE_PREFIX_BYTES` for it in
+        // `WRITE_SIDE_MAX_LINE_BYTES` and has no way to see a node name, so an
+        // assumption it documents but nothing measures is how a wrong
+        // dropped-byte count would reach an operator with no trail back to its
+        // cause. Measured after the prefix and before the line, so this is the
+        // prefix alone. Today's one producer is `format!("repo-{uuid}")`, ~41
+        // bytes wrapped, with ~212 to spare — so this is a tripwire for a
+        // future producer, not a live condition.
+        //
+        // Not a hard failure in release: the line still archives correctly, and
+        // the cost of crossing this is one under-reported truncation count, not
+        // a lost line. Once per process, because a node that crosses it crosses
+        // it on every one of its lines.
+        debug_assert!(
+            prefixed.len() <= ASSUMED_ARCHIVE_PREFIX_BYTES,
+            "archive prefix for node {node:?} is {} bytes, over api::rest::sse::\
+             ASSUMED_ARCHIVE_PREFIX_BYTES ({ASSUMED_ARCHIVE_PREFIX_BYTES}); \
+             WRITE_SIDE_MAX_LINE_BYTES no longer reserves enough and this node's \
+             truncated lines will be re-cut on read with a wrong dropped-byte count",
+            prefixed.len()
+        );
+        if prefixed.len() > ASSUMED_ARCHIVE_PREFIX_BYTES {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                warn!(
+                    %node,
+                    prefix_bytes = prefixed.len(),
+                    assumed = ASSUMED_ARCHIVE_PREFIX_BYTES,
+                    "this node's archive prefix is wider than api::rest::sse reserves for it; \
+                     an over-long line from this node is truncated twice and the marker it \
+                     carries under-reports the dropped bytes. Raise \
+                     ASSUMED_ARCHIVE_PREFIX_BYTES or shorten the node name",
+                );
+            });
+        }
         prefixed.extend(line.chars().map(flatten_log_char));
         // The archive gets the **same string** the subscribers get — see this
         // method's "The prefix" doc section above.

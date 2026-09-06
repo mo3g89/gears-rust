@@ -59,3 +59,21 @@ grep -q 'access_log .* sse_no_query' "$rendered" \
 awk '/^    location ~ \^\/qa\/v1\/runs/,/^    }/' "$rendered" | grep -q 'access_log .* sse_no_query' \
   || { echo "FAIL: sse_no_query is not applied inside the SSE location"; exit 1; }
 echo "PASS: SSE location redacts the access-token query string from its access log"
+
+# THE OTHER HALF OF THE SAME LEAK. `log_format` governs the access log only;
+# nginx writes upstream failures to the ERROR log in a fixed format that
+# carries the whole request line, token and all -- twice per failure, in
+# `request:` and again in `upstream:`. A gears restart makes an `EventSource`
+# reconnect against a 502 in a loop, so it recurs exactly when the deployment
+# is unhealthy. `crit` drops `error`-level entries for this location only.
+# Whole-branch review I3. Same anchoring as the check above, and for the same
+# reason: the template's own comment quotes this location pattern at column 0.
+awk '/^    location ~ \^\/qa\/v1\/runs/,/^    }/' "$rendered" | grep -qE 'error_log +[^ ]+ +crit;' \
+  || { echo "FAIL: SSE location does not raise its error_log to crit -- an upstream 502 on this route writes ?access_token=eyJ... to the error log"; exit 1; }
+# And ONLY inside it: a server-level `error_log ... crit` would blind every
+# other route, which is a far bigger loss than this one route's upstream detail.
+if grep -qE '^ {0,4}error_log +[^ ]+ +crit;' "$rendered"; then
+    echo "FAIL: error_log crit appears outside the SSE location -- it must not silence the whole server"
+    exit 1
+fi
+echo "PASS: SSE location suppresses upstream-failure error-log entries, and only that location"

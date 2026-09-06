@@ -68,6 +68,35 @@ use crate::api::rest::dto::RunLogLineDto;
 /// harm as truncating a status, and this module has no way to say 'the rest of
 /// this line is in the archived log'"*. This layer can say it, which is what
 /// makes the cap acceptable here and not there.
+///
+/// # It is no longer only a read-side number, and changing it is not only a
+/// bandwidth decision
+///
+/// Whole-branch review I2. Everything above describes what this constant does
+/// for *this endpoint*, and that was the whole of it when it was written. It is
+/// now also the input to [`WRITE_SIDE_MAX_LINE_BYTES`], which is what
+/// `argo::watch::handle_line` truncates to **before the line is archived** — so
+/// this number decides what is written to the database, and therefore what
+/// every `first_line`/`last_line` resume anchor
+/// (`domain::repos::LogResume`) contains.
+///
+/// **Lowering it is a one-way migration for every run already on disk, and it
+/// fails quietly.** An anchor archived under the old value holds text longer
+/// than a post-deploy re-read of the same line produces, so
+/// `LineSkip`'s first-line guard mismatches for every affected node,
+/// suppression is disabled for that node for the rest of the run, and review
+/// finding #50's unbounded `CONCAT` growth returns for every live run at the
+/// moment of the deploy. The only signal is a `debug!` that attributes the
+/// mismatch to log rotation, which is the other thing that produces it. Raising
+/// it is safe in that direction (a longer cap cannot shorten an existing
+/// anchor) but widens what a single line may cost the broadcaster and the
+/// archive row.
+///
+/// So: change this for SSE framing reasons alone only when no run is live, or
+/// accept one run's worth of duplicated archive text. The constant stays here
+/// rather than moving to `infra` — `infra` depending on `api::rest` is a real
+/// layering complaint and a later phase owns it — so this paragraph is the only
+/// thing standing between a bandwidth tweak and that outcome.
 pub const MAX_LINE_BYTES: usize = 8 * 1024;
 
 /// How long one live-log connection may stay open.
@@ -158,7 +187,20 @@ pub const TRUNCATION_MARKER_MAX: usize =
 /// reappears: a write-side truncation marker gets re-cut on read,
 /// reporting a dropped-byte count two orders of magnitude short of the
 /// truth — not a panic, not data loss, a misdiagnosis.
-const ASSUMED_ARCHIVE_PREFIX_BYTES: usize = 256;
+///
+/// **Documented but unenforced was the whole of the problem** (whole-branch
+/// review, stale one-liner #2): a misdiagnosis nothing announces is a
+/// misdiagnosis nobody traces back to here. `IngestService::fan_out_log`
+/// now measures the prefix it actually built against this number and says
+/// so — `debug_assert!` in a debug build, a `warn!` once per process
+/// otherwise. It is deliberately not a hard failure in release: an
+/// over-long node name still archives correctly, it only makes one
+/// dropped-byte count wrong, and refusing to archive the line would be a
+/// worse answer than archiving it with a warning.
+/// (`pub(crate)` only so `service::ingest::fan_out_log` — the one place the
+/// real prefix is built — can check the assumption instead of restating the
+/// number. Nothing outside this crate has any use for it.)
+pub(crate) const ASSUMED_ARCHIVE_PREFIX_BYTES: usize = 256;
 
 /// The cap a **write-side** caller must truncate to before its output is
 /// wrapped in an archive prefix and read back through this module's own

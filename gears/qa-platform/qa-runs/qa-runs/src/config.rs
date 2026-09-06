@@ -195,9 +195,33 @@ pub struct QaRunsConfig {
     ///
     /// `0` **remains accepted as an explicit "unbounded" opt-out** — the
     /// frozen guide's convention for this knob (guide lines 116-120) and the
-    /// behaviour every deployment got before this default changed. A
-    /// deployment relying on today's unlimited concurrency sets
-    /// `max_concurrent_runs: 0` and keeps it.
+    /// behaviour every deployment got before this default changed.
+    ///
+    /// **Whole-branch review I1: that opt-out was, until this wave, not
+    /// reachable in the shipped image**, and this paragraph said "sets
+    /// `max_concurrent_runs: 0` and keeps it" without naming anywhere it could
+    /// be set. `gears/qa-platform/config/qa-platform-stack.yaml` had no such
+    /// key; the Helm chart embeds that file **verbatim** (`.Files.Get` in
+    /// `gears-config-configmap.yaml`, byte-pinned by
+    /// `deploy/helm/tests/test_chart_file_sync.py`), and the file's own comment
+    /// says it is baked into the image and cannot be edited per deployment. It
+    /// is now `--set qaRuns.maxConcurrentRuns=0` on the chart, rendered into
+    /// the fragment `entrypoint.sh` inserts at `QA_RUNS_ARGO_ANCHOR`, which the
+    /// chart sets unconditionally.
+    ///
+    /// **`${QA_RUNS_MAX_CONCURRENT_RUNS:-50}` in that file would not have
+    /// worked, and this was checked rather than reasoned about.** `${VAR}`
+    /// expansion is opt-in per config struct and runs *after* serde, on
+    /// `String` fields marked `#[expand_vars]`
+    /// (`libs/toolkit/src/context.rs`, `config_expanded_or_default`).
+    /// [`QaRunsConfig`] derives no `ExpandVars`, `gear.rs` loads through plain
+    /// `ctx.config_or_default()`, and this field is a `u32` — so a placeholder
+    /// there would fail to deserialize the whole `qa-runs` section rather than
+    /// expand. `entrypoint.sh` does targeted `sed` on named anchors, not an
+    /// envsubst pass, so it does not reach it either. Making the placeholder
+    /// route work means retyping this knob as a `String` and moving the gear
+    /// onto the expanded loader — a change to how the gear reads *all* of its
+    /// config, for one knob, and not this wave's.
     ///
     /// **This is a deployment-visible behaviour change, and the 429 is the
     /// smaller half of it.** A deployment that leaves this knob unset moves
@@ -509,8 +533,9 @@ pub struct ArgoExecutorConfig {
     /// its own silence already bounded by Argo's `activeDeadlineSeconds`
     /// (`domain::timeout`'s whole module resolves this per run): once that
     /// fires, Argo kills the pod, the log stream reaches end-of-file, and
-    /// `follow` returns on its own through the pre-existing "log stream ended
-    /// early" path — no idle timeout needed for a pod that is merely slow.
+    /// `follow` returns on its own through its `Ok(Ok(None))` arm — the one
+    /// exit that is a completed read — no idle timeout needed for a pod that
+    /// is merely slow.
     /// What is *not* already bounded that way is a wedged **connection** to an
     /// otherwise-healthy pod, which is a transport failure, not a
     /// test-duration one — the same class [`Self`]'s own note below on
@@ -523,28 +548,52 @@ pub struct ArgoExecutorConfig {
     /// call the thing on the other end dead" — and in the same order of
     /// magnitude as `kube`'s own 295 s, not two orders of magnitude above it.
     ///
-    /// # The trade this makes, stated honestly
+    /// # The trade this makes, and what whole-branch review C1 found wrong with it
     ///
-    /// Tightening from eight hours to 600 seconds is not free. A pod that is
-    /// genuinely healthy but quiet for longer than this has its *individual*
-    /// follow abandoned: no further `Log`/`TestResult` events reach the sink
-    /// from that pod for the rest of *this* `watch()` call (the pod is marked
-    /// drained and is not retried within the same call — see
+    /// **The paragraph that stood here was false, and it is worth saying how it
+    /// was false rather than simply replacing it.** It said a pod quiet for
+    /// longer than this had its follow abandoned at "a loss of granularity, not
+    /// of correctness", because `run`'s loop resumed and Argo's eventual
+    /// terminal phase still produced a correct `Finished`; and that if
+    /// something later ended the whole observation, the dispatcher's 5 s
+    /// re-attach (`domain::service::dispatch::reattach_watchers`) reopened the
+    /// stream and `LogResume` suppressed the duplicate — "wasteful, not lossy".
+    ///
+    /// Both halves were right about the mechanism and wrong about the order.
+    /// The `Finished` was not the *consolation* for the abandoned follow, it
+    /// was what **prevented** the re-attach: `IngestService::finish` records
+    /// the terminal state, `runs_sea_repo::active_states` is `dispatching |
+    /// running` and nothing else, and `watch_candidates_query` filters on
+    /// exactly that — so the run stopped being a re-attach candidate at the
+    /// same moment its log stopped being read. The re-attach offered as the
+    /// safety net is real only when an observation ends *abnormally*; on this
+    /// path it ended by reporting a verdict.
+    ///
+    /// What was lost was the rest of that pod's log and, worse, every
+    /// `=== TEST_CASE: … ===` marker after the gap — those tests produced no
+    /// `TestResult` and no row, the five counters are tallied from stored rows,
+    /// and the verdict came from Argo's workflow phase regardless. A runner
+    /// exiting 0 despite failures therefore produced a run reported
+    /// **Succeeded with a truncated, all-passing result set**.
+    ///
+    /// **What the give-up does now**: it ends the whole observation without a
+    /// `Finished` — see
     /// [`Watcher::follow`](crate::infra::executor::argo::watch::Watcher::follow)'s
-    /// own doc). That is a loss of granularity, not of correctness: `run`'s
-    /// own loop resumes (it was blocked, not ended) and the workflow's
-    /// eventual terminal phase, whenever Argo reports one, still produces a
-    /// correct `Finished` — delayed by at most this many seconds beyond
-    /// whatever it would otherwise have taken. If something else later ends
-    /// this whole observation for an unrelated reason (a real API error,
-    /// cancellation, a process restart), the dispatcher's own periodic
-    /// re-attach (`domain::service::dispatch::reattach_watchers`, its 5 s
-    /// tick) opens a fresh `watch()`, and `LogResume` suppresses whatever this
-    /// pod's log had already archived before the gap — wasteful, a full
-    /// re-read of that pod's log, but not lossy: nothing already emitted is
-    /// repeated or dropped. That second mechanism already existed before this
-    /// task; tightening this field does not change it, only how often a
-    /// legitimately-quiet pod's *chatter* (not its *outcome*) gets cut short.
+    /// own doc for the trace and for why end-of-file is the only exit that
+    /// still reports one. The run stays in `active_states`, `reattach_watchers`
+    /// re-attaches on its next 5 s tick, and `LogResume` suppresses whatever
+    /// was already archived. A pod that was merely quiet loses nothing at all;
+    /// it resumes.
+    ///
+    /// **The cost this field now buys is a loop, not a truncation.** A
+    /// genuinely wedged connection wedges the re-attach too, so the run
+    /// re-reads that pod's log every `log_follow_idle_seconds` until the
+    /// control-plane timeout sweep reclaims it — bounded, and loud: each pass
+    /// logs a `warn!` naming the pod, the node and this deadline. Lowering this
+    /// value tightens that loop; raising it loosens the loop and lengthens the
+    /// stall a wedged pod imposes on its siblings, since `drain_pods` follows
+    /// pods one at a time inside `run`'s own loop. That is the trade this
+    /// number now makes, and neither direction silently drops a test result.
     ///
     /// Read through `.max(1)` at the call site (`Watcher::follow`), the same
     /// guard [`Self::status_poll_seconds`] gets, so a misconfigured `0` cannot
