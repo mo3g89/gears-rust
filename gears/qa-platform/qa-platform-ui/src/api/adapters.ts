@@ -982,11 +982,20 @@ export function scheduleNotificationsReq(
 // Test repositories (CONTRACT-DIFF rows 29, 30, 33, 35, 37)
 // ---------------------------------------------------------------------------
 
-/** `TestRepositoryDto` -> `TestRepository`. `content_root` -> `tests_root`, and X7's one
- *  nullable `credential_ref` replaces legacy's `ssh_key_id` + `has_token` pair. The
- *  reference is surfaced through `ssh_key_id` because that is the field the edit form
- *  binds; `has_token` becomes "there is a credential", which is the one true bit legacy's
- *  boolean carried. `source_type` is `'git'` for the reason given on `planFromDto`. */
+/** `TestRepositoryDto` -> `TestRepository`. `content_root` -> `tests_root`.
+ *
+ *  **`ssh_key_id` is no longer derived from the DTO; `has_token` now comes from
+ *  `has_credential` instead of `credential_ref`.** The DTO used to publish the raw
+ *  `credential_ref` and this adapter forwarded it into `ssh_key_id` — the gear's read
+ *  DTO no longer does that (review finding #2: a LIST/GET caller could redeem the
+ *  credstore reference for the repository's git credentials), so deriving `ssh_key_id`
+ *  from it here would just re-open the leak the gear closed. `ssh_key_id` is hardcoded
+ *  `null` because nothing reads it: no component prefills an edit form from it. The
+ *  gear replaced the reference with a boolean, `has_credential` (a fact, not a
+ *  redeemable reference), specifically so `has_token` — which does have a live
+ *  consumer, `ProductDetailPage`'s "Auth" column — keeps reporting real state instead
+ *  of always reading "Public/none". `source_type` is `'git'` for the reason given on
+ *  `planFromDto`. */
 export function repoFromDto(dto: S['TestRepositoryDto']): TestRepository {
   return {
     id: dto.id,
@@ -997,9 +1006,9 @@ export function repoFromDto(dto: S['TestRepositoryDto']): TestRepository {
     product_id: dto.product_id,
     default_branch: dto.default_branch,
     tests_root: dto.content_root,
-    ssh_key_id: dto.credential_ref ?? null,
+    ssh_key_id: null,
     ssh_key_name: null,
-    has_token: !!dto.credential_ref,
+    has_token: dto.has_credential,
     last_synced_at: dto.last_synced_at ?? null,
     sync_error: dto.sync_error ?? null,
     created_at: dto.created_at,

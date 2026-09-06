@@ -303,7 +303,7 @@ const REPO_DTO = {
   product_id: 'prod-1',
   default_branch: 'main',
   content_root: '',
-  credential_ref: null,
+  has_credential: false,
   last_synced_at: null,
   sync_error: null,
   created_at: '2026-08-01T00:00:00Z',
