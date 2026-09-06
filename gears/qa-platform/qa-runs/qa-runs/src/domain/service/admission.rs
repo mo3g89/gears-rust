@@ -139,8 +139,11 @@ pub(in crate::domain::service) struct GlobalCapGate {
 impl GlobalCapGate {
     /// Take one slot, or refuse.
     ///
-    /// `max == 0` is unlimited and costs no executor call, which is the shipped
-    /// default (`run_queue.rs:856-858`).
+    /// `max == 0` is unlimited and costs no executor call — the legacy
+    /// behaviour (`run_queue.rs:856-858`) and, since review finding #19, an
+    /// explicit opt-out rather than this gear's shipped default. See
+    /// `crate::config::QaRunsConfig::max_concurrent_runs` for the current
+    /// default and what enabling the cap costs on this path.
     async fn reserve(&self, executor: &dyn RunExecutor, max: u32) -> Result<CapSlot, DomainError> {
         if max == 0 {
             return Ok(CapSlot { outstanding: None });

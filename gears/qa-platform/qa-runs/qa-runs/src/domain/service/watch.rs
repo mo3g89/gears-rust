@@ -307,17 +307,29 @@ impl WatchRegistry {
     /// Record `handle` so [`Self::shutdown`] can wait for it.
     ///
     /// Called once per successful [`Self::claim`], from
-    /// [`SpawningRunWatcher::attach`] alone. Nothing removes a handle once
-    /// pushed except `shutdown` draining the `Vec` — an ended observer's
-    /// handle sits here, already resolved, until the next shutdown collects
-    /// it. That is a real memory cost, not a leak: `JoinHandle<()>` is a few
-    /// words, and it is bounded by the same thing that bounds the registry
-    /// itself — see [`SpawningRunWatcher`]'s header.
+    /// [`SpawningRunWatcher::attach`] alone.
+    ///
+    /// **Reaps finished handles before pushing, and that reap is load-bearing
+    /// rather than tidiness.** `claimed` is bounded by *live* runs — the slot
+    /// drops when the observer ends, so its `HashSet` cannot outgrow however
+    /// many runs are live right now. This `Vec` is a different shape: with
+    /// nothing removing a finished handle except a `shutdown` call, it is
+    /// bounded by *cumulative attaches over the process's whole lifetime*,
+    /// not by anything live. `drain`'s own doc names the amplifier: a run the
+    /// executor has forgotten is "re-watched once per tick until the
+    /// control-plane timeout sweep reclaims it", and each of those re-attaches
+    /// is a `claim` that ends almost immediately and a `track` that would
+    /// otherwise never be removed. At the 5 s dispatcher cadence against an
+    /// 86,400 s `max_timeout_seconds`, one forgotten execution alone would
+    /// push on the order of 17,000 handles before the sweep reclaims the run
+    /// — a real, unbounded-with-time growth a `shutdown()` that never runs
+    /// (this gear's normal operating mode) would never reap. `retain` here is
+    /// what keeps the `Vec` bounded by *live* observers too, the same as
+    /// `claimed`, rather than by history.
     fn track(&self, handle: JoinHandle<()>) {
-        self.handles
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(handle);
+        let mut handles = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
+        handles.retain(|h| !h.is_finished());
+        handles.push(handle);
     }
 
     /// Wait for every observer this registry has ever tracked to end.
@@ -331,15 +343,18 @@ impl WatchRegistry {
     ///   `an observer's own select` is for. Calling this alone blocks until
     ///   every live run finishes or fails on its own, which for a healthy run
     ///   is `cpt-cf-qa-nfr-run-duration`'s eight hours.
-    /// * **It can hang** on a task blocked inside `RunExecutor::watch` or
-    ///   inside the ingest path's own database round trip, past the point the
-    ///   token was cancelled — cancellation is cooperative, checked only at
-    ///   the `tokio::select!` in [`SpawningRunWatcher::attach`], not
-    ///   preemptive. A task already past that point, awaiting an
-    ///   uncancellable read, does not notice the token at all and finishes on
-    ///   its own schedule. `gear.rs`'s `serve` awaits this inside the
-    ///   framework's own `stop_timeout`, which is what actually bounds how
-    ///   long the *process* waits — this method itself has no timeout.
+    /// * **It can still take a while, in principle.** `tokio::select!` owns
+    ///   the whole `drain(...)` future — not just the point between two of its
+    ///   `.await`s — so every await inside it, including a blocked
+    ///   `RunExecutor::watch` call or the ingest path's own database round
+    ///   trip, *is* a cancellation point: cancelling drops that future,
+    ///   in-flight I/O included, on the next poll. What is **not** a
+    ///   cancellation point is a synchronous, non-yielding stretch of CPU
+    ///   work inside `drain`, if one is ever added — there is none today, but
+    ///   nothing enforces that going forward. `gear.rs`'s `serve` awaits this
+    ///   inside the framework's own `stop_timeout`, which is what bounds how
+    ///   long the *process* waits regardless — this method itself has no
+    ///   timeout of its own.
     /// * **A `claim`/`attach` racing this call can go unwaited.** A handle
     ///   pushed by [`Self::track`] after this method has taken its snapshot of
     ///   the `Vec` is not in that snapshot, so a `shutdown` that returns while

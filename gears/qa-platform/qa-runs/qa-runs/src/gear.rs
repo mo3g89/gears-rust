@@ -582,13 +582,31 @@ impl QaRuns {
         }
 
         let result = supervise(cancel, &tasks, tickers).await;
-        // Awaited after the tickers have stopped (or failed), not raced
-        // against them: `reattach_watchers` only runs from inside the
-        // dispatcher tick `supervise` has just drained, so every observer
-        // that will ever be spawned on this replica has been by the time this
-        // line runs. Bounded by the framework's own `stop_timeout` racing
-        // this whole function, not by anything in this method - see
-        // `AppServices::shutdown`'s doc for what can make it hang regardless.
+        // Awaited once the tickers have stopped or `supervise` has given up on
+        // them, not raced against them - `reattach_watchers` only runs from
+        // inside the dispatcher tick, and `tasks` (which gates it) is
+        // cancelled before this line runs either way.
+        //
+        // **Not a claim that every observer has necessarily been spawned by
+        // now**, and an earlier version of this comment said so. On the
+        // premature-failure path - one ticker panics or exits before `cancel`
+        // ever fires - `supervise` cancels `tasks` and returns `Err` without
+        // waiting for a *surviving* ticker's in-flight tick to notice and
+        // stop (`supervise`'s own body: it returns as soon as the first
+        // ticker joins, rather than looping `tickers.join_next()` on that
+        // path). A tick already past its own cancellation check when that
+        // happens could still call `attach` after this line has started
+        // running. That is exactly the race `WatchRegistry::shutdown`'s doc
+        // already names and narrows rather than closes: `tasks` (and so the
+        // watcher's own token, bridged above) is already cancelled by the
+        // time any such attach could happen, so the new observer's
+        // `tokio::select!` sees it on the first poll and ends immediately
+        // rather than doing any work.
+        //
+        // Bounded by the framework's own `stop_timeout` racing this whole
+        // function either way, not by anything in this method - see
+        // `AppServices::shutdown`'s doc for what else can make it take a
+        // while regardless.
         rt.services.shutdown().await;
         result
     }
@@ -1237,6 +1255,42 @@ mod tests {
             body.contains("rt.services.shutdown()"),
             "and await the production watcher's shutdown before returning, or a \
              caller has no way to know an observer might still be unwinding: {body}"
+        );
+
+        // The bridge specifically, isolated from every other `cancel.cancelled()`
+        // in this function (the two idle-until-cancelled early returns
+        // legitimately await `cancel` directly). Fix round 1, Important 3:
+        // the first version of this test passed with the bridge wired to
+        // `cancel.cancelled()` instead of `tasks.cancelled()` - precisely the
+        // bug self-review caught, and re-introducing it leaves the other
+        // three assertions above green because `rt.shutdown`, `.cancel()` and
+        // `rt.services.shutdown()` are all still present. Only this pins the
+        // fix itself: `tasks`, not `cancel`, is what `supervise` cancels
+        // unconditionally on every exit path, including a ticker panicking
+        // before `cancel` ever fires - see the bridge's own comment.
+        let spawn_start = body
+            .find("tokio::spawn({")
+            .expect("serve still spawns the bridge task");
+        let bridge = &body[spawn_start..];
+        let spawn_end = bridge
+            .find("});")
+            .expect("the bridge's tokio::spawn block is closed");
+        let bridge = &bridge[..spawn_end];
+
+        assert!(
+            bridge.contains("tasks.cancelled()"),
+            "the bridge must await `tasks`, not `cancel` directly, or the \
+             premature-ticker-failure path never wakes it: {bridge}"
+        );
+        assert!(
+            !bridge.contains("cancel.cancelled()"),
+            "the bridge awaiting `cancel` directly is the exact regression this \
+             test exists to catch: {bridge}"
+        );
+        assert!(
+            bridge.contains("shutdown.cancel()"),
+            "and it must actually cancel the watcher's token, not just observe \
+             `tasks`: {bridge}"
         );
     }
 

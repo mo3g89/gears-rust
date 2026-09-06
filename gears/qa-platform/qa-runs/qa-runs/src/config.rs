@@ -199,16 +199,35 @@ pub struct QaRunsConfig {
     /// deployment relying on today's unlimited concurrency sets
     /// `max_concurrent_runs: 0` and keeps it.
     ///
-    /// **This is a deployment-visible behaviour change.** A deployment that
-    /// leaves this knob unset moves from "never rejected for concurrency" to
-    /// "429 at launch past 50 concurrent runs" the moment it upgrades. That is
-    /// deliberate: it is also the only knob that transitively bounds how many
-    /// result observers a process can hold open at once — see
+    /// **This is a deployment-visible behaviour change, and the 429 is the
+    /// smaller half of it.** A deployment that leaves this knob unset moves
+    /// from "never rejected for concurrency" to "429 at launch past 50
+    /// concurrent runs" — but enabling the cap by default also puts a
+    /// cross-plane `executor.list_active()` call on the front of **every**
+    /// launch (`admission::GlobalCapGate::reserve`), where a disabled cap
+    /// (`max == 0`) short-circuits before that call is ever made. And that
+    /// call's failure direction is the strict one:
+    /// `AdmissionService::enforce_global_cap`'s own doc states the asymmetry
+    /// against the depth limit — over-committing is the worse outcome for
+    /// this cap, so **an unreadable executor now fails the launch**, where a
+    /// disabled cap or the depth limit alone would have let it through. In
+    /// concrete terms: a launch that today succeeds during an Argo outage can,
+    /// after this default takes effect, fail with a 500 instead. Also worth
+    /// stating plainly: the cap **refuses rather than queues** a burst past
+    /// the limit, so it does not buy back the queue as a buffer the way
+    /// `queue_max_depth` does — a deployment that saw bursts absorbed by the
+    /// queue before will see some of them rejected outright now. All of this
+    /// is the ruled trade-off, not a defect — a concurrency cap that cannot be
+    /// evaluated should fail closed, and the alternative is the gear staying
+    /// unbounded — but it belongs here rather than being discovered later.
+    ///
+    /// The knob is also the only one that transitively bounds how many result
+    /// observers a process can hold open at once — see
     /// [`crate::domain::service::watch::SpawningRunWatcher`]'s header, "The
     /// number of observers is bounded transitively, by admission — not by
     /// this registry" — and it is the only knob that bounds how many claims
     /// can exist at once, which is what `QueueRepository::all_claims`' scan
-    /// window has to cope with when it is left at its default of `0`.
+    /// window has to cope with when the operator opts back into `0`.
     pub max_concurrent_runs: u32,
 
     /// Fallback run timeout when neither the launch request nor the plan
@@ -706,17 +725,23 @@ mod tests {
         );
     }
 
-    /// **The number is not just a pinned field — it is a real cap.** Review
-    /// finding #19: the shipped default used to be `0`, which
-    /// `domain::queue::global_cap_status` reads as "disabled" regardless of how
-    /// many runs are active, so no deployment that left the knob unset was ever
-    /// refused for concurrency. This drives the exact pair
-    /// `admission::AdmissionService::enforce_global_cap` calls with the
-    /// default, so a regression that reverted the default to `0` (or any other
-    /// value that never reaches the limit) fails here without needing a full
-    /// admission-service harness.
+    /// **Named for what this actually exercises, not for the property it
+    /// stands in for.** Fix round 1, Minor: this used to be named
+    /// "the default cap actually bounds concurrent runs", which is a claim
+    /// about `AdmissionService` that a test calling two pure functions does
+    /// not get to make on its own. What this *does* pin: the default plugged
+    /// into `domain::queue::global_cap_status` and `cap_reached` — the exact
+    /// pair `admission::GlobalCapGate::reserve` calls — reads as a real,
+    /// reached cap rather than as "disabled". Before this task the shipped
+    /// default was `0`, which `global_cap_status` reads as "disabled"
+    /// regardless of how many runs are active, so no deployment that left the
+    /// knob unset was ever refused for concurrency; a regression that
+    /// reverted the default to `0` (or any other value the pair never treats
+    /// as reached) fails here. Whether `GlobalCapGate` itself calls this pair
+    /// correctly is a different, already-covered claim —
+    /// `admission`'s own test suite owns that.
     #[test]
-    fn the_default_cap_actually_bounds_concurrent_runs() {
+    fn the_default_reads_as_a_reached_cap_through_global_cap_status_and_cap_reached() {
         use crate::domain::queue::{cap_reached, global_cap_status};
 
         let max = QaRunsConfig::default().max_concurrent_runs;

@@ -203,13 +203,13 @@ use toolkit_security::pep_properties;
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::{
-    ExecutionEvent, ExecutionNode, ExecutionRef, NodeOutcome, RunAccess, RunEnv, RunExecutor,
-    RunSpec, RunnerSpec, TestObservation,
+    ExecutionEvent, ExecutionNode, ExecutionRef, ExecutionSink, ExecutionStream, NodeOutcome,
+    RunAccess, RunEnv, RunExecutor, RunSpec, RunnerSpec, TestObservation,
 };
 use crate::domain::repos::{ArchivedLog, LogResume, RunLogsRepository, RunsRepository};
 use crate::domain::service::admission::tests::fakes::{FakeCatalog, FakeEnvironments, PLATFORM_A};
 use crate::domain::service::test_support::{NullLogArchive, OWNER_TENANT};
-use crate::domain::service::watch::WatchTarget;
+use crate::domain::service::watch::{RunWatcher, SpawningRunWatcher, WatchTarget};
 use crate::domain::service::{AppServices, DbProvider, LogArchive, QueueLimits, ServiceDeps};
 use crate::domain::state_machine::ExecutorOutcome;
 use crate::domain::system_actor::TenantBound;
@@ -523,6 +523,109 @@ async fn shutdown_reaches_the_production_watcher_through_app_services() {
             "shutdown must return once every observer this tick spawned has ended, \
              not hang",
         );
+}
+
+/// A `RunExecutor` whose `watch` never ends on its own, unlike
+/// `MockRunExecutor`'s. That mock "materialises the whole sequence into the
+/// channel before returning" (its own module doc) and then drops the sender,
+/// so a real drain against it always completes fast on its own regardless of
+/// cancellation — which is exactly why the mechanism-level test above this
+/// one is built against a bare `WatchRegistry` and a hand-rolled `select!`
+/// instead of driving `attach`. This type exists to close that gap: it hands
+/// back an open channel and keeps the sending half alive for as long as the
+/// executor itself lives, so `ExecutionStream::recv` blocks forever and the
+/// only way `drain` ever returns is the observer's own cancellation.
+#[derive(Default)]
+struct NeverEndingExecutor {
+    // Locked rather than held by value so `watch(&self, ..)` can populate it
+    // on first call; kept `Some` forever after, which is what keeps the
+    // channel open. `Mutex` rather than the async kind: held only for the
+    // instant it takes to assign, never across an `.await`.
+    sink: std::sync::Mutex<Option<ExecutionSink>>,
+}
+
+#[async_trait]
+impl RunExecutor for NeverEndingExecutor {
+    async fn start(&self, _spec: RunSpec) -> Result<ExecutionRef, DomainError> {
+        unreachable!("this test never dispatches through the executor, only watches")
+    }
+
+    async fn watch(
+        &self,
+        _execution_ref: &ExecutionRef,
+        _resume: LogResume,
+    ) -> Result<ExecutionStream, DomainError> {
+        let (sink, stream) = ExecutionStream::channel(1);
+        *self
+            .sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+        Ok(stream)
+    }
+
+    async fn cancel(&self, _execution_ref: &ExecutionRef) -> Result<(), DomainError> {
+        unreachable!("this test never cancels through the executor")
+    }
+
+    async fn list_active(&self) -> Result<std::collections::BTreeSet<ExecutionRef>, DomainError> {
+        unreachable!("this test never reconciles claims")
+    }
+}
+
+/// **The falsifying test finding #18 was missing.** Fix round 1, Important 2:
+/// the mechanism-level test above this one hand-builds a `tokio::spawn` and
+/// `select!` that *mirrors* `SpawningRunWatcher::attach`'s shape rather than
+/// driving `attach` itself, and `shutdown_reaches_the_production_watcher_
+/// through_app_services` above passes regardless of the cancel arm because
+/// `MockRunExecutor`'s drain self-completes. Deleting the cancel arm from
+/// `attach` — the entire point of this task — turned neither of them red.
+///
+/// This one drives the real `SpawningRunWatcher::attach` against
+/// [`NeverEndingExecutor`], whose stream never ends on its own, so the only
+/// way this observer's `drain` ever returns is if `attach`'s `select!`
+/// actually races it against the cancellation token and the token wins.
+/// **Break-tested**: with the cancel arm removed from `attach` (replacing the
+/// `select!` with a bare `drain(...).await`), this test times out rather than
+/// passing — see the fix report for the transcript.
+#[tokio::test]
+async fn cancelling_a_real_attach_ends_an_observer_blocked_forever_in_watch() {
+    let h = harness().await;
+    let executor: Arc<dyn RunExecutor> = Arc::new(NeverEndingExecutor::default());
+    let cancel = CancellationToken::new();
+    let watcher = SpawningRunWatcher::new(executor, Arc::clone(&h.services.ingest), cancel.clone());
+
+    let run_id = Uuid::new_v4();
+    watcher.attach(WatchTarget {
+        run_id,
+        tenant: TenantBound::new(OWNER_TENANT).expect("non-nil"),
+        execution_ref: ExecutionRef::new("never-ending"),
+    });
+    assert!(
+        watcher.is_watching(run_id),
+        "attach must have claimed and spawned the observer"
+    );
+
+    // Let the spawned task actually reach the perpetual read inside `drain`
+    // before cancelling - otherwise a `select!` that raced the two futures
+    // before either was polled even once would prove nothing about which one
+    // actually wins once both are live.
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    cancel.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(5), watcher.shutdown())
+        .await
+        .expect(
+            "cancelling the token must end an observer that would otherwise never \
+             return on its own; if this timed out, attach's select! stopped \
+             racing the cancellation against the drain",
+        );
+
+    assert!(
+        !watcher.is_watching(run_id),
+        "the slot must be freed once the observer actually ends"
+    );
 }
 
 /// **An empty stream is not a failure**, which is the port's contract and the
