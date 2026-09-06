@@ -217,7 +217,7 @@ linting is not running.
 ## `#[cfg(feature = "runner-secret")]` code is neither compiled nor run there.
 ## 39 tests under qa-runs::infra::executor::argo and 13 under
 ## qa-environments' runner-secret writer are what this adds.
-## `--lib` only: `qa-runs/tests/argo_cluster.rs`'s 5 are `#[ignore]`d and want
+## `--lib` only: `qa-runs/tests/argo_cluster.rs`'s 4 are `#[ignore]`d and want
 ## a live cluster.
 test-qa-platform-features: install-tools
 	cargo nextest run -p qa-runs --features argo --lib
