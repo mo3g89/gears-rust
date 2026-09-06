@@ -195,11 +195,13 @@ pub struct FlushReport {
 ///
 /// The read path needs the repository, not the accumulator — the same reason
 /// `LogFanout` deliberately has no `subscribe`. [`Self::resume_positions`]
-/// (Task 13, Finding #50) does not reopen that: it answers counts and a
-/// timestamp, never `text` — the same restraint [`crate::domain::repos::
-/// ArchivedLog`]'s hand-written `Debug` argues for, applied to the signature
-/// instead. The repository round trip this section is really about — a
-/// connection and a resolved `AccessScope` — still happens on
+/// (Task 13, Finding #50) does not reopen that: as of fix-round 2 it answers
+/// counts and two per-node anchor lines (never the whole archived text) —
+/// the same restraint [`crate::domain::repos::ArchivedLog`]'s hand-written
+/// `Debug` argues for, and [`crate::domain::repos::LogPosition`] now argues
+/// for identically, since its two anchors are themselves archived line text.
+/// The repository round trip this section is really about — a connection
+/// and a resolved `AccessScope` — still happens on
 /// [`crate::infra::logs::RunLogArchive`], mirroring how [`Self::flush`]
 /// resolves both, not on this trait.
 ///

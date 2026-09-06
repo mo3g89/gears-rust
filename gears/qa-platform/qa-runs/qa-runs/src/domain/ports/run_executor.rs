@@ -813,13 +813,19 @@ pub trait RunExecutor: Send + Sync {
     ///
     /// **`resume` is what makes re-attachable mean "picks up where it left
     /// off" rather than "starts over".** Before Task 13 (review finding #50)
-    /// this parameter did not exist, `MockRunExecutor` satisfied re-attach by
-    /// replaying every event from the beginning, and the Argo adapter did the
-    /// same for a different reason — it opened every pod log with no
-    /// `since_time` and no `tail_lines` — which is a correctness bug there:
-    /// `append_log` is a `CONCAT` with no truncate, replace or offset
-    /// anywhere in `RunLogsRepository`, so a full replay through it duplicates
-    /// the whole archived log on every re-attach. `resume` is per-node
+    /// this parameter did not exist at all, `MockRunExecutor` satisfied
+    /// re-attach by replaying every event from the beginning, and the Argo
+    /// adapter did the same for a different reason: it opened every pod log
+    /// with no way to skip what it had already sent, and nothing suppressed
+    /// the re-sent lines on the way out either — which was a correctness bug
+    /// there, not a design choice: `append_log` is a `CONCAT` with no
+    /// truncate, replace or offset anywhere in `RunLogsRepository`, so a full
+    /// replay through it duplicated the whole archived log on every
+    /// re-attach. (The adapter still opens a pod log the same plain way
+    /// today — `infra::executor::argo::watch`'s `LineSkip` suppresses the
+    /// re-sent lines afterward instead of asking Kubernetes to filter them;
+    /// that is a deliberate choice, argued for on `LineSkip`'s own doc, not
+    /// the absence this paragraph describes.) `resume` is per-node
     /// (`domain::repos::LogResume`) because the Argo adapter's pods are: each
     /// is a separate log with its own read position. An executor with no
     /// resumable notion of position — the mock's only alternative to

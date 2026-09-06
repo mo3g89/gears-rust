@@ -585,7 +585,11 @@ mod tests {
         // answer partway through this script.
         let resume: LogResume = [(
             "a".to_owned(),
-            crate::domain::repos::LogPosition { lines: 2 },
+            crate::domain::repos::LogPosition {
+                lines: 2,
+                first_line: "a-one".to_owned(),
+                last_line: "a-two".to_owned(),
+            },
         )]
         .into_iter()
         .collect();

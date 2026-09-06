@@ -62,7 +62,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, DynamicObject, ListParams, LogParams};
 use kube::{Client, ResourceExt};
 use serde_json::Value;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::config::ArgoExecutorConfig;
 use crate::domain::error::DomainError;
@@ -231,11 +231,20 @@ fn node_of(pod: &Pod) -> String {
 /// A count has no clock in it. This re-reads a node's pod log from byte 0,
 /// exactly as before this task, and suppresses the first `lines` of what
 /// comes back — the same lines [`domain::repos::LogResume::from_archived_text`]
-/// already counted as archived for that node. It can only ever
-/// *under*-suppress relative to the real log (which re-duplicates, the
-/// direction this crate has always tolerated), never over-suppress relative
-/// to what actually reached the executor, because the archive counts
-/// nothing this mechanism could not also see on a fresh read.
+/// already counted as archived for that node.
+///
+/// **It is not true that a count can never over-suppress relative to what
+/// actually reached the executor — the first version of this doc said so,
+/// and review disproved it.** kubelet only retains a container's log up to
+/// `containerLogMaxSize` × `containerLogMaxFiles` (10Mi × 5 by default); once
+/// rotation has dropped lines from the head, a re-attach's "byte 0" is no
+/// longer this node's true byte 0, and suppressing by the archived count
+/// alone would drop real, never-archived lines — on exactly the long, chatty
+/// run `cpt-cf-qa-nfr-run-duration` exists for. See "Two guards" below for
+/// the fix; the property that survives is narrower than originally claimed:
+/// **guarded**, a count can only ever *under*-suppress relative to the real
+/// log (which re-duplicates, the direction this crate has always
+/// tolerated), never lose a line the archive did not already have.
 ///
 /// The cost is an unchanged one: a re-attach re-reads a node's whole log over
 /// the network, exactly as every attach always has. Finding #50 was about
@@ -245,32 +254,129 @@ fn node_of(pod: &Pod) -> String {
 /// start late instead of at byte 0, and is a real future optimisation that
 /// needs a parser and a schema change neither of which exists yet.
 ///
+/// # Two guards — fix-round 2
+///
+/// See [`domain::repos::LogPosition`]'s own "Two anchors" section for the
+/// full argument; this is the mechanism side of it.
+///
+/// **Rotation, guarded by the first line.** [`Self::consume`] compares the
+/// very first line this node's fresh read produces against
+/// [`LogResume::first_line_for`]'s answer, once, before suppressing
+/// anything. A mismatch means the window has moved — this read's byte 0 is
+/// not the archive's — and the response is to suppress *nothing* for this
+/// node for the rest of this attach: safe, because emitting everything is
+/// the duplication direction, never the loss direction.
+///
+/// **A pre-fix-inflated count, guarded by the last line, detected but not
+/// recoverable.** Once [`Self::consume`] has suppressed exactly as many
+/// lines as the count called for, it compares the last one it actually
+/// suppressed against [`LogResume::last_line_for`]'s answer. A mismatch
+/// means the count itself was wrong — see [`LogResume::lines_for`]'s doc for
+/// the one way that happens, a run whose archive still carries duplicates
+/// from before this fix shipped — and by the time this fires, whatever it
+/// wrongly suppressed already did not reach the sink. There is no re-read
+/// that gets it back, so the contract here is "log loudly enough that an
+/// operator can tell this happened", not "recover it": an `error!` naming
+/// the execution reference, the node, and both lines.
+///
 /// Pulled out of [`Watcher::follow`] as its own type so the suppression
 /// decision — the actual fix — is unit-testable without a Kubernetes API
 /// server: `follow` needs one to open the log stream; this needs only a
-/// [`LogResume`] and a sequence of node names.
-struct LineSkip(i64);
+/// [`LogResume`], an execution reference and node name for its own log
+/// lines, and a sequence of raw lines.
+struct LineSkip {
+    execution_ref: String,
+    node: String,
+    /// How many more lines to suppress. Reaches `0` and stops there:
+    /// consuming more lines than were seeded — a resume position larger
+    /// than what this fresh read actually has left — suppresses everything
+    /// this read produces and never underflows.
+    remaining: i64,
+    /// `remaining`'s starting value, kept so the last-line guard can tell
+    /// "suppression just finished" (`remaining` reached `0` having started
+    /// above it) apart from "there was never anything to suppress"
+    /// (`remaining` started at `0`).
+    total: i64,
+    first_line: Option<String>,
+    last_line: Option<String>,
+    /// Set on the first call to [`Self::consume`], so the first-line guard
+    /// runs exactly once regardless of how many lines follow.
+    checked_first: bool,
+    /// Set once the first-line guard disagrees. Every following line is
+    /// then emitted unconditionally, the safe direction — see this type's
+    /// "Two guards" doc.
+    misaligned: bool,
+    /// The most recent line actually suppressed, kept only long enough to
+    /// compare against `last_line` the moment `remaining` reaches `0`.
+    last_suppressed: Option<String>,
+}
 
 impl LineSkip {
-    /// Seeded from `resume`'s count for `node` — `0` (suppress nothing) for
-    /// a node `resume` says nothing about, which is what a first attach's
-    /// empty [`LogResume`] produces for every node.
-    fn for_node(resume: &LogResume, node: &str) -> Self {
-        Self(resume.lines_for(node))
+    /// Seeded from `resume`'s answers for `node` — `0` lines and no anchors
+    /// for a node `resume` says nothing about, which is what a first
+    /// attach's empty [`LogResume`] produces for every node, and what makes
+    /// [`Self::consume`] suppress nothing for it.
+    fn for_node(resume: &LogResume, execution_ref: &str, node: &str) -> Self {
+        let remaining = resume.lines_for(node);
+        Self {
+            execution_ref: execution_ref.to_owned(),
+            node: node.to_owned(),
+            remaining,
+            total: remaining,
+            first_line: resume.first_line_for(node),
+            last_line: resume.last_line_for(node),
+            checked_first: false,
+            misaligned: false,
+            last_suppressed: None,
+        }
     }
 
-    /// `true` if the next line is already archived and must not reach the
-    /// sink again; `false` if it should. Decrements at most to `0`: consuming
-    /// more lines than were seeded — a resume position larger than what this
-    /// fresh read actually has left — suppresses everything this read
-    /// produces and never underflows.
-    fn consume(&mut self) -> bool {
-        if self.0 > 0 {
-            self.0 -= 1;
-            true
-        } else {
-            false
+    /// `true` if `line` is already archived and must not reach the sink
+    /// again; `false` if it should. See this type's "Two guards" doc for
+    /// the two checks this performs around the count, and
+    /// [`domain::repos::LogPosition`]'s "Two anchors" for why both exist.
+    fn consume(&mut self, line: &str) -> bool {
+        if !self.checked_first {
+            self.checked_first = true;
+            if self.remaining > 0 && self.first_line.as_deref() != Some(line) {
+                debug!(
+                    execution_ref = %self.execution_ref,
+                    node = %self.node,
+                    "this node's re-read log does not start where its archive does (log \
+                     rotation is the expected cause on a long-running node); resuming \
+                     without suppression for it rather than trusting a misaligned count",
+                );
+                self.misaligned = true;
+                self.remaining = 0;
+                return false;
+            }
         }
+
+        if self.misaligned || self.remaining <= 0 {
+            return false;
+        }
+
+        self.last_suppressed = Some(line.to_owned());
+        self.remaining -= 1;
+
+        if self.remaining == 0 && self.total > 0 {
+            let matches = self.last_line.as_deref() == self.last_suppressed.as_deref();
+            if !matches {
+                error!(
+                    execution_ref = %self.execution_ref,
+                    node = %self.node,
+                    expected = self.last_line.as_deref().unwrap_or_default(),
+                    actual = self.last_suppressed.as_deref().unwrap_or_default(),
+                    "this node's archived line count did not match its re-read log at the \
+                     boundary the count expected; the archive most likely still carries \
+                     duplicate lines from a run that hit review finding #50 before this \
+                     resume fix shipped, and any lines this count wrongly suppressed cannot \
+                     be recovered",
+                );
+            }
+        }
+
+        true
     }
 }
 
@@ -479,26 +585,26 @@ impl Watcher {
     ///
     /// **Re-reads from byte 0 every time**, exactly as before Task 13 — see
     /// [`LineSkip`]'s doc for why that read is unchanged and only the
-    /// archive-facing half of what it produces is suppressed. `skip` is
-    /// seeded once per pod, here, from `self.resume`'s count for `node`;
-    /// a line it says is already archived still reaches the marker parser
-    /// (`upsert_test_result` replaces a row rather than appending, so
-    /// re-parsing a marker is harmless) but not the sink's `Log` event, which
-    /// is what `append_log`'s `CONCAT` would otherwise duplicate.
+    /// archive-facing half of what it produces is suppressed, guarded
+    /// against both a moved window (log rotation) and an inflated count (a
+    /// pre-fix duplicate archive). `skip` is seeded once per pod, here, from
+    /// `self.resume`'s answers for `node`; a line it says is already
+    /// archived still reaches the marker parser (`upsert_test_result`
+    /// replaces a row rather than appending, so re-parsing a marker is
+    /// harmless) but not the sink's `Log` event, which is what
+    /// `append_log`'s `CONCAT` would otherwise duplicate.
     async fn follow(&mut self, pod_name: &str, node: &str) -> bool {
         let Some(stream) = self.open_log(pod_name).await else {
             return true;
         };
         let mut parser = MarkerParser::new(node);
-        let mut skip = LineSkip::for_node(&self.resume, node);
+        let mut skip = LineSkip::for_node(&self.resume, &self.name, node);
         let mut lines = stream.lines();
         loop {
             match lines.try_next().await {
                 Ok(Some(line)) => {
-                    if !self
-                        .emit_line(&mut parser, node, line, skip.consume())
-                        .await
-                    {
+                    let suppress = skip.consume(&line);
+                    if !self.emit_line(&mut parser, node, line, suppress).await {
                         return false;
                     }
                 }
@@ -594,45 +700,80 @@ impl Watcher {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    //! `LineSkip` is the actual fix for review finding #50 in this adapter —
-    //! the four properties below are what Critical 2 of fix-round 1 found
-    //! untested: every test that shipped with the original commit drove
-    //! `MockRunExecutor`, never this file, because `argo/watch.rs` had no
-    //! `#[cfg(test)]` module at all and the only test here that builds a
-    //! resume value is the `#[ignore]`d cluster suite, which always passes
-    //! `LogResume::default()`. These run under `--features argo`, which is
-    //! this module's own gate — no separate `#[cfg]` needed on the module
-    //! itself.
+    //! `LineSkip` is the actual fix for review finding #50 in this adapter.
+    //! Fix-round 1 added the count-based suppression properties below (every
+    //! test that shipped with the original commit drove `MockRunExecutor`,
+    //! never this file, because `argo/watch.rs` had no `#[cfg(test)]` module
+    //! at all). Fix-round 2 added the two-guard tests: the first-line guard
+    //! is Critical (kubelet log rotation moves the window forward, and an
+    //! unguarded count would then suppress real, never-archived lines); the
+    //! last-line guard is Important (a pre-fix archive's inflated count is
+    //! detected, though not recovered — that half is exercised through
+    //! `tracing_test` rather than its own dedicated test, since its only
+    //! observable effect is the `error!` line).
+    //!
+    //! These run under `--features argo`, which is this module's own gate —
+    //! no separate `#[cfg]` needed on the module itself.
 
     use super::LineSkip;
     use crate::domain::repos::{LogPosition, LogResume};
 
-    fn resume_of(entries: impl IntoIterator<Item = (&'static str, i64)>) -> LogResume {
-        entries
-            .into_iter()
-            .map(|(node, lines)| (node.to_owned(), LogPosition { lines }))
-            .collect()
+    /// Build a resume position the way a real `LogResume::from_archived_text`
+    /// would for a node whose archived lines are exactly `lines`, in order —
+    /// `first_line`/`last_line` derived from it, so a resume built this way
+    /// is aligned by construction against a fresh read that reproduces the
+    /// same lines.
+    fn aligned_resume(node: &str, lines: &[&str]) -> LogResume {
+        resume_with(
+            node,
+            i64::try_from(lines.len()).expect("test fixture length fits in i64"),
+            lines.first().copied().unwrap_or_default(),
+            lines.last().copied().unwrap_or_default(),
+        )
+    }
+
+    /// Build a resume position with an explicit `lines` count against
+    /// explicit anchors — for a test that wants a count larger than the
+    /// handful of lines it is convenient to spell out, where
+    /// [`aligned_resume`] (whose count is always the anchor slice's own
+    /// length) cannot express the mismatch.
+    fn resume_with(node: &str, lines: i64, first_line: &str, last_line: &str) -> LogResume {
+        [(
+            node.to_owned(),
+            LogPosition {
+                lines,
+                first_line: first_line.to_owned(),
+                last_line: last_line.to_owned(),
+            },
+        )]
+        .into_iter()
+        .collect()
     }
 
     /// An empty resume — what every first attach passes — suppresses
     /// nothing at all.
     #[test]
     fn an_empty_resume_suppresses_nothing() {
-        let mut skip = LineSkip::for_node(&LogResume::default(), "a");
+        let mut skip = LineSkip::for_node(&LogResume::default(), "wf-1", "a");
 
-        for _ in 0..5 {
-            assert!(!skip.consume(), "nothing is archived for this node yet");
+        for line in ["x0", "x1", "x2", "x3", "x4"] {
+            assert!(!skip.consume(line), "nothing is archived for this node yet");
         }
     }
 
-    /// A resume of `N` suppresses exactly the first `N` lines for that node
-    /// and lets every line after them through.
+    /// **The first-line guard, matching.** A resume of `N` whose first line
+    /// agrees with the fresh read's first line suppresses exactly the first
+    /// `N` and lets every line after them through — fix-round 1's original
+    /// property, now under the guard fix-round 2 added.
     #[test]
-    fn a_resume_of_n_suppresses_exactly_the_first_n() {
-        let resume = resume_of([("a", 3)]);
-        let mut skip = LineSkip::for_node(&resume, "a");
+    fn a_matching_first_line_suppresses_the_full_count() {
+        let resume = aligned_resume("a", &["l0", "l1", "l2"]);
+        let mut skip = LineSkip::for_node(&resume, "wf-1", "a");
 
-        let suppressed: Vec<bool> = (0..5).map(|_| skip.consume()).collect();
+        let suppressed: Vec<bool> = ["l0", "l1", "l2", "l3", "l4"]
+            .into_iter()
+            .map(|line| skip.consume(line))
+            .collect();
 
         assert_eq!(
             suppressed,
@@ -641,16 +782,75 @@ mod tests {
         );
     }
 
+    /// **The first-line guard, mismatching — the Critical fix, fix-round
+    /// 2.** kubelet log rotation (or anything else) can move a node's log
+    /// window forward between attaches, so a fresh read's first line need
+    /// not be the archive's first line any more. When it is not, the count
+    /// must not be trusted at all: suppressing nothing here is the
+    /// duplication direction, which is safe; suppressing by the stale count
+    /// would drop real lines the archive never had a chance to see.
+    #[test]
+    fn a_mismatched_first_line_suppresses_nothing() {
+        let resume = aligned_resume("a", &["l0", "l1", "l2"]);
+        let mut skip = LineSkip::for_node(&resume, "wf-1", "a");
+
+        // The fresh read's first line is not "l0" -- rotation has moved
+        // the window forward past it.
+        let suppressed: Vec<bool> = ["l2", "l3", "l4"]
+            .into_iter()
+            .map(|line| skip.consume(line))
+            .collect();
+
+        assert_eq!(
+            suppressed,
+            vec![false, false, false],
+            "a misaligned window suppresses nothing at all, not even the lines \
+             that happen to coincide with what the archive has",
+        );
+    }
+
+    /// The first-line guard is per node: a mismatch for one node must not
+    /// disable suppression for another, and a node with nothing archived at
+    /// all is never compared against anything.
+    #[test]
+    fn the_first_line_guard_is_per_node() {
+        let resume_a = aligned_resume("a", &["a0", "a1", "a2"]);
+        let resume_b = aligned_resume("b", &["b0", "b1"]);
+        let mut skip_a = LineSkip::for_node(&resume_a, "wf-1", "a");
+        let mut skip_b = LineSkip::for_node(&resume_b, "wf-1", "b");
+
+        // Node a's window has rotated; node b's has not.
+        assert!(
+            !skip_a.consume("a-rotated-past-the-anchor"),
+            "node a is misaligned"
+        );
+        assert!(
+            skip_b.consume("b0"),
+            "node b's own guard is unaffected by node a's mismatch"
+        );
+        assert!(skip_b.consume("b1"), "node b keeps suppressing normally");
+    }
+
     /// A resume larger than the lines this read will ever produce suppresses
     /// all of them and does not panic or underflow — the case a stale or
-    /// otherwise-too-high resume position produces.
+    /// otherwise-too-high resume position produces. The last-line guard
+    /// never fires here: `remaining` never reaches `0`, so "suppression
+    /// completed" never happens within this read.
     #[test]
     fn a_resume_larger_than_available_lines_suppresses_all_of_them() {
-        let resume = resume_of([("a", 1_000_000)]);
-        let mut skip = LineSkip::for_node(&resume, "a");
+        // The last-line anchor is never reached (`remaining` stays above `0`
+        // for this whole read), so its value cannot matter here.
+        let resume = resume_with("a", 1_000_000, "l0", "irrelevant -- never reached");
+        let mut skip = LineSkip::for_node(&resume, "wf-1", "a");
 
-        for _ in 0..10 {
-            assert!(skip.consume(), "a read this short never exhausts the count");
+        for (i, line) in ["l0", "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9"]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(
+                skip.consume(line),
+                "a read this short never exhausts the count (line {i})"
+            );
         }
     }
 
@@ -658,14 +858,58 @@ mod tests {
     /// suppress a single line of another's, however large its own count is.
     #[test]
     fn suppression_is_per_node_not_global() {
-        let resume = resume_of([("a", 10)]);
-        let mut skip_a = LineSkip::for_node(&resume, "a");
-        let mut skip_b = LineSkip::for_node(&resume, "b");
+        let resume = resume_with("a", 10, "a0", "a9");
+        let mut skip_a = LineSkip::for_node(&resume, "wf-1", "a");
+        let mut skip_b = LineSkip::for_node(&resume, "wf-1", "b");
 
-        assert!(skip_a.consume(), "node a has 10 archived lines to skip");
+        assert!(skip_a.consume("a0"), "node a has 10 archived lines to skip");
         assert!(
-            !skip_b.consume(),
+            !skip_b.consume("anything"),
             "node b has none, regardless of node a's count",
+        );
+    }
+
+    /// **The last-line guard fires when the count is inflated — Important,
+    /// fix-round 2.** A pre-fix archive whose count over-counts this node's
+    /// real content still passes the first-line guard (the window has not
+    /// moved, only the count is wrong), so suppression proceeds and
+    /// consumes real, never-before-archived lines it should not have. The
+    /// mismatch is detected once the count is exhausted, and logged loudly
+    /// rather than silently, because nothing at that point can undo the
+    /// suppression already applied.
+    #[test]
+    #[tracing_test::traced_test]
+    fn a_mismatched_last_line_logs_but_still_suppresses() {
+        // Archive says node a has 2 lines, "l0" then "l1" -- but the real
+        // log only ever had "l0"; "l1" is a pre-fix duplicate of "l0" that
+        // never really existed as a second, distinct line.
+        let resume: LogResume = [(
+            "a".to_owned(),
+            LogPosition {
+                lines: 2,
+                first_line: "l0".to_owned(),
+                last_line: "l1".to_owned(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        let mut skip = LineSkip::for_node(&resume, "wf-1", "a");
+
+        // The fresh read's real content: "l0", then genuinely new output
+        // that was never archived at all.
+        assert!(skip.consume("l0"), "the first line still matches");
+        assert!(
+            skip.consume("new-output-never-archived"),
+            "the count says 2, so this is still suppressed -- wrongly"
+        );
+        assert!(
+            !skip.consume("more-new-output"),
+            "the count is now exhausted; later lines emit normally"
+        );
+
+        assert!(
+            logs_contain("archived line count did not match its re-read log"),
+            "the mismatch must be logged loudly, since it cannot be recovered",
         );
     }
 }
