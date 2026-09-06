@@ -115,7 +115,10 @@ async fn a_bad_signature_is_refused_and_writes_nothing() {
     .into_response();
 
     let (status, body) = rendered(response).await;
-    assert_eq!(status, 403, "a bad signature must be a 403; body was {body}");
+    assert_eq!(
+        status, 403,
+        "a bad signature must be a 403; body was {body}"
+    );
     assert_eq!(
         fleet.collect_counts(TENANT, REPO, BRANCH).await.len(),
         0,

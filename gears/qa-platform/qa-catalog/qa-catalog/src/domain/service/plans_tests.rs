@@ -641,7 +641,10 @@ fn resolve_under_root_reports_internal_not_absent_on_a_permission_failure() {
 fn resolve_under_root_still_reports_ok_none_when_genuinely_absent() {
     let tmp = tempfile::tempdir().unwrap();
     let resolved = super::plans::resolve_under_root(tmp.path(), "nope.py").unwrap();
-    assert_eq!(resolved, None, "a genuinely missing path must stay Ok(None)");
+    assert_eq!(
+        resolved, None,
+        "a genuinely missing path must stay Ok(None)"
+    );
 }
 
 #[tokio::test]
@@ -726,7 +729,10 @@ async fn a_genuinely_absent_plan_is_still_not_found() {
         .get_plan(&ctx(tenant_id), repo_id, "main", "plans/nope.yaml")
         .await
         .unwrap_err();
-    assert!(matches!(err, DomainError::PlanNotFound { .. }), "got {err:?}");
+    assert!(
+        matches!(err, DomainError::PlanNotFound { .. }),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -854,7 +860,10 @@ async fn a_genuinely_absent_test_file_is_still_file_not_found() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, DomainError::FileNotFound { .. }), "got {err:?}");
+    assert!(
+        matches!(err, DomainError::FileNotFound { .. }),
+        "got {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
