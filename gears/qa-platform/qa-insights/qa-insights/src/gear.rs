@@ -1062,9 +1062,17 @@ const WEDGED_PASSES_BEFORE_ERROR: u32 = 3;
 /// [`WEDGED_PASSES_BEFORE_ERROR`] exists to raise, which is the load-bearing half
 /// of the alert obligation. Found by review, not by the tests.
 ///
-/// The other two passes genuinely do not care, and they say so at their call
-/// sites by mapping `None` to an empty slice: with no tenants there is nothing to
-/// poll and nothing to collect, and neither keeps state between passes.
+/// The other two passes keep no state between passes either, so treating
+/// `None` as zero tenants costs them nothing behaviourally. **They used to say
+/// so by mapping it through `unwrap_or_default()`, and review finding #56 is
+/// why that changed**: folding a refused enumeration into an empty `Vec` at
+/// the call site made a ticker whose background work has silently stopped
+/// indistinguishable, by inspection, from one with nothing to do — the same
+/// shape of trap [`reconcile_pass`] was already fixed against, just without a
+/// wedge count to corrupt. Both call sites now match this `Option` explicitly
+/// and return without iterating on `None`, exactly as [`reconcile_pass`]
+/// already did; neither adds a second `warn!` of its own, since this function
+/// has already logged one by the time either sees `None`.
 ///
 /// Not fatal to the ticker either way. The enumeration no longer asks a PDP
 /// that could decline it — `domain::service::tenants::TenantDirectory::scope`
@@ -1222,13 +1230,18 @@ fn report_reconcile_outcome(
 /// `poll_once` calls `JiraService::active_config` before it looks at any bug,
 /// which is legacy's own first step (`jira_poller.rs:40-43`).
 async fn jira_poll_pass(services: &Arc<ConcreteAppServices>) {
-    // `unwrap_or_default`, not a `return`: this pass keeps no state between
-    // passes, so a refused enumeration and an empty one really are the same to
-    // it. [`reconcile_pass`] is the one that cannot say that.
-    for tenant in tenants_for(services, ROLE_JIRA_POLLER)
-        .await
-        .unwrap_or_default()
-    {
+    // A failed directory read is not "this deployment has no tenants".
+    // `unwrap_or_default()` used to fold the two together here, which made a
+    // stopped ticker indistinguishable from an idle one at this call site —
+    // even though [`tenants_for`] had already warned, nothing here said so.
+    // Matching instead, exactly as [`reconcile_pass`] already had to, costs
+    // this pass nothing: it keeps no state between passes, so returning
+    // before the loop and running it zero times come to the same thing.
+    // Review finding #56.
+    let Some(tenants) = tenants_for(services, ROLE_JIRA_POLLER).await else {
+        return;
+    };
+    for tenant in tenants {
         let ctx = system_actor::for_jira_poll(tenant);
         match services.jira_poller.poll_once(&ctx).await {
             Ok(()) => debug!(tenant_id = %tenant.get(), "qa-insights JIRA poller pass"),
@@ -1247,11 +1260,11 @@ async fn jira_poll_pass(services: &Arc<ConcreteAppServices>) {
 /// One collect cycle over every tenant, on the default branch.
 async fn collect_pass(services: &Arc<ConcreteAppServices>, branch: &str) {
     // Stateless between passes, exactly like [`jira_poll_pass`] — see its
-    // comment.
-    for tenant in tenants_for(services, ROLE_COLLECT)
-        .await
-        .unwrap_or_default()
-    {
+    // comment. Review finding #56.
+    let Some(tenants) = tenants_for(services, ROLE_COLLECT).await else {
+        return;
+    };
+    for tenant in tenants {
         let ctx = system_actor::for_collect_cycle(tenant);
         match services.collect.run_collect_cycle(&ctx, branch).await {
             Ok(launched) => debug!(

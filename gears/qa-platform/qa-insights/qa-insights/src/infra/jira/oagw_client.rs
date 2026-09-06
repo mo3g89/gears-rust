@@ -598,7 +598,18 @@ impl OagwJiraClient {
             return None;
         }
 
-        let document: serde_json::Value = serde_json::from_slice(&body).ok()?;
+        let document: serde_json::Value = match serde_json::from_slice(&body) {
+            Ok(document) => document,
+            Err(error) => {
+                // Same treatment as the HTTP-error arms above. A 200 whose body
+                // is not JSON is a gateway or proxy answering in place of JIRA;
+                // dropping it silently makes the caller re-file a bug it thinks
+                // is still open, with nothing in the log to explain the
+                // duplicate. Review finding #28.
+                warn!(%error, "JIRA answered 200 with a body that could not be parsed as JSON");
+                return None;
+            }
+        };
         document
             .pointer("/issues/0/key")
             .and_then(serde_json::Value::as_str)
