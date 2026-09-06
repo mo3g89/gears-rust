@@ -52,6 +52,7 @@ jobs:
       dylint: ${{ steps.filter.outputs.dylint }}
       deps:   ${{ steps.filter.outputs.deps }}
       ci:     ${{ steps.filter.outputs.ci }}
+      ui:     ${{ steps.filter.outputs.ui }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -80,6 +81,9 @@ jobs:
               - 'deny.toml'
             ci:
               - '.github/workflows/**'
+            ui:
+              - 'gears/qa-platform/qa-platform-ui/**'
+              - 'Makefile'
 
   # ── Jobs ──────────────────────────────────────────────────────────────
 
@@ -246,6 +250,40 @@ jobs:
 
       - name: cargo test (no macros)
         run: make test-no-macros
+
+  ui:
+    name: QA Platform UI
+    needs: changes
+    if: >-
+      !cancelled()
+      && (needs.changes.result != 'success'
+      || needs.changes.outputs.ui == 'true'
+      || needs.changes.outputs.ci == 'true'
+      || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gears/qa-platform/qa-platform-ui/package-lock.json
+
+      # `ui-contract` is deliberately absent: it regenerates types from a live
+      # /openapi.json and needs the compose stack up on localhost:8087, which
+      # this job has no gears to serve.
+      #
+      # `ui-lint` is deliberately absent too: the project has no
+      # eslint.config.js and ESLint 9 requires one, so the target cannot run
+      # at all. The lint gap it would otherwise catch is ~15 violations
+      # across 12 files and is tracked separately.
+      - name: Test and build the UI
+        run: make ui-test ui-build
 
   integration:
     name: Integration tests
