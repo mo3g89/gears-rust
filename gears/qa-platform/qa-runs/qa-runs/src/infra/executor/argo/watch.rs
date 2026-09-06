@@ -64,7 +64,7 @@ use kube::{Client, ResourceExt};
 use serde_json::Value;
 use tracing::{debug, error, warn};
 
-use crate::api::rest::sse::sanitize_line;
+use crate::api::rest::sse::sanitize_line_for_archive;
 use crate::config::ArgoExecutorConfig;
 use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::{
@@ -694,9 +694,12 @@ impl Watcher {
 ///
 /// # Two forms of one line, and why there are two (review finding #30)
 ///
-/// [`sanitize_line`] — the same cap and character-boundary handling
-/// `api::rest::sse` already applies on the read side — is computed once,
-/// here, and used for two of this line's three destinations:
+/// [`sanitize_line_for_archive`] — `api::rest::sse`'s own write-side
+/// truncation, capping at a budget that leaves room for the archive prefix
+/// `IngestService::fan_out_log` wraps every line in (see that function's
+/// doc for why a plain `sanitize_line` here would get re-truncated on
+/// read, discarding the true dropped-byte count) — is computed once, here,
+/// and used for two of this line's three destinations:
 ///
 /// * the sink, and downstream of it `IngestService::fan_out_log`'s archive
 ///   write, so a pathological line no longer sits in the broadcaster or the
@@ -714,24 +717,43 @@ impl Watcher {
 /// decodes a `=== TEST_CASE: <base64-json> ===` marker whose capture
 /// (`CASE_RE`, `\S+`) has no length limit, carrying a pytest plugin's JSON —
 /// `reason` and `ticket` fields this crate does not control the size of. So
-/// a marker line is not provably under [`MAX_LINE_BYTES`] the way an
-/// ordinary log line usually is (checked, not assumed — see this crate's
-/// task notes for review finding #30); truncating the parser's input could
-/// cut a marker in half and silently lose a test result that the log
-/// truncation itself never claimed to preserve.
+/// a marker line is not provably under `MAX_LINE_BYTES` the way an
+/// ordinary log line usually is. And truncating it would not merely cut the
+/// marker in half: [`sanitize_line_for_archive`] *appends* its own marker
+/// after whatever survives the cut, so a truncated `TEST_CASE` line would no
+/// longer end in `===` at all — `CASE_RE` (`^=== TEST_CASE: (\S+) ===$`)
+/// would simply fail to match, and the whole case would be silently
+/// dropped, not partially decoded. The parser's input has to stay raw to
+/// avoid that.
 ///
-/// # A residual this change accepts: an archive written before this shipped
+/// # A residual this change accepts, and only for one of three positions
 ///
 /// An archived `first_line`/`last_line` anchor from a run whose over-long
 /// line was written before this fix deployed holds the *full, untruncated*
-/// text — nothing rewrites an archive already on disk. Re-attaching to that
-/// run afterwards compares that untruncated anchor against this function's
-/// now-truncated re-read, which will not match. That is not a new failure
-/// mode: it is the same misaligned-window case [`LineSkip::consume`]
-/// already detects and handles by suppressing nothing for that node — the
-/// safe direction (duplication), not the unsafe one (loss) — same as real
-/// log rotation. Bounded to runs whose watch spans this deploy and whose
-/// affected node is re-attached to afterwards.
+/// text — nothing rewrites an archive already on disk. A post-deploy
+/// re-attach's now-truncated re-read of that same line will not match that
+/// stale anchor, and what happens next depends on *where* the over-long
+/// line sits in that node's archived output, because [`LineSkip`] has two
+/// independent guards over three positions:
+///
+/// * **First archived line for that node**: the first-line guard fires,
+///   exactly the misaligned-window case it exists for. Suppression is
+///   disabled for that node for the rest of the re-attach — the safe
+///   direction (duplication, not loss) — same as real log rotation.
+/// * **A middle line**: neither guard runs against it at all — suppression
+///   is purely count-based between the two anchors, so a stale (untruncated
+///   in the archive, truncated on re-read) middle line changes what that
+///   one re-read line's own bytes look like, not whether it is suppressed.
+///   Nothing diverges: no duplication, no loss.
+/// * **Last archived line for that node**: the last-line guard fires
+///   instead, once the count is exhausted, and logs an `error!` asserting
+///   the archive "most likely still carries duplicate lines from a run
+///   that hit review finding #50" — which is not what happened here. That
+///   `error!` is a false alarm with no data effect in this specific case;
+///   an operator reading it would misdiagnose why.
+///
+/// Bounded to runs whose watch spans this deploy and whose affected node is
+/// re-attached to afterwards.
 async fn handle_line(
     sink: &ExecutionSink,
     parser: &mut MarkerParser,
@@ -739,12 +761,15 @@ async fn handle_line(
     node: &str,
     line: String,
 ) -> bool {
-    let sanitized = sanitize_line(&line);
+    let sanitized = sanitize_line_for_archive(&line);
     let suppress = skip.consume(&sanitized);
     // `&line` (raw) for the parser, `sanitized` for everything else -- see
     // this function's own doc for why the split exists. Do not collapse
     // these back to one form without re-checking that a marker line still
-    // cannot exceed `MAX_LINE_BYTES`.
+    // cannot exceed `MAX_LINE_BYTES`, and do not swap `sanitize_line_for_archive`
+    // back for plain `sanitize_line` without re-checking `WRITE_SIDE_MAX_LINE_BYTES`'s
+    // doc -- that swap is exactly what let the read side re-truncate an
+    // already-truncated line and lose the true dropped-byte count.
     emit_line(sink, parser, node, &line, sanitized, suppress).await
 }
 
@@ -819,7 +844,7 @@ mod tests {
     //! needed to exercise it.
 
     use super::{LineSkip, handle_line};
-    use crate::api::rest::sse::{MAX_LINE_BYTES, TRUNCATION_MARKER_MAX};
+    use crate::api::rest::sse::{MAX_LINE_BYTES, TRUNCATION_MARKER_MAX, sanitize_line_for_archive};
     use crate::domain::ports::run_executor::{ExecutionEvent, ExecutionStream};
     use crate::domain::repos::{LogPosition, LogResume};
     use crate::infra::executor::argo::markers::MarkerParser;
@@ -1103,6 +1128,50 @@ mod tests {
             emitted[0].len() <= MAX_LINE_BYTES + TRUNCATION_MARKER_MAX,
             "the emitted line must be capped, was {} bytes",
             emitted[0].len()
+        );
+    }
+
+    /// **The property `handle_line`'s "two forms" doc turns on: `skip.consume`
+    /// must see the *sanitized* form, not the raw one — fix round 1.**
+    ///
+    /// The test above seeds `LogResume::default()`, under which
+    /// `skip.consume` returns `false` no matter what text it is given, so it
+    /// cannot tell a correct call (`skip.consume(&sanitized)`) apart from the
+    /// exact regression this crate's own resume invariant exists to prevent
+    /// (`skip.consume(&line)`, the raw re-read). This test seeds an aligned
+    /// resume whose one archived anchor is the *capped* form a real
+    /// `fan_out_log` would have archived for this same over-long line, then
+    /// re-feeds the identical raw line and asserts it is suppressed. Red
+    /// under `skip.consume(&line)` (raw never matches a capped anchor, so
+    /// nothing is ever suppressed for a node that once emitted an over-long
+    /// line); green under the shipped `skip.consume(&sanitized)`.
+    #[tokio::test]
+    async fn a_re_read_pathological_line_is_suppressed_against_its_capped_anchor() {
+        let huge = "y".repeat(MAX_LINE_BYTES * 4);
+        let archived_anchor = sanitize_line_for_archive(&huge);
+        let resume = aligned_resume("node-1", &[archived_anchor.as_str()]);
+
+        let (sink, mut stream) = ExecutionStream::channel(4);
+        let mut parser = MarkerParser::new("node-1");
+        let mut skip = LineSkip::for_node(&resume, "wf-1", "node-1");
+
+        assert!(
+            handle_line(&sink, &mut parser, &mut skip, "node-1", huge).await,
+            "the observer is still attached; this must not report false"
+        );
+        drop(sink);
+
+        let mut emitted = Vec::new();
+        while let Some(event) = stream.recv().await {
+            if let ExecutionEvent::Log { line, .. } = event {
+                emitted.push(line);
+            }
+        }
+
+        assert!(
+            emitted.is_empty(),
+            "a re-read of an already-archived (capped) line must be suppressed, \
+             not re-emitted: {emitted:?}"
         );
     }
 }

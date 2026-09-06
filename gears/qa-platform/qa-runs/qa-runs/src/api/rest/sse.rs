@@ -15,8 +15,14 @@
 //!    bounds a line *count*, not bytes - `infra::logs::broadcast` records that a
 //!    runner emitting a 2 MB line holds 512 MB per subscribed run, and that the
 //!    byte cap belongs to whoever writes the adapter. This is that cap for the
-//!    read side; it does **not** shrink the broadcaster's resident buffer, which
-//!    is still `capacity x` the longest line the adapter accepts.
+//!    read side, and, **as of Task 15, one adapter now pays its own way**:
+//!    `argo::watch::handle_line` truncates with [`sanitize_line_for_archive`]
+//!    before a line ever reaches the broadcaster, so *that* adapter's resident
+//!    buffer no longer scales with an unbounded line. Nothing in this crate
+//!    enforces the same of a *different* adapter (`MockRunExecutor` does not
+//!    truncate; a future HTTP-push producer `fan_out_log`'s own doc
+//!    anticipates would not either) — the obligation `infra::logs::broadcast`
+//!    records is still real for any adapter that has not taken it up.
 //! 3. **A stream ends.** See [`MAX_STREAM_DURATION`].
 //!
 //! # What this endpoint will not be able to do, once a real elector is deployed
@@ -135,6 +141,71 @@ const MAX_USIZE_DIGITS: usize = usize::MAX.ilog10() as usize + 1;
 pub const TRUNCATION_MARKER_MAX: usize =
     TRUNCATION_PREFIX.len() + MAX_USIZE_DIGITS + TRUNCATION_SUFFIX.len();
 
+/// Upper bound this crate assumes for `"[{node}] "` — the prefix
+/// `IngestService::fan_out_log` wraps every archived line in — so
+/// [`WRITE_SIDE_MAX_LINE_BYTES`] can reserve room for it without a
+/// write-side caller ever telling this module its actual `node.len()`.
+///
+/// **Not an invariant.** `ExecutionNode::name` is a plain `String`,
+/// deliberately not normalised to a DNS-1123 label (`fan_out_log`'s own
+/// doc), so nothing here guarantees a name never exceeds this. It is,
+/// today, generous by roughly 6x: the one production source is
+/// `format!("repo-{repo_id}")` over a UUID, ~41 bytes once wrapped —
+/// `LogResume::from_archived_text` already carries the matching residual
+/// for a node name containing `']'`, on the same unreachable-today,
+/// not-unsound-if-it-happened terms. If a future producer ever grows node
+/// names past this, the failure this constant exists to prevent
+/// reappears: a write-side truncation marker gets re-cut on read,
+/// reporting a dropped-byte count two orders of magnitude short of the
+/// truth — not a panic, not data loss, a misdiagnosis.
+const ASSUMED_ARCHIVE_PREFIX_BYTES: usize = 256;
+
+/// The cap a **write-side** caller must truncate to before its output is
+/// wrapped in an archive prefix and read back through this module's own
+/// [`sanitize_line`] — so the wrapped line still fits under
+/// [`MAX_LINE_BYTES`] and [`sanitize_line`] never re-truncates it.
+///
+/// # Why this has to exist at all
+///
+/// `argo::watch::handle_line` truncates a line before it reaches the sink
+/// (review finding #30), so the archive holds that line already at a cap,
+/// plus a marker naming the true dropped-byte count.
+/// `IngestService::fan_out_log` then wraps it as `"[{node}] {line}"` and
+/// archives *that* — and every reader, live SSE and archive replay alike,
+/// gets the wrapped string back through [`sanitize_line`] again
+/// (`api::rest::handlers::runs::sse_event`, `lines_as_events`). A
+/// write-side line truncated to plain [`MAX_LINE_BYTES`] is, once wrapped,
+/// always over the cap, so the read side re-truncates it — discarding the
+/// write side's own marker (whose count is correct) for a fresh one that
+/// only counts what the *second* cut dropped. [`WRITE_SIDE_MAX_LINE_BYTES`]
+/// is what stops that: reserve the prefix's assumed width and this
+/// module's own [`TRUNCATION_MARKER_MAX`] up front, so the wrapped result
+/// never crosses [`MAX_LINE_BYTES`] in the first place.
+///
+/// # A budget, not a text-matching detector
+///
+/// The alternative — have [`sanitize_line`] recognise its own marker and
+/// leave an already-marked line alone — would need to parse the marker's
+/// text back out, a *third* copy of its format (append it here, parse it
+/// there) for exactly the kind of drift this crate keeps re-discovering
+/// (see [`TRUNCATION_MARKER_MAX`]'s doc, and `LogPosition`'s
+/// `flatten_log_char`). A budget avoids that: the write side simply never
+/// produces a line long enough to need a second cut, so there is nothing
+/// for the read side to detect.
+///
+/// # A fixed number, not `MAX_LINE_BYTES - node.len()`
+///
+/// `LineSkip::consume`'s anchor is derived from this exact write-side
+/// output, so if the truncation point depended on the runtime length of
+/// `node`, the archived text for a byte-identical over-long line would
+/// differ depending on which node emitted it — a coupling between "how
+/// long is my own name" and "where does my content get cut" with no
+/// purpose behind it. Reserving a fixed [`ASSUMED_ARCHIVE_PREFIX_BYTES`]
+/// instead keeps the truncation point a function of the line and the cap
+/// alone, matching every other truncation decision this module makes.
+pub const WRITE_SIDE_MAX_LINE_BYTES: usize =
+    MAX_LINE_BYTES - ASSUMED_ARCHIVE_PREFIX_BYTES - TRUNCATION_MARKER_MAX;
+
 /// Make one log line safe to frame as a single SSE event.
 ///
 /// Two transformations, in this order. The second is the one only this layer
@@ -163,18 +234,52 @@ pub const TRUNCATION_MARKER_MAX: usize =
 /// forge an SSE frame, which is the boundary this function defends.
 #[must_use]
 pub fn sanitize_line(line: &str) -> String {
-    let flattened: String = line
-        .chars()
-        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-        .collect();
+    truncate(flatten(line), MAX_LINE_BYTES)
+}
 
-    if flattened.len() <= MAX_LINE_BYTES {
+/// [`sanitize_line`] for a **write-side** caller whose output will be
+/// wrapped in more text (`IngestService::fan_out_log`'s archive prefix)
+/// before anything reads it — truncates to [`WRITE_SIDE_MAX_LINE_BYTES`]
+/// rather than [`MAX_LINE_BYTES`], so the wrapped result never crosses this
+/// module's own cap and gets re-truncated on read. See
+/// [`WRITE_SIDE_MAX_LINE_BYTES`]'s doc for why this needs its own budget
+/// rather than a second call to [`sanitize_line`].
+///
+/// Same flattening, same character-boundary handling, same marker — one
+/// function ([`truncate`]) parametrized by the cap, not a second copy of
+/// the rule.
+#[must_use]
+pub fn sanitize_line_for_archive(line: &str) -> String {
+    truncate(flatten(line), WRITE_SIDE_MAX_LINE_BYTES)
+}
+
+/// Every `\r` and `\n` becomes a space. Replaced rather than dropped so that
+/// `a\nb` reads as `a b` and not as `ab` - joining two words that were never
+/// adjacent misreports the runner's output. Shared by [`sanitize_line`] and
+/// [`sanitize_line_for_archive`] - see [`truncate`]'s doc for why capping is
+/// split out the same way.
+fn flatten(line: &str) -> String {
+    line.chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect()
+}
+
+/// Truncate already-flattened text to `cap` bytes, on a character boundary,
+/// appending a marker naming how many bytes were dropped.
+///
+/// Parametrized by `cap` rather than hard-coding [`MAX_LINE_BYTES`] so
+/// [`sanitize_line`] (the read side) and [`sanitize_line_for_archive`] (a
+/// write side that must leave room for text wrapped around its result
+/// later) share one truncation rule instead of maintaining two copies of
+/// it under different names.
+fn truncate(flattened: String, cap: usize) -> String {
+    if flattened.len() <= cap {
         return flattened;
     }
 
     // Back off to the nearest character boundary at or below the cap, so the
     // truncation never splits a multi-byte character.
-    let mut cut = MAX_LINE_BYTES;
+    let mut cut = cap;
     while cut > 0 && !flattened.is_char_boundary(cut) {
         cut -= 1;
     }
@@ -196,7 +301,10 @@ pub fn log_event(line: &str) -> RunLogLineDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_LINE_BYTES, TRUNCATION_MARKER_MAX, log_event, sanitize_line};
+    use super::{
+        MAX_LINE_BYTES, TRUNCATION_MARKER_MAX, WRITE_SIDE_MAX_LINE_BYTES, log_event, sanitize_line,
+        sanitize_line_for_archive,
+    };
 
     /// The forgery this module exists to prevent. A payload carrying a blank
     /// line followed by `event:`/`data:` is two SSE events once framed, and the
@@ -295,6 +403,44 @@ mod tests {
             safe.len() <= MAX_LINE_BYTES + TRUNCATION_MARKER_MAX,
             "marker overran its declared bound: {} bytes",
             safe.len()
+        );
+    }
+
+    /// **The end-to-end property Task 15's fix round 1 exists to guarantee.**
+    ///
+    /// `argo::watch::handle_line` truncates a ~2 MB line with
+    /// [`sanitize_line_for_archive`] before it reaches the broadcaster.
+    /// `IngestService::fan_out_log` then wraps that output as
+    /// `"[{node}] {line}"` and archives it -- and every reader gets the
+    /// wrapped string back through this module's [`sanitize_line`]. If the
+    /// write side had used plain [`sanitize_line`] instead (its output
+    /// already at `MAX_LINE_BYTES`), wrapping it in a real node prefix pushes
+    /// the total over the cap, and the read side would re-truncate,
+    /// discarding the true ~2 MB drop count for a tiny one left over from
+    /// the second cut. This test fails under that mistake and passes under
+    /// the shipped design.
+    #[test]
+    fn a_write_side_truncated_line_survives_the_read_side_without_a_second_cut() {
+        // `ExecutionNode::name`'s one production source,
+        // `format!("repo-{repo_id}")` over a UUID.
+        let node = "repo-3f9c2b6e-1a2d-4e5f-9a8b-7c6d5e4f3a2b";
+        let huge = "z".repeat(MAX_LINE_BYTES * 250); // ~2 MB, ASCII throughout
+        let write_side = sanitize_line_for_archive(&huge);
+        // `IngestService::fan_out_log`'s own construction -- see
+        // `WRITE_SIDE_MAX_LINE_BYTES`'s doc, which names this exact format.
+        let archived = format!("[{node}] {write_side}");
+
+        let read_side = sanitize_line(&archived);
+        assert_eq!(
+            read_side, archived,
+            "the read side must not re-truncate a line the write side already capped"
+        );
+
+        let true_dropped = huge.len() - WRITE_SIDE_MAX_LINE_BYTES;
+        assert!(
+            write_side.contains(&true_dropped.to_string()),
+            "the marker must report the true ~2 MB drop, not a re-truncation's much \
+             smaller one: {write_side}"
         );
     }
 }
