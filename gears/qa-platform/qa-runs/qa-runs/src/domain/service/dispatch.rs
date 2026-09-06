@@ -1054,7 +1054,8 @@ where
     ///   starved by another tenant's position in an arbitrary order. It can
     ///   still be *delayed*: the ordering decides who goes first, not how much
     ///   each takes.
-    /// * With the cap **disabled** — the shipped default —
+    /// * With the cap **disabled** — the explicit unbounded opt-out, no
+    ///   longer the shipped default (`crate::config::QaRunsConfig::max_concurrent_runs`) —
     ///   `plan_dispatch_batch` claims a platform's entire parallel FIFO, and each
     ///   claimed row is dispatched inline below, so one tenant with 20 slow-building
     ///   runs holds the tick for 20 × (force-sync + bundle build). Every other

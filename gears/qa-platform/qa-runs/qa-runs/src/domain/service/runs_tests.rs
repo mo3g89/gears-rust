@@ -1228,6 +1228,7 @@ async fn the_container_wires_ingest_and_the_operator_actions_to_the_same_halves(
             admitter: None,
             dispatcher: None,
             watcher: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
             default_timeout_seconds: 900,
             limits: QueueLimits {
                 queue_max_depth: 20,

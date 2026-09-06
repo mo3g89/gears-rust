@@ -2616,6 +2616,7 @@ async fn the_di_container_assembles_a_working_launch_service() {
             // dispatcher tick's pass - so the real watcher is wired rather than
             // a double that would only assert it is never called.
             watcher: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
             default_timeout_seconds: 900,
             limits: crate::domain::service::QueueLimits {
                 queue_max_depth: 20,

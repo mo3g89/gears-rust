@@ -441,9 +441,11 @@ where
     /// are easy to lose:
     ///
     /// * **A disabled cap costs no executor call.** Legacy returns `None` before
-    ///   listing anything when `max_concurrent_runs == 0` (`:856-858`), which is
-    ///   the shipped default — so the common path makes no cross-plane call at
-    ///   all.
+    ///   listing anything when `max_concurrent_runs == 0` (`:856-858`). That is
+    ///   no longer this gear's shipped default — see
+    ///   `crate::config::QaRunsConfig::max_concurrent_runs` — but `0` stays a
+    ///   valid opt-out, and a deployment that sets it still makes no
+    ///   cross-plane call on this path.
     /// * **An unreadable executor fails the launch**, where the depth limit fails
     ///   open. Legacy makes exactly this asymmetry and states it: over-committing
     ///   is the worse outcome for the cap, while for the depth limit the worse

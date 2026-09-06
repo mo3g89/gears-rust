@@ -183,11 +183,32 @@ pub struct QaRunsConfig {
     /// [`DomainError::QueueFull`](crate::domain::error::DomainError::QueueFull).
     pub queue_max_depth: u32,
 
-    /// Cluster-wide concurrent-run cap. `0` = unlimited.
+    /// Cluster-wide concurrent-run cap.
     ///
-    /// This is also the only knob that bounds how many claims can exist at
-    /// once, which is what `QueueRepository::all_claims`' scan window has to
-    /// cope with when it is left at its default of `0`.
+    /// **Default is 50, not 0 — derived, not guessed.** `cpt-cf-qa-nfr-scale`
+    /// (`docs/PRD.md`, "Scale envelope") is a `p1` requirement that this
+    /// subsystem MUST handle "50 concurrently executing runs". Fifty is
+    /// therefore not a number picked because it looked safe; it is the
+    /// number the gear is already committed to sustaining, so admitting up to
+    /// it and refusing beyond it asks nothing of a deployment the NFR did not
+    /// already ask for.
+    ///
+    /// `0` **remains accepted as an explicit "unbounded" opt-out** — the
+    /// frozen guide's convention for this knob (guide lines 116-120) and the
+    /// behaviour every deployment got before this default changed. A
+    /// deployment relying on today's unlimited concurrency sets
+    /// `max_concurrent_runs: 0` and keeps it.
+    ///
+    /// **This is a deployment-visible behaviour change.** A deployment that
+    /// leaves this knob unset moves from "never rejected for concurrency" to
+    /// "429 at launch past 50 concurrent runs" the moment it upgrades. That is
+    /// deliberate: it is also the only knob that transitively bounds how many
+    /// result observers a process can hold open at once — see
+    /// [`crate::domain::service::watch::SpawningRunWatcher`]'s header, "The
+    /// number of observers is bounded transitively, by admission — not by
+    /// this registry" — and it is the only knob that bounds how many claims
+    /// can exist at once, which is what `QueueRepository::all_claims`' scan
+    /// window has to cope with when it is left at its default of `0`.
     pub max_concurrent_runs: u32,
 
     /// Fallback run timeout when neither the launch request nor the plan
@@ -511,7 +532,10 @@ impl Default for QaRunsConfig {
             orphan_timeout_seconds: 600,
             queue_ttl_seconds: 7200,
             queue_max_depth: 20,
-            max_concurrent_runs: 0,
+            // 50, not 0 - see the field's own doc for the derivation
+            // (`cpt-cf-qa-nfr-scale`'s "50 concurrently executing runs") and
+            // why `0` stays available as an explicit unbounded opt-out.
+            max_concurrent_runs: 50,
             default_timeout_seconds: 3600,
             max_timeout_seconds: 86_400,
             log_buffer_lines: DEFAULT_LOG_CHANNEL_CAPACITY,
@@ -669,12 +693,41 @@ mod tests {
         assert_eq!(config.orphan_timeout_seconds, 600);
         assert_eq!(config.queue_ttl_seconds, 7200);
         assert_eq!(config.queue_max_depth, 20);
-        assert_eq!(config.max_concurrent_runs, 0);
+        assert_eq!(
+            config.max_concurrent_runs, 50,
+            "review finding #19: the default moved off 0 - see the field's own doc \
+             for the derivation"
+        );
         assert_eq!(config.default_timeout_seconds, 3600);
         assert_eq!(config.max_timeout_seconds, 86_400);
         assert_eq!(
             config.log_buffer_lines, DEFAULT_LOG_CHANNEL_CAPACITY,
             "one quantity, one default - see the field's doc"
+        );
+    }
+
+    /// **The number is not just a pinned field — it is a real cap.** Review
+    /// finding #19: the shipped default used to be `0`, which
+    /// `domain::queue::global_cap_status` reads as "disabled" regardless of how
+    /// many runs are active, so no deployment that left the knob unset was ever
+    /// refused for concurrency. This drives the exact pair
+    /// `admission::AdmissionService::enforce_global_cap` calls with the
+    /// default, so a regression that reverted the default to `0` (or any other
+    /// value that never reaches the limit) fails here without needing a full
+    /// admission-service harness.
+    #[test]
+    fn the_default_cap_actually_bounds_concurrent_runs() {
+        use crate::domain::queue::{cap_reached, global_cap_status};
+
+        let max = QaRunsConfig::default().max_concurrent_runs;
+        assert!(
+            !cap_reached(global_cap_status(max - 1, max)),
+            "one below the default limit must still be admitted"
+        );
+        assert!(
+            cap_reached(global_cap_status(max, max)),
+            "at the default limit the next run must be refused - this is the cap \
+             that a `0` default made unreachable"
         );
     }
 

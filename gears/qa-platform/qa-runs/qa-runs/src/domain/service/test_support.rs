@@ -2170,6 +2170,7 @@ impl Fleet {
                 admitter: Some(Arc::clone(&self.admitter) as Arc<dyn Admitter>),
                 dispatcher: None,
                 watcher: None,
+                cancel: tokio_util::sync::CancellationToken::new(),
                 default_timeout_seconds: 3600,
                 limits: QueueLimits {
                     queue_max_depth: 20,

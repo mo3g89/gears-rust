@@ -2400,6 +2400,7 @@ async fn admission_and_dispatch_share_one_platform_lock_registry() {
             admitter: None,
             dispatcher: None,
             watcher: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
             default_timeout_seconds: 900,
             limits: QueueLimits {
                 queue_max_depth: 20,

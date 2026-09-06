@@ -45,8 +45,13 @@
 //!   doc.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use super::{AttachedSlot, WatchRegistry};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use super::{AttachedSlot, WatchRegistry};
 
 /// **The property the one-producer rule rests on.** A second `claim` for the
 /// same run returns `None`, and `None` is not a spawn — there is no other
@@ -107,11 +112,85 @@ fn a_panicking_observer_still_frees_its_run() {
     );
 }
 
+/// **Cancelling the token an observer was spawned with ends it, and
+/// `shutdown` proves that rather than hoping the scheduler got around to
+/// it.** Built around `std::future::pending` rather than a scripted
+/// executor: `MockRunExecutor::watch` "materialises the whole sequence into
+/// the channel before returning" (its own module doc), so a real drain
+/// against it completes on its own so fast that racing it against
+/// cancellation would prove nothing about which one actually ended the
+/// task. This isolates the one thing review finding #18 is about — the
+/// `tokio::select!` `SpawningRunWatcher::attach` adds — by reproducing its
+/// exact shape against a future that never resolves unless told to.
+#[tokio::test]
+async fn cancelling_the_token_ends_an_observer_that_would_otherwise_never_stop() {
+    let registry = WatchRegistry::default();
+    let run = Uuid::from_u128(0xF00D);
+    let slot = registry.claim(run).expect("free");
+    let cancel = CancellationToken::new();
+    let ended = Arc::new(AtomicBool::new(false));
+
+    let handle = {
+        let cancel = cancel.clone();
+        let ended = Arc::clone(&ended);
+        tokio::spawn(async move {
+            // Mirrors `SpawningRunWatcher::attach`'s own shape: the slot is
+            // moved in so it drops - and the run frees - however this task
+            // ends.
+            let _slot = slot;
+            tokio::select! {
+                () = cancel.cancelled() => {}
+                () = std::future::pending::<()>() => {}
+            }
+            ended.store(true, Ordering::SeqCst);
+        })
+    };
+    registry.track(handle);
+
+    // Let the spawned task actually reach its `select!` before asserting
+    // anything about it - otherwise this could pass even if `track` or the
+    // select were both missing, by racing the assertions ahead of the task
+    // ever being polled.
+    tokio::task::yield_now().await;
+    assert!(
+        registry.holds(run),
+        "the observer is live before cancellation"
+    );
+    assert!(
+        !ended.load(Ordering::SeqCst),
+        "premise: nothing but cancellation ends this observer"
+    );
+
+    cancel.cancel();
+    registry.shutdown().await;
+
+    assert!(
+        ended.load(Ordering::SeqCst),
+        "shutdown must have actually waited for the task to run past its select, \
+         not merely returned because nothing was tracked"
+    );
+    assert!(
+        !registry.holds(run),
+        "the slot drops when the observer ends, freeing the run for a later attempt"
+    );
+}
+
+/// **`shutdown` on an empty registry is not a hang.** The loop in
+/// `WatchRegistry::shutdown` re-snapshots until it sees an empty `Vec`; the
+/// degenerate case — nothing was ever tracked — must return on the first
+/// snapshot rather than waiting for something that will never arrive.
+#[tokio::test]
+async fn shutdown_of_a_registry_with_no_observers_returns_immediately() {
+    let registry = WatchRegistry::default();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), registry.shutdown())
+        .await
+        .expect("shutdown must return promptly when nothing was ever attached");
+}
+
 // ---------------------------------------------------------------------------
 // The composition: a run that ends because it finished, not because it expired
 // ---------------------------------------------------------------------------
-
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
@@ -191,11 +270,19 @@ struct Harness {
     services: Arc<ConcreteAppServices>,
     db: Arc<DbProvider>,
     executor: Arc<MockRunExecutor>,
+    /// The exact token the production watcher was built with — see
+    /// `ServiceDeps::cancel`. Held so a test can cancel the real gear-shutdown
+    /// signal rather than one it minted itself, which is what makes
+    /// `shutdown_reaches_the_production_watcher_through_app_services` a
+    /// wiring test rather than a restatement of `WatchRegistry::shutdown`'s
+    /// own unit test.
+    cancel: CancellationToken,
 }
 
 async fn harness() -> Harness {
     let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
     let executor = Arc::new(MockRunExecutor::new());
+    let cancel = CancellationToken::new();
     let services = Arc::new(AppServices::new(
         Arc::new(OrmRunsRepository),
         Arc::new(OrmQueueRepository),
@@ -218,6 +305,7 @@ async fn harness() -> Harness {
             // **The production watcher**, which is what makes this a composition
             // test rather than an assertion about a double.
             watcher: None,
+            cancel: cancel.clone(),
             default_timeout_seconds: 3600,
             limits: QueueLimits {
                 queue_max_depth: 20,
@@ -231,6 +319,7 @@ async fn harness() -> Harness {
         services,
         db,
         executor,
+        cancel,
     }
 }
 
@@ -398,6 +487,42 @@ async fn a_platformless_run_reaches_a_terminal_state_from_its_finished_event() {
         RunState::Succeeded,
         "a run that was never queued still has to be able to finish"
     );
+}
+
+/// **`AppServices::shutdown` reaches the *production* watcher, not a
+/// hand-built one.** Review finding #18's wiring half: the mechanism is
+/// proven in isolation by
+/// `cancelling_the_token_ends_an_observer_that_would_otherwise_never_stop`
+/// above, against a future that never resolves on its own; this test instead
+/// drives the real `SpawningRunWatcher` this container built - over the real
+/// `IngestService`, behind `DispatchService::reattach_watchers` - and cancels
+/// the exact token `ServiceDeps::cancel` handed it, the same one a real
+/// deployment's `gear.rs` bridges from its own shutdown. `MockRunExecutor`'s
+/// drain completes quickly on its own regardless (see the test above for why
+/// that rules out proving cancellation *causes* the end here), so what this
+/// pins is narrower and just as necessary: the shutdown this container
+/// exposes is not a no-op wired to nothing, and it returns promptly rather
+/// than hanging.
+#[tokio::test]
+async fn shutdown_reaches_the_production_watcher_through_app_services() {
+    let h = harness().await;
+    // Only the attachment matters here, not the run's own outcome - the
+    // shutdown wiring is what this test is about.
+    let _run_id = a_live_run(&h, "shutdown-me", None).await;
+
+    let report = h.services.dispatch.run_tick().await;
+    assert_eq!(report.attached, 1, "premise: the tick attached the run");
+
+    h.cancel.cancel();
+    // Bounded rather than an unconditional `.await`: a regression that made
+    // `shutdown` loop forever - tracking a new handle on every pass, never
+    // converging - must fail this test rather than hang the suite.
+    tokio::time::timeout(std::time::Duration::from_secs(5), h.services.shutdown())
+        .await
+        .expect(
+            "shutdown must return once every observer this tick spawned has ended, \
+             not hang",
+        );
 }
 
 /// **An empty stream is not a failure**, which is the port's contract and the
@@ -585,6 +710,7 @@ async fn resume_harness() -> ResumeHarness {
             admitter: None,
             dispatcher: None,
             watcher: None,
+            cancel: CancellationToken::new(),
             default_timeout_seconds: 3600,
             limits: QueueLimits {
                 queue_max_depth: 20,

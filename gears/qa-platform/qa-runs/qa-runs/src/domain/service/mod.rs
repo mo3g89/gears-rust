@@ -63,6 +63,7 @@ use authz_resolver_sdk::pep::ResourceType;
 use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
 use qa_catalog_sdk::QaCatalogClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
+use tokio_util::sync::CancellationToken;
 use toolkit_db::DBProvider;
 use uuid::Uuid;
 
@@ -659,6 +660,20 @@ pub(crate) struct ServiceDeps {
     /// spawned task, and a test that had to drive it through the production
     /// watcher would be asserting on a `tokio::spawn` it does not control.
     pub(crate) watcher: Option<Arc<dyn watch::RunWatcher>>,
+    /// The gear's own shutdown signal — the third lifetime
+    /// [`watch::SpawningRunWatcher`]'s header describes, beside the caller's
+    /// and the observed run's.
+    ///
+    /// **Not an override like [`Self::admitter`]/[`Self::dispatcher`]/[`Self::watcher`]
+    /// — always required, whichever wiring is chosen.** Even when
+    /// [`Self::watcher`] is `Some(..)` and this constructor never builds a
+    /// [`watch::SpawningRunWatcher`] at all, the field must still be supplied:
+    /// `new` cannot conditionally require an argument, and a struct with a
+    /// field that "doesn't matter sometimes" is exactly the kind of ambiguity
+    /// this crate's constructors are written to not have. A caller that does
+    /// not care passes `CancellationToken::new()`, which nothing ever
+    /// cancels and which is then simply unused.
+    pub(crate) cancel: CancellationToken,
     /// `runner_defaults.default_timeout_seconds`, honoured only when non-zero
     /// (`manager/src/services/argo.rs:168-181`).
     pub(crate) default_timeout_seconds: u64,
@@ -800,6 +815,15 @@ where
                   watch::tests::a_run_reaches_a_terminal_state_from_its_finished_event"
     )]
     pub(crate) ingest: Arc<ingest::IngestService<R, Q>>,
+    /// The production watcher, held concretely so [`Self::shutdown`] can await
+    /// its `JoinHandle`s — [`watch::RunWatcher`] has no `shutdown` of its own,
+    /// deliberately: the trait's two methods are the ones a dispatcher pass
+    /// needs, and lifecycle plumbing is not one of them. `None` when
+    /// [`ServiceDeps::watcher`] overrode the production wiring: a test double
+    /// spawns no task, so there is nothing for a shutdown to await, and this
+    /// container has no concrete [`watch::SpawningRunWatcher`] to hold in that
+    /// case.
+    watcher_lifecycle: Option<Arc<watch::SpawningRunWatcher<R, Q>>>,
     /// Reads, cancel, re-run, and the queue operator actions.
     pub(crate) runs: Arc<runs::RunsService<R, Q>>,
     /// Schedule CRUD, and the firing tick `gear.rs`'s second ticker drives.
@@ -811,6 +835,16 @@ where
     /// `Arc` into the scheduler.
     pub(crate) schedules: Arc<schedules::ScheduleService<S, R>>,
 }
+
+/// The trait-object handle [`launch::LaunchService`] and friends consume,
+/// paired with the concrete instance [`AppServices::shutdown`] needs back —
+/// see the comment at its one call site in [`AppServices::new`]. Named so
+/// clippy's `type_complexity` has one thing to point at instead of an inline
+/// tuple type repeating both generics.
+type WatcherPair<R, Q> = (
+    Arc<dyn watch::RunWatcher>,
+    Option<Arc<watch::SpawningRunWatcher<R, Q>>>,
+);
 
 impl<R, Q, S> AppServices<R, Q, S>
 where
@@ -853,12 +887,24 @@ where
             archive: Arc::clone(&deps.archive),
             policy_enforcer: enforcer.clone(),
         }));
-        let watcher = deps.watcher.unwrap_or_else(|| {
-            Arc::new(watch::SpawningRunWatcher::new(
+        // Built together rather than through `unwrap_or_else` alone, because
+        // `AppServices::shutdown` needs the *concrete* type back and
+        // `Arc<dyn watch::RunWatcher>` has thrown that away. `None` when
+        // `deps.watcher` overrode the production wiring: there is then no
+        // real `SpawningRunWatcher` in the process for a shutdown to await.
+        let (watcher, watcher_lifecycle): WatcherPair<R, Q> = if let Some(watcher) = deps.watcher {
+            (watcher, None)
+        } else {
+            let watcher = Arc::new(watch::SpawningRunWatcher::new(
                 Arc::clone(&deps.executor),
                 Arc::clone(&ingest),
-            )) as Arc<dyn watch::RunWatcher>
-        });
+                deps.cancel.clone(),
+            ));
+            (
+                Arc::clone(&watcher) as Arc<dyn watch::RunWatcher>,
+                Some(watcher),
+            )
+        };
 
         let dispatch = Arc::new(dispatch::DispatchService::new(dispatch::DispatchDeps {
             db: Arc::clone(&deps.db),
@@ -927,8 +973,25 @@ where
             admission,
             dispatch,
             ingest,
+            watcher_lifecycle,
             runs,
             schedules,
+        }
+    }
+
+    /// Wait for every observer the production watcher has spawned to end.
+    ///
+    /// A no-op when [`ServiceDeps::watcher`] overrode the production wiring —
+    /// see this container's `watcher_lifecycle` field. Forwards to
+    /// [`watch::SpawningRunWatcher::shutdown`], whose doc (and
+    /// [`watch::WatchRegistry::shutdown`]'s beneath it) carries what this does
+    /// and does not guarantee: it does not cancel anything by itself, and it
+    /// can hang on an observer blocked past its own cancellation check. The
+    /// framework's own `stop_timeout` is what bounds how long `gear.rs`'s
+    /// `serve` actually waits on this.
+    pub(crate) async fn shutdown(&self) {
+        if let Some(watcher) = &self.watcher_lifecycle {
+            watcher.shutdown().await;
         }
     }
 }
