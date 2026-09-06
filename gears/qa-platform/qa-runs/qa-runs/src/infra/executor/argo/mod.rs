@@ -84,6 +84,7 @@ use tracing::{info, warn};
 use crate::config::ArgoExecutorConfig;
 use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::{ExecutionRef, ExecutionStream, RunExecutor, RunSpec};
+use crate::domain::repos::LogResume;
 use crate::infra::executor::argo::workflow::{APP_LABEL, APP_LABEL_VALUE};
 
 /// Argo phases this adapter counts as alive.
@@ -350,8 +351,18 @@ impl RunExecutor for ArgoRunExecutor {
         )))
     }
 
-    async fn watch(&self, execution_ref: &ExecutionRef) -> Result<ExecutionStream, DomainError> {
-        watch::start(self.client.clone(), self.config.clone(), execution_ref).await
+    async fn watch(
+        &self,
+        execution_ref: &ExecutionRef,
+        resume: LogResume,
+    ) -> Result<ExecutionStream, DomainError> {
+        watch::start(
+            self.client.clone(),
+            self.config.clone(),
+            execution_ref,
+            resume,
+        )
+        .await
     }
 
     async fn cancel(&self, execution_ref: &ExecutionRef) -> Result<(), DomainError> {

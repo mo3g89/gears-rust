@@ -193,6 +193,19 @@ impl LogArchive for RecordingArchive {
         }
         report
     }
+
+    /// No test in this file drives a re-attach through `RecordingArchive`
+    /// (that composition is `service::watch`'s, covered end to end in
+    /// `watch_tests.rs`), so this double answers the same "nothing archived,
+    /// nothing to resume" empty map `NullLogArchive` does rather than
+    /// modelling per-node counts it has no reader for.
+    async fn resume_positions(
+        &self,
+        _tenant: system_actor::TenantBound,
+        _run_id: Uuid,
+    ) -> Result<LogResume, DomainError> {
+        Ok(LogResume::default())
+    }
 }
 
 struct Harness {

@@ -3048,8 +3048,9 @@ pub(in crate::domain::service) mod fakes {
         async fn watch(
             &self,
             execution_ref: &ExecutionRef,
+            resume: crate::domain::repos::LogResume,
         ) -> Result<ExecutionStream, DomainError> {
-            self.inner.watch(execution_ref).await
+            self.inner.watch(execution_ref, resume).await
         }
 
         async fn cancel(&self, _execution_ref: &ExecutionRef) -> Result<(), DomainError> {
@@ -4078,8 +4079,9 @@ impl RunExecutor for YieldingListing {
     async fn watch(
         &self,
         reference: &crate::domain::ports::run_executor::ExecutionRef,
+        resume: crate::domain::repos::LogResume,
     ) -> Result<crate::domain::ports::run_executor::ExecutionStream, DomainError> {
-        self.0.watch(reference).await
+        self.0.watch(reference, resume).await
     }
 
     async fn list_active(

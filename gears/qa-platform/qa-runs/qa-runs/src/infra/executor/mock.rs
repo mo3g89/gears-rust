@@ -20,9 +20,14 @@
 //! 2. **Honours `cancel`** — a cancelled execution's stream ends
 //!    `Finished { outcome: Canceled, .. }`, so the cancel path is exercised end
 //!    to end without 2.7 (`cancel_makes_the_stream_finish_as_canceled`).
-//! 3. **Re-attachable** — `watch` twice on one reference yields the sequence
-//!    twice, so crash recovery is testable
-//!    (`watch_is_re_attachable_and_replays_from_the_beginning`).
+//! 3. **Re-attachable** — `watch` twice on one reference with no resume
+//!    position given yields the sequence twice, so crash recovery is testable
+//!    (`watch_is_re_attachable_and_replays_from_the_beginning`). Given a
+//!    non-empty [`LogResume`], `watch` instead replays *from* it — skipping
+//!    exactly the `Log` entries per node it says are already archived — which
+//!    is Task 13's fix for review finding #50 and is what makes both
+//!    directions (no lines lost, no lines duplicated) testable at once
+//!    (`watch_resumes_without_duplicating_or_dropping_log_lines`).
 //! 4. **Records what it was given** — `MockRunExecutor::submitted` is how
 //!    environment assembly, node grouping and the
 //!    reference-not-material rule get verified end to end
@@ -35,7 +40,7 @@
 //!    16c: an errored `watch` and an empty stream are the two answers the port
 //!    forbids conflating, and only one of them was constructible.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -46,6 +51,7 @@ use crate::domain::ports::run_executor::{
     ExecutionEvent, ExecutionRef, ExecutionStream, NodeOutcome, RunExecutor, RunSpec,
     TestObservation,
 };
+use crate::domain::repos::LogResume;
 use crate::domain::state_machine::ExecutorOutcome;
 
 /// Test name the default script reports. Uppercase status, matching the
@@ -312,7 +318,11 @@ impl RunExecutor for MockRunExecutor {
         Ok(execution_ref)
     }
 
-    async fn watch(&self, execution_ref: &ExecutionRef) -> Result<ExecutionStream, DomainError> {
+    async fn watch(
+        &self,
+        execution_ref: &ExecutionRef,
+        resume: LogResume,
+    ) -> Result<ExecutionStream, DomainError> {
         if let Some(message) = &self.lock().fail_watch {
             return Err(DomainError::ExecutorFailed(message.clone()));
         }
@@ -321,7 +331,35 @@ impl RunExecutor for MockRunExecutor {
         // known before the first send.
         let events = self.lock().script_for(execution_ref);
         let (sink, stream) = ExecutionStream::channel(events.len().max(1));
+        // **Resume, not replay** — Task 13, review finding #50. The mock has
+        // no real log to seek within, so it does what an adapter with true
+        // per-line resumption would achieve by construction: skip exactly the
+        // `Log` entries `resume` says this node's archive already has, in
+        // order, and keep everything else. `remaining` starts at
+        // `resume.lines_for(node)` per node the first time that node is seen
+        // and counts down, so a node `resume` says nothing about (the common
+        // case: a first attach, where `resume` is empty) skips nothing.
+        //
+        // This is deliberately **exact**, unlike the Argo adapter's
+        // `since_time`/`tail_lines`: the mock holds its own scripted sequence
+        // rather than asking Kubernetes, so there is no approximation to make
+        // and no reason to accept one. That asymmetry is what keeps this
+        // mock's long-standing "replays from the beginning" guarantee (no
+        // lines lost — `watch_is_re_attachable_and_replays_from_the_beginning`
+        // below) while making the *duplication* direction falsifiable too
+        // (`watch_resumes_without_duplicating_or_dropping_log_lines`), which
+        // an adapter that silently dropped the gap could not pass.
+        let mut remaining: HashMap<String, i64> = HashMap::new();
         for event in events {
+            if let ExecutionEvent::Log { node, .. } = &event {
+                let left = remaining
+                    .entry(node.clone())
+                    .or_insert_with(|| resume.lines_for(node));
+                if *left > 0 {
+                    *left -= 1;
+                    continue;
+                }
+            }
             // Capacity is the script's length and the observer is still alive
             // here, so this cannot report a dropped observer — written the way
             // an adapter must write it anyway, because the mock is the shape
@@ -468,16 +506,21 @@ mod tests {
         executor.script(run_id, script.clone());
 
         let execution_ref = executor.start(spec_for(run_id)).await.unwrap();
-        let mut stream = executor.watch(&execution_ref).await.unwrap();
+        let mut stream = executor
+            .watch(&execution_ref, LogResume::default())
+            .await
+            .unwrap();
 
         assert_eq!(drain(&mut stream).await, script);
     }
 
     /// `cpt-cf-qa-nfr-run-duration` requires an 8-hour run to survive a
     /// control-plane restart, allocated to "`watch(execution_id)` resumes"
-    /// (`DESIGN.md:57`). The mock replays from the beginning, which is stronger
-    /// than the contract asks for and is what makes the crash-recovery path
-    /// assertable.
+    /// (`DESIGN.md:57`). With no resume position given — `LogResume::default()`,
+    /// what a first attach always passes — the mock replays from the
+    /// beginning, which is stronger than the contract asks for and is what
+    /// makes the crash-recovery path assertable. Given an actual resume
+    /// position it does not replay in full; see the test below for that half.
     #[tokio::test]
     async fn watch_is_re_attachable_and_replays_from_the_beginning() {
         let executor = MockRunExecutor::new();
@@ -491,12 +534,92 @@ mod tests {
         );
         let execution_ref = executor.start(spec_for(run_id)).await.unwrap();
 
-        let mut first = executor.watch(&execution_ref).await.unwrap();
+        let mut first = executor
+            .watch(&execution_ref, LogResume::default())
+            .await
+            .unwrap();
         let first_events = drain(&mut first).await;
-        let mut second = executor.watch(&execution_ref).await.unwrap();
+        let mut second = executor
+            .watch(&execution_ref, LogResume::default())
+            .await
+            .unwrap();
 
         assert_eq!(drain(&mut second).await, first_events);
         assert_eq!(first_events.len(), 2);
+    }
+
+    /// **Both directions of Finding #50's fix, on the one double that can
+    /// make them exact.** The Argo adapter's `since_time`/`tail_lines` are
+    /// Kubernetes approximations (`domain::repos::LogPosition`'s doc); the
+    /// mock has no such excuse; it holds the script itself, so this pins
+    /// what "resume, don't replay" should mean when nothing stands in the
+    /// way of doing it exactly.
+    ///
+    /// Two nodes, so a resume position for one cannot be satisfied by
+    /// accident from the other's count.
+    #[tokio::test]
+    async fn watch_resumes_without_duplicating_or_dropping_log_lines() {
+        let executor = MockRunExecutor::new();
+        let run_id = Uuid::new_v4();
+        let script = vec![
+            ExecutionEvent::Started,
+            ExecutionEvent::Log {
+                node: "a".to_owned(),
+                line: "a-one".to_owned(),
+            },
+            ExecutionEvent::Log {
+                node: "b".to_owned(),
+                line: "b-one".to_owned(),
+            },
+            ExecutionEvent::Log {
+                node: "a".to_owned(),
+                line: "a-two".to_owned(),
+            },
+            ExecutionEvent::Log {
+                node: "a".to_owned(),
+                line: "a-three".to_owned(),
+            },
+            finished(ExecutorOutcome::Succeeded),
+        ];
+        executor.script(run_id, script.clone());
+        let execution_ref = executor.start(spec_for(run_id)).await.unwrap();
+
+        // "Two of node a's three lines and none of node b's are already
+        // archived" -- what a real re-attach's `log_resume_positions` would
+        // answer partway through this script.
+        let resume: LogResume = [(
+            "a".to_owned(),
+            crate::domain::repos::LogPosition {
+                lines: 2,
+                since_time: None,
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let mut resumed = executor.watch(&execution_ref, resume).await.unwrap();
+        let replayed = drain(&mut resumed).await;
+
+        // No duplication: the two already-archived `a` lines are not resent.
+        assert!(
+            !replayed.iter().any(
+                |event| matches!(event, ExecutionEvent::Log { node, line } if node == "a" && (line == "a-one" || line == "a-two"))
+            ),
+            "the two lines `resume` already accounts for must not be replayed"
+        );
+        // No loss: everything after the resume position, on both nodes, is
+        // still there, in order.
+        assert_eq!(
+            replayed,
+            vec![
+                script[0].clone(),
+                script[2].clone(),
+                script[4].clone(),
+                script[5].clone(),
+            ],
+            "b's line and a's un-archived third line must both survive, in \
+             their original order",
+        );
     }
 
     /// An empty stream is "nothing more to say", not an error — the error case
@@ -508,7 +631,7 @@ mod tests {
         let executor = MockRunExecutor::new();
 
         let mut stream = executor
-            .watch(&ExecutionRef::new("never-started"))
+            .watch(&ExecutionRef::new("never-started"), LogResume::default())
             .await
             .unwrap();
 
@@ -529,7 +652,10 @@ mod tests {
         let execution_ref = executor.start(spec_for(run_id)).await.unwrap();
 
         executor.cancel(&execution_ref).await.unwrap();
-        let mut stream = executor.watch(&execution_ref).await.unwrap();
+        let mut stream = executor
+            .watch(&execution_ref, LogResume::default())
+            .await
+            .unwrap();
         let events = drain(&mut stream).await;
 
         assert!(matches!(
@@ -570,7 +696,10 @@ mod tests {
         let execution_ref = executor.start(spec_for(run_id)).await.unwrap();
 
         executor.cancel(&execution_ref).await.unwrap();
-        let mut stream = executor.watch(&execution_ref).await.unwrap();
+        let mut stream = executor
+            .watch(&execution_ref, LogResume::default())
+            .await
+            .unwrap();
         let events = drain(&mut stream).await;
 
         assert_eq!(events.len(), 3);
@@ -630,7 +759,10 @@ mod tests {
                 .contains(&execution_ref),
             "a forgotten execution is Gone, which is what releases the claim"
         );
-        let mut stream = executor.watch(&execution_ref).await.unwrap();
+        let mut stream = executor
+            .watch(&execution_ref, LogResume::default())
+            .await
+            .unwrap();
         assert!(
             matches!(
                 drain(&mut stream).await.last(),
@@ -650,7 +782,10 @@ mod tests {
         let execution_ref = executor.start(spec_for(run_id)).await.unwrap();
 
         executor.cancel(&execution_ref).await.unwrap();
-        let mut first = executor.watch(&execution_ref).await.unwrap();
+        let mut first = executor
+            .watch(&execution_ref, LogResume::default())
+            .await
+            .unwrap();
         let after_first = drain(&mut first).await;
         assert!(
             matches!(
@@ -665,7 +800,10 @@ mod tests {
         );
 
         executor.cancel(&execution_ref).await.unwrap();
-        let mut second = executor.watch(&execution_ref).await.unwrap();
+        let mut second = executor
+            .watch(&execution_ref, LogResume::default())
+            .await
+            .unwrap();
 
         assert_eq!(drain(&mut second).await, after_first);
         assert!(executor.list_active().await.unwrap().is_empty());
@@ -713,7 +851,10 @@ mod tests {
         let execution_ref = executor.start(spec_for(run_id)).await.unwrap();
         executor.fail_watch("executor unreachable");
 
-        let error = executor.watch(&execution_ref).await.unwrap_err();
+        let error = executor
+            .watch(&execution_ref, LogResume::default())
+            .await
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -742,7 +883,10 @@ mod tests {
         let executor = MockRunExecutor::new();
         let execution_ref = executor.start(spec_for(Uuid::new_v4())).await.unwrap();
 
-        let mut stream = executor.watch(&execution_ref).await.unwrap();
+        let mut stream = executor
+            .watch(&execution_ref, LogResume::default())
+            .await
+            .unwrap();
         let events = drain(&mut stream).await;
 
         assert_eq!(events.first(), Some(&ExecutionEvent::Started));

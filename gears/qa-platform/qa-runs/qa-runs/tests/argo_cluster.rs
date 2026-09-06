@@ -49,6 +49,7 @@ use qa_runs::domain::ports::run_executor::{
     ExecutionEvent, ExecutionNode, ExecutionRef, RunAccess, RunEnv, RunExecutor, RunSpec,
     RunnerSpec,
 };
+use qa_runs::domain::repos::LogResume;
 use qa_runs::domain::state_machine::ExecutorOutcome;
 use qa_runs::infra::executor::argo::{ArgoRunExecutor, workflow_resource};
 
@@ -130,7 +131,10 @@ fn spec(run_name: &str) -> RunSpec {
 /// Drain a `watch` stream to its end, with a ceiling so a hung stream fails the
 /// test instead of the suite.
 async fn drain(executor: &ArgoRunExecutor, reference: &ExecutionRef) -> Vec<ExecutionEvent> {
-    let mut stream = executor.watch(reference).await.expect("watch opens");
+    let mut stream = executor
+        .watch(reference, LogResume::default())
+        .await
+        .expect("watch opens");
     let mut events = Vec::new();
     tokio::time::timeout(Duration::from_mins(3), async {
         while let Some(event) = stream.recv().await {
@@ -418,7 +422,10 @@ async fn an_unknown_reference_yields_an_empty_stream_rather_than_an_error() {
         .expect("connects");
 
     let mut stream = executor
-        .watch(&ExecutionRef::new("no-such-workflow-at-all"))
+        .watch(
+            &ExecutionRef::new("no-such-workflow-at-all"),
+            LogResume::default(),
+        )
         .await
         .expect("watch on an unknown reference is Ok, not Err");
     assert_eq!(stream.recv().await, None, "and it is empty");

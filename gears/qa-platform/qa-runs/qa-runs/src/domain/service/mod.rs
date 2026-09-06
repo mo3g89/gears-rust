@@ -68,6 +68,7 @@ use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::repos::RunsRepository;
+use crate::domain::system_actor;
 
 /// `pub(crate)` rather than private-plus-re-export (qa-catalog's idiom): Tasks
 /// 14 and 15 name [`Admission`](launch::Admission) and the two seam traits, and
@@ -190,10 +191,17 @@ pub struct FlushReport {
 /// acquiring a database transaction. Keeping the archive separate keeps each
 /// port's purpose answerable in one sentence.
 ///
-/// # Why there is no `read`
+/// # Why there is no `read`, and the one method that is not one
 ///
 /// The read path needs the repository, not the accumulator — the same reason
-/// `LogFanout` deliberately has no `subscribe`.
+/// `LogFanout` deliberately has no `subscribe`. [`Self::resume_positions`]
+/// (Task 13, Finding #50) does not reopen that: it answers counts and a
+/// timestamp, never `text` — the same restraint [`crate::domain::repos::
+/// ArchivedLog`]'s hand-written `Debug` argues for, applied to the signature
+/// instead. The repository round trip this section is really about — a
+/// connection and a resolved `AccessScope` — still happens on
+/// [`crate::infra::logs::RunLogArchive`], mirroring how [`Self::flush`]
+/// resolves both, not on this trait.
 ///
 /// # One `flush` per run at a time — the hazard, and who closes it
 ///
@@ -247,6 +255,28 @@ pub trait LogArchive: Send + Sync {
     /// run's failure must not stop the others, so failures are counted in the
     /// report and logged.
     async fn flush_due(&self) -> FlushReport;
+
+    /// Where `run_id`'s archive currently ends, per node. See this trait's
+    /// header for why this exists despite "no read", and
+    /// [`crate::domain::repos::LogResume`] for what the answer means.
+    ///
+    /// `tenant` rather than a raw `Uuid`: the implementation resolves its own
+    /// [`AccessScope`](toolkit_security::AccessScope) for the read, the same
+    /// way [`Self::flush`]'s `write` half does, and a nil tenant must not
+    /// reach that resolution any more than it may reach a write — see
+    /// `domain::system_actor::TenantBound`'s own doc.
+    ///
+    /// [`super::service::watch`]'s `drain` is the one caller, and treats a
+    /// failure here as "resume position unknown" rather than as a reason to
+    /// abandon the attach: it falls back to
+    /// [`crate::domain::repos::LogResume::default`], which is exactly what a
+    /// first attach already does, so a transient failure degrades to the old
+    /// replay-from-the-beginning behaviour rather than blocking observation.
+    async fn resume_positions(
+        &self,
+        tenant: system_actor::TenantBound,
+        run_id: Uuid,
+    ) -> Result<crate::domain::repos::LogResume, DomainError>;
 }
 
 /// `DB` provider alias.

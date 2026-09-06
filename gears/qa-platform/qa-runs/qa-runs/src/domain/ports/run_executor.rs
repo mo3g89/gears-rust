@@ -156,6 +156,7 @@ use uuid::Uuid;
 pub use qa_product_sdk::access::{MountSpec, RunAccess, RunnerSpec};
 
 use crate::domain::error::DomainError;
+use crate::domain::repos::LogResume;
 use crate::domain::state_machine::ExecutorOutcome;
 
 /// An opaque handle on one started execution, minted by
@@ -797,7 +798,8 @@ pub trait RunExecutor: Send + Sync {
     /// the queue on this path.
     async fn start(&self, spec: RunSpec) -> Result<ExecutionRef, DomainError>;
 
-    /// Observe an execution.
+    /// Observe an execution, resuming rather than replaying whatever
+    /// `resume` says is already archived.
     ///
     /// The stream ends after [`ExecutionEvent::Finished`], and yields nothing
     /// at all for a reference the executor no longer knows — an empty stream is
@@ -807,13 +809,31 @@ pub trait RunExecutor: Send + Sync {
     /// it must resume observation of a still-running execution rather than
     /// error: `cpt-cf-qa-nfr-run-duration` requires an 8-hour run to survive a
     /// restart, and `DESIGN.md:57` allocates that to "`watch(execution_id)`
-    /// resumes". The mock satisfies it trivially by replaying; 2.7 must satisfy
-    /// it for real, which is why it is in the contract now rather than after
-    /// the first restart loses a run.
+    /// resumes".
+    ///
+    /// **`resume` is what makes re-attachable mean "picks up where it left
+    /// off" rather than "starts over".** Before Task 13 (review finding #50)
+    /// this parameter did not exist, `MockRunExecutor` satisfied re-attach by
+    /// replaying every event from the beginning, and the Argo adapter did the
+    /// same for a different reason — it opened every pod log with no
+    /// `since_time` and no `tail_lines` — which is a correctness bug there:
+    /// `append_log` is a `CONCAT` with no truncate, replace or offset
+    /// anywhere in `RunLogsRepository`, so a full replay through it duplicates
+    /// the whole archived log on every re-attach. `resume` is per-node
+    /// (`domain::repos::LogResume`) because the Argo adapter's pods are: each
+    /// is a separate log with its own read position. An executor with no
+    /// resumable notion of position — the mock's only alternative to
+    /// replaying-with-skip — is free to ignore it and replay in full; the
+    /// port does not require true resumption, only that an implementation
+    /// capable of it uses `resume` rather than discarding it.
     ///
     /// # Errors
     /// [`DomainError::ExecutorFailed`] when the executor cannot be reached.
-    async fn watch(&self, execution_ref: &ExecutionRef) -> Result<ExecutionStream, DomainError>;
+    async fn watch(
+        &self,
+        execution_ref: &ExecutionRef,
+        resume: LogResume,
+    ) -> Result<ExecutionStream, DomainError>;
 
     /// Request cancellation. Idempotent: cancelling an already-terminal or
     /// entirely unknown execution succeeds.

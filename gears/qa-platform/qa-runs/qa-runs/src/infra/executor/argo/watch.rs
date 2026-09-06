@@ -69,6 +69,7 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::{
     ExecutionEvent, ExecutionRef, ExecutionSink, ExecutionStream, NodeOutcome, TestObservation,
 };
+use crate::domain::repos::LogResume;
 use crate::domain::state_machine::ExecutorOutcome;
 use crate::infra::executor::argo::markers::MarkerParser;
 use crate::infra::executor::argo::workflow::NODE_ANNOTATION;
@@ -207,6 +208,26 @@ fn node_of(pod: &Pod) -> String {
         .unwrap_or_else(|| pod.name_any())
 }
 
+/// `resume`'s `since_time` for `node`, converted to what `kube`'s
+/// [`LogParams`] needs.
+///
+/// `kube-core` types `since_time` as `jiff::Timestamp` (not this crate's own
+/// `time::OffsetDateTime`, which is what `LogResume` carries — see
+/// `domain::repos::run_logs_repo`), so this is the one conversion point. It
+/// answers `None` on either the domain side having nothing for `node` (a
+/// first attach — read from the beginning, unchanged) or, defensively, on a
+/// conversion failure: `time::OffsetDateTime::unix_timestamp_nanos` and
+/// `jiff::Timestamp::from_nanosecond` cover the same practical range for any
+/// value this crate produces (`OffsetDateTime::now_utc()`-derived, always),
+/// so a conversion failure is not expected — but this is a resume
+/// *optimisation*, and falling back to "read from the beginning" on the
+/// unexpected path is the same safe direction every other failure in this
+/// module takes, not a new one invented for this case.
+fn since_time_for(resume: &LogResume, node: &str) -> Option<jiff::Timestamp> {
+    let at = resume.since_time_for(node)?;
+    jiff::Timestamp::from_nanosecond(at.unix_timestamp_nanos()).ok()
+}
+
 /// Open an observation of one execution.
 ///
 /// Returns an **empty, already-ended** stream for a workflow the cluster does
@@ -220,6 +241,7 @@ pub async fn start(
     client: Client,
     config: ArgoExecutorConfig,
     execution_ref: &ExecutionRef,
+    resume: LogResume,
 ) -> Result<ExecutionStream, DomainError> {
     let name = execution_ref.as_str().to_owned();
     let workflows: Api<DynamicObject> =
@@ -249,6 +271,7 @@ pub async fn start(
         sink,
         started: false,
         drained: HashSet::new(),
+        resume,
     };
     tokio::spawn(async move { watcher.run().await });
     Ok(stream)
@@ -262,11 +285,26 @@ struct Watcher {
     name: String,
     sink: ExecutionSink,
     started: bool,
-    /// Pods whose log has been read to end-of-file. A pod is followed exactly
-    /// once per `watch` call; a *new* `watch` re-reads every log from byte zero,
-    /// which is what makes re-attach work and is safe because
-    /// `upsert_test_result` replaces the row rather than appending.
+    /// Pods whose log has been read to end-of-file **within this `watch`
+    /// call**. A pod is followed exactly once per call: `drain_pods` runs on
+    /// every status-poll tick, and without this a still-running pod would be
+    /// re-followed from wherever `open_log` starts it on every one of those
+    /// ticks, not just once per re-attach.
+    ///
+    /// This is unrelated to *cross-attach* resumption, which is `resume`'s
+    /// job below. Before Task 13 (review finding #50) a *new* `watch` call
+    /// re-read every log from byte zero regardless of what an earlier call
+    /// had already archived, and that was safe only for test results —
+    /// `upsert_test_result` replaces the row rather than appending — not for
+    /// the archived log, which `append_log`'s `CONCAT` duplicated on every
+    /// re-attach.
     drained: HashSet<String>,
+    /// Where to resume each pod's log read from, keyed by node — see
+    /// [`LogResume`]'s own doc. Consulted once per pod, in
+    /// [`Self::open_log`], the first time that pod is followed by *this*
+    /// `watch` call; `drained` above is what stops a second consultation
+    /// for the same pod on a later poll tick.
+    resume: LogResume,
 }
 
 impl Watcher {
@@ -393,7 +431,7 @@ impl Watcher {
     /// [`ExecutionEvent::Log`] per line and a
     /// [`ExecutionEvent::TestResult`] per completed test.
     async fn follow(&mut self, pod_name: &str, node: &str) -> bool {
-        let Some(stream) = self.open_log(pod_name).await else {
+        let Some(stream) = self.open_log(pod_name, node).await else {
             return true;
         };
         let mut parser = MarkerParser::new(node);
@@ -431,10 +469,37 @@ impl Watcher {
     /// can still refuse a log request, so the caller retries on the next pass
     /// rather than marking the pod drained. Boxed so the type is nameable,
     /// which is what lets [`Self::follow`] stay small.
-    async fn open_log(&self, pod_name: &str) -> Option<Pin<Box<dyn AsyncBufRead + Send>>> {
+    async fn open_log(
+        &self,
+        pod_name: &str,
+        node: &str,
+    ) -> Option<Pin<Box<dyn AsyncBufRead + Send>>> {
         let params = LogParams {
             container: Some(MAIN_CONTAINER.to_owned()),
             follow: true,
+            // Resume, don't replay — Task 13, review finding #50. A fresh
+            // `Watcher` starts with an empty `drained` set (this struct's own
+            // doc) and this used to be plain `..LogParams::default()`, so
+            // every re-attach re-read each pod's log from byte 0 and
+            // `append_log`'s `CONCAT` wrote it all again — the archive was
+            // the one place that replay was not safe (see `resume`'s doc).
+            //
+            // `since_time` only, deliberately not `tail_lines` even though
+            // `resume.tail_lines_for` exists: for a `follow: true` stream
+            // `tail_lines` means "the last N lines of the log as it stands
+            // right now", not "skip the first N", so if this pod produced
+            // more than `2 * N` lines during the gap since the last observer
+            // ended, `tail_lines = N` would return only recent output and
+            // silently drop the middle — reopening the loss direction this
+            // fix must not open. `since_time` has no such failure mode: it
+            // can re-request a few lines already archived (at most one flush
+            // period's worth — see `LogPosition`'s doc), never skip past one
+            // that was not. `resume.tail_lines_for` is still called by the
+            // `LogResume` API surface Task 15/16/17 build on; it is simply
+            // never `Some` here, because `run_logs_sea_repo`'s
+            // `log_resume_positions` always has a timestamp once it has a
+            // count.
+            since_time: since_time_for(&self.resume, node),
             ..LogParams::default()
         };
         match self.pods.log_stream(pod_name, &params).await {

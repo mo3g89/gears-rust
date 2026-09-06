@@ -92,7 +92,9 @@ integration = ["dep:testcontainers", "dep:testcontainers-modules"]
 # * `regex` — the runner's log-marker grammar
 #   (`manager/src/services/argo.rs:2736-2996`).
 # * `base64` — `=== TEST_CASE: <base64-json> ===` markers (`argo.rs:2921`).
-argo = ["dep:kube", "dep:k8s-openapi", "dep:regex", "dep:base64"]
+# * `jiff` — `kube-core`'s `LogParams::since_time` type; see this crate's
+#   `Cargo.toml` dependency comment.
+argo = ["dep:kube", "dep:k8s-openapi", "dep:regex", "dep:base64", "dep:jiff"]
 
 [dependencies]
 qa-runs-sdk = { path = "../qa-runs-sdk" }
@@ -207,6 +209,10 @@ kube = { workspace = true, features = [
 k8s-openapi = { workspace = true, features = ["latest"], optional = true }
 regex = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+# `kube-core`'s `LogParams::since_time` is `jiff::Timestamp`; needed to resume
+# a pod log read instead of replaying it (Task 13, review finding #50) — see
+# `infra::executor::argo::watch::since_time_for`.
+jiff = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Log-output assertions. Several guarantees in this crate are discharged by a

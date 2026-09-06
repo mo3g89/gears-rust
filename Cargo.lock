@@ -9311,6 +9311,7 @@ dependencies = [
  "futures",
  "http",
  "inventory",
+ "jiff",
  "k8s-openapi",
  "kube",
  "qa-catalog",

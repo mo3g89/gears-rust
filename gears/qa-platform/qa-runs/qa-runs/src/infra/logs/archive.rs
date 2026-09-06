@@ -83,7 +83,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::repos::RunLogsRepository;
+use crate::domain::repos::{LogResume, RunLogsRepository};
 use crate::domain::service::{DbProvider, FlushReport, LogArchive, actions, resources};
 use crate::domain::system_actor;
 
@@ -385,6 +385,24 @@ where
             }
         }
         report
+    }
+
+    async fn resume_positions(
+        &self,
+        tenant: system_actor::TenantBound,
+        run_id: Uuid,
+    ) -> Result<LogResume, DomainError> {
+        // The same resolution `Self::write` performs for the write half — a
+        // fresh `qa.run` scope per call, via the enforcer, never hoisted or
+        // cached — except `GET`, not `DISPATCH`: this is a read of the run's
+        // own archive, not a write to it.
+        let ctx = system_actor::for_log_archive(tenant);
+        let scope = self
+            .policy_enforcer
+            .access_scope(&ctx, &resources::RUN, actions::GET, Some(run_id))
+            .await?;
+        let conn = self.db.conn()?;
+        self.runs.log_resume_positions(&conn, &scope, run_id).await
     }
 }
 

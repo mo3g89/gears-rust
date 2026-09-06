@@ -1774,10 +1774,28 @@ where
     /// A filled window costs more here than it does there. The other two leave
     /// work that is already late a little later; this one leaves a run
     /// **unobserved** for up to a full rotation, and what the executor emitted in
-    /// that window survives only if `RunExecutor::watch` genuinely resumes. The
-    /// port requires that; `MockRunExecutor` satisfies it by replaying from the
-    /// beginning, which is stronger, so nothing in this crate can falsify an
-    /// adapter that drops the gap.
+    /// that window survives only if `RunExecutor::watch` genuinely resumes.
+    ///
+    /// **Both directions are falsifiable now, and neither was before Task 13
+    /// (review finding #50).** Before it, `MockRunExecutor` satisfied
+    /// re-attach by replaying every event from the beginning regardless of
+    /// what `watch` was given — stronger than the port requires in the
+    /// no-loss direction, but it meant nothing in this crate could falsify an
+    /// adapter that dropped the gap, *and* the mock could not have caught the
+    /// opposite defect either, because it had no notion of "already sent"
+    /// to duplicate. `watch` now carries a `LogResume`
+    /// (`domain::repos::LogResume`), the mock replays from that position
+    /// exactly — it holds its own script, so there is no approximation to
+    /// make — and `watch_tests::a_reattach_does_not_duplicate_the_archived_log`
+    /// is what a re-attach that replayed in full, as this method's own
+    /// `reattach_watchers` caller now exercises on every unwatched live run,
+    /// would fail. `mock::watch_resumes_without_duplicating_or_dropping_log_lines`
+    /// is the mock-level pin for the same two directions. The Argo adapter's
+    /// `since_time`-based resume (`infra::executor::argo::watch`) is weaker
+    /// than the mock's exact skip — a Kubernetes timestamp is not a line
+    /// offset — but is still the safe direction: see
+    /// `domain::repos::LogPosition`'s doc for why it can duplicate a few
+    /// lines at the boundary but cannot open a gap.
     async fn list_watch_candidates(
         &self,
         // Kept, unused, so the caller's audit-logging `system_actor::for_watch_scan`

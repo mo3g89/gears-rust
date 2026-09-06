@@ -194,7 +194,7 @@ use uuid::Uuid;
 
 use super::ingest::IngestService;
 use crate::domain::ports::run_executor::{ExecutionRef, RunExecutor};
-use crate::domain::repos::{QueueRepository, RunsRepository};
+use crate::domain::repos::{LogResume, QueueRepository, RunsRepository};
 use crate::domain::system_actor::{self, TenantBound};
 
 /// One run to observe, with the tenant every write about it must be bound to.
@@ -415,7 +415,34 @@ where
     R: RunsRepository + 'static,
     Q: QueueRepository + 'static,
 {
-    let mut stream = match executor.watch(&target.execution_ref).await {
+    // Read before the watch call, not inside `attach` before the spawn as
+    // Task 13's brief illustrated: `attach` is synchronous and infallible by
+    // contract (this module's own doc, "Both methods are synchronous and
+    // infallible") and a resume read is neither — it is a database round
+    // trip through a resolved `AccessScope`. Reading it here, at the start of
+    // the task `attach` already spawns and before the one call it gates,
+    // gets the same property (the executor never opens a stream without
+    // whatever resume position exists) without asking `attach` to become
+    // async or fallible. A failure here is treated as "resume position
+    // unknown" rather than as a reason to abandon the attach: it falls back
+    // to `LogResume::default()`, which is exactly what a first attach
+    // already passes, so this degrades to the pre-Task-13 replay-from-the-
+    // beginning behaviour rather than leaving the run unobserved. Review
+    // finding #50.
+    let resume = match ingest.resume_positions(target.tenant, target.run_id).await {
+        Ok(resume) => resume,
+        Err(error) => {
+            warn!(
+                run_id = %target.run_id,
+                execution_ref = target.execution_ref.as_str(),
+                %error,
+                "could not read this run's log resume position; watching from the beginning",
+            );
+            LogResume::default()
+        }
+    };
+
+    let mut stream = match executor.watch(&target.execution_ref, resume).await {
         Ok(stream) => stream,
         Err(error) => {
             error!(

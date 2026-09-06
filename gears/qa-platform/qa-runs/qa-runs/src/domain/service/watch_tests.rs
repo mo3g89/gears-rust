@@ -32,11 +32,17 @@
 //!   replica ticks and so publishes into the map its own router reads, and it is
 //!   only under a real elector that a subscriber on a non-leader would get a 200
 //!   and silence. `infra::logs::broadcast` carries it.
-//! * **That re-attachment works against a real executor.** `MockRunExecutor`
-//!   satisfies the `watch` re-attach contract by *replaying from the beginning*,
-//!   which is strictly stronger than the "resumes" the port requires. An adapter
-//!   that dropped everything emitted before the re-attach would pass every test
-//!   here.
+//! * **That re-attachment works against a real executor.** Every test above
+//!   this line builds `harness()`, whose `NullLogArchive` always answers an
+//!   empty [`LogResume`] (nothing was ever archived under it), so
+//!   `MockRunExecutor` replays those runs' scripts from the beginning exactly
+//!   as it always has — an adapter that dropped everything emitted before a
+//!   re-attach would pass every one of them. The Finding #50 section below
+//!   this comment is the exception: it builds its own harness over a real
+//!   `RunLogArchive` precisely so a non-empty resume position reaches the
+//!   mock, and the mock is what makes that position exact rather than a
+//!   Kubernetes-shaped approximation — see `infra::executor::mock`'s module
+//!   doc.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::{AttachedSlot, WatchRegistry};
@@ -112,7 +118,7 @@ use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
+use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
 use qa_runs_sdk::{RunState, RunTarget};
 use toolkit_security::pep_properties;
 
@@ -121,7 +127,7 @@ use crate::domain::ports::run_executor::{
     ExecutionEvent, ExecutionNode, ExecutionRef, NodeOutcome, RunAccess, RunEnv, RunExecutor,
     RunSpec, RunnerSpec, TestObservation,
 };
-use crate::domain::repos::RunsRepository;
+use crate::domain::repos::{ArchivedLog, LogResume, RunLogsRepository, RunsRepository};
 use crate::domain::service::admission::tests::fakes::{FakeCatalog, FakeEnvironments, PLATFORM_A};
 use crate::domain::service::test_support::{NullLogArchive, OWNER_TENANT};
 use crate::domain::service::watch::WatchTarget;
@@ -130,7 +136,7 @@ use crate::domain::state_machine::ExecutorOutcome;
 use crate::domain::system_actor::TenantBound;
 use crate::infra::ConcreteAppServices;
 use crate::infra::executor::mock::MockRunExecutor;
-use crate::infra::logs::RunLogBroadcaster;
+use crate::infra::logs::{RunLogArchive, RunLogBroadcaster};
 use crate::infra::storage::test_db::{inmem_db, sample_new_run, scope};
 use crate::infra::storage::{OrmQueueRepository, OrmRunsRepository};
 use toolkit_db::DBProvider;
@@ -433,7 +439,7 @@ async fn an_execution_the_executor_has_forgotten_retires_nothing() {
     // empty stream and appears in no active listing.
     let mut stream = h
         .executor
-        .watch(&ExecutionRef::new("never-started"))
+        .watch(&ExecutionRef::new("never-started"), LogResume::default())
         .await
         .expect("an unknown reference is not an error");
     assert!(
@@ -526,4 +532,222 @@ async fn an_unreachable_executor_retires_nothing() {
         "the slot was released when the failed observation ended"
     );
     assert_eq!(settled_state(&h, run_id).await, RunState::Succeeded);
+}
+
+// ---------------------------------------------------------------------------
+// Finding #50: a re-attach must resume the log read, not replay it
+// ---------------------------------------------------------------------------
+
+/// A second harness, over a **real** [`RunLogArchive`] rather than
+/// [`NullLogArchive`].
+///
+/// `harness()` above uses `NullLogArchive` deliberately — none of its tests
+/// read the archive, and most of this suite's `AppServices` instances are
+/// built over repositories that do not implement `RunLogsRepository`. This
+/// one needs the opposite: an archive whose writes are readable back, which
+/// is what proves a re-attach did or did not duplicate them. `archive` is
+/// kept concretely, the way `ingest_races_pg_tests::Fixture` keeps its own,
+/// so a test can force a flush directly rather than waiting on a periodic
+/// tick this suite never runs.
+struct ResumeHarness {
+    services: Arc<ConcreteAppServices>,
+    db: Arc<DbProvider>,
+    executor: Arc<MockRunExecutor>,
+    archive: Arc<RunLogArchive<OrmRunsRepository>>,
+}
+
+async fn resume_harness() -> ResumeHarness {
+    let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
+    let executor = Arc::new(MockRunExecutor::new());
+    let authz: Arc<dyn AuthZResolverClient> = Arc::new(EnumerationGrantingAuthZ {
+        covering: vec![OWNER_TENANT],
+    });
+    let archive = Arc::new(RunLogArchive::new(
+        Arc::clone(&db),
+        Arc::new(OrmRunsRepository),
+        PolicyEnforcer::new(Arc::clone(&authz)),
+    ));
+    let services = Arc::new(AppServices::new(
+        Arc::new(OrmRunsRepository),
+        Arc::new(OrmQueueRepository),
+        Arc::new(crate::infra::storage::OrmSchedulesRepository),
+        ServiceDeps {
+            db: Arc::clone(&db),
+            authz,
+            catalog: Arc::new(FakeCatalog::serving(&["tests/a.py"])),
+            environments: Arc::new(FakeEnvironments::free()),
+            product_plugins: Arc::new(
+                crate::domain::service::admission::tests::fakes::FakeProductPlugins::default(),
+            ),
+            executor: Arc::clone(&executor) as Arc<dyn RunExecutor>,
+            logs: Arc::new(RunLogBroadcaster::new(8)),
+            archive: Arc::clone(&archive) as Arc<dyn LogArchive>,
+            admitter: None,
+            dispatcher: None,
+            watcher: None,
+            default_timeout_seconds: 3600,
+            limits: QueueLimits {
+                queue_max_depth: 20,
+                max_concurrent_runs: 0,
+                queue_ttl_seconds: 7200,
+            },
+            orphan_timeout_seconds: 600,
+        },
+    ));
+    ResumeHarness {
+        services,
+        db,
+        executor,
+        archive,
+    }
+}
+
+/// Three log lines for node `repo-a`, then **nothing else** — deliberately no
+/// `Finished`. A run that finished would leave `Running` and
+/// `list_watch_candidates` would stop offering it, which would make a second
+/// tick's "is it still unwatched" answer vacuous. A live run whose observer
+/// simply ended is exactly Finding #50's trigger: "a process restart, a
+/// transient API-server error, an ingest failure" all end the stream with no
+/// terminal event, and `reattach_watchers` re-attaches on the next tick
+/// regardless of which of the three it was.
+fn unfinished_log_script() -> Vec<ExecutionEvent> {
+    vec![
+        ExecutionEvent::Started,
+        ExecutionEvent::Log {
+            node: "repo-a".to_owned(),
+            line: "one".to_owned(),
+        },
+        ExecutionEvent::Log {
+            node: "repo-a".to_owned(),
+            line: "two".to_owned(),
+        },
+        ExecutionEvent::Log {
+            node: "repo-a".to_owned(),
+            line: "three".to_owned(),
+        },
+    ]
+}
+
+impl ResumeHarness {
+    /// A live, platformless run with an execution reference, scripted with
+    /// [`unfinished_log_script`].
+    async fn live_run_with_execution_ref(&self) -> Uuid {
+        let conn = self.db.conn().unwrap();
+        let mut new = sample_new_run("resume-fixture");
+        new.state = RunState::Running;
+        new.target = RunTarget::Plan {
+            repo_id: Uuid::new_v4(),
+            path: "tests/plan.yaml".to_owned(),
+        };
+        new.timeout_at = Some(time::OffsetDateTime::now_utc() + time::Duration::hours(1));
+        let run = OrmRunsRepository
+            .create(&conn, &scope(OWNER_TENANT), OWNER_TENANT, new)
+            .await
+            .unwrap();
+
+        self.executor.script(run.id, unfinished_log_script());
+        let reference = self
+            .executor
+            .start(RunSpec {
+                run_id: run.id,
+                run_name: run.name.clone(),
+                nodes: vec![ExecutionNode {
+                    name: "repo-a".to_owned(),
+                    bundle_ref: "bundle://a".to_owned(),
+                    test_files: vec!["tests/a.py".to_owned()],
+                }],
+                env: RunEnv::default(),
+                access: RunAccess::default(),
+                runner: RunnerSpec::default(),
+                timeout_seconds: 3600,
+            })
+            .await
+            .unwrap();
+        OrmRunsRepository
+            .set_execution_ref(&conn, &scope(OWNER_TENANT), run.id, reference.as_str())
+            .await
+            .unwrap();
+        run.id
+    }
+
+    /// One dispatcher tick — which attaches `run_id` if it is not already
+    /// watched — then wait for the spawned observer to finish and settle
+    /// into the archive.
+    ///
+    /// There is no accessor for `is_watching` from outside `domain::service`
+    /// (`AppServices::watcher`'s own doc: "no accessor... production surface
+    /// existing for a test"), so this polls the one thing observable from
+    /// here — the archived line count — until it stops moving, forcing a
+    /// flush each time since this script never emits `Finished` and so never
+    /// triggers `IngestService::finish`'s own flush.
+    async fn attach_and_drain(&self, run_id: Uuid) {
+        self.services.dispatch.run_tick().await;
+
+        let mut last = -1_i64;
+        let mut stable_polls = 0;
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            self.archive.flush(run_id).await.ok();
+            let current = self.archived_log(run_id).await.map_or(0, |log| log.lines);
+            if current == last {
+                stable_polls += 1;
+                if stable_polls >= 3 {
+                    return;
+                }
+            } else {
+                stable_polls = 0;
+            }
+            last = current;
+        }
+        panic!("the observer did not settle within the poll budget");
+    }
+
+    async fn archived_log(&self, run_id: Uuid) -> Option<ArchivedLog> {
+        let conn = self.db.conn().unwrap();
+        OrmRunsRepository
+            .get_log(&conn, &scope(OWNER_TENANT), run_id)
+            .await
+            .unwrap()
+    }
+}
+
+/// **A re-attach must not append the run's whole log a second time.**
+///
+/// `reattach_watchers` runs on every tick and re-attaches any live run whose
+/// observer ended — a process restart, a transient API-server error, an
+/// ingest failure. Before this task the Argo watcher opened each pod log with
+/// no `since_time` and no `tail_lines`, so it re-read from byte 0, and
+/// `append_log` is a `CONCAT`. `RunLogsRepository` has no truncate, replace or
+/// offset, so nothing could undo it. Review finding #50.
+///
+/// **TDD evidence (recorded in the commit that fixes this):** before the fix,
+/// `after_second.lines` was double `after_first.lines` (6 vs 3) — the whole
+/// script replayed again rather than resuming past it.
+#[tokio::test]
+async fn a_reattach_does_not_duplicate_the_archived_log() {
+    let h = resume_harness().await;
+    let run_id = h.live_run_with_execution_ref().await;
+
+    h.attach_and_drain(run_id).await;
+    let after_first = h
+        .archived_log(run_id)
+        .await
+        .expect("the first observation must have archived something");
+    assert!(after_first.lines > 0, "premise: something was archived");
+
+    // The observer ended (the script has no `Finished`); the slot is freed
+    // by `AttachedSlot`'s Drop, and the next tick's `reattach_watchers`
+    // re-attaches because the run is still `Running` and unwatched.
+    h.attach_and_drain(run_id).await;
+    let after_second = h.archived_log(run_id).await.expect("the row still exists");
+
+    assert_eq!(
+        after_second.lines, after_first.lines,
+        "a re-attach must not re-append the log; it grew from {} to {} lines",
+        after_first.lines, after_second.lines
+    );
+    assert_eq!(
+        after_second.text, after_first.text,
+        "a re-attach must not change the archived text"
+    );
 }

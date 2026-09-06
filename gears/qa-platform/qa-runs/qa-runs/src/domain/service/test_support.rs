@@ -70,9 +70,9 @@ use toolkit_db::secure::SecureEntityExt;
 
 use crate::domain::repos::SchedulesRepository;
 use crate::domain::repos::{
-    ArchivedLog, NewRun, NewTestResult, OwnedRunId, RunLogsRepository, RunResultDelta,
-    RunStatePatch, RunWithResult, RunsRepository, TestResultRow, TimeoutCandidate, WatchCandidate,
-    Windowed,
+    ArchivedLog, LogPosition, LogResume, NewRun, NewTestResult, OwnedRunId, RunLogsRepository,
+    RunResultDelta, RunStatePatch, RunWithResult, RunsRepository, TestResultRow, TimeoutCandidate,
+    WatchCandidate, Windowed,
 };
 
 /// Wrap a double's whole fixture as a single page.
@@ -750,6 +750,44 @@ impl RunLogsRepository for MockRunsRepository {
         run_id: Uuid,
     ) -> Result<Option<ArchivedLog>, DomainError> {
         Ok(self.logs.lock().unwrap().get(&run_id).cloned())
+    }
+
+    /// Mirrors `infra::storage::run_logs_sea_repo`'s real implementation —
+    /// counting lines by their `"[{node}] "` prefix — rather than stubbing
+    /// `unsupported`, so a test built over this double can exercise
+    /// `RunLogArchive::resume_positions` too. `since_time` is always `None`:
+    /// this double has no `updated_at` column to stand in for it, and no
+    /// test here needs one — see `LogPosition`'s doc for what a real
+    /// implementation uses it for.
+    async fn log_resume_positions<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        run_id: Uuid,
+    ) -> Result<LogResume, DomainError> {
+        let Some(log) = self.logs.lock().unwrap().get(&run_id).cloned() else {
+            return Ok(LogResume::default());
+        };
+        let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        for line in log.text.lines() {
+            if let Some(rest) = line.strip_prefix('[')
+                && let Some(end) = rest.find(']')
+            {
+                *counts.entry(rest[..end].to_owned()).or_insert(0) += 1;
+            }
+        }
+        Ok(counts
+            .into_iter()
+            .map(|(node, lines)| {
+                (
+                    node,
+                    LogPosition {
+                        lines,
+                        since_time: None,
+                    },
+                )
+            })
+            .collect())
     }
 }
 
@@ -1720,6 +1758,18 @@ impl LogArchive for NullLogArchive {
 
     async fn flush_due(&self) -> FlushReport {
         FlushReport::default()
+    }
+
+    /// Nothing is ever archived under this double, so nothing is ever
+    /// resumable either — the empty map is exactly right, not a placeholder:
+    /// it is what makes a caller read from the beginning, which is correct
+    /// here because "the beginning" is the whole of what this double has.
+    async fn resume_positions(
+        &self,
+        _tenant: crate::domain::system_actor::TenantBound,
+        _run_id: Uuid,
+    ) -> Result<LogResume, DomainError> {
+        Ok(LogResume::default())
     }
 }
 

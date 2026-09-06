@@ -130,11 +130,13 @@ use crate::domain::ports::run_executor::{
     ExecutionEvent, ExecutionStream, NodeOutcome, TestObservation,
 };
 use crate::domain::repos::{
-    NewTestResult, QueueRepository, RunResultDelta, RunStatePatch, RunsRepository, TestResultRow,
+    LogResume, NewTestResult, QueueRepository, RunResultDelta, RunStatePatch, RunsRepository,
+    TestResultRow,
 };
 use crate::domain::state_machine::{
     ExecutorOutcome, can_transition, derive_terminal_state, is_terminal, reconcile_recorded_state,
 };
+use crate::domain::system_actor;
 
 /// Trim a runner-supplied per-test status, and **do not change its case**.
 ///
@@ -680,6 +682,24 @@ where
             .get(&conn, &scope, run_id)
             .await?
             .ok_or(DomainError::RunNotFound { id: run_id })
+    }
+
+    /// Where `run_id`'s archive currently ends, per node — Task 13, review
+    /// finding #50.
+    ///
+    /// A thin delegation to `self.archive`, which is private to this struct
+    /// (`IngestDeps::archive`'s own doc: `get_log` must not sit next to
+    /// `list`, and the same reach argument applies to `archive` itself —
+    /// nothing outside this module should be able to call `record`/`flush`
+    /// directly). [`super::watch`]'s `drain` is the one caller: it reads this
+    /// before calling [`RunExecutor::watch`](crate::domain::ports::run_executor::RunExecutor::watch)
+    /// so the executor can resume rather than replay.
+    pub(in crate::domain::service) async fn resume_positions(
+        &self,
+        tenant: system_actor::TenantBound,
+        run_id: Uuid,
+    ) -> Result<LogResume, DomainError> {
+        self.archive.resume_positions(tenant, run_id).await
     }
 }
 
