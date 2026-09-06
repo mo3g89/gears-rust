@@ -48,6 +48,16 @@
 //! [`LaunchService::resolve`] for where it surfaces (`DomainError::Forbidden`
 //! for a denial, [`DomainError::Catalog`] for anything else non-absent).
 //!
+//! **Finding #9's fix round 1 found the same hole one call earlier.** A custom
+//! plan's nested `plan.yaml` lookup (`get_plan`) is scoped by the same kind of
+//! grant as `get_test_meta`, and a denial of it used to be folded into
+//! "unresolvable nested plan, contributes nothing" exactly as a denied
+//! `TEST_META` file used to be folded into "unreadable" — reachable on the
+//! identical missing-grant input, one hop upstream of the fix finding #9
+//! originally shipped. [`LaunchService::resolve_one_nested_plan`] now applies
+//! the same split, through the same [`classify_catalog_failure`] both call
+//! sites share.
+//!
 //! That distinction is about the **exclusivity scan** and not about the whole
 //! launch's other reads. Reading a plan in order to know *which files a run
 //! contains* is a different question, and a launch whose target cannot be
@@ -61,7 +71,7 @@
 //! | validate parameters | nothing written, nothing fetched |
 //! | read the platform | launch fails; no run row |
 //! | read the target, group, guard | launch fails; no run row |
-//! | resolve exclusivity | an absent input resolves parallel and logs; a `TEST_META` read that failed for any other reason now fails the launch (finding #9) |
+//! | resolve exclusivity | an absent input (a `TEST_META` file or a nested `plan.yaml`) resolves parallel and logs; either one failing for any other reason now fails the launch (finding #9) |
 //! | create the run row | launch fails; no run row (the insert is the write) |
 //! | admit | run row is marked terminal, then the error is returned |
 //! | dispatch inline | the error propagates; Task 14 owns the claim release |
@@ -986,6 +996,31 @@ fn catalog_error(error: &qa_catalog_sdk::QaCatalogError) -> DomainError {
     DomainError::Catalog(error.to_string())
 }
 
+/// Translate a `QaCatalogError` that is **not** the absence case into the
+/// `DomainError` it fails a launch with.
+///
+/// Shared by [`resolve_single_file_read`] (a `TEST_META` read) and
+/// [`LaunchService::resolve_one_nested_plan`] (a `get_plan` read, review
+/// finding #9's fix-round-1 addition): the same missing grant can deny either
+/// call, and the classification is written once, here, rather than re-derived
+/// per call site -- two copies of "which `QaCatalogError` variant means a
+/// deny" that must always agree is exactly the drift this codebase's
+/// `EnforcerError` split (`domain/error.rs`) exists to avoid repeating.
+///
+/// A `PermissionDenied` surfaces as [`DomainError::Forbidden`] (403), the same
+/// split already made for that flattened authorization error; every other
+/// cause -- including a future `QaCatalogError` variant, since every one is
+/// `#[non_exhaustive]` -- goes through [`catalog_error`] (500). Both callers
+/// route their own `NotFound` (the absent case) elsewhere before ever reaching
+/// this function, so it never has to, and must not, treat an absent resource
+/// as a failure.
+fn classify_catalog_failure(error: qa_catalog_sdk::QaCatalogError) -> DomainError {
+    match error {
+        QaCatalogError::PermissionDenied { .. } => DomainError::Forbidden,
+        other => catalog_error(&other),
+    }
+}
+
 fn environments_error(error: &qa_environments_sdk::QaEnvironmentsError) -> DomainError {
     DomainError::Environments(error.to_string())
 }
@@ -1716,17 +1751,26 @@ impl<R: RunsRepository> LaunchService<R> {
     /// giving up either property, and is the obvious optimisation if a custom plan
     /// ever composes enough plans for this to matter.
     ///
-    /// # An unresolvable `plan.yaml` still cannot fail a launch; an unreadable `TEST_META` file now can
+    /// # A missing `plan.yaml` still cannot fail a launch; a denied or faulted read now does
     ///
-    /// A nested plan whose `plan.yaml` will not load — wrong branch, deleted
-    /// repository, another tenant's `repo_id` — warns and contributes nothing
-    /// (`:540-546`, and the whole-function contract at `:177-179`), unchanged
-    /// by review finding #9: that is `get_plan`, not `get_test_meta`, and is out
-    /// of that finding's scope. The launch then fails at dispatch for the real
-    /// reason, if at all. What *can* now fail this function is the other branch
-    /// — [`Self::scan_nested_plan`]'s `TEST_META` read, when it fails for a
-    /// reason other than the file being absent. See the module doc's "A
-    /// missing input never fails a launch; an unreadable one now does".
+    /// A nested plan whose `plan.yaml` is genuinely **absent** — wrong branch,
+    /// deleted repository, another tenant's `repo_id` (all `NotFound`, see
+    /// "The cross-tenant question" below) — warns and contributes nothing
+    /// (`:540-546`, and the whole-function contract at `:177-179`). That much
+    /// is unchanged by review finding #9.
+    ///
+    /// **What is not unchanged, fixed in this task's fix round 1:** a `get_plan`
+    /// read that fails for a reason *other* than the plan.yaml being absent — a
+    /// denial, a database failure, an internal error — used to be folded into
+    /// the same "contributes nothing" arm as an absent one. On a custom plan
+    /// whose nested entry names a `plan_path`, the same missing grant that
+    /// finding #9 fixed for `TEST_META` denies `get_plan` first, one call
+    /// earlier: [`Self::scan_nested_plan`] is never reached, and the same
+    /// destructive-suite-resolves-parallel outcome results, just one hop
+    /// upstream of where the original fix landed. Fixed with the identical
+    /// split `TEST_META` already gets — see [`classify_catalog_failure`], which
+    /// this function's `Err` arm now shares with
+    /// [`resolve_single_file_read`] rather than re-deriving it.
     ///
     /// # The cross-tenant question, and where the answer is enforced
     ///
@@ -1743,17 +1787,28 @@ impl<R: RunsRepository> LaunchService<R> {
     /// `:101-111`) and answers `NotFound`. The same is true of `get_test_meta`
     /// (`:203-215`), which this path already used.
     ///
-    /// **And the response discriminates nothing** — *given that every foreign
-    /// `repo_id` takes the `Err` arm.* That conditional is the actual guarantee and
-    /// the half that will rot, so it is stated before the conclusion rather than
-    /// after it.
+    /// **And the response discriminates nothing among the absent-resource
+    /// causes** — *given that every foreign `repo_id` takes the `Err` arm as
+    /// `NotFound`.* That conditional is the actual guarantee and the half that
+    /// will rot, so it is stated before the conclusion rather than after it.
     ///
-    /// The conclusion: a PEP denial, a deleted repository and a plan simply not on
-    /// this branch all arrive as one `QaCatalogError`, all take the `Err` arm
-    /// below, and all produce the same outcome — a warning in the launcher's log, a
-    /// bump to `unresolved`, and no contribution. The launch still succeeds with the
-    /// same run row. The log line is visible to an operator of *this* deployment,
-    /// not to the caller.
+    /// The conclusion, since review finding #9's fix round 1: a deleted
+    /// repository, a plan simply not on this branch, and the cross-tenant case
+    /// argued above all arrive as `QaCatalogError::NotFound`, all take the same
+    /// arm below, and all produce the same outcome — a warning in the
+    /// launcher's log, a bump to `unresolved`, and no contribution. The launch
+    /// still succeeds with the same run row. The log line is visible to an
+    /// operator of *this* deployment, not to the caller. **A PEP denial no
+    /// longer joins them**: it is `PermissionDenied`, not `NotFound`, and now
+    /// fails the launch closed via [`classify_catalog_failure`] — the same
+    /// outcome a denied `TEST_META` read gets, and for the same reason: a
+    /// missing grant is not "this resource does not exist", and treating it as
+    /// one lets a suite resolve parallel instead of failing loudly. Note that
+    /// this is a **different** denial from the cross-tenant one two paragraphs
+    /// up: that one is *this call succeeding as designed* (the PEP correctly
+    /// scopes a foreign repository out of existence, and answers `NotFound`);
+    /// this one is *this gear's own system actor* lacking the grant to call
+    /// `get_plan` at all, regardless of whose repository it names.
     ///
     /// ## The conditional, and what breaks it
     ///
@@ -1774,11 +1829,15 @@ impl<R: RunsRepository> LaunchService<R> {
     /// The enforcement point is asserted, in the gear that owns it:
     /// `qa-catalog`'s `plan_and_test_meta_reads_are_scoped_to_the_callers_tenant`
     /// drives `get_plan` and `get_test_meta` under a foreign tenant against a real
-    /// database and pins `NotFound`. It lives there rather than here on purpose — a
-    /// qa-runs test could only assert `MockCatalog`, which returns one error for
-    /// every cause and so cannot tell the two apart. What *is* tested here is the
-    /// arm's behaviour
-    /// (`an_unresolvable_nested_plan_contributes_nothing_and_does_not_fail_the_launch`).
+    /// database and pins `NotFound`. It lives there rather than here on purpose.
+    /// What *is* tested here, against `MockCatalog` — which distinguishes
+    /// `NotFound`/`PermissionDenied`/an internal fault for `get_plan` exactly as
+    /// it does for `get_test_meta`, since review finding #9's fix round 1 —
+    /// is both arms' behaviour:
+    /// `an_unresolvable_nested_plan_contributes_nothing_and_does_not_fail_the_launch`
+    /// for the absent case, and
+    /// `a_denied_nested_plan_yaml_read_fails_the_launch_rather_than_going_parallel`
+    /// for the denied one.
     async fn resolve_nested_exclusivity(
         &self,
         ctx: &SecurityContext,
@@ -1859,20 +1918,38 @@ impl<R: RunsRepository> LaunchService<R> {
                 Some(flag) => Ok(NestedContribution::Declared(flag)),
                 None => self.scan_nested_plan(ctx, branch, plan).await,
             },
-            // Unchanged by review finding #9: this is `get_plan` (the nested
-            // `plan.yaml` lookup), not `get_test_meta`, and is out of this
-            // task's scope. It keeps legacy's "an unresolvable nested plan
-            // contributes nothing" (`exclusivity.rs:540-546`) rather than
-            // failing the launch.
+            // Absent, exactly as legacy's "an unresolvable nested plan
+            // contributes nothing" (`exclusivity.rs:540-546`): wrong branch,
+            // deleted repository, another tenant's `repo_id` (`NotFound`
+            // either way -- see "The cross-tenant question" above). Unchanged
+            // by review finding #9.
+            Err(error @ QaCatalogError::NotFound { .. }) => {
+                warn!(
+                    repo_id = %plan.repo_id,
+                    plan_path = %plan_path,
+                    %branch,
+                    %error,
+                    "exclusivity: nested plan.yaml not found; it contributes nothing",
+                );
+                Ok(NestedContribution::Nothing { unresolved: true })
+            }
+            // NOT absent -- a denial, a database failure, an internal error --
+            // fixed in this task's fix round 1: the same missing grant that
+            // finding #9 fixed for `TEST_META` can deny this call first, one
+            // hop upstream of `scan_nested_plan`, and folding it into
+            // "contributes nothing" resolved a declared-exclusive custom plan
+            // as parallel just as silently. See `classify_catalog_failure`,
+            // shared with `resolve_single_file_read`'s identical split.
             Err(error) => {
                 warn!(
                     repo_id = %plan.repo_id,
                     plan_path = %plan_path,
                     %branch,
                     %error,
-                    "exclusivity: nested plan not resolvable; it contributes nothing",
+                    "exclusivity: the nested plan.yaml read failed for a reason other than \
+                     being absent; failing the launch rather than resolving it parallel",
                 );
-                Ok(NestedContribution::Nothing { unresolved: true })
+                Err(classify_catalog_failure(error))
             }
         }
     }
@@ -1958,19 +2035,21 @@ impl<R: RunsRepository> LaunchService<R> {
     /// implied.** The per-file retry *can* tell "one file is missing" from
     /// "the catalog is down" - `QaCatalogError` is `toolkit_canonical_errors::CanonicalError`,
     /// whose `NotFound` is the absent-file case and every other variant is not
-    /// (review finding #9) - so the two are no longer paid for identically. An
-    /// absent file costs one failed call and is omitted, exactly as before.
-    /// An outage costs at most `1 + N` failed calls per group, same as before,
-    /// but it no longer buys a silent parallel resolution for it: the first
-    /// non-absent failure aborts the retry and fails the launch closed, so the
-    /// `N` is now a bounded upper bound on the cost of *discovering* the outage,
-    /// not the cost of *ignoring* it. That is strictly worse in round trips than
-    /// the source system, which reads N files from a local checkout
-    /// (`manager/src/services/exclusivity.rs:412-421`) where this makes N
-    /// cross-gear calls - but the alternative this replaces was resolving a
-    /// destructive suite as parallel on an outage, which is worse than an extra
-    /// round trip. A future `get_test_meta` that reported per-file failures
-    /// would remove the retry entirely.
+    /// (review finding #9) - and that discrimination is what changes the cost,
+    /// not just what it buys. An outage now aborts the retry on the **first**
+    /// per-file read that fails non-absent: two calls total (the batch, then
+    /// that one retry), not `1 + N`. `1 + N` is reachable only when every one
+    /// of the N files is genuinely absent - the case this retry exists to
+    /// serve, and the one where paying for all N is the correct behaviour, not
+    /// a cost of the outage case. What the two calls buy for an outage is not
+    /// "free": it no longer resolves the suite parallel; the first non-absent
+    /// failure fails the launch closed. That is strictly worse in round trips
+    /// than the source system, which reads N files from a local checkout
+    /// (`manager/src/services/exclusivity.rs:412-421`) where an all-absent
+    /// group makes this retry N cross-gear calls - but the alternative it
+    /// replaces was resolving a destructive suite as parallel on an outage,
+    /// which is worse than an extra round trip. A future `get_test_meta` that
+    /// reported per-file failures would remove the retry entirely.
     ///
     /// # A pytest node selector is stripped before the read
     ///
@@ -2108,13 +2187,25 @@ enum SingleFileRead {
 /// as unreadable is what resolved a suite whose files declare
 /// `exclusive: True` as **parallel** when the only fault was a missing grant,
 /// a destructive test silently losing its platform-to-itself guarantee. That
-/// is the dangerous direction, and it fails closed now: a `PermissionDenied`
-/// surfaces as [`DomainError::Forbidden`] (403), the same split this plan
-/// already made for a flattened authorization error (`DomainError`'s
-/// `EnforcerError` conversion); every other cause -- `QaCatalogError`'s
-/// catch-all included, since every variant is `#[non_exhaustive]` and a future
-/// one must not silently become a dropped vote -- goes through
-/// [`catalog_error`] (500).
+/// is the dangerous direction, and it fails closed now, via
+/// [`classify_catalog_failure`] -- the same classification
+/// [`LaunchService::resolve_one_nested_plan`]'s `get_plan` read reuses, fixed
+/// alongside this task's own review round for the identical reason: the same
+/// missing grant denies both calls.
+///
+/// **`NotFound` does not name which resource was absent.** `CanonicalError`'s
+/// `resource_type` is not part of this match, so a `NotFound` for the
+/// *repository itself* -- not on this branch, cross-tenant, deleted -- is
+/// indistinguishable here from one for this specific file, and both take the
+/// same arm. That is correct for this function: either way there is no
+/// `TEST_META` to read for this path, so it abstains. But it means one bad
+/// repository read can make **every** file in the group abstain at once, which
+/// looks like N absent files rather than one absent repository. Not fixable at
+/// this layer -- qa-catalog maps both `DomainError::NotFound { id }` (a
+/// catalog entry, including a repository) and `FileNotFound { path }` through
+/// the same `CatalogResourceError` (`qa-catalog/src/api/rest/error.rs`), so
+/// they carry an identical resource type on the wire -- so the next reader
+/// must not assume a `NotFound` here means "this file, specifically".
 fn resolve_single_file_read(
     repo_id: Uuid,
     branch: &str,
@@ -2132,10 +2223,7 @@ fn resolve_single_file_read(
                 "exclusivity: the TEST_META read failed for a reason other than the file \
                  being absent; failing the launch rather than resolving it parallel",
             );
-            Err(match error {
-                QaCatalogError::PermissionDenied { .. } => DomainError::Forbidden,
-                other => catalog_error(&other),
-            })
+            Err(classify_catalog_failure(error))
         }
     }
 }
@@ -2506,9 +2594,10 @@ impl<R: RunsRepository> LaunchService<R> {
     ///    literally named `"  FOO  "`.
     /// 2. **Resolve.** Platform (which is the ownership check), then the target,
     ///    grouped by repository, guarded, with the branch resolved once. Then
-    ///    exclusivity, which can now fail this step: a `TEST_META` read that
-    ///    failed for a reason other than the file being absent propagates
-    ///    (review finding #9) rather than silently resolving parallel.
+    ///    exclusivity, which can now fail this step: a `TEST_META` read or a
+    ///    nested `plan.yaml` read that failed for a reason other than the
+    ///    resource being absent propagates (review finding #9) rather than
+    ///    silently resolving parallel.
     /// 3. **Create the run row**, under a bounded name retry.
     /// 4. **Admit.** A refusal retires the row (see [`Self::abandon`]) and is
     ///    returned to the caller.
@@ -2522,12 +2611,24 @@ impl<R: RunsRepository> LaunchService<R> {
     /// no explicit branch, [`DomainError::Environments`] /
     /// [`DomainError::Catalog`] when the platform or the target cannot be
     /// resolved, and the same two from resolving exclusivity: a `TEST_META`
-    /// read that fails for a reason other than the file being absent now
-    /// surfaces as [`DomainError::Forbidden`] (a denial) or
-    /// [`DomainError::Catalog`] (anything else) rather than being swallowed
-    /// (review finding #9). [`DomainError::QueueFull`] /
+    /// read or a nested `plan.yaml` read that fails for a reason other than
+    /// the resource being absent now surfaces as [`DomainError::Forbidden`] (a
+    /// denial) or [`DomainError::Catalog`] (anything else) rather than being
+    /// swallowed (review finding #9). [`DomainError::QueueFull`] /
     /// [`DomainError::ConcurrencyLimit`] when admission refuses, and
     /// [`DomainError::Database`] on a persistence failure.
+    ///
+    /// **The 403 is attributed to the wrong party, and that is written down
+    /// rather than silently accepted.** The condition it reports is this
+    /// gear's own *system actor* lacking a qa-catalog grant — not a fact about
+    /// the caller who receives it. An operator reading a bare 403 off the wire
+    /// is pointed at the caller's permissions, not at the deployment's. The
+    /// `warn!` at the point of failure (`resolve_single_file_read`,
+    /// [`Self::resolve_one_nested_plan`]) carries `%error`, `%repo_id`,
+    /// `branch` and `path`/`plan_path` — that is the real signal for the
+    /// operator who can act on it, and the reason a 403 is still the right
+    /// wire status rather than an opaque 500: it fails closed and is
+    /// distinguishable in logs, which a generic fault would not be.
     #[instrument(skip(self, ctx, request), fields(kind = request.target.kind().as_str()))]
     pub async fn launch(
         &self,

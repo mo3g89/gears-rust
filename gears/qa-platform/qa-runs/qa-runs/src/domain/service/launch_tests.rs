@@ -716,8 +716,10 @@ async fn exclusivity_resolution_never_force_syncs() {
 async fn an_entirely_unreadable_file_set_resolves_default_not_test_meta_false() {
     let harness = Builder::new()
         .catalog(
-            // The plan names a file the catalog has no meta for, which is what
-            // "could not be read" looks like through this SDK.
+            // The plan names a file the catalog has no meta for: genuinely
+            // *absent*, i.e. `QaCatalogError::NotFound` through this SDK --
+            // not a denial or a fault, which now fail the launch instead
+            // (review finding #9).
             MockCatalog::new().with_plan(plan_fixture("Smoke", &["tests/gone.py"])),
         )
         .build()
@@ -740,10 +742,10 @@ async fn an_entirely_unreadable_file_set_resolves_default_not_test_meta_false() 
 }
 
 /// The per-file fallback, and why it exists: qa-catalog's `get_test_meta` is
-/// all-or-nothing, so a batch containing one missing file fails outright. The
-/// source system reads each file separately and skips only the unreadable one
-/// (`exclusivity.rs:411-432`, the read at `:421`), so a readable **destructive**
-/// file still wins.
+/// all-or-nothing, so a batch containing one absent file fails outright with
+/// `NotFound`. The source system reads each file separately and skips only the
+/// absent one (`exclusivity.rs:411-432`, the read at `:421`), so a readable
+/// **destructive** file still wins.
 /// Without the fallback this run would resolve parallel.
 #[tokio::test]
 async fn a_partially_unreadable_group_still_lets_the_readable_files_vote() {
@@ -860,6 +862,11 @@ async fn a_missing_file_is_omitted_and_the_rest_still_vote() {
     assert!(
         created.resolved_exclusive,
         "the readable file declared exclusive: True, so the suite must be exclusive"
+    );
+    assert_eq!(
+        created.exclusive_tier,
+        ExclusiveTier::TestMeta,
+        "the vote came from TEST_META, not a plan.yaml declaration"
     );
 }
 
@@ -1166,12 +1173,22 @@ async fn each_nested_plan_is_resolved_in_its_own_repository() {
     assert_eq!(created.exclusive_tier, ExclusiveTier::Plan);
 }
 
-/// A nested plan that cannot be resolved contributes nothing and **does not fail
-/// the launch** (`manager/src/services/exclusivity.rs:540-546`, and the
-/// whole-function contract at `:177-179`: resolution never fails a launch).
+/// A nested plan whose `plan.yaml` is genuinely **absent** (`NotFound`)
+/// contributes nothing and **does not fail the launch**
+/// (`manager/src/services/exclusivity.rs:540-546`, and the whole-function
+/// contract at `:177-179`: resolution never fails a launch on a missing
+/// input).
 ///
 /// The second, resolvable plan still decides, which is what "computed from the
 /// rest" means.
+///
+/// **This is the guard against over-propagating, for review finding #9's fix
+/// round 1** (`resolve_one_nested_plan`'s `get_plan` arm, alongside
+/// `a_denied_nested_plan_yaml_read_fails_the_launch_rather_than_going_parallel`
+/// below): it must stay green exactly as it was before that fix, because
+/// `MockCatalog::with_unresolvable_plan` answers `NotFound`, not a denial or a
+/// fault, and `NotFound` is the one outcome that must still contribute
+/// nothing rather than fail the launch.
 #[tokio::test]
 async fn an_unresolvable_nested_plan_contributes_nothing_and_does_not_fail_the_launch() {
     let mut destructive = plan_fixture("Destructive", &["tests/b.py"]);
@@ -1204,6 +1221,52 @@ async fn an_unresolvable_nested_plan_contributes_nothing_and_does_not_fail_the_l
         0,
         "an unresolvable plan's files must not be scanned either - it contributes \
          nothing, rather than falling through to TEST_META"
+    );
+}
+
+/// **The same missing grant, one call earlier.** Review finding #9's fix
+/// round 1: `get_plan` is scoped by the same kind of grant as `get_test_meta`,
+/// so a policy that denies this gear's system actor the catalog read denies a
+/// custom plan's nested `plan.yaml` lookup *before* `scan_nested_plan` -- the
+/// branch the original fix hardened -- is ever reached. The old `Err` arm
+/// folded that into "unresolvable nested plan, contributes nothing" exactly
+/// as the old `TEST_META` fallback folded a denial into "unreadable", so a
+/// declared-exclusive custom plan would have resolved parallel here too, on
+/// the identical operational fault: a missing grant, not a missing plan.
+///
+/// The counterpart that must not regress is
+/// `an_unresolvable_nested_plan_contributes_nothing_and_does_not_fail_the_launch`
+/// above: a genuinely absent `plan.yaml` (`NotFound`) still contributes
+/// nothing and the launch still succeeds.
+#[tokio::test]
+async fn a_denied_nested_plan_yaml_read_fails_the_launch_rather_than_going_parallel() {
+    let harness = Builder::new()
+        .catalog(
+            MockCatalog::new()
+                .with_custom_plan(custom_plan_fixture_nested(&[(
+                    REPO_ID,
+                    "tests/destructive.py",
+                    Some("plans/destructive.yaml"),
+                )]))
+                .with_denied_plan(REPO_ID, "plans/destructive.yaml"),
+        )
+        .build()
+        .await;
+
+    let err = harness
+        .service
+        .launch(&ctx(OWNER_TENANT), custom_plan_request())
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, DomainError::Forbidden),
+        "a denied nested plan.yaml read must surface, not silently resolve parallel; got {err:?}"
+    );
+    assert!(
+        harness.runs.created().is_empty(),
+        "resolution runs before the run row is created, so a resolution failure must \
+         leave no row behind"
     );
 }
 

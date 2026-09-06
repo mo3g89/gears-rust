@@ -773,6 +773,21 @@ fn catalog_unsupported(method: &str) -> QaCatalogError {
 ))]
 struct MockCatalogEntryError;
 
+/// The resource type a `get_plan` failure maps through in the real gear
+/// (`qa-catalog/src/api/rest/error.rs`'s `PlanResourceError` for
+/// `DomainError::PlanNotFound`, sharing `CatalogResourceError`'s
+/// `permission_denied` for `Forbidden` -- both `NotFound`-shaped errors here
+/// regardless, since [`MockCatalog::get_plan`]'s match does not look at
+/// `resource_type` any more than `gather_group_meta`'s does). Declared
+/// separately from [`MockCatalogEntryError`] so a `get_plan` failure and a
+/// `get_test_meta` failure are visibly two different calls in a test's
+/// fixture, matching qa-catalog's own split, even though both collapse to the
+/// same `CanonicalError` variants.
+#[toolkit::api::canonical_prelude::resource_error(toolkit_gts::gts_id!(
+    "cf.qa.catalog.plan.v1~"
+))]
+struct MockCatalogPlanError;
+
 /// In-memory `QaCatalogClientV1` serving one repository default branch, one
 /// discovered plan, one custom plan, and per-file `TEST_META`.
 pub(super) struct MockCatalog {
@@ -785,9 +800,17 @@ pub(super) struct MockCatalog {
     /// apart — and a test claiming "plan A declared exclusive, plan B did not"
     /// would be asserting against one fixture answering for both.
     pub(super) plans_by_path: Vec<((Uuid, String), Plan)>,
-    /// `(repo_id, plan_path)` pairs whose `get_plan` fails: legacy's
-    /// "nested plan not resolvable on this branch" case.
+    /// `(repo_id, plan_path)` pairs whose `get_plan` answers `NotFound`:
+    /// legacy's "nested plan not resolvable on this branch" case. Contributes
+    /// nothing and must not fail the launch.
     pub(super) unresolvable_plans: Vec<(Uuid, String)>,
+    /// `(repo_id, plan_path)` pairs whose `get_plan` answers `PermissionDenied`
+    /// — a policy that denies this gear's system actor the read, as opposed to
+    /// the plan simply not existing. Review finding #9's fix round 1: this
+    /// must fail the launch, never resolve it parallel. Checked before
+    /// [`Self::unresolvable_plans`], though a test should only ever put one
+    /// `(repo_id, plan_path)` in one of the two.
+    pub(super) denied_plans: Vec<(Uuid, String)>,
     /// Every `(repo_id, plan_path)` `get_plan` was asked for, in order.
     pub(super) plan_lookups: Mutex<Vec<(Uuid, String)>>,
     pub(super) custom_plan: Option<CustomPlan>,
@@ -819,6 +842,7 @@ impl MockCatalog {
             plan: None,
             plans_by_path: Vec::new(),
             unresolvable_plans: Vec::new(),
+            denied_plans: Vec::new(),
             plan_lookups: Mutex::new(Vec::new()),
             custom_plan: None,
             metas: Vec::new(),
@@ -853,6 +877,16 @@ impl MockCatalog {
     pub(super) fn with_unresolvable_plan(mut self, repo_id: Uuid, plan_path: &str) -> Self {
         self.unresolvable_plans
             .push((repo_id, plan_path.to_owned()));
+        self
+    }
+
+    /// Make `(repo_id, plan_path)`'s `get_plan` answer `PermissionDenied`, as
+    /// it would if a policy denied this gear's system actor the read. Review
+    /// finding #9's fix-round-1 fixture: the plan this deployment cannot read
+    /// may still declare `exclusive: True`, and the point is that the launch
+    /// must fail rather than resolve as if the plan simply were not there.
+    pub(super) fn with_denied_plan(mut self, repo_id: Uuid, plan_path: &str) -> Self {
+        self.denied_plans.push((repo_id, plan_path.to_owned()));
         self
     }
 
@@ -1052,6 +1086,14 @@ impl QaCatalogClientV1 for MockCatalog {
         Err(catalog_unsupported("list_plans"))
     }
 
+    /// **The failure category matters here too, for the same reason it does in
+    /// [`Self::get_test_meta`] (review finding #9's fix round 1).** A
+    /// `(repo_id, plan_path)` in [`Self::unresolvable_plans`] answers
+    /// `NotFound` — a genuinely missing/unresolvable `plan.yaml` — and one in
+    /// [`Self::denied_plans`] answers `PermissionDenied`. Before that fix
+    /// round, both used `internal(...)`, indistinguishable from each other and
+    /// from a real fault; that is exactly the defect this double must not
+    /// reintroduce.
     async fn get_plan(
         &self,
         _ctx: &SecurityContext,
@@ -1066,11 +1108,22 @@ impl QaCatalogClientV1 for MockCatalog {
             .push((repo_id, path.to_owned()));
 
         if self
+            .denied_plans
+            .iter()
+            .any(|(r, p)| *r == repo_id && p == path)
+        {
+            return Err(MockCatalogPlanError::permission_denied()
+                .with_reason("ACCESS_DENIED")
+                .create());
+        }
+        if self
             .unresolvable_plans
             .iter()
             .any(|(r, p)| *r == repo_id && p == path)
         {
-            return Err(QaCatalogError::internal("plan not on this branch").create());
+            return Err(MockCatalogPlanError::not_found("plan not on this branch")
+                .with_resource(path.to_owned())
+                .create());
         }
         if let Some((_, plan)) = self
             .plans_by_path
