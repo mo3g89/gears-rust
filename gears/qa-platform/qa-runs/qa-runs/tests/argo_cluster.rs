@@ -42,6 +42,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use kube::api::{Api, DeleteParams, DynamicObject};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use qa_runs::config::ArgoExecutorConfig;
@@ -182,11 +183,10 @@ async fn a_real_workflow_runs_and_reports_a_real_test_result() {
         eprintln!("QA_RUNS_ARGO_KUBECONFIG is unset; skipping");
         return;
     };
-    let executor = ArgoRunExecutor::connect(config(vec![
-        "/bin/sh".to_owned(),
-        "-c".to_owned(),
-        canary_script(),
-    ]))
+    let executor = ArgoRunExecutor::connect(
+        config(vec!["/bin/sh".to_owned(), "-c".to_owned(), canary_script()]),
+        CancellationToken::new(),
+    )
     .await
     .expect("connects to the cluster");
 
@@ -339,11 +339,14 @@ async fn cancelling_a_running_workflow_finishes_it_as_canceled() {
         eprintln!("QA_RUNS_ARGO_KUBECONFIG is unset; skipping");
         return;
     };
-    let executor = ArgoRunExecutor::connect(config(vec![
-        "/bin/sh".to_owned(),
-        "-c".to_owned(),
-        "echo starting; sleep 600".to_owned(),
-    ]))
+    let executor = ArgoRunExecutor::connect(
+        config(vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "echo starting; sleep 600".to_owned(),
+        ]),
+        CancellationToken::new(),
+    )
     .await
     .expect("connects");
 
@@ -417,9 +420,12 @@ async fn an_unknown_reference_yields_an_empty_stream_rather_than_an_error() {
         eprintln!("QA_RUNS_ARGO_KUBECONFIG is unset; skipping");
         return;
     };
-    let executor = ArgoRunExecutor::connect(config(vec!["/bin/true".to_owned()]))
-        .await
-        .expect("connects");
+    let executor = ArgoRunExecutor::connect(
+        config(vec!["/bin/true".to_owned()]),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("connects");
 
     let mut stream = executor
         .watch(
@@ -442,9 +448,12 @@ async fn a_spec_with_no_nodes_is_rejected_before_anything_is_submitted() {
         eprintln!("QA_RUNS_ARGO_KUBECONFIG is unset; skipping");
         return;
     };
-    let executor = ArgoRunExecutor::connect(config(vec!["/bin/true".to_owned()]))
-        .await
-        .expect("connects");
+    let executor = ArgoRunExecutor::connect(
+        config(vec!["/bin/true".to_owned()]),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("connects");
 
     let mut run = spec("Argo Empty-1");
     run.nodes.clear();

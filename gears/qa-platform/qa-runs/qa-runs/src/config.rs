@@ -454,6 +454,60 @@ pub struct ArgoExecutorConfig {
     /// one opaque string with no key component, so there is nothing to derive
     /// a per-reference key from.
     pub secret_key: String,
+
+    /// How long a pod-log follow (`infra::executor::argo::watch::Watcher::follow`)
+    /// may go **without a single line** before giving up on that pod. Default
+    /// 28,800 (8 hours). Review findings #20/#21: `follow: true` held a task
+    /// forever on a wedged API-server connection, because nothing bounded it.
+    ///
+    /// # This is an idle bound, not a lifetime bound — and the difference is the
+    /// # whole point
+    ///
+    /// `follow: true` on a *healthy* run is meant to stay open for as long as
+    /// the node runs, which `cpt-cf-qa-nfr-run-duration` puts at up to eight
+    /// hours, and a single long test within that run can legitimately produce
+    /// no log line for a long stretch (a slow fixture, a network fetch, a test
+    /// that just doesn't print). A deadline on the *whole* follow would cut
+    /// that off mid-run and lose every line after it — trading the hang this
+    /// field fixes for a log-loss bug wearing its clothes, which is exactly what
+    /// the preceding three tasks on this file spent six fix rounds preventing
+    /// (see `LineSkip`'s own doc). So this resets on every line: a fresh line
+    /// resets the clock, and only a stretch of true silence this long trips it.
+    ///
+    /// # Where 8 hours comes from
+    ///
+    /// Reused, not reasoned anew: `api::rest::sse::MAX_STREAM_DURATION` already
+    /// draws this exact number from `cpt-cf-qa-nfr-run-duration` for a related
+    /// bound (that one total, this one idle) — "eight hours is
+    /// `cpt-cf-qa-nfr-run-duration`'s longest contemplated run, so a legitimate
+    /// stream is not cut short by a run merely being long". The same fact
+    /// carries over here even more conservatively: that constant cuts off a
+    /// *chatty* stream at 8 hours regardless of output; this one only fires on
+    /// 8 hours of **total silence**, which a platform that contemplates no run
+    /// longer than 8 hours has no legitimate reason to produce. Silence that
+    /// long is already indistinguishable from wedged, whatever the pod's true
+    /// state — there is no NFR or knob elsewhere in this file that argues for a
+    /// shorter number without also risking a healthy quiet stretch.
+    ///
+    /// Read through `.max(1)` at the call site (`Watcher::follow`), the same
+    /// guard [`Self::status_poll_seconds`] gets, so a misconfigured `0` cannot
+    /// produce a zero-duration timeout that fires between every single line.
+    ///
+    /// # This is not the first idle bound in the path, only the first explicit one
+    ///
+    /// `kube::Config`'s own `read_timeout` (295 s, unset by this adapter, so
+    /// its library default stands) already sits under every call this
+    /// `Watcher` makes, `follow`'s included — measured against `kube-client`
+    /// 3.1.0's source, not assumed: it is a connector-level socket read
+    /// timeout, not a per-request one, so it already bounds a connection that
+    /// goes **completely silent at the transport level**. What it does not
+    /// reach is the case this field is really for: bytes arriving (a
+    /// keep-alive, a partial chunk) without ever completing one more log
+    /// *line* — `kube`'s timeout resets on each such byte and never fires,
+    /// while this field's clock is line-granular and does not. This field is
+    /// also the one this codebase can see, name in a log line, and change
+    /// without a `kube` upgrade, where 295 s is presently none of those.
+    pub log_follow_idle_seconds: u64,
 }
 
 impl Default for ArgoExecutorConfig {
@@ -471,6 +525,7 @@ impl Default for ArgoExecutorConfig {
             bundle_auth: None,
             secret_name_prefix: "qa-platform-".to_owned(),
             secret_key: "value".to_owned(),
+            log_follow_idle_seconds: 8 * 60 * 60,
         }
     }
 }

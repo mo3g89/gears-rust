@@ -79,6 +79,7 @@ use kube::api::{
 };
 use kube::{Client, Config};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::config::ArgoExecutorConfig;
@@ -127,6 +128,29 @@ pub fn workflow_resource() -> ApiResource {
 pub struct ArgoRunExecutor {
     client: Client,
     config: ArgoExecutorConfig,
+    /// The gear's own shutdown signal — **wiring state, not per-call state**,
+    /// which is why it is a constructor field rather than a
+    /// [`RunExecutor::watch`] parameter. Review findings #20/#21: `watch::start`
+    /// used to spawn `Watcher::run` with no token and no handle at all, so
+    /// nothing could ever ask a detached watcher — or the pod-log follow inside
+    /// it — to stop; it ran until its next successful emit discovered the
+    /// observer had gone (`ExecutionSink::emit` returning `false`) or the
+    /// process died with it.
+    ///
+    /// **Why not thread it through the port instead.** `RunExecutor::watch`
+    /// has already changed shape three times in this remediation plan, each
+    /// time rippling to five implementors and around sixteen call sites; a
+    /// fourth change for a token whose lifetime is the *executor's*, not any
+    /// one call's, would be paying that cost for the wrong lifetime. The
+    /// service layer already owns *per-run* cancellation as of the
+    /// preceding task (`domain::service::watch::SpawningRunWatcher`'s own
+    /// `cancel` field, review finding #18) — a second per-call channel here
+    /// would be two mechanisms doing one job.
+    ///
+    /// A child of this token is handed to [`watch::start`] on every call, so
+    /// cancelling it here stops every `Watcher` this executor has spawned, not
+    /// just the next one.
+    cancel: CancellationToken,
 }
 
 impl std::fmt::Debug for ArgoRunExecutor {
@@ -207,7 +231,14 @@ impl ArgoRunExecutor {
     /// When the kubeconfig cannot be read or built, when a client cannot be
     /// constructed from it, or when the `Workflow` collection cannot be listed
     /// — which is also the `argoproj.io` CRD presence check and the RBAC check.
-    pub async fn connect(config: ArgoExecutorConfig) -> anyhow::Result<Self> {
+    ///
+    /// `cancel` is the gear's own shutdown signal — see [`Self::cancel`]'s doc
+    /// for why it arrives here, at construction, rather than on
+    /// [`RunExecutor::watch`] itself.
+    pub async fn connect(
+        config: ArgoExecutorConfig,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<Self> {
         if config.runner_image.trim().is_empty() {
             anyhow::bail!(
                 "qa-runs.argo.runner_image must be set: an unset image is an \
@@ -234,6 +265,7 @@ impl ArgoRunExecutor {
         let executor = Self {
             client: Client::try_from(kube_config)?,
             config,
+            cancel,
         };
 
         let found = executor
@@ -356,11 +388,16 @@ impl RunExecutor for ArgoRunExecutor {
         execution_ref: &ExecutionRef,
         resume: LogResume,
     ) -> Result<ExecutionStream, DomainError> {
+        // A child, not the token itself: `start` cancels only the one
+        // `Watcher` it spawns, so a leaked clone of a *child* cannot cancel
+        // this executor's other observers or its own shutdown signal — only
+        // `self.cancel` (or whoever holds it in `gear.rs`) can do that.
         watch::start(
             self.client.clone(),
             self.config.clone(),
             execution_ref,
             resume,
+            self.cancel.child_token(),
         )
         .await
     }

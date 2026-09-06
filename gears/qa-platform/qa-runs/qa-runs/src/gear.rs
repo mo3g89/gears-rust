@@ -298,6 +298,20 @@ impl Gear for QaRuns {
         let dispatcher = Cadence::dispatcher(&cfg);
         let scheduler = Cadence::scheduler(&cfg);
 
+        // Minted here rather than borrowed from `serve`'s own token, because
+        // `serve` (and the framework-supplied `CancellationToken` it receives)
+        // does not exist yet at this point in the gear's lifecycle - see
+        // `QaRunsRuntime::shutdown`'s doc for how `serve` bridges the two.
+        //
+        // **Created before the executor, not after** — moved up from its
+        // original spot below `archive` (Task 17, review findings #20/#21) so
+        // a child of it can be handed to `argo_executor`: the Argo watcher's
+        // own cancellation is wired from this same shutdown signal, not a
+        // second token, and `ArgoRunExecutor::connect` needs one at
+        // construction. Nothing between the old position and this one reads
+        // `shutdown`, so the move changes no other ordering.
+        let shutdown = CancellationToken::new();
+
         let logs = LogWiring::new(cfg.log_buffer_lines);
         let executor: Arc<dyn RunExecutor> = match cfg.executor {
             ExecutorKind::Mock => {
@@ -308,7 +322,7 @@ impl Gear for QaRuns {
                 );
                 Arc::new(MockRunExecutor::new())
             }
-            ExecutorKind::Argo => Self::argo_executor(&cfg.argo).await?,
+            ExecutorKind::Argo => Self::argo_executor(&cfg.argo, shutdown.child_token()).await?,
         };
 
         // Built once, here, and shared by `ServiceDeps::archive` (for
@@ -329,12 +343,6 @@ impl Gear for QaRuns {
             Arc::clone(&runs_repo),
             policy_enforcer,
         ));
-
-        // Minted here rather than borrowed from `serve`'s own token, because
-        // `serve` (and the framework-supplied `CancellationToken` it receives)
-        // does not exist yet at this point in the gear's lifecycle - see
-        // `QaRunsRuntime::shutdown`'s doc for how `serve` bridges the two.
-        let shutdown = CancellationToken::new();
 
         let services = Arc::new(AppServices::new(
             runs_repo,
@@ -398,6 +406,11 @@ impl Gear for QaRuns {
 impl QaRuns {
     /// The Argo executor, when this binary was built with the `argo` feature.
     ///
+    /// `cancel` is [`QaRunsRuntime::shutdown`]'s child — see
+    /// `infra::executor::argo::ArgoRunExecutor::cancel`'s doc for why the
+    /// gear's shutdown signal is wired in here, at construction, rather than
+    /// threaded through `RunExecutor::watch` itself.
+    ///
     /// # Errors
     /// When the API server cannot be reached, the `argoproj.io` CRDs are absent,
     /// this process' credentials do not allow listing `Workflow`, or
@@ -405,7 +418,10 @@ impl QaRuns {
     /// purpose: an executor that constructs happily and fails on first dispatch
     /// turns a misconfiguration into a failed run hours later.
     #[cfg(feature = "argo")]
-    async fn argo_executor(cfg: &ArgoExecutorConfig) -> anyhow::Result<Arc<dyn RunExecutor>> {
+    async fn argo_executor(
+        cfg: &ArgoExecutorConfig,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<Arc<dyn RunExecutor>> {
         warn!(
             executor = "argo",
             namespace = %cfg.namespace,
@@ -415,7 +431,7 @@ impl QaRuns {
              2026-08-27 waiver permits only behind this non-default feature"
         );
         Ok(Arc::new(
-            crate::infra::executor::argo::ArgoRunExecutor::connect(cfg.clone()).await?,
+            crate::infra::executor::argo::ArgoRunExecutor::connect(cfg.clone(), cancel).await?,
         ))
     }
 
@@ -431,7 +447,10 @@ impl QaRuns {
     /// Always.
     #[cfg(not(feature = "argo"))]
     #[allow(clippy::unused_async)]
-    async fn argo_executor(_cfg: &ArgoExecutorConfig) -> anyhow::Result<Arc<dyn RunExecutor>> {
+    async fn argo_executor(
+        _cfg: &ArgoExecutorConfig,
+        _cancel: CancellationToken,
+    ) -> anyhow::Result<Arc<dyn RunExecutor>> {
         anyhow::bail!(
             "qa-runs.executor is `argo`, but this binary was built without the \
              `argo` cargo feature. Rebuild with `--features argo`, or set \

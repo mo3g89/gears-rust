@@ -80,7 +80,7 @@ integration = ["dep:testcontainers", "dep:testcontainers-modules"]
 # ships in nothing and is not what ADR-0001's criterion is about. `-e normal`
 # restricts the query to the edges a released binary actually has.
 #
-# The four extra crates and why each is needed:
+# The seven extra crates and why each is needed:
 #
 # * `kube` — the API client. `client` for HTTP, `rustls-tls`/`aws-lc-rs` for
 #   TLS (matching `chat-engine`'s `k8s` feature, the in-repo precedent), and
@@ -92,7 +92,29 @@ integration = ["dep:testcontainers", "dep:testcontainers-modules"]
 # * `regex` — the runner's log-marker grammar
 #   (`manager/src/services/argo.rs:2736-2996`).
 # * `base64` — `=== TEST_CASE: <base64-json> ===` markers (`argo.rs:2921`).
-argo = ["dep:kube", "dep:k8s-openapi", "dep:regex", "dep:base64"]
+# * `tower`, `http-body`, `bytes` — **test-only**, for `watch`'s own
+#   `#[cfg(test)]` module (Task 17, review findings #20/#21): a loopback
+#   `kube::Client` built over a hand-rolled `tower::Service` that either
+#   answers instantly (the cancellation test) or accepts a request and never
+#   writes a body frame (the idle-deadline test, informed by
+#   `qa-plugin-k8s`'s `test_support::StubApiServer` but needing a body that
+#   never completes, which that server's always-answer-in-one-shot design
+#   cannot produce). They belong here and not in `[dev-dependencies]` for the
+#   same reason `testcontainers` does two entries up: **Cargo does not allow
+#   optional dev-dependencies**, and `argo`'s tests need them named via `dep:`
+#   without pulling them into a default `cargo test`. All three are already in
+#   `kube`'s own dependency graph under this feature, so this adds no new
+#   crate to a released `--features argo` build — only a name this module can
+#   use directly.
+argo = [
+    "dep:kube",
+    "dep:k8s-openapi",
+    "dep:regex",
+    "dep:base64",
+    "dep:tower",
+    "dep:http-body",
+    "dep:bytes",
+]
 
 [dependencies]
 qa-runs-sdk = { path = "../qa-runs-sdk" }
@@ -207,6 +229,12 @@ kube = { workspace = true, features = [
 k8s-openapi = { workspace = true, features = ["latest"], optional = true }
 regex = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+# Test-only, for `infra::executor::argo::watch`'s own loopback `kube::Client`
+# doubles (Task 17) — see the `[features]` note's entry for these three.
+# `util` is the feature `tower::service_fn` lives behind.
+tower = { workspace = true, features = ["util"], optional = true }
+http-body = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Log-output assertions. Several guarantees in this crate are discharged by a
