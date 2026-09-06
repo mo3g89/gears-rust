@@ -18,11 +18,18 @@
 //!     get the Workflow            -> gone? end the stream (never an error)
 //!     emit Started once            (first non-Pending phase)
 //!     follow every new pod's log to EOF, emitting Log and TestResult
-//!     terminal phase? -> one more pod pass; emit Finished only if that pass
-//!                        left every pod at end-of-file, then end
+//!     terminal phase? -> one more pod pass; emit Finished only if no pod in
+//!                        it stopped part-way, then end
 //!     sleep
 //! }
 //! ```
+//!
+//! "No pod stopped part-way" is deliberately narrower than "every log was
+//! read", and the gap is not an oversight: a pod with no log endpoint, a pod
+//! that never reached a phase with one, and a failed pod `list` all leave the
+//! pass able to emit `Finished`. `Watcher::drain_pods`' own doc lists all
+//! three and says which of them is a pre-existing hole this file has not
+//! closed.
 //!
 //! 1. **`Finished` must be last and the stream must then end**
 //!    (`run_executor.rs:649`), or `drain`'s `while let Some(event)` never
@@ -531,18 +538,29 @@ struct Watcher {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FollowOutcome {
     /// Nothing more to read here, and nothing that should hold back a
-    /// verdict. **Two sites produce it, and only the first marks the pod
-    /// drained**, which is why this variant is not named "drained":
+    /// verdict. **Two sites in [`Watcher::follow`] produce it, and only the
+    /// first marks the pod drained**, which is why this variant is not named
+    /// "drained":
     ///
     /// * end-of-file — the pod's log provably has nothing more to say, so
     ///   [`Watcher::follow`] records it in `drained` and no later pass of
     ///   this `Watcher` re-reads it;
     /// * [`Watcher::open_log`] answering `None` — *"this pod has no log
-    ///   endpoint (yet)"*, left exactly as it was before this change. It
-    ///   drains nothing and is retried on the next pass, and it deliberately
-    ///   does **not** block [`Watcher::finish`]: a pod that never produces a
-    ///   log at all would otherwise hold its run open until the
-    ///   control-plane timeout sweep reclaimed it. See that method's own doc.
+    ///   endpoint"*, left exactly as it was before this change. It drains
+    ///   nothing and is retried on the next pass, and it deliberately does
+    ///   **not** block [`Watcher::finish`]: a pod that never produces a log
+    ///   at all would otherwise hold its run open until the control-plane
+    ///   timeout sweep reclaimed it. See that method's own doc, which also
+    ///   names the terminal-workflow case in which `None` is not "not yet".
+    ///
+    /// **Two more sites produce it in [`Watcher::drain_pods`], and neither
+    /// read a log at all**: a failed pod `list` (no pod was examined), and
+    /// the fold's own default (a pass in which every pod was skipped, or
+    /// there were none). Both are named on that method's *"Two things report
+    /// `Complete` without having read a log"* section, which is the one to
+    /// read before treating this variant as evidence that anything was read.
+    /// This is the whole-pass reading of the same variant; see the type
+    /// header above for why one enum carries both scopes.
     Complete,
     /// We were reading this pod's log and stopped part-way: the idle
     /// deadline fired, or the stream errored mid-read. The rest of that log
@@ -649,11 +667,23 @@ impl Watcher {
                 // **This second pass is the one that gates the verdict**, and
                 // it is the current answer rather than a stale one: every pod
                 // the first pass left un-drained is followed again here, and
-                // every pod it drained is skipped, so `Complete` here means
-                // every pod of this workflow is at end-of-file (or has no log
-                // endpoint at all — see `FollowOutcome::Complete`). The first
-                // pass cannot have been `Incomplete` and still reach this
-                // line: that arm returned above.
+                // every pod it drained is skipped. The first pass cannot have
+                // been `Incomplete` and still reach this line: that arm
+                // returned above.
+                //
+                // **What `Complete` here does and does not assert.** It
+                // asserts that no pod was observed to stop part-way. It does
+                // **not** assert that every pod's log was read: a pod with no
+                // log endpoint, a pod whose phase never reached
+                // `Running`/`Succeeded`/`Failed`, and — the one worth
+                // stopping at, because it means *no pod was examined at all*
+                // — a failed pod `list` all answer `Complete` too. So this
+                // gate closes C1's hole (a verdict over a log we watched stop
+                // mid-read) and leaves the pre-existing one (a verdict over a
+                // log we never opened) exactly where it was. `drain_pods`'
+                // "Three things report `Complete` without having read a log"
+                // is the full list; do not read this `Complete` as "every log
+                // was drained".
                 match self.drain_pods().await {
                     FollowOutcome::Stop => return,
                     FollowOutcome::Incomplete => {
@@ -733,10 +763,13 @@ impl Watcher {
     /// A pod already in `drained` is skipped without being followed and does
     /// not make the pass incomplete: it is at end-of-file already.
     ///
-    /// # Two things report `Complete` without having read a log, unchanged
+    /// # Three things report `Complete` without having read a log, unchanged
     ///
     /// Named because `Complete` otherwise reads as "we read everything", and
-    /// on a terminal workflow this is the answer that releases the verdict:
+    /// on a terminal workflow this is the answer that releases the verdict.
+    /// **`Complete` is the pass's *default*, not an achievement**: it is what
+    /// this method answers when nothing downgraded it, including when
+    /// nothing was looked at.
     ///
     /// * **A pod whose phase is not yet `Running`/`Succeeded`/`Failed`** is
     ///   skipped by the loop below without being followed at all — it has no
@@ -749,7 +782,15 @@ impl Watcher {
     ///   family as C1 (a `Finished` over logs this pass never saw),
     ///   deliberately left alone here: making it `Incomplete` would put every
     ///   run whose API server rejects `list` into the re-attach loop, which
-    ///   is a separate decision from this fix.
+    ///   is a separate decision from this fix. Note what `Complete` means at
+    ///   *that* return: not "every pod is at end-of-file" but "no pod was
+    ///   examined at all".
+    /// * **A pass with nothing to follow** — an empty `list`, or one whose
+    ///   every pod was skipped by the two clauses above — falls out of the
+    ///   loop still holding the initial `Complete`. On a terminal workflow
+    ///   the second pass is normally exactly this, which is intended: its
+    ///   pods were drained by the first pass. It is listed because the same
+    ///   answer arrives from a workflow that never had a pod at all.
     ///
     /// The pod `list` call below is not raced against `self.cancel`, same
     /// reason as [`Self::open_log`]: one bounded request/response, covered by
@@ -1105,6 +1146,37 @@ impl Watcher {
     /// can still refuse a log request, so the caller retries on the next pass
     /// rather than marking the pod drained. Boxed so the type is nameable,
     /// which is what lets [`Self::follow`] stay small.
+    ///
+    /// # "Not yet" is an assumption about *when* this was asked, and it is
+    /// # sometimes wrong
+    ///
+    /// Nothing here distinguishes the two cases, and only one of them is
+    /// benign:
+    ///
+    /// * **On a non-terminal workflow**, "not yet" is almost always right: the
+    ///   container is still starting, the next poll pass asks again, and the
+    ///   pod is followed then.
+    /// * **On a terminal workflow with a `Succeeded`/`Failed` pod**, there is
+    ///   no "yet" left. A `None` there means the log is gone or unreachable —
+    ///   kubelet rotation or garbage collection took it, the pod object
+    ///   outlived its container, or the API server returned a transient error
+    ///   this method logs at `debug!` and discards. And that is precisely when
+    ///   it matters, because [`FollowOutcome::Complete`] is what releases the
+    ///   verdict: `run`'s terminal pass will emit `Finished` over a pod whose
+    ///   log was never opened at all.
+    ///
+    /// **Left as it is, deliberately** — see [`FollowOutcome::Complete`] and
+    /// the brief that requested this shape. Blocking `finish` on a `None`
+    /// would hang every run whose pod genuinely never produces a log, in a
+    /// re-attach loop the control-plane timeout sweep cannot always terminate
+    /// (`domain::service::launch`'s saturated-`timeout_seconds` case, recorded
+    /// in [`Self::follow`]'s doc). Trading a rare truncated-but-finished run
+    /// for a rare run that never finishes at all is not obviously the right
+    /// trade, and making it would need the two cases told apart — by the
+    /// workflow phase and the pod phase this method is not currently given —
+    /// rather than by treating every `None` as the worse one. What is not
+    /// acceptable is leaving the reader thinking `None` only ever means
+    /// "not yet", which is what this section is for.
     ///
     /// **Not raced against `self.cancel`.** This is one bounded request/response
     /// (`kube`'s own HTTP timeout applies, the same as every other call `run`
