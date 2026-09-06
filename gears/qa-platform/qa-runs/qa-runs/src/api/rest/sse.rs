@@ -105,6 +105,36 @@ pub const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// gear has not needed.
 const TRUNCATION_PREFIX: &str = " [qa-runs: line truncated, ";
 
+/// The other literal half of the marker [`sanitize_line`] appends, around
+/// the dropped-byte count. Named so [`TRUNCATION_MARKER_MAX`] can size
+/// itself off the same text `sanitize_line` builds from, rather than a
+/// second copy of it.
+const TRUNCATION_SUFFIX: &str = " bytes dropped; see the archived log]";
+
+/// How many decimal digits a `usize` can ever need, on this target.
+/// `usize::MAX.ilog10()` is the index of its highest digit, so `+ 1` is the
+/// digit count — computed rather than written as a literal `20`, so a build
+/// for a pointer width other than 64 bits gets its own correct bound instead
+/// of silently inheriting this one.
+const MAX_USIZE_DIGITS: usize = usize::MAX.ilog10() as usize + 1;
+
+/// Upper bound on the total length [`sanitize_line`] appends when it
+/// truncates a line, in bytes: [`TRUNCATION_PREFIX`], the dropped-byte count
+/// at its widest possible decimal rendering, and [`TRUNCATION_SUFFIX`].
+///
+/// **Not "about seventy bytes"** (this module's own estimate, stated where
+/// [`MAX_LINE_BYTES`] is defined, for a reader who wants a feel for the
+/// number rather than a proof). `dropped` is `flattened.len() - cut`, and
+/// `flattened.len()` is bounded only by how large a line a caller hands this
+/// function — this crate does not itself cap that before `sanitize_line`
+/// sees it, so the honest bound on the count's digit count is a `usize`'s
+/// widest rendering, [`MAX_USIZE_DIGITS`], not the two or three digits a
+/// typical over-long line would produce. A test that wants a real ceiling on
+/// the emitted length needs this, not the smaller number that happens to
+/// hold for every case anyone has tried.
+pub const TRUNCATION_MARKER_MAX: usize =
+    TRUNCATION_PREFIX.len() + MAX_USIZE_DIGITS + TRUNCATION_SUFFIX.len();
+
 /// Make one log line safe to frame as a single SSE event.
 ///
 /// Two transformations, in this order. The second is the one only this layer
@@ -152,7 +182,7 @@ pub fn sanitize_line(line: &str) -> String {
     let mut out = flattened[..cut].to_owned();
     out.push_str(TRUNCATION_PREFIX);
     out.push_str(&dropped.to_string());
-    out.push_str(" bytes dropped; see the archived log]");
+    out.push_str(TRUNCATION_SUFFIX);
     out
 }
 
@@ -166,7 +196,7 @@ pub fn log_event(line: &str) -> RunLogLineDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_LINE_BYTES, log_event, sanitize_line};
+    use super::{MAX_LINE_BYTES, TRUNCATION_MARKER_MAX, log_event, sanitize_line};
 
     /// The forgery this module exists to prevent. A payload carrying a blank
     /// line followed by `event:`/`data:` is two SSE events once framed, and the
@@ -250,5 +280,21 @@ mod tests {
     #[test]
     fn the_event_payload_carries_the_sanitized_line() {
         assert_eq!(log_event("a\nb").line, "a b");
+    }
+
+    /// [`TRUNCATION_MARKER_MAX`] must actually bound the marker, not merely
+    /// the typical case — this is what a caller outside this cap (`argo::watch`,
+    /// truncating before the broadcaster) relies on to size its own assertion.
+    /// A line far larger than `MAX_LINE_BYTES` pushes `dropped` into more
+    /// digits than a hand-picked estimate would have covered.
+    #[test]
+    fn the_marker_bound_holds_for_a_line_far_larger_than_the_cap() {
+        let huge = "q".repeat(MAX_LINE_BYTES * 50);
+        let safe = sanitize_line(&huge);
+        assert!(
+            safe.len() <= MAX_LINE_BYTES + TRUNCATION_MARKER_MAX,
+            "marker overran its declared bound: {} bytes",
+            safe.len()
+        );
     }
 }

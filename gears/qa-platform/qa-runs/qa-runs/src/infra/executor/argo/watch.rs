@@ -64,6 +64,7 @@ use kube::{Client, ResourceExt};
 use serde_json::Value;
 use tracing::{debug, error, warn};
 
+use crate::api::rest::sse::sanitize_line;
 use crate::config::ArgoExecutorConfig;
 use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::{
@@ -634,8 +635,7 @@ impl Watcher {
         loop {
             match lines.try_next().await {
                 Ok(Some(line)) => {
-                    let suppress = skip.consume(&line);
-                    if !self.emit_line(&mut parser, node, line, suppress).await {
+                    if !handle_line(&self.sink, &mut parser, &mut skip, node, line).await {
                         return false;
                     }
                 }
@@ -652,7 +652,7 @@ impl Watcher {
         // `finish` is what produces the final test's observation - see
         // `markers`' "one-test lag". Emitted before this function returns, and
         // therefore before `Finished`.
-        if !self.emit_results(parser.finish()).await {
+        if !emit_results(&self.sink, parser.finish()).await {
             return false;
         }
         self.drained.insert(pod_name.to_owned());
@@ -681,51 +681,112 @@ impl Watcher {
             }
         }
     }
+}
 
-    /// One log line: whatever it completed first, then the line itself —
-    /// unless `suppress`, in which case the line has already been archived by
-    /// an earlier `watch()` and must not reach the sink a second time (Task
-    /// 13, review finding #50; see [`LineSkip`]'s doc for the mechanism).
-    ///
-    /// **Results before the line that produced them**, and **always**, even
-    /// when `suppress` is set — so a consumer reading both streams never sees
-    /// a `TEST_RESULT` marker in the log before the result it announced, and
-    /// a re-attach never fails to notice a marker just because its line is
-    /// being resumed past.
-    async fn emit_line(
-        &self,
-        parser: &mut MarkerParser,
-        node: &str,
-        line: String,
-        suppress: bool,
-    ) -> bool {
-        if !self.emit_results(parser.line(&line)).await {
+/// Everything `follow`'s loop does with one freshly read pod-log line.
+///
+/// Free rather than a `Watcher` method for one reason: it only ever touches
+/// the channel half of a `Watcher` (`sink`) plus the per-pod state
+/// (`parser`, `skip`) `follow` already keeps in its own locals — nothing
+/// here needs the `kube::Api` handles the rest of `Watcher` carries. That is
+/// what lets this file's own tests drive it against a plain
+/// `ExecutionStream::channel`, with no cluster and no `Api` construction.
+///
+/// # Two forms of one line, and why there are two (review finding #30)
+///
+/// [`sanitize_line`] — the same cap and character-boundary handling
+/// `api::rest::sse` already applies on the read side — is computed once,
+/// here, and used for two of this line's three destinations:
+///
+/// * the sink, and downstream of it `IngestService::fan_out_log`'s archive
+///   write, so a pathological line no longer sits in the broadcaster or the
+///   archive at full size — the truncation this task adds;
+/// * [`LineSkip::consume`]'s anchor comparison, capped **the same way**,
+///   because the anchor it compares against is now the *capped* archived
+///   text. Comparing a raw re-read against a capped anchor would never
+///   match again for any node that ever emitted an over-long line —
+///   permanently disabling this run's resume suppression for that node,
+///   the same failure shape `flatten_log_char`'s own doc already recounts
+///   once for a different mismatch.
+///
+/// The **marker parser** gets the raw, uncapped line instead, not the
+/// sanitized one. This is deliberate, not an oversight: `MarkerParser::case`
+/// decodes a `=== TEST_CASE: <base64-json> ===` marker whose capture
+/// (`CASE_RE`, `\S+`) has no length limit, carrying a pytest plugin's JSON —
+/// `reason` and `ticket` fields this crate does not control the size of. So
+/// a marker line is not provably under [`MAX_LINE_BYTES`] the way an
+/// ordinary log line usually is (checked, not assumed — see this crate's
+/// task notes for review finding #30); truncating the parser's input could
+/// cut a marker in half and silently lose a test result that the log
+/// truncation itself never claimed to preserve.
+///
+/// # A residual this change accepts: an archive written before this shipped
+///
+/// An archived `first_line`/`last_line` anchor from a run whose over-long
+/// line was written before this fix deployed holds the *full, untruncated*
+/// text — nothing rewrites an archive already on disk. Re-attaching to that
+/// run afterwards compares that untruncated anchor against this function's
+/// now-truncated re-read, which will not match. That is not a new failure
+/// mode: it is the same misaligned-window case [`LineSkip::consume`]
+/// already detects and handles by suppressing nothing for that node — the
+/// safe direction (duplication), not the unsafe one (loss) — same as real
+/// log rotation. Bounded to runs whose watch spans this deploy and whose
+/// affected node is re-attached to afterwards.
+async fn handle_line(
+    sink: &ExecutionSink,
+    parser: &mut MarkerParser,
+    skip: &mut LineSkip,
+    node: &str,
+    line: String,
+) -> bool {
+    let sanitized = sanitize_line(&line);
+    let suppress = skip.consume(&sanitized);
+    // `&line` (raw) for the parser, `sanitized` for everything else -- see
+    // this function's own doc for why the split exists. Do not collapse
+    // these back to one form without re-checking that a marker line still
+    // cannot exceed `MAX_LINE_BYTES`.
+    emit_line(sink, parser, node, &line, sanitized, suppress).await
+}
+
+/// One log line: whatever it completed first, then the line itself —
+/// unless `suppress`, in which case the line has already been archived by
+/// an earlier `watch()` and must not reach the sink a second time (Task
+/// 13, review finding #50; see [`LineSkip`]'s doc for the mechanism).
+///
+/// **Results before the line that produced them**, and **always**, even
+/// when `suppress` is set — so a consumer reading both streams never sees
+/// a `TEST_RESULT` marker in the log before the result it announced, and
+/// a re-attach never fails to notice a marker just because its line is
+/// being resumed past.
+async fn emit_line(
+    sink: &ExecutionSink,
+    parser: &mut MarkerParser,
+    node: &str,
+    raw_line: &str,
+    sanitized_line: String,
+    suppress: bool,
+) -> bool {
+    if !emit_results(sink, parser.line(raw_line)).await {
+        return false;
+    }
+    if suppress {
+        return true;
+    }
+    sink.emit(ExecutionEvent::Log {
+        node: node.to_owned(),
+        line: sanitized_line,
+    })
+    .await
+}
+
+/// Emit a batch of observations, stopping early if the observer has gone.
+async fn emit_results(sink: &ExecutionSink, observations: Vec<TestObservation>) -> bool {
+    for observation in observations {
+        if !sink.emit(ExecutionEvent::TestResult(observation)).await {
             return false;
         }
-        if suppress {
-            return true;
-        }
-        self.sink
-            .emit(ExecutionEvent::Log {
-                node: node.to_owned(),
-                line,
-            })
-            .await
     }
-
-    /// Emit a batch of observations, stopping early if the observer has gone.
-    async fn emit_results(&self, observations: Vec<TestObservation>) -> bool {
-        for observation in observations {
-            if !self
-                .sink
-                .emit(ExecutionEvent::TestResult(observation))
-                .await
-            {
-                return false;
-            }
-        }
-        true
-    }
+    true
 }
 
 #[cfg(test)]
@@ -751,9 +812,17 @@ mod tests {
     //!
     //! These run under `--features argo`, which is this module's own gate —
     //! no separate `#[cfg]` needed on the module itself.
+    //!
+    //! Task 15 (review finding #30) added `handle_line`'s own test below,
+    //! driven directly against a plain `ExecutionStream::channel` rather
+    //! than a `Watcher` — see that function's doc for why no `kube::Api` is
+    //! needed to exercise it.
 
-    use super::LineSkip;
+    use super::{LineSkip, handle_line};
+    use crate::api::rest::sse::{MAX_LINE_BYTES, TRUNCATION_MARKER_MAX};
+    use crate::domain::ports::run_executor::{ExecutionEvent, ExecutionStream};
     use crate::domain::repos::{LogPosition, LogResume};
+    use crate::infra::executor::argo::markers::MarkerParser;
 
     /// Build a resume position the way a real `LogResume::from_archived_text`
     /// would for a node whose archived lines are exactly `lines`, in order —
@@ -983,6 +1052,57 @@ mod tests {
         assert!(
             logs_contain("archived line count did not match its re-read log"),
             "the mismatch must be logged loudly, since it cannot be recovered",
+        );
+    }
+
+    /// **A pathological log line is truncated before it enters the
+    /// broadcaster.**
+    ///
+    /// Truncation lived only on the read side (`api::rest::sse`), so a 2 MB
+    /// line was carried in full through the broadcaster and into the archive
+    /// and only shrank when a reader asked. One such line per node is
+    /// hundreds of megabytes of resident memory for output no reader can
+    /// ever receive in full.
+    ///
+    /// The same cap and the same helper as the read side, deliberately: two
+    /// truncation rules that must agree is a drift this crate has been
+    /// bitten by (see `LogPosition`'s doc on `flatten_log_char`, one such
+    /// drift already fixed once). Review finding #30.
+    #[tokio::test]
+    async fn a_pathological_line_is_truncated_before_it_is_emitted() {
+        let (sink, mut stream) = ExecutionStream::channel(4);
+        let mut parser = MarkerParser::new("node-1");
+        let mut skip = LineSkip::for_node(&LogResume::default(), "wf-1", "node-1");
+
+        assert!(
+            handle_line(
+                &sink,
+                &mut parser,
+                &mut skip,
+                "node-1",
+                "y".repeat(MAX_LINE_BYTES * 4),
+            )
+            .await,
+            "the observer is still attached; this must not report false"
+        );
+        drop(sink);
+
+        let mut emitted = Vec::new();
+        while let Some(event) = stream.recv().await {
+            if let ExecutionEvent::Log { line, .. } = event {
+                emitted.push(line);
+            }
+        }
+
+        assert_eq!(
+            emitted.len(),
+            1,
+            "exactly one Log event for the one line fed in"
+        );
+        assert!(
+            emitted[0].len() <= MAX_LINE_BYTES + TRUNCATION_MARKER_MAX,
+            "the emitted line must be capped, was {} bytes",
+            emitted[0].len()
         );
     }
 }
