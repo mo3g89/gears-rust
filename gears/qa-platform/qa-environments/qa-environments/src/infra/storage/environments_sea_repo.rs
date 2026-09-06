@@ -425,6 +425,16 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
                 // serialize what we saw". If the map's value type ever widens,
                 // this must skip the health write, not invent one.
                 // Review finding #29.
+                //
+                // This early `return Ok(())` also exits before the health-half
+                // match below and before the `rows_affected == 0` check at the
+                // end of this method, so a write against a nonexistent
+                // environment that also hit this (currently unreachable)
+                // branch would report success instead of
+                // `EnvironmentNotFound`. That is what this brief's own
+                // suggested fix does; noted rather than changed, since
+                // reordering it is a different, un-asked-for change in
+                // control flow. Review finding #29 (minor).
                 let Some(attrs) = attrs_or_skip(serde_json::to_value(observation.attrs()), id)
                 else {
                     return Ok(());
@@ -599,6 +609,8 @@ mod record_observation_tests {
     use qa_product_sdk::observation::{
         FailureClass, HealthState, ObservedAttrs, PluginFailure, PluginObservation,
     };
+
+    use crate::test_support::CapturedLogs;
 
     use super::{
         EnvironmentColumn, EnvironmentEntity, Expr, ObservationWrite, PluginHealthOutcome,
@@ -1128,7 +1140,11 @@ mod record_observation_tests {
     }
 
     /// **The skip path, exercised with a real `serde_json::Error`.** Review
-    /// finding #29.
+    /// finding #29, and its own follow-up: the first version of this test
+    /// asserted only `outcome.is_none()`, leaving the `_and_warns` half of
+    /// its name unverified -- exactly the gap #28 disclosed and #29 did not.
+    /// It now drives the `warn!` too, via [`crate::test_support::CapturedLogs`]
+    /// (moved there from `environments_kubeconfig_tests` for this reuse).
     ///
     /// `record_observation`'s own call site can never produce this `Err`:
     /// `ObservedAttrs` is a `BTreeMap<String, String>`, and
@@ -1141,16 +1157,40 @@ mod record_observation_tests {
     /// `None` rather than `Some(json!({}))` -- the fix for the trap this
     /// finding is about, closed before the map's value type could ever widen
     /// enough to reach it for real.
+    ///
+    /// No `#[tokio::test]` needed: `attrs_or_skip` is synchronous, so a plain
+    /// thread-local `tracing::subscriber::set_default` guard already covers
+    /// the one call made while it is held -- there is no `.await` for the
+    /// guard to need to survive. The other hazard the harness's doc comment
+    /// warns about (global per-callsite `Interest` caching) does not apply
+    /// either: this `warn!` callsite lives only in `attrs_or_skip`'s `Err`
+    /// arm, which no other test in this crate reaches, so no other test can
+    /// have cached it as `never` first. Confirmed empirically, not just
+    /// argued -- see the fix report for both the solo and full-suite runs.
     #[test]
     fn a_serialization_failure_skips_the_write_and_warns() {
         let malformed = serde_json::from_str::<serde_json::Value>("{not json")
             .expect_err("deliberately malformed, to get a real serde_json::Error");
 
-        let outcome = attrs_or_skip(Err(malformed), Uuid::from_u128(0x0E));
+        let logs = CapturedLogs::default();
+        let outcome = {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(logs.clone())
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .finish();
+            let _guard = tracing::subscriber::set_default(subscriber);
+            attrs_or_skip(Err(malformed), Uuid::from_u128(0x0E))
+        };
 
         assert!(
             outcome.is_none(),
             "a serialization failure must skip the write, not answer an empty attribute map"
+        );
+        assert!(
+            logs.text().contains("skipping this health write"),
+            "a serialization failure must be logged, not silent; captured: {}",
+            logs.text()
         );
     }
 

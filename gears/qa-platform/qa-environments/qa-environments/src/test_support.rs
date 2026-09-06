@@ -1225,3 +1225,68 @@ pub async fn set_config(db: &Db, tenant: Uuid, id: Uuid, config: serde_json::Val
     .await
     .expect("the config seed must apply");
 }
+
+// ---------------------------------------------------------------------------
+// The security keystone
+// ---------------------------------------------------------------------------
+
+/// Collects the raw bytes a `tracing` subscriber writes, so a test can assert
+/// against **everything that was emitted** rather than a filtered view of it.
+///
+/// This exists instead of `tracing-test` (used elsewhere in this workspace)
+/// because of a hole that a break-test found: `tracing-test` keeps only the
+/// captured lines containing the test's span name, so a **multi-line** field
+/// value survives capture as its first line only. A kubeconfig is multi-line
+/// and its private key is not on line one, so a deliberate
+/// `info!(document = %material.expose())` planted in `write_generated_secret`
+/// left a `tracing-test` assertion on the canary **passing**. Against this
+/// buffer the same plant fails, which is the whole point of the test.
+///
+/// Originally private to `environments_kubeconfig_tests`; moved here (review
+/// finding #29-followup) so `infra::storage::environments_sea_repo`'s tests
+/// can assert `attrs_or_skip`'s `warn!` line too, instead of leaving the
+/// `_and_warns` half of a test's name unverified. Two hazards apply to every
+/// caller, not just the original one:
+///
+/// 1. `tracing` caches each callsite's `Interest` **globally**, decided by
+///    whichever thread reaches it first. A callsite exercised only by one
+///    test is safe by construction; a callsite other tests can also reach
+///    needs the warm-up-then-clear dance
+///    `the_document_never_reaches_a_log_line_a_debug_rendering_or_a_response_body`
+///    uses below.
+/// 2. A thread-local `tracing::subscriber::set_default` guard only covers
+///    work done on the thread that installed it. A synchronous callsite is
+///    fine on a plain `#[test]`; an `async` one needs a current-thread
+///    runtime (`#[tokio::test]`'s default) so every `.await` stays on that
+///    thread.
+#[derive(Clone, Default)]
+pub struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+
+    pub fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+}
+
+pub struct CapturedLogsWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogsWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogsWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogsWriter(Arc::clone(&self.0))
+    }
+}
