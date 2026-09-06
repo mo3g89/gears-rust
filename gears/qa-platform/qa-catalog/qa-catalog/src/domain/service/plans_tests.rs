@@ -54,7 +54,39 @@ fn permissions_are_enforced() -> bool {
         std::os::unix::fs::PermissionsExt::from_mode(0o000),
     )
     .unwrap();
-    std::fs::read(probe.path()).is_err()
+    let enforced = std::fs::read(probe.path()).is_err();
+    if !enforced {
+        // Silent skips here would make a root CI run report e.g. "8/8
+        // passed" while only 4 of the 8 permission-gated tests actually ran
+        // their EACCES path -- say so on stderr so that isn't mistaken for
+        // full coverage.
+        eprintln!(
+            "permissions_are_enforced: mode bits did not deny access (running as root?) \
+             -- skipping permission-gated test"
+        );
+    }
+    enforced
+}
+
+/// Restores a path's permissions on drop, including through a panicking
+/// assertion. Without this, a test that `chmod 000`s a directory and then
+/// panics on `unwrap_err()`/`assert!` (as one of these did during this
+/// task's own RED run) leaves an undeletable directory behind for
+/// `TempDir::drop` to trip over.
+struct RestorePermsOnDrop<'a> {
+    path: &'a Path,
+    mode: u32,
+}
+
+impl Drop for RestorePermsOnDrop<'_> {
+    fn drop(&mut self) {
+        // Best-effort: there is nothing sensible to do with a failure inside
+        // a destructor, and this only ever runs in tests.
+        drop(std::fs::set_permissions(
+            self.path,
+            std::os::unix::fs::PermissionsExt::from_mode(self.mode),
+        ));
+    }
 }
 
 /// Tempdir + synced repo fixture whose `main` branch snapshot exists under
@@ -527,19 +559,22 @@ fn content_root_dir_reports_internal_not_not_synced_on_a_permission_failure() {
         std::os::unix::fs::PermissionsExt::from_mode(0o000),
     )
     .unwrap();
+    // Runs on drop even if the assertions below panic, so a failing
+    // assertion can never leave a `0o000` directory for `tmp`'s own
+    // `TempDir::drop` to trip over.
+    let _restore = RestorePermsOnDrop {
+        path: branches_dir,
+        mode: 0o755,
+    };
 
     let err = super::plans::content_root_dir(tmp.path(), &repo, "main").unwrap_err();
 
-    // Restore so the tempdir's own cleanup can traverse `branches` again.
-    std::fs::set_permissions(
-        branches_dir,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .unwrap();
-
+    let DomainError::Internal(message) = &err else {
+        panic!("an EACCES resolving the workdir must not read as RepoNotSynced; got {err:?}");
+    };
     assert!(
-        matches!(err, DomainError::Internal(_)),
-        "an EACCES resolving the workdir must not read as RepoNotSynced; got {err:?}"
+        message.contains("working directory exists but could not be resolved"),
+        "expected the working-directory message, got {message:?}"
     );
 }
 
@@ -580,19 +615,22 @@ fn resolve_under_root_reports_internal_not_absent_on_a_permission_failure() {
         std::os::unix::fs::PermissionsExt::from_mode(0o000),
     )
     .unwrap();
+    // Runs on drop even if the assertions below panic, so a failing
+    // assertion can never leave a `0o000` directory for `tmp`'s own
+    // `TempDir::drop` to trip over.
+    let _restore = RestorePermsOnDrop {
+        path: &locked_dir,
+        mode: 0o755,
+    };
 
     let err = super::plans::resolve_under_root(root, "locked/file.py").unwrap_err();
 
-    // Restore so the tempdir's own cleanup can traverse `locked` again.
-    std::fs::set_permissions(
-        &locked_dir,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .unwrap();
-
+    let DomainError::Internal(message) = &err else {
+        panic!("an EACCES resolving a path must not silently read as absent; got {err:?}");
+    };
     assert!(
-        matches!(err, DomainError::Internal(_)),
-        "an EACCES resolving a path must not silently read as absent; got {err:?}"
+        message.contains("could not be resolved"),
+        "expected the path-resolution message, got {message:?}"
     );
 }
 
@@ -663,9 +701,15 @@ async fn an_unreadable_plan_file_is_internal_not_not_found() {
         .await
         .unwrap_err();
 
+    // Not just `Internal`: pin the message to `get_plan`'s own site so this
+    // test cannot pass on an `Internal` raised by some other call inside it
+    // (e.g. `resolve_under_root`).
+    let DomainError::Internal(message) = &err else {
+        panic!("an EACCES on an existing plan must not be PlanNotFound; got {err:?}");
+    };
     assert!(
-        matches!(err, DomainError::Internal(_)),
-        "an EACCES on an existing plan must not be PlanNotFound; got {err:?}"
+        message.contains("could not be read"),
+        "expected get_plan's read-failure message, got {message:?}"
     );
 }
 
@@ -781,9 +825,15 @@ async fn an_unreadable_test_file_is_internal_not_file_not_found() {
         .await
         .unwrap_err();
 
+    // Not just `Internal`: pin the message to `get_test_meta`'s own site so
+    // this test cannot pass on an `Internal` raised by some other call
+    // inside it (e.g. `resolve_under_root`).
+    let DomainError::Internal(message) = &err else {
+        panic!("an EACCES on an existing test file must not be FileNotFound; got {err:?}");
+    };
     assert!(
-        matches!(err, DomainError::Internal(_)),
-        "an EACCES on an existing test file must not be FileNotFound; got {err:?}"
+        message.contains("could not be read"),
+        "expected get_test_meta's read-failure message, got {message:?}"
     );
 }
 

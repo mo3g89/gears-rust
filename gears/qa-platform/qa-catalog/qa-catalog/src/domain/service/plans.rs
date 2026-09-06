@@ -341,13 +341,32 @@ impl<R: TestReposRepository> PlansService<R> {
                 debug!(repo_id = %repo.id, "Skipping unsynced repository in the universe walk");
                 continue;
             }
-            let Ok(root) = content_root_dir(&self.repos_dir, &repo, &effective_branch) else {
-                debug!(
-                    repo_id = %repo.id,
-                    branch = %effective_branch,
-                    "Skipping repository with no snapshot for the selected branch"
-                );
-                continue;
+            // `content_root_dir` answers `RepoNotSynced` for a genuinely
+            // absent snapshot (unremarkable — logged at `debug!`, matching
+            // this function's failure posture above) and `Internal` for a
+            // fault such as an EACCES on the `branches` directory (review
+            // finding #26). Either way this repository is still skipped, not
+            // failed (same failure posture as `require_synced` above) — what
+            // must not happen is telling an operator a repository has never
+            // synced, at `debug!`, when it in fact has and the real cause is
+            // an unreadable directory that `warn!` would have surfaced.
+            let root = match content_root_dir(&self.repos_dir, &repo, &effective_branch) {
+                Ok(root) => root,
+                Err(DomainError::RepoNotSynced { .. }) => {
+                    debug!(
+                        repo_id = %repo.id,
+                        branch = %effective_branch,
+                        "Skipping repository with no snapshot for the selected branch"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    warn!(
+                        repo_id = %repo.id, branch = %effective_branch, error = %error,
+                        "Skipping repository in the universe walk: content root could not be resolved"
+                    );
+                    continue;
+                }
             };
 
             let repo_id = repo.id;
@@ -406,11 +425,11 @@ fn walk_repo_universe(repo_id: Uuid, root: &Path) -> Vec<UniverseTest> {
             // fault here still cannot fail the whole universe listing (that
             // would turn one bad file into an outage for an analytics read,
             // a bigger behaviour change than any review finding asked for —
-            // see finding #28's fix for the same shape). What changed is
-            // that "absent on this branch (or escaping the root)" is no
-            // longer the only reason this entry is dropped: an `EACCES` or
-            // other non-absent IO failure drops it too, and is warned rather
-            // than silently folded into "absent" (review finding #8).
+            // see finding #28's fix for the same shape). Absence is the only
+            // silent case now: an out-of-root escape and any other IO fault
+            // are both warned (distinctly from each other and from absence)
+            // rather than folded into "absent" (review finding #8; see
+            // `read_universe_test_file`'s doc for the three-way split).
             //
             // One read per file, feeding both parsers below — the reason
             // `case_count` lives beside `test_meta`.
@@ -514,20 +533,21 @@ fn walk_repo_universe(repo_id: Uuid, root: &Path) -> Vec<UniverseTest> {
 
 /// Resolve `test_file` under `root` and read its content for
 /// [`walk_repo_universe`]. `None` means "drop this entry from the universe",
-/// for either of two reasons: a plain absence (or an out-of-root escape),
-/// which stays silent as it always has, or a fault (EACCES, a mid-read IO
-/// failure) which is warned so it is not misread as an absence. Split out of
-/// `walk_repo_universe` to keep that function under the cognitive-complexity
-/// lint's threshold. Review finding #8.
+/// for one of three reasons: a plain absence (`Ok(None)`), which stays
+/// silent as it always has -- a plan is free to list a file that does not
+/// exist on every branch; an out-of-root escape (`Err(Validation)`, from
+/// `resolve_under_root`'s `starts_with(root)` check), which is warned as its
+/// own specific, actionable shape rather than an ordinary fault; or any
+/// other fault (EACCES, a mid-read IO failure), warned with the error so it
+/// is not misread as an absence. Split out of `walk_repo_universe` to keep
+/// that function under the cognitive-complexity lint's threshold. Review
+/// finding #8.
 fn read_universe_test_file(repo_id: Uuid, root: &Path, test_file: &str) -> Option<String> {
     let resolved = match resolve_under_root(root, test_file) {
         Ok(Some(resolved)) => resolved,
         Ok(None) => return None,
         Err(error) => {
-            warn!(
-                repo_id = %repo_id, test_file = %test_file, error = %error,
-                "Skipping universe test file: could not resolve under content root"
-            );
+            warn_universe_resolve_error(repo_id, test_file, error);
             return None;
         }
     };
@@ -540,6 +560,27 @@ fn read_universe_test_file(repo_id: Uuid, root: &Path, test_file: &str) -> Optio
                 "Skipping universe test file: could not read file"
             );
             None
+        }
+    }
+}
+
+/// Warn for a [`resolve_under_root`] failure inside [`read_universe_test_file`],
+/// distinguishing an out-of-root escape (its own specific, actionable shape)
+/// from any other fault (EACCES, ...). Split out to keep that function under
+/// the cognitive-complexity lint's threshold.
+fn warn_universe_resolve_error(repo_id: Uuid, test_file: &str, error: DomainError) {
+    match error {
+        DomainError::Validation { .. } => {
+            warn!(
+                repo_id = %repo_id, test_file = %test_file,
+                "Skipping universe test file: escapes the content root"
+            );
+        }
+        error => {
+            warn!(
+                repo_id = %repo_id, test_file = %test_file, error = %error,
+                "Skipping universe test file: could not resolve under content root"
+            );
         }
     }
 }
@@ -800,8 +841,7 @@ fn scan_file_based_plans(root: &Path) -> Vec<(String, ParsedPlan)> {
         return Vec::new();
     }
 
-    let Ok(entries) = std::fs::read_dir(&plans_root) else {
-        warn!(dir = %plans_root.display(), "Failed to read file-based plans root");
+    let Some(entries) = read_dir_or_warn(&plans_root) else {
         return Vec::new();
     };
 
@@ -824,8 +864,7 @@ fn scan_file_based_plans(root: &Path) -> Vec<(String, ParsedPlan)> {
 /// `<root>/<dir>/plan.yaml`, else `<root>/<dir>/<subdir>/plan.yaml`
 /// (legacy plans.rs:592-661; depth-2 only when depth-1 has no plan.yaml).
 fn scan_legacy_directory_plans(root: &Path) -> Vec<(String, ParsedPlan)> {
-    let Ok(top_entries) = std::fs::read_dir(root) else {
-        warn!(dir = %root.display(), "Failed to read plans root");
+    let Some(top_entries) = read_dir_or_warn(root) else {
         return Vec::new();
     };
 
@@ -848,7 +887,7 @@ fn scan_legacy_directory_plans(root: &Path) -> Vec<(String, ParsedPlan)> {
             continue;
         }
 
-        let Ok(sub_entries) = std::fs::read_dir(&top_path) else {
+        let Some(sub_entries) = read_dir_or_warn(&top_path) else {
             continue;
         };
         for sub_entry in sub_entries.flatten() {
@@ -918,7 +957,7 @@ fn list_test_files(root: &Path, plan_dir: &str) -> Vec<String> {
               file name (plans.rs:760), so `TEST_A.PY` is not a test file there either"
 )]
 fn collect_test_files(root: &Path, current: &Path, prefix: &str, files: &mut Vec<String>) {
-    let Some(entries) = read_test_dir(current) else {
+    let Some(entries) = read_dir_or_warn(current) else {
         return;
     };
 
@@ -951,22 +990,25 @@ fn collect_test_files(root: &Path, current: &Path, prefix: &str, files: &mut Vec
     }
 }
 
-/// `std::fs::read_dir` for [`collect_test_files`]'s recursive walk.
+/// `std::fs::read_dir`, shared by every directory read in the discovery walk
+/// (`collect_test_files`'s recursive test-file walk, `scan_file_based_plans`,
+/// both levels of `scan_legacy_directory_plans`).
 ///
-/// `list_test_files` returns `Vec<String>` (see its doc comment), so this
-/// cannot propagate a `Result` without cascading through it and
-/// `PlansService::get_plan`'s parse path (plans.rs:775) -- the same outage
-/// tradeoff `walk_repo_universe` avoids above. An absent directory (never
-/// materialized) stays a silent empty result; anything else is warned so an
-/// unreadable *directory* does not read as "no tests here" (review finding
-/// #8's rule, applied to the discovery walk). Split out to keep
-/// `collect_test_files` under the cognitive-complexity lint's threshold.
-fn read_test_dir(current: &Path) -> Option<std::fs::ReadDir> {
-    match std::fs::read_dir(current) {
+/// None of those callers return `Result` (see each one's own doc comment for
+/// why cascading one would be a bigger behaviour change than any finding
+/// asked for), so this cannot propagate either. Named once so the rule
+/// cannot drift between the four call sites the way it did before review
+/// finding #8's fix round 1 -- three of the four warned inconsistently (one
+/// not at all, two without the IO error) before being unified here. An
+/// absent directory (never materialized) stays a silent empty result;
+/// anything else is warned with the error so an unreadable *directory* does
+/// not read as "nothing here".
+fn read_dir_or_warn(dir: &Path) -> Option<std::fs::ReadDir> {
+    match std::fs::read_dir(dir) {
         Ok(entries) => Some(entries),
         Err(error) if io_is_absent(&error) => None,
         Err(error) => {
-            warn!(dir = %current.display(), error = %error, "Skipping unreadable test directory");
+            warn!(dir = %dir.display(), error = %error, "Skipping unreadable directory");
             None
         }
     }
@@ -976,18 +1018,36 @@ fn read_test_dir(current: &Path) -> Option<std::fs::ReadDir> {
 /// [`collect_test_files`]. Split out to keep that function under the
 /// cognitive-complexity lint's threshold.
 ///
-/// `Ok(None)` (not resolvable under the root at all: does not exist, or a
-/// symlink escape) keeps the message this always had. A fault (e.g. EACCES)
-/// is not the same claim as "outside the content root": it gets its own
-/// message naming the error rather than being folded into that one --
-/// `Ok(None) | Err(_)` used to answer both the same way (review finding #8).
+/// Three distinct outcomes, not two: `Ok(None)` means the path is genuinely
+/// absent on this branch; `Err(Validation)` (from `resolve_under_root`'s own
+/// `starts_with(root)` check, plans.rs:763-768) means it resolved to a
+/// symlink escape -- that is what "outside the content root" actually
+/// describes, and is worth its own line; anything else (e.g. EACCES) is a
+/// plain fault naming the IO error. An earlier version of this fix answered
+/// `Ok(None) | Err(_)` with the escape message, which put that label on the
+/// absent case and lost it on the real escape (review finding #8, corrected
+/// in fix round 1).
 fn record_derived_test_file(root: &Path, path: &Path, rel: String, files: &mut Vec<String>) {
     match resolve_under_root(root, &rel) {
         Ok(Some(_)) => files.push(rel),
         Ok(None) => {
+            warn!(file = %path.display(), "Skipping derived test path: not present under the content root");
+        }
+        Err(error) => warn_derived_resolve_error(path, error),
+    }
+}
+
+/// Warn for a [`resolve_under_root`] failure inside [`record_derived_test_file`],
+/// distinguishing an out-of-root escape (its own specific, actionable shape --
+/// what "outside the content root" actually describes) from any other fault
+/// (e.g. EACCES). Split out to keep that function under the
+/// cognitive-complexity lint's threshold.
+fn warn_derived_resolve_error(path: &Path, error: DomainError) {
+    match error {
+        DomainError::Validation { .. } => {
             warn!(file = %path.display(), "Skipping derived test path outside the content root");
         }
-        Err(error) => {
+        error => {
             warn!(
                 file = %path.display(), error = %error,
                 "Skipping derived test path: could not resolve under content root"
