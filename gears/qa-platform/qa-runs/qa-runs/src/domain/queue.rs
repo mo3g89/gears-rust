@@ -180,7 +180,10 @@ pub struct QueuedRow {
 pub struct GlobalCap {
     /// Runs already counted against the limit, cluster-wide.
     pub active: u32,
-    /// The limit itself. `0` disables it — the shipped default.
+    /// The limit itself. `0` disables it. **No longer the shipped default**
+    /// — `0` is kept as an explicit "unbounded" opt-out; see
+    /// `crate::config::QaRunsConfig::max_concurrent_runs` for the current
+    /// default and its derivation.
     pub max: u32,
 }
 
@@ -308,8 +311,9 @@ pub fn queue_is_full(queued_depth: usize, limit: Option<u32>) -> bool {
 }
 
 /// Normalise the global concurrency setting: `None` when disabled
-/// (`max_concurrent_runs == 0`, the shipped default), else the [`GlobalCap`]
-/// (`manager/src/services/run_queue.rs:714-722`).
+/// (`max_concurrent_runs == 0`, the explicit "unbounded" opt-out — no
+/// longer the shipped default, see `crate::config::QaRunsConfig`), else the
+/// [`GlobalCap`] (`manager/src/services/run_queue.rs:714-722`).
 #[must_use]
 pub fn global_cap_status(active: u32, max: u32) -> Option<GlobalCap> {
     if max == 0 {

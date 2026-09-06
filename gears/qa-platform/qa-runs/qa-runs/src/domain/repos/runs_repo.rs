@@ -936,12 +936,26 @@ pub trait RunsRepository: Send + Sync {
     /// error anywhere. (Roughly, because the first interval fires immediately;
     /// the boundary is not worth stating to the run.)
     ///
-    /// Nothing here caps the fleet: `max_concurrent_runs` would, and
-    /// [`crate::domain::queue::global_cap_status`] records `0` — no cap — as the
-    /// shipped default. So the honest statement is that
-    /// [`MAX_WATCH_SCAN`] bounds per-tick **cost** and the interval bounds
-    /// **latency**, and the pair meets the NFR only below a fleet size neither
-    /// of them enforces. Raising the constant or lowering the interval both
+    /// This method has no cap of its own on the fleet it scans. **Corrected,
+    /// review finding #19**: this used to say nothing bounds the fleet
+    /// because `max_concurrent_runs` shipped at `0` — *no cap*
+    /// (`crate::domain::queue::global_cap_status`) — by default, which is no
+    /// longer true. `max_concurrent_runs` bounds it one layer up, transitively:
+    /// every dispatch is admitted through `admission::GlobalCapGate::reserve`
+    /// first, so the population this scan ever has to enumerate cannot exceed
+    /// that limit once every live run was itself admitted under it. The
+    /// shipped default (`crate::config::QaRunsConfig::max_concurrent_runs`) is
+    /// now 50 — comfortably inside the "roughly a thousand" figure above, so
+    /// the NFR threshold holds by default rather than only below a ceiling
+    /// nothing enforces. `0` remains available as an explicit unbounded
+    /// opt-out, and a deployment that sets it is back to exactly the
+    /// unenforced-fleet-size question this paragraph originally posed, with no
+    /// help from admission at all. So the honest statement is that
+    /// [`MAX_WATCH_SCAN`] bounds per-tick **cost**, the interval bounds
+    /// **latency**, and the shipped default now bounds the fleet itself; an
+    /// operator who dials `max_concurrent_runs` back to `0` gives that back and
+    /// the pair meets the NFR only below a fleet size neither of them enforces
+    /// any more. Raising the constant or lowering the interval both
     /// move it; which to move is a deployment question, not one this method can
     /// answer.
     ///

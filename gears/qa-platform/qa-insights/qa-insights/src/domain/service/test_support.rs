@@ -94,6 +94,27 @@
 //! in this crate folds — the adapter is one `map_err` and its own tests drive that
 //! function directly. [`FakePlatforms`] is the second, and its production
 //! counterpart is `infra::clients::qa_environments::QaEnvironmentsReader`.
+//!
+//! # [`Fleet`], added by Task 7's review-remediation pass
+//!
+//! Every fixture above builds one *service* over doubled ports. Task 7 needed
+//! more than that: `handlers::collect::report_collect_count` takes
+//! `Extension<Arc<ConcreteAppServices>>` — the whole DI container, wired with
+//! every one of this gear's six real repositories over one real (in-memory)
+//! database — because a fake standing in for [`CollectRepository`] could
+//! answer "wrote nothing" without the write path itself ever having refused
+//! anything. [`Fleet`] is this crate's answer to `qa-runs`'s own `Fleet`
+//! (`qa-runs/qa-runs/src/domain/service/test_support.rs:1898`), the
+//! established shape for that: one shared database, real repositories over
+//! it, and every collaborator this gear cannot avoid wiring — permissive or
+//! inert wherever nothing in this suite exercises it — behind the one knob
+//! Task 7's tests actually vary, `collect_report_signing_secret`.
+//!
+//! It is deliberately not named or shaped around collect alone — Task 8 wires
+//! the same struct behind the notification and saved-view handlers — so a
+//! caller wanting a different knob varied (or a different double swapped in)
+//! extends [`Fleet`], rather than a task-7-specific `collect_fleet` that would
+//! have needed rewriting the moment a second handler suite needed it.
 
 // A test double: every accessor unwraps a `Mutex` whose only contention is
 // this crate's own tests, and a poisoned lock there is a test that already
@@ -101,8 +122,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::missing_panics_doc)]
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
@@ -111,16 +132,31 @@ use authz_resolver_sdk::models::{
 };
 use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
 use qa_catalog_sdk::{SOURCE_REPO, UniverseTest};
+use qa_insights_sdk::CollectCount;
 use qa_runs_sdk::{
     ExclusiveTier, Run, RunSource, RunState, RunTarget, RunTestResult, ScheduleNotificationSettings,
 };
-use time::{Date, OffsetDateTime};
+use time::{Date, Duration, OffsetDateTime};
 use toolkit_security::{SecurityContext, pep_properties};
 use uuid::Uuid;
 
 use crate::domain::analytics::ExecRow;
 use crate::domain::error::DomainError;
-use crate::domain::ports::{CatalogReader, Clock, EnvironmentReader, RunsReader};
+use crate::domain::ports::{
+    CatalogReader, Clock, EnvironmentReader, IssueRef, JiraClient, JiraIssue, MailClient, NewIssue,
+    RunsLauncher, RunsReader, SendOutcome, SlackClient, SlackMessage, StatusCategory,
+};
+use crate::domain::repos::CollectRepository;
+use crate::domain::service::{AppServices, DbProvider, ServiceDeps};
+use crate::gear::ConcreteAppServices;
+use crate::infra::notify::UnsupportedMailClient;
+use crate::infra::storage::collect_sea_repo::OrmCollectRepository;
+use crate::infra::storage::jira_sea_repo::OrmJiraRepository;
+use crate::infra::storage::notify_sea_repo::OrmNotifyRepository;
+use crate::infra::storage::results_sea_repo::OrmResultsRepository;
+use crate::infra::storage::saved_views_sea_repo::OrmSavedViewsRepository;
+use crate::infra::storage::test_db::{inmem_db, scope};
+use crate::infra::storage::watermark_sea_repo::OrmWatermarkRepository;
 
 /// One run as this fake holds it: its metadata and its per-test rows.
 type StoredRun = (Run, Vec<RunTestResult>);
@@ -1062,5 +1098,231 @@ pub fn exec_row_at(test_file: &str, status: &str, at: OffsetDateTime) -> ExecRow
         platform_id: Some(Uuid::from_u128(0x31)),
         ts: at,
         day: at.date(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The full-gear fixture, added by Task 7
+// ---------------------------------------------------------------------------
+
+/// [`RunsLauncher`] double that panics if called.
+///
+/// [`Fleet`]'s tests exercise `CollectService::record_count`, never `trigger`
+/// or the collect cycle, so nothing behind [`Fleet::services`] should ever
+/// reach a launcher — [`domain::local_client::client`](crate::domain::local_client::client)'s
+/// `UnusedJiraClient` is this same idiom one port over: a double that
+/// plausibly answered would turn a wiring mistake into a silently wrong
+/// fixture instead of a loud failure.
+struct UnreachableRunsLauncher;
+
+#[async_trait]
+impl RunsLauncher for UnreachableRunsLauncher {
+    async fn launch_collect(
+        &self,
+        _ctx: &SecurityContext,
+        _repo_id: Uuid,
+        _branch: &str,
+        _collect_url: &str,
+    ) -> Result<(), DomainError> {
+        unreachable!("Fleet's tests do not launch a collect run")
+    }
+
+    async fn launch_test(
+        &self,
+        _ctx: &SecurityContext,
+        _repo_id: Uuid,
+        _plan_path: &str,
+        _test_file: &str,
+        _platform_id: Option<Uuid>,
+        _branch: Option<&str>,
+    ) -> Result<(), DomainError> {
+        unreachable!("Fleet's tests do not launch a single-test run")
+    }
+}
+
+/// [`JiraClient`] double, [`UnreachableRunsLauncher`]'s reason: nothing built
+/// over [`Fleet`] yet files a bug or polls JIRA status.
+struct UnreachableJiraClient;
+
+#[async_trait]
+impl JiraClient for UnreachableJiraClient {
+    async fn create_or_find_issue(
+        &self,
+        _ctx: &SecurityContext,
+        _config: &qa_insights_sdk::JiraConfig,
+        _issue: NewIssue,
+    ) -> Result<IssueRef, DomainError> {
+        unreachable!("Fleet's tests do not file or search for a bug")
+    }
+
+    async fn check_status(
+        &self,
+        _ctx: &SecurityContext,
+        _config: &qa_insights_sdk::JiraConfig,
+        _jira_key: &str,
+    ) -> Result<StatusCategory, DomainError> {
+        unreachable!("Fleet's tests do not poll JIRA status")
+    }
+
+    async fn get_issue(
+        &self,
+        _ctx: &SecurityContext,
+        _config: &qa_insights_sdk::JiraConfig,
+        _jira_key: &str,
+    ) -> Result<JiraIssue, DomainError> {
+        unreachable!("Fleet's tests do not read a JIRA issue")
+    }
+}
+
+/// [`SlackClient`] double, [`UnreachableRunsLauncher`]'s reason: nothing
+/// built over [`Fleet`] yet sends a notification.
+///
+/// Unlike [`Fleet`]'s `mail_client`, there is no inert *production* adapter to
+/// reuse here — `infra::notify::SlackOagwClient` genuinely dials out — so this
+/// double is [`Fleet`]'s own, not a second copy of one qa-insights already
+/// ships.
+struct UnreachableSlackClient;
+
+#[async_trait]
+impl SlackClient for UnreachableSlackClient {
+    async fn send(
+        &self,
+        _ctx: &SecurityContext,
+        _message: &SlackMessage,
+    ) -> Result<SendOutcome, DomainError> {
+        unreachable!("Fleet's tests do not send a Slack message")
+    }
+}
+
+/// One in-memory database and one [`ConcreteAppServices`] wired over it with
+/// this gear's **real** repositories — the fixture the HTTP-boundary suites
+/// under `api::rest::handlers` drive their handlers against, rather than
+/// through a fake standing in for the whole write path.
+///
+/// Modeled on `qa-runs`'s own `Fleet`
+/// (`qa-runs/qa-runs/src/domain/service/test_support.rs:1898`, "one database
+/// and one set of collaborators, over which any number of instances can be
+/// built"). This gear has no second *instance* to build — nothing here plays
+/// qa-runs' replica role — so [`Fleet::services`] is a plain field rather
+/// than a per-call constructor; what carries over is the rest of that
+/// struct's shape: one shared database, real repositories over it, and every
+/// dependency [`AppServices::new`] cannot be built without.
+///
+/// # Everything but the signing secret is a permissive or inert double
+///
+/// `signing_secret` is the one collaborator Task 7's tests vary — see
+/// [`Self::new`]. Every other [`ServiceDeps`] field is a double that answers
+/// plausibly and that nothing built over [`Fleet`] yet exercises:
+/// [`TenantScopedAuthZ`] grants, [`FakeRuns`]/[`FakeCatalog`]/[`FakePlatforms`]
+/// hold nothing, [`FixedClock`] reports [`TODAY`], and
+/// [`UnreachableRunsLauncher`]/[`UnreachableJiraClient`]/[`UnreachableSlackClient`]
+/// panic rather than answer — [`UnusedJiraClient`](crate::domain::local_client::client)'s
+/// own doc gives the reasoning: a double that answered plausibly would hide a
+/// wiring mistake as a silently wrong fixture rather than surface it as a
+/// failure. The one exception is `mail_client`: `infra::notify`'s
+/// [`UnsupportedMailClient`] is already the *production* answer for a
+/// deployment with no SMTP relay configured, so it is reused rather than
+/// doubled a second time.
+///
+/// A future caller that needs one of these doubles to answer for real — Task
+/// 8's notify suite, most likely, once it reaches the send-once path — extends
+/// this struct rather than reaching around it, which is the whole reason it
+/// lives here and not inside `collect_handler_tests.rs`.
+pub struct Fleet {
+    db: Arc<DbProvider>,
+    /// The DI container every handler suite drives directly.
+    pub(crate) services: Arc<ConcreteAppServices>,
+}
+
+impl Fleet {
+    /// Build with `signing_secret` as `collect_report_signing_secret` — the
+    /// one dependency Task 7's tests vary. See this struct's own doc for
+    /// every other collaborator.
+    pub async fn new(signing_secret: &str) -> Self {
+        Self::build(
+            signing_secret,
+            Arc::new(TenantScopedAuthZ) as Arc<dyn AuthZResolverClient>,
+        )
+        .await
+    }
+
+    /// A [`Fleet`] whose policy decision point refuses everything, as a
+    /// deployment whose policy engine has not yet been taught one of this
+    /// gear's resource types does — the most likely error an operator sees
+    /// first, and Task 8's fixture for pinning which resource type an
+    /// endpoint names in that refusal.
+    ///
+    /// `signing_secret` is irrelevant to every caller of this constructor: a
+    /// PDP denial is decided before `collect::CollectService` ever reaches
+    /// its signature check, so an arbitrary constant stands in for it.
+    pub async fn denying() -> Self {
+        Self::build(
+            "unused-denying-fleet-secret",
+            Arc::new(DenyAllAuthZ) as Arc<dyn AuthZResolverClient>,
+        )
+        .await
+    }
+
+    async fn build(signing_secret: &str, authz: Arc<dyn AuthZResolverClient>) -> Self {
+        let db = Arc::new(DbProvider::new(inmem_db().await));
+
+        let deps = ServiceDeps {
+            db: Arc::clone(&db),
+            authz,
+            runs: Arc::new(FakeRuns::default()) as Arc<dyn RunsReader>,
+            catalog: Arc::new(FakeCatalog::default()) as Arc<dyn CatalogReader>,
+            platforms: Arc::new(FakePlatforms::default()) as Arc<dyn EnvironmentReader>,
+            clock: Arc::new(FixedClock::default()) as Arc<dyn Clock>,
+            runs_launcher: Arc::new(UnreachableRunsLauncher) as Arc<dyn RunsLauncher>,
+            jira_client: Arc::new(UnreachableJiraClient) as Arc<dyn JiraClient>,
+            slack_client: Arc::new(UnreachableSlackClient) as Arc<dyn SlackClient>,
+            mail_client: Arc::new(UnsupportedMailClient) as Arc<dyn MailClient>,
+            reconcile_lookback: Duration::seconds(3600),
+            reconcile_page_size: 100,
+            default_collect_branch: DEFAULT_BRANCH.to_owned(),
+            collect_report_base_url: "https://qa-insights.example.test".to_owned(),
+            collect_report_signing_secret: signing_secret.to_owned(),
+        };
+
+        let services = Arc::new(AppServices::new(
+            OrmResultsRepository,
+            OrmWatermarkRepository,
+            OrmSavedViewsRepository,
+            OrmCollectRepository,
+            OrmJiraRepository,
+            OrmNotifyRepository,
+            deps,
+        ));
+
+        Self { db, services }
+    }
+
+    /// Every count row actually persisted for `(repo_id, branch)` under
+    /// `tenant_id` — read back through the real [`OrmCollectRepository`]
+    /// this [`Fleet`] wired [`Self::services`] with, not tracked in memory
+    /// by a second, competing fixture.
+    ///
+    /// This is the load-bearing half of the "a bad signature writes nothing"
+    /// assertion: a handler that wrote the row and only then checked the
+    /// signature would still pass a status-only test, and would still pass a
+    /// count tracked by a fake that the write path never actually reached.
+    /// Reading the real repository, over the same database
+    /// [`Self::services`] writes through, is what makes the absence of a row
+    /// here a fact about persistence rather than about this fixture's own
+    /// bookkeeping.
+    pub async fn collect_counts(
+        &self,
+        tenant_id: Uuid,
+        repo_id: Uuid,
+        branch: &str,
+    ) -> Vec<CollectCount> {
+        let conn = self
+            .db
+            .conn()
+            .expect("the fixture's own database connection must be reachable");
+        OrmCollectRepository
+            .list_counts_for(&conn, &scope(tenant_id), &[repo_id], branch)
+            .await
+            .expect("the fixture's own read must not fail")
     }
 }

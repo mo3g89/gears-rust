@@ -96,6 +96,7 @@ async fn services_with(
             // `None` wires the real watcher, which is what these tests want: the
             // point is that a production wiring stays tenant-scoped.
             watcher: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
             default_timeout_seconds: 3600,
             limits: QueueLimits {
                 queue_max_depth: 20,

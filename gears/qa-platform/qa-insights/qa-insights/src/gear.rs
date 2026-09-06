@@ -899,7 +899,7 @@ impl QaInsights {
                                 return Ok(());
                             }
                             _ = ticker.tick() => {
-                                reconcile_pass(&services, &mut wedged).await;
+                                reconcile_pass(&services, &mut wedged, &cancel).await;
                             }
                         }
                     }
@@ -959,7 +959,7 @@ impl QaInsights {
                                 return Ok(());
                             }
                             _ = ticker.tick() => {
-                                jira_poll_pass(&services).await;
+                                jira_poll_pass(&services, &cancel).await;
                             }
                         }
                     }
@@ -1018,7 +1018,7 @@ impl QaInsights {
                                 return Ok(());
                             }
                             _ = ticker.tick() => {
-                                collect_pass(&services, &branch).await;
+                                collect_pass(&services, &branch, &cancel).await;
                             }
                         }
                     }
@@ -1062,9 +1062,17 @@ const WEDGED_PASSES_BEFORE_ERROR: u32 = 3;
 /// [`WEDGED_PASSES_BEFORE_ERROR`] exists to raise, which is the load-bearing half
 /// of the alert obligation. Found by review, not by the tests.
 ///
-/// The other two passes genuinely do not care, and they say so at their call
-/// sites by mapping `None` to an empty slice: with no tenants there is nothing to
-/// poll and nothing to collect, and neither keeps state between passes.
+/// The other two passes keep no state between passes either, so treating
+/// `None` as zero tenants costs them nothing behaviourally. **They used to say
+/// so by mapping it through `unwrap_or_default()`, and review finding #56 is
+/// why that changed**: folding a refused enumeration into an empty `Vec` at
+/// the call site made a ticker whose background work has silently stopped
+/// indistinguishable, by inspection, from one with nothing to do — the same
+/// shape of trap [`reconcile_pass`] was already fixed against, just without a
+/// wedge count to corrupt. Both call sites now match this `Option` explicitly
+/// and return without iterating on `None`, exactly as [`reconcile_pass`]
+/// already did; neither adds a second `warn!` of its own, since this function
+/// has already logged one by the time either sees `None`.
 ///
 /// Not fatal to the ticker either way. The enumeration no longer asks a PDP
 /// that could decline it — `domain::service::tenants::TenantDirectory::scope`
@@ -1127,9 +1135,16 @@ fn prune_wedged(
 /// A free function rather than a body inside the ticker's closure so the pass has
 /// somewhere to be documented and read; `wedged` is threaded in rather than
 /// captured so the closure stays the only owner of the term's state.
+///
+/// `cancel` is checked at the top of the per-tenant loop, before that
+/// tenant's reconcile call — not after, since the call is the round trip a
+/// shutdown is trying to cut off. Stopping early leaves `wedged` exactly as
+/// it stood after the last tenant this call reached; the next tick resumes
+/// from there, same as any other pass that ends partway through.
 async fn reconcile_pass(
     services: &Arc<ConcreteAppServices>,
     wedged: &mut std::collections::HashMap<uuid::Uuid, u32>,
+    cancel: &CancellationToken,
 ) {
     let tenants = tenants_for(services, ROLE_RECONCILER).await;
     prune_wedged(wedged, tenants.as_deref());
@@ -1139,6 +1154,9 @@ async fn reconcile_pass(
     };
 
     for tenant in tenants {
+        if cancel.is_cancelled() {
+            return;
+        }
         match services.reconcile.reconcile_once(tenant).await {
             Ok(outcome) => report_reconcile_outcome(tenant, &outcome, wedged),
             Err(error) => warn!(
@@ -1221,14 +1239,28 @@ fn report_reconcile_outcome(
 /// A tenant with no JIRA configuration, or a disabled one, costs one read:
 /// `poll_once` calls `JiraService::active_config` before it looks at any bug,
 /// which is legacy's own first step (`jira_poller.rs:40-43`).
-async fn jira_poll_pass(services: &Arc<ConcreteAppServices>) {
-    // `unwrap_or_default`, not a `return`: this pass keeps no state between
-    // passes, so a refused enumeration and an empty one really are the same to
-    // it. [`reconcile_pass`] is the one that cannot say that.
-    for tenant in tenants_for(services, ROLE_JIRA_POLLER)
-        .await
-        .unwrap_or_default()
-    {
+///
+/// `cancel` is checked at the top of the per-tenant loop, before that
+/// tenant's poll — not after, since `poll_once` is the round trip (JIRA
+/// itself, then qa-runs for a rerun) a shutdown is trying to cut off.
+/// Stopping early costs nothing beyond what any skipped tenant already
+/// costs: this pass is stateless between ticks, so the next one covers it.
+async fn jira_poll_pass(services: &Arc<ConcreteAppServices>, cancel: &CancellationToken) {
+    // A failed directory read is not "this deployment has no tenants".
+    // `unwrap_or_default()` used to fold the two together here, which made a
+    // stopped ticker indistinguishable from an idle one at this call site —
+    // even though [`tenants_for`] had already warned, nothing here said so.
+    // Matching instead, exactly as [`reconcile_pass`] already had to, costs
+    // this pass nothing: it keeps no state between passes, so returning
+    // before the loop and running it zero times come to the same thing.
+    // Review finding #56.
+    let Some(tenants) = tenants_for(services, ROLE_JIRA_POLLER).await else {
+        return;
+    };
+    for tenant in tenants {
+        if cancel.is_cancelled() {
+            return;
+        }
         let ctx = system_actor::for_jira_poll(tenant);
         match services.jira_poller.poll_once(&ctx).await {
             Ok(()) => debug!(tenant_id = %tenant.get(), "qa-insights JIRA poller pass"),
@@ -1245,13 +1277,26 @@ async fn jira_poll_pass(services: &Arc<ConcreteAppServices>) {
 }
 
 /// One collect cycle over every tenant, on the default branch.
-async fn collect_pass(services: &Arc<ConcreteAppServices>, branch: &str) {
+///
+/// `cancel` is checked at the top of the per-tenant loop, before that
+/// tenant's cycle — not after, matching [`jira_poll_pass`]:
+/// `run_collect_cycle` is itself a qa-catalog round trip plus a launch per
+/// repository, and a shutdown should not wait for it to finish before
+/// stopping.
+async fn collect_pass(
+    services: &Arc<ConcreteAppServices>,
+    branch: &str,
+    cancel: &CancellationToken,
+) {
     // Stateless between passes, exactly like [`jira_poll_pass`] — see its
-    // comment.
-    for tenant in tenants_for(services, ROLE_COLLECT)
-        .await
-        .unwrap_or_default()
-    {
+    // comment. Review finding #56.
+    let Some(tenants) = tenants_for(services, ROLE_COLLECT).await else {
+        return;
+    };
+    for tenant in tenants {
+        if cancel.is_cancelled() {
+            return;
+        }
         let ctx = system_actor::for_collect_cycle(tenant);
         match services.collect.run_collect_cycle(&ctx, branch).await {
             Ok(launched) => debug!(

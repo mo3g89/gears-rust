@@ -20,6 +20,7 @@ use toolkit_db::secure::{
     secure_update_with_scope,
 };
 use toolkit_security::AccessScope;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
@@ -416,8 +417,28 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         let update = match observation.environment() {
             PluginObservationOutcome::Detected(_) => {
                 let roles = observation.roles();
-                let attrs = serde_json::to_value(observation.attrs())
-                    .unwrap_or_else(|_| serde_json::json!({}));
+                // `ObservedAttrs` is a `BTreeMap<String, String>`, so this
+                // cannot fail today. It is matched rather than defaulted
+                // because the alternative wrote an empty attribute map
+                // *together with* a `Checked` status -- recording "we looked
+                // and saw nothing" for what is actually "we could not
+                // serialize what we saw". If the map's value type ever widens,
+                // this must skip the health write, not invent one.
+                // Review finding #29.
+                //
+                // This early `return Ok(())` also exits before the health-half
+                // match below and before the `rows_affected == 0` check at the
+                // end of this method, so a write against a nonexistent
+                // environment that also hit this (currently unreachable)
+                // branch would report success instead of
+                // `EnvironmentNotFound`. That is what this brief's own
+                // suggested fix does; noted rather than changed, since
+                // reordering it is a different, un-asked-for change in
+                // control flow. Review finding #29 (minor).
+                let Some(attrs) = attrs_or_skip(serde_json::to_value(observation.attrs()), id)
+                else {
+                    return Ok(());
+                };
                 update
                     // Target is authoritative: overwrite outright, even to NULL.
                     .col_expr(
@@ -518,6 +539,39 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
     }
 }
 
+/// Turn an observed-attribute serialization outcome into either the value to
+/// write, or the signal that [`OrmEnvironmentsRepository::record_observation`]
+/// must skip the whole health write instead of recording an empty one.
+///
+/// # Why this is a free function rather than inline in the match arm
+///
+/// `record_observation`'s own call site can never produce the `Err` this
+/// matches: `ObservedAttrs` is a `BTreeMap<String, String>`, and
+/// `serde_json::to_value` on one cannot fail. Pulling the decision out into a
+/// function that takes the *outcome* of that serialization, rather than the
+/// value to serialize, is what lets
+/// [`a_serialization_failure_skips_the_write_and_warns`] drive the skip path
+/// with a real `serde_json::Error` — the one a genuinely malformed document
+/// produces — instead of the call site's always-succeeds input. Review
+/// finding #29.
+fn attrs_or_skip(
+    result: Result<serde_json::Value, serde_json::Error>,
+    id: Uuid,
+) -> Option<serde_json::Value> {
+    match result {
+        Ok(attrs) => Some(attrs),
+        Err(error) => {
+            warn!(
+                environment_id = %id,
+                %error,
+                "qa-environments: observed attributes could not be serialized; skipping this \
+                 health write rather than recording an empty one"
+            );
+            None
+        }
+    }
+}
+
 /// Tests for `record_observation`'s five merge rules (three for the version
 /// half, two for the cluster-health half).
 ///
@@ -556,9 +610,11 @@ mod record_observation_tests {
         FailureClass, HealthState, ObservedAttrs, PluginFailure, PluginObservation,
     };
 
+    use crate::test_support::CapturedLogs;
+
     use super::{
         EnvironmentColumn, EnvironmentEntity, Expr, ObservationWrite, PluginHealthOutcome,
-        PluginObservationOutcome,
+        PluginObservationOutcome, attrs_or_skip,
     };
     use crate::domain::repos::{EnvironmentsRepository, PersistedCredentials};
     use crate::infra::storage::entity::environment;
@@ -1081,5 +1137,69 @@ mod record_observation_tests {
              health column since Task 19 dropped the legacy pair"
         );
         assert_eq!(row.health_detail.as_deref(), Some("Healthy"));
+    }
+
+    /// **The skip path, exercised with a real `serde_json::Error`.** Review
+    /// finding #29, and its own follow-up: the first version of this test
+    /// asserted only `outcome.is_none()`, leaving the `_and_warns` half of
+    /// its name unverified -- exactly the gap #28 disclosed and #29 did not.
+    /// It now drives the `warn!` too, via [`crate::test_support::CapturedLogs`]
+    /// (moved there from `environments_kubeconfig_tests` for this reuse).
+    ///
+    /// `record_observation`'s own call site can never produce this `Err`:
+    /// `ObservedAttrs` is a `BTreeMap<String, String>`, and
+    /// `serde_json::to_value` on one cannot fail. So this cannot be TDD'd the
+    /// ordinary way -- there is no way to make the *call site* red first --
+    /// and this test does not pretend otherwise. What it does honestly is
+    /// drive [`attrs_or_skip`] directly with the `serde_json::Error` a
+    /// genuinely malformed document produces (from a real failed parse, not a
+    /// fabricated stand-in), and pin that the decision function returns
+    /// `None` rather than `Some(json!({}))` -- the fix for the trap this
+    /// finding is about, closed before the map's value type could ever widen
+    /// enough to reach it for real.
+    ///
+    /// No `#[tokio::test]` needed: `attrs_or_skip` is synchronous, so a plain
+    /// thread-local `tracing::subscriber::set_default` guard already covers
+    /// the one call made while it is held -- there is no `.await` for the
+    /// guard to need to survive. The other hazard the harness's doc comment
+    /// warns about (global per-callsite `Interest` caching) does not apply
+    /// either: this `warn!` callsite lives only in `attrs_or_skip`'s `Err`
+    /// arm, which no other test in this crate reaches, so no other test can
+    /// have cached it as `never` first. Confirmed empirically, not just
+    /// argued -- see the fix report for both the solo and full-suite runs.
+    #[test]
+    fn a_serialization_failure_skips_the_write_and_warns() {
+        let malformed = serde_json::from_str::<serde_json::Value>("{not json")
+            .expect_err("deliberately malformed, to get a real serde_json::Error");
+
+        let logs = CapturedLogs::default();
+        let outcome = {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(logs.clone())
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .finish();
+            let _guard = tracing::subscriber::set_default(subscriber);
+            attrs_or_skip(Err(malformed), Uuid::from_u128(0x0E))
+        };
+
+        assert!(
+            outcome.is_none(),
+            "a serialization failure must skip the write, not answer an empty attribute map"
+        );
+        assert!(
+            logs.text().contains("skipping this health write"),
+            "a serialization failure must be logged, not silent; captured: {}",
+            logs.text()
+        );
+    }
+
+    /// The ordinary path: a value that serialized without issue is passed
+    /// through unchanged.
+    #[test]
+    fn a_successful_serialization_is_passed_through() {
+        let value = serde_json::json!({"namespace": "virtuozzo"});
+        let outcome = attrs_or_skip(Ok(value.clone()), Uuid::from_u128(0x0E));
+        assert_eq!(outcome, Some(value));
     }
 }

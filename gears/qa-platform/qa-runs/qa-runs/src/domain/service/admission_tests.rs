@@ -3048,8 +3048,9 @@ pub(in crate::domain::service) mod fakes {
         async fn watch(
             &self,
             execution_ref: &ExecutionRef,
+            resume: crate::domain::repos::LogResume,
         ) -> Result<ExecutionStream, DomainError> {
-            self.inner.watch(execution_ref).await
+            self.inner.watch(execution_ref, resume).await
         }
 
         async fn cancel(&self, _execution_ref: &ExecutionRef) -> Result<(), DomainError> {
@@ -3586,8 +3587,10 @@ async fn a_reached_concurrency_cap_refuses_the_launch_before_the_lock() {
 
 /// A disabled cap costs no executor call at all — legacy returns before listing
 /// anything when `max_concurrent_runs == 0` (`run_queue.rs:856-858`), which is
-/// the shipped default. Proven by injecting a listing failure that would
-/// otherwise fail the launch.
+/// an explicit opt-out rather than this gear's shipped default (`0` was the
+/// default until review finding #19; see
+/// `crate::config::QaRunsConfig::max_concurrent_runs`). Proven by injecting a
+/// listing failure that would otherwise fail the launch.
 #[tokio::test]
 async fn a_disabled_cap_never_calls_the_executor() {
     let run = run_fixture(
@@ -4078,8 +4081,9 @@ impl RunExecutor for YieldingListing {
     async fn watch(
         &self,
         reference: &crate::domain::ports::run_executor::ExecutionRef,
+        resume: crate::domain::repos::LogResume,
     ) -> Result<crate::domain::ports::run_executor::ExecutionStream, DomainError> {
-        self.0.watch(reference).await
+        self.0.watch(reference, resume).await
     }
 
     async fn list_active(

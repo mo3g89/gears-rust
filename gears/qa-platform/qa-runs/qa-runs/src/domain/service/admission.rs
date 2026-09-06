@@ -139,8 +139,11 @@ pub(in crate::domain::service) struct GlobalCapGate {
 impl GlobalCapGate {
     /// Take one slot, or refuse.
     ///
-    /// `max == 0` is unlimited and costs no executor call, which is the shipped
-    /// default (`run_queue.rs:856-858`).
+    /// `max == 0` is unlimited and costs no executor call — the legacy
+    /// behaviour (`run_queue.rs:856-858`) and, since review finding #19, an
+    /// explicit opt-out rather than this gear's shipped default. See
+    /// `crate::config::QaRunsConfig::max_concurrent_runs` for the current
+    /// default and what enabling the cap costs on this path.
     async fn reserve(&self, executor: &dyn RunExecutor, max: u32) -> Result<CapSlot, DomainError> {
         if max == 0 {
             return Ok(CapSlot { outstanding: None });
@@ -441,9 +444,11 @@ where
     /// are easy to lose:
     ///
     /// * **A disabled cap costs no executor call.** Legacy returns `None` before
-    ///   listing anything when `max_concurrent_runs == 0` (`:856-858`), which is
-    ///   the shipped default — so the common path makes no cross-plane call at
-    ///   all.
+    ///   listing anything when `max_concurrent_runs == 0` (`:856-858`). That is
+    ///   no longer this gear's shipped default — see
+    ///   `crate::config::QaRunsConfig::max_concurrent_runs` — but `0` stays a
+    ///   valid opt-out, and a deployment that sets it still makes no
+    ///   cross-plane call on this path.
     /// * **An unreadable executor fails the launch**, where the depth limit fails
     ///   open. Legacy makes exactly this asymmetry and states it: over-committing
     ///   is the worse outcome for the cap, while for the depth limit the worse

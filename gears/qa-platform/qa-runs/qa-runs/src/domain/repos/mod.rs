@@ -187,7 +187,7 @@ pub use queue_repo::{
     ClaimAge, ClaimRow, ExpiredRow, MAX_CLAIM_SCAN, MAX_QUEUE_READ_LIMIT, NewQueueRow,
     QueueRepository, QueueRowRecord, QueuedPlatform, RowStatus,
 };
-pub use run_logs_repo::{ArchivedLog, RunLogsRepository};
+pub use run_logs_repo::{ArchivedLog, LogPosition, LogResume, RunLogsRepository, flatten_log_char};
 pub use runs_repo::{
     MAX_TIMEOUT_SWEEP_SCAN, MAX_WATCH_SCAN, NewRun, NewTestResult, OwnedRunId, RunResultDelta,
     RunStatePatch, RunWithResult, RunsRepository, TestResultRow, TimeoutCandidate, WatchCandidate,

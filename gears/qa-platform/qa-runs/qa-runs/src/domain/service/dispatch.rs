@@ -1054,7 +1054,8 @@ where
     ///   starved by another tenant's position in an arbitrary order. It can
     ///   still be *delayed*: the ordering decides who goes first, not how much
     ///   each takes.
-    /// * With the cap **disabled** — the shipped default —
+    /// * With the cap **disabled** — the explicit unbounded opt-out, no
+    ///   longer the shipped default (`crate::config::QaRunsConfig::max_concurrent_runs`) —
     ///   `plan_dispatch_batch` claims a platform's entire parallel FIFO, and each
     ///   claimed row is dispatched inline below, so one tenant with 20 slow-building
     ///   runs holds the tick for 20 × (force-sync + bundle build). Every other
@@ -1774,10 +1775,37 @@ where
     /// A filled window costs more here than it does there. The other two leave
     /// work that is already late a little later; this one leaves a run
     /// **unobserved** for up to a full rotation, and what the executor emitted in
-    /// that window survives only if `RunExecutor::watch` genuinely resumes. The
-    /// port requires that; `MockRunExecutor` satisfies it by replaying from the
-    /// beginning, which is stronger, so nothing in this crate can falsify an
-    /// adapter that drops the gap.
+    /// that window survives only if `RunExecutor::watch` genuinely resumes.
+    ///
+    /// **Both directions are falsifiable now, and neither was before Task 13
+    /// (review finding #50).** Before it, `MockRunExecutor` satisfied
+    /// re-attach by replaying every event from the beginning regardless of
+    /// what `watch` was given — stronger than the port requires in the
+    /// no-loss direction, but it meant nothing in this crate could falsify an
+    /// adapter that dropped the gap, *and* the mock could not have caught the
+    /// opposite defect either, because it had no notion of "already sent"
+    /// to duplicate. `watch` now carries a `LogResume`
+    /// (`domain::repos::LogResume`), the mock replays from that position
+    /// exactly — it holds its own script, so there is no approximation to
+    /// make — and `watch_tests::a_reattach_does_not_duplicate_the_archived_log`
+    /// is what a re-attach that replayed in full, as this method's own
+    /// `reattach_watchers` caller now exercises on every unwatched live run,
+    /// would fail. `mock::watch_resumes_without_duplicating_or_dropping_log_lines`
+    /// is the mock-level pin for the same two directions. **Fix-round 1**:
+    /// the Argo adapter's first version instead asked Kubernetes to filter by
+    /// `LogParams::since_time`, using the archive row's `updated_at` as a
+    /// stand-in for a node's last archived line — review found that compares
+    /// the control plane's write clock against each line's own kubelet
+    /// emission time, two different events, and can *lose* a line queued
+    /// behind a database round trip when the observer ends before it
+    /// flushes, which is worse than the bug this task fixes. The shipped
+    /// mechanism (`infra::executor::argo::watch`'s `LineSkip`) has no clock
+    /// in it: it re-reads a node's log from byte 0, exactly as before this
+    /// task, and suppresses the same count the mock does — see
+    /// `domain::repos::LogPosition`'s doc for why a count can only
+    /// under-suppress (re-duplicating a little, the tolerated direction)
+    /// and never over-suppress relative to what actually reached the pod's
+    /// log.
     async fn list_watch_candidates(
         &self,
         // Kept, unused, so the caller's audit-logging `system_actor::for_watch_scan`

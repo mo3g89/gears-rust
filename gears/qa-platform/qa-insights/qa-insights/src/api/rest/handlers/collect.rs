@@ -189,3 +189,7 @@ mod tests {
         assert_eq!(decoded.branch, "feature/VHP-123-thing");
     }
 }
+
+#[cfg(test)]
+#[path = "collect_handler_tests.rs"]
+mod collect_handler_tests;

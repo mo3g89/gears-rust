@@ -225,15 +225,22 @@ fn golden_run() -> qa_runs_sdk::Run {
     run
 }
 
-/// The spec as JSON, keys sorted at every level.
+/// The spec as JSON.
 ///
-/// `serde_json`'s object is a `BTreeMap` in this workspace (`preserve_order` is
-/// off), and both [`RunSpec::env`] and the map behind it are already
-/// `BTreeMap`s, so ordering is a property of the types rather than of this
-/// function. The env entry keeps its **variant**: a literal renders as
-/// `{"value": …}` and a secret binding as `{"secret": …}`, so a value silently
-/// replacing a reference — the direction `RunEnv::new` documents at length —
-/// changes the fixture instead of hiding in it.
+/// This function does **not** guarantee sorted keys, and the assertion below
+/// does not need it to: `RunSpec::env` is a `BTreeMap` on the port, but the
+/// `Map<String, Value>` this function collects it into is `serde_json::Map`,
+/// whose own backing is `BTreeMap` by default and becomes an `IndexMap`
+/// (insertion order) when `serde_json`'s `preserve_order` feature is enabled —
+/// which it is under `cargo nextest run --workspace` (see the comment at the
+/// assertion below for why). So the same run of this function can serialise in
+/// sorted order or in struct-declaration order depending on which command built
+/// the test binary. That is harmless here because the fixture is compared as a
+/// parsed [`Value`], whose map equality does not consult order either way. The
+/// env entry keeps its **variant**: a literal renders as `{"value": …}` and a
+/// secret binding as `{"secret": …}`, so a value silently replacing a
+/// reference — the direction `RunEnv::new` documents at length — changes the
+/// fixture instead of hiding in it.
 ///
 /// # The access half is projected by *effect*, not by the port's field names
 ///
@@ -355,8 +362,12 @@ fn line_diff(expected: &str, actual: &str) -> String {
 /// If this test fails after a plugin change, the plugin changed behaviour.
 /// Do not re-record the fixture to make it pass — that discards the only
 /// evidence that the migration was faithful.
+///
+/// Named for what it now asserts: a **semantic**, not byte-for-byte, match. See
+/// the comment at the assertion below for why byte comparison does not hold
+/// under every build this test runs under.
 #[tokio::test]
-async fn a_vhp_run_spec_is_byte_identical_to_the_recorded_fixture() {
+async fn a_vhp_run_spec_matches_the_recorded_fixture() {
     let executor = Arc::new(crate::infra::executor::mock::MockRunExecutor::new());
     let catalog = Arc::new(FakeCatalog::serving(&[]));
     catalog.custom_plan_files.lock().unwrap().extend([
@@ -392,7 +403,8 @@ async fn a_vhp_run_spec_is_byte_identical_to_the_recorded_fixture() {
 
     let submitted = executor.submitted();
     assert_eq!(submitted.len(), 1, "premise: the run reached the executor");
-    let actual = serde_json::to_string_pretty(&spec_as_json(&submitted[0])).unwrap();
+    let actual_value = spec_as_json(&submitted[0]);
+    let actual = serde_json::to_string_pretty(&actual_value).unwrap();
 
     if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
         std::fs::write(FIXTURE, format!("{actual}\n")).unwrap();
@@ -414,9 +426,34 @@ async fn a_vhp_run_spec_is_byte_identical_to_the_recorded_fixture() {
         )
     });
     let expected = expected.trim_end();
+    let expected_value: Value = serde_json::from_str(expected).unwrap_or_else(|error| {
+        panic!(
+            "the golden fixture at {FIXTURE} is not valid JSON ({error}); it must have been \
+             hand-edited or corrupted. Do NOT re-record it to paper over this -- restore it \
+             from git history instead"
+        )
+    });
 
+    // Semantic comparison, not textual: both sides are parsed to `serde_json::Value`
+    // and compared as values, not as the pretty-printed strings above. `Value`'s map
+    // equality does not consult order at all, under either of `serde_json::Map`'s
+    // backings (the default `BTreeMap` or, with the `preserve_order` feature on, an
+    // `IndexMap`) -- so this still catches any field or value that was added,
+    // removed, renamed or changed. The *only* thing it stops catching is key order,
+    // and key order is not a behaviour of the VHP plugin this test guards: it is a
+    // serialisation artifact of `serde_json`'s `preserve_order` feature, which
+    // `cargo nextest run --workspace` enables workspace-wide because
+    // `serde_toon_format` (pulled in by `kreuzberg`, by `cf-gears-file-parser`, by
+    // `cf-gears-example-server` -- none of them QA Platform) turns it on, flipping
+    // `Map`'s backing from `BTreeMap` to `IndexMap` and reordering this test's own
+    // output to struct-declaration order instead of the fixture's recorded sorted
+    // order. `cargo nextest run -p qa-runs --lib` does not pull that feature in, so
+    // the same code compares byte-identically there too -- this assertion is what
+    // makes both builds agree. This is not a loosened gate: it is the same guard,
+    // made insensitive to a build feature that was never part of the plugin's
+    // observable behaviour.
     assert!(
-        expected == actual,
+        expected_value == actual_value,
         "the RunSpec no longer matches the fixture recorded before the product-plugin \
          migration. If a plugin change caused this, the plugin changed behaviour - find \
          out why. Do NOT re-record the fixture to make this pass.\n\n{}",

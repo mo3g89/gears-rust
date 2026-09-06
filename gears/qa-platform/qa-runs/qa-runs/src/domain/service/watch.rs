@@ -110,6 +110,15 @@
 //! [`super::admission::PlatformLocks`] — and this module adds a third. The
 //! sentence is corrected in `run_executor.rs` rather than only here.
 //!
+//! **Task 16 adds `tokio_util::sync::CancellationToken`**, a new crate rather
+//! than a new path under an already-used one, so it earns its own sentence
+//! rather than riding the paragraph above. The same argument covers it: a
+//! `CancellationToken` is a cooperative-cancellation primitive with no I/O of
+//! its own, in the same class as the `mpsc` channel and the `Mutex` already
+//! named here, and it is what [`SpawningRunWatcher::attach`] selects on
+//! beside the drain — see "The number of observers is bounded transitively"
+//! below and [`WatchRegistry::shutdown`].
+//!
 //! # One producer per run
 //!
 //! One producer per run is no longer what keeps the ingest races closed — Task
@@ -188,13 +197,15 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use toolkit_macros::domain_model;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::ingest::IngestService;
 use crate::domain::ports::run_executor::{ExecutionRef, RunExecutor};
-use crate::domain::repos::{QueueRepository, RunsRepository};
+use crate::domain::repos::{LogResume, QueueRepository, RunsRepository};
 use crate::domain::system_actor::{self, TenantBound};
 
 /// One run to observe, with the tenant every write about it must be bound to.
@@ -256,13 +267,27 @@ pub trait RunWatcher: Send + Sync {
 /// bottom of the drain would leak the slot on every one of those paths and the
 /// run would then never be observed again, which is worse than the defect this
 /// registry exists to prevent because it is silent and permanent.
+///
+/// # Also holds the `JoinHandle`s, since Task 16 (review finding #18)
+///
+/// Not a second, unrelated responsibility: `claimed` and `handles` are two
+/// views of the same fact, "an observer is live for this run". Kept as two
+/// `Mutex`es rather than one so the hot path and the cold path do not
+/// contend — `claim`/`holds` run once per live run on every dispatcher tick,
+/// while `handles` is only written once per attach and only read by
+/// [`Self::shutdown`], which runs at most once per process lifetime. Sharing
+/// one lock would make every tick's claim check wait behind whatever
+/// `shutdown` is doing to the `Vec`, for no correctness reason.
 #[derive(Clone, Default)]
-struct WatchRegistry(Arc<Mutex<HashSet<Uuid>>>);
+struct WatchRegistry {
+    claimed: Arc<Mutex<HashSet<Uuid>>>,
+    handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
 
 impl WatchRegistry {
     /// Take the right to observe `run_id`, or `None` if it is already taken.
     fn claim(&self, run_id: Uuid) -> Option<AttachedSlot> {
-        self.0
+        self.claimed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(run_id)
@@ -273,10 +298,96 @@ impl WatchRegistry {
     }
 
     fn holds(&self, run_id: Uuid) -> bool {
-        self.0
+        self.claimed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&run_id)
+    }
+
+    /// Record `handle` so [`Self::shutdown`] can wait for it.
+    ///
+    /// Called once per successful [`Self::claim`], from
+    /// [`SpawningRunWatcher::attach`] alone.
+    ///
+    /// **Reaps finished handles before pushing, and that reap is load-bearing
+    /// rather than tidiness.** `claimed` is bounded by *live* runs — the slot
+    /// drops when the observer ends, so its `HashSet` cannot outgrow however
+    /// many runs are live right now. This `Vec` is a different shape: with
+    /// nothing removing a finished handle except a `shutdown` call, it is
+    /// bounded by *cumulative attaches over the process's whole lifetime*,
+    /// not by anything live. `drain`'s own doc names the amplifier: a run the
+    /// executor has forgotten is "re-watched once per tick until the
+    /// control-plane timeout sweep reclaims it", and each of those re-attaches
+    /// is a `claim` that ends almost immediately and a `track` that would
+    /// otherwise never be removed. At the 5 s dispatcher cadence against an
+    /// 86,400 s `max_timeout_seconds`, one forgotten execution alone would
+    /// push on the order of 17,000 handles before the sweep reclaims the run
+    /// — a real, unbounded-with-time growth a `shutdown()` that never runs
+    /// (this gear's normal operating mode) would never reap. `retain` here is
+    /// what keeps the `Vec` bounded by *live* observers too, the same as
+    /// `claimed`, rather than by history.
+    fn track(&self, handle: JoinHandle<()>) {
+        let mut handles = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
+        handles.retain(|h| !h.is_finished());
+        handles.push(handle);
+    }
+
+    /// Wait for every observer this registry has ever tracked to end.
+    ///
+    /// # What this does not guarantee, stated rather than assumed
+    ///
+    /// * **It does not itself cancel anything.** A caller that wants the
+    ///   observers to actually stop, rather than run to their natural end,
+    ///   must cancel the [`CancellationToken`] [`SpawningRunWatcher`] was
+    ///   built with *before* calling this — that is what
+    ///   `an observer's own select` is for. Calling this alone blocks until
+    ///   every live run finishes or fails on its own, which for a healthy run
+    ///   is `cpt-cf-qa-nfr-run-duration`'s eight hours.
+    /// * **It can still take a while, in principle.** `tokio::select!` owns
+    ///   the whole `drain(...)` future — not just the point between two of its
+    ///   `.await`s — so every await inside it, including a blocked
+    ///   `RunExecutor::watch` call or the ingest path's own database round
+    ///   trip, *is* a cancellation point: cancelling drops that future,
+    ///   in-flight I/O included, on the next poll. What is **not** a
+    ///   cancellation point is a synchronous, non-yielding stretch of CPU
+    ///   work inside `drain`, if one is ever added — there is none today, but
+    ///   nothing enforces that going forward. `gear.rs`'s `serve` awaits this
+    ///   inside the framework's own `stop_timeout`, which is what bounds how
+    ///   long the *process* waits regardless — this method itself has no
+    ///   timeout of its own.
+    /// * **A `claim`/`attach` racing this call can go unwaited.** A handle
+    ///   pushed by [`Self::track`] after this method has taken its snapshot of
+    ///   the `Vec` is not in that snapshot, so a `shutdown` that returns while
+    ///   a concurrent `attach` is mid-spawn does not wait for the handle it is
+    ///   about to push. The loop below re-snapshots until it sees an empty
+    ///   `Vec` specifically to narrow this window — a caller that also
+    ///   cancels the token before calling this closes it further, because the
+    ///   newly spawned observer's `tokio::select!` sees an already-cancelled
+    ///   token and returns on its first poll rather than doing any work — but
+    ///   the window is not provably zero, only small and self-terminating in
+    ///   this gear's one production caller (`reattach_watchers` stops
+    ///   attaching once its own tick observes the same cancellation).
+    /// * **The freed slot is not this method's concern.** An observer that
+    ///   ends — cancelled or not — drops its `AttachedSlot` exactly as it
+    ///   always did, which frees the run for a later attempt. `shutdown`
+    ///   changes nothing about that: it only decides how long the *caller*
+    ///   waits before it can be sure every handle it knows about has resolved.
+    async fn shutdown(&self) {
+        loop {
+            let batch: Vec<JoinHandle<()>> =
+                std::mem::take(&mut *self.handles.lock().unwrap_or_else(PoisonError::into_inner));
+            if batch.is_empty() {
+                return;
+            }
+            for handle in batch {
+                if let Err(error) = handle.await {
+                    warn!(
+                        %error,
+                        "an observer task ended abnormally while shutting down",
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -289,7 +400,7 @@ struct AttachedSlot {
 impl Drop for AttachedSlot {
     fn drop(&mut self) {
         self.registry
-            .0
+            .claimed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.run_id);
@@ -299,49 +410,93 @@ impl Drop for AttachedSlot {
 /// The production [`RunWatcher`]: one task per observed run, draining
 /// `RunExecutor::watch` into `IngestService`.
 ///
-/// # The number of observers is **not bounded**, and that is new
+/// # The number of observers is bounded transitively, by admission — not by
+/// this registry, and that is deliberate
 ///
 /// Stated because it is a resource question this task introduces and nothing
-/// else in the gear discusses. Before it, a live run cost the control plane no
-/// in-process resources at all; now each costs a detached task holding an
-/// `ExecutionStream` `mpsc` for as long as the run executes, which
+/// else in the gear discusses. Each observed run costs a detached task
+/// holding an `ExecutionStream` `mpsc` for as long as the run executes, which
 /// `cpt-cf-qa-nfr-run-duration` puts at up to eight hours, plus an entry in
-/// [`WatchRegistry`]'s `HashSet`.
+/// [`WatchRegistry`]'s `HashSet` and one `JoinHandle`.
 ///
-/// What does *not* bound it:
+/// **Corrected by review finding #19.** This section used to conclude the
+/// resource was simply unbounded, on the evidence that `max_concurrent_runs`
+/// shipped at `0` — *no cap* — by default. That evidence is now false: `0` is
+/// kept as an explicit "unbounded" opt-out (`crate::config::QaRunsConfig::max_concurrent_runs`),
+/// but the shipped default is 50, derived from `cpt-cf-qa-nfr-scale`'s own
+/// requirement that this subsystem handle that many concurrent runs. The
+/// conclusion below is corrected to match; the argument for *where* a cap
+/// belongs is kept, because it is still the reason this registry does not
+/// have one.
 ///
-/// * `MAX_WATCH_SCAN` bounds the **rate** of attachment — how many observers one
-///   tick may start — and its own doc claims only that. It says nothing about
-///   the total.
-/// * `max_concurrent_runs` bounds live runs, but
-///   [`crate::domain::queue::global_cap_status`] records `0` — *no cap* — as the
-///   shipped default.
+/// What still does *not* bound the observer count directly:
+///
+/// * `MAX_WATCH_SCAN` bounds the **rate** of attachment — how many observers
+///   one tick may start — and its own doc claims only that. It says nothing
+///   about the total.
 /// * `queue_max_depth` bounds queued rows per (scope, platform) and does not
 ///   reach a platformless run at all, which is never queued.
+/// * This registry itself has no cap on [`WatchRegistry`]'s `HashSet` — see
+///   below for why that stays true.
 ///
-/// So the ceiling in a default deployment is however many runs are executing.
-/// Left unbounded rather than capped: a cap here would have to decide *which*
-/// live run goes unobserved, and an unobserved run is one that can only end at
-/// its deadline — which is the failure this whole module exists to remove. The
-/// honest form is to say the resource is unbounded and where it would be
-/// bounded, not to invent a limit whose overflow behaviour is worse than the
-/// resource.
+/// **What does bound it: `max_concurrent_runs`, enforced at admission.**
+/// There is at most one observer per live run — [`WatchRegistry::claim`]
+/// makes a second attach on the same run id return `None`, structurally, not
+/// by convention — and `admission::AdmissionService`'s global-cap check
+/// refuses a launch past `max_concurrent_runs` before a run row exists at
+/// all. Capping how many runs can be live therefore caps how many observers
+/// this type can ever be asked to hold, without this registry having to know
+/// the limit or enforce it itself.
+///
+/// **Still left uncapped *here*, and the argument does not change**: a cap in
+/// this registry would have to decide *which* live run goes unobserved, and
+/// an unobserved run is one that can only end at its deadline — which is the
+/// failure this whole module exists to remove. Admission is the only place
+/// refusing is honest, because it is the only place a caller is still
+/// listening for the answer: refuse there and the caller gets a 429 at
+/// launch; refuse here and the caller is long gone, and the run it fired off
+/// — which *did* start — runs unobserved for up to eight hours instead. A
+/// registry cap's overflow behaviour is strictly worse than the resource it
+/// would be capping.
+///
+/// **What this is not**: proof that the two numbers can never diverge. The
+/// bound is transitive through "one observer per live run", not a shared
+/// counter — a deployment that sets `max_concurrent_runs: 0` (the explicit
+/// opt-out) restores exactly the unbounded case this section used to
+/// describe as the only case there was.
 pub struct SpawningRunWatcher<R, Q> {
     executor: Arc<dyn RunExecutor>,
     ingest: Arc<IngestService<R, Q>>,
     attached: WatchRegistry,
+    /// The gear's shutdown signal — the third lifetime beside the caller's
+    /// and the run's. See [`RunWatcher::attach`]'s impl doc below and
+    /// [`WatchRegistry::shutdown`].
+    cancel: CancellationToken,
 }
 
 impl<R, Q> SpawningRunWatcher<R, Q> {
     pub(in crate::domain::service) fn new(
         executor: Arc<dyn RunExecutor>,
         ingest: Arc<IngestService<R, Q>>,
+        cancel: CancellationToken,
     ) -> Self {
         Self {
             executor,
             ingest,
             attached: WatchRegistry::default(),
+            cancel,
         }
+    }
+
+    /// Wait for every observer this instance has spawned to end.
+    ///
+    /// Forwards to [`WatchRegistry::shutdown`] — see its doc for what this
+    /// does and does not guarantee (in particular: it does not cancel
+    /// anything by itself; a caller wants [`Self`]'s own `cancel` token
+    /// cancelled first, or this blocks for as long as every live observer
+    /// takes to end on its own).
+    pub(in crate::domain::service) async fn shutdown(&self) {
+        self.attached.shutdown().await;
     }
 }
 
@@ -415,7 +570,34 @@ where
     R: RunsRepository + 'static,
     Q: QueueRepository + 'static,
 {
-    let mut stream = match executor.watch(&target.execution_ref).await {
+    // Read before the watch call, not inside `attach` before the spawn as
+    // Task 13's brief illustrated: `attach` is synchronous and infallible by
+    // contract (this module's own doc, "Both methods are synchronous and
+    // infallible") and a resume read is neither — it is a database round
+    // trip through a resolved `AccessScope`. Reading it here, at the start of
+    // the task `attach` already spawns and before the one call it gates,
+    // gets the same property (the executor never opens a stream without
+    // whatever resume position exists) without asking `attach` to become
+    // async or fallible. A failure here is treated as "resume position
+    // unknown" rather than as a reason to abandon the attach: it falls back
+    // to `LogResume::default()`, which is exactly what a first attach
+    // already passes, so this degrades to the pre-Task-13 replay-from-the-
+    // beginning behaviour rather than leaving the run unobserved. Review
+    // finding #50.
+    let resume = match ingest.resume_positions(target.tenant, target.run_id).await {
+        Ok(resume) => resume,
+        Err(error) => {
+            warn!(
+                run_id = %target.run_id,
+                execution_ref = target.execution_ref.as_str(),
+                %error,
+                "could not read this run's log resume position; watching from the beginning",
+            );
+            LogResume::default()
+        }
+    };
+
+    let mut stream = match executor.watch(&target.execution_ref, resume).await {
         Ok(stream) => stream,
         Err(error) => {
             error!(
@@ -452,7 +634,7 @@ where
     R: RunsRepository + 'static,
     Q: QueueRepository + 'static,
 {
-    /// # The observer's lifetime is the run's, never the caller's
+    /// # The observer's lifetime is the run's and the gear's, never the caller's
     ///
     /// The task is spawned detached and holds its own `Arc`s, so it outlives the
     /// tick that started it and survives the next one. Binding it to the caller
@@ -461,8 +643,16 @@ where
     /// `cpt-cf-qa-nfr-run-duration` puts eight hours on the run, not on the
     /// tick.
     ///
-    /// What it does *not* survive is the process: a dropped runtime takes every
-    /// observer with it, which is the whole reason the re-attachment pass exists.
+    /// **Until review finding #18, what it did not survive was the process**:
+    /// a dropped runtime took every observer with it, undetected — a shutdown
+    /// by process death rather than by design, indistinguishable in the logs
+    /// from a crash. The `tokio::select!` below adds the third lifetime this
+    /// module's header promises: the gear's own [`CancellationToken`],
+    /// threaded in at construction (`SpawningRunWatcher::new`) and shared —
+    /// as a child token per observer — by every task this method spawns. A
+    /// caller that cancels it and then awaits [`SpawningRunWatcher::shutdown`]
+    /// gets a bounded, observable stop instead of an unaccounted-for task list
+    /// racing the runtime's own teardown.
     fn attach(&self, target: WatchTarget) {
         // The insert is the idempotency, and it happens before the spawn: two
         // concurrent attaches cannot both reach `tokio::spawn`, because only one
@@ -478,12 +668,29 @@ where
 
         let executor = Arc::clone(&self.executor);
         let ingest = Arc::clone(&self.ingest);
-        tokio::spawn(async move {
+        let cancel = self.cancel.child_token();
+        let handle = tokio::spawn(async move {
             // Moved in so it is dropped — and the run freed for a later attempt
             // — however this task ends, including a panic.
             let _slot = slot;
-            drain(executor.as_ref(), ingest.as_ref(), target).await;
+            // Read out before the select: `drain` below takes `target` by
+            // value to build its future, which `tokio::select!` evaluates
+            // eagerly for *every* branch before polling any of them, so
+            // `target` is gone by the time either arm's body runs. `run_id`
+            // is `Copy` and is all the cancelled arm needs to log.
+            let run_id = target.run_id;
+            tokio::select! {
+                // The gear's shutdown — the third lifetime, distinct from the
+                // caller's (which would cancel an eight-hour run at the end of
+                // a five-second tick) and from the run's (which is what the
+                // detached spawn above is right about). Review finding #18.
+                () = cancel.cancelled() => {
+                    info!(run_id = %run_id, "observation stopping (gear shutdown)");
+                }
+                () = drain(executor.as_ref(), ingest.as_ref(), target) => {}
+            }
         });
+        self.attached.track(handle);
     }
 
     fn is_watching(&self, run_id: Uuid) -> bool {

@@ -6,11 +6,129 @@
 //! twice, and was rejected: `retained` is a *capped tail* that evicts from the
 //! front at `MAX_RETAINED_BYTES_PER_RUN`. A run emitting more than that between
 //! two flushes would lose its head **before it was ever written**, silently. A
-//! drained buffer cannot lose a line it has not yet flushed.
+//! drained buffer cannot lose a line it has not yet flushed — that argument
+//! still holds, unchanged, and is why this module still does not reuse
+//! `retained`.
 //!
-//! The cost is that a pending buffer is unbounded between flushes. That is
-//! consistent with the no-cap decision (design §8) and bounded in practice by
-//! the flush period.
+//! **What used to follow does not hold any more, and is retracted rather than
+//! restated.** This section used to conclude that a pending buffer is
+//! therefore safe left unbounded, "consistent with the no-cap decision
+//! (design §8) and bounded in practice by the flush period." That was true
+//! for a log read once. It stopped being true the moment a flapping API
+//! server made a watcher re-attach re-read a pod's *whole* log every 5 s
+//! while `append_log` concatenated each re-read onto the row — Finding #50 —
+//! because "bounded by the flush period" assumes one flush period's worth of
+//! *new* output, not the same output arriving again and again between
+//! flushes. With that fixed (the preceding commit; the resume position is
+//! recovered from the archived text itself, see
+//! [`LogResume::from_archived_text`](crate::domain::repos::LogResume::from_archived_text)),
+//! what is left between two flushes really is one flush period's worth of a
+//! run's own output — and that can still be enormous for a genuinely chatty
+//! run, which is Finding #22. [`MAX_PENDING_BYTES_PER_RUN`] bounds it.
+//!
+//! That reopens the very objection this section led with: capping *is*
+//! "losing a line before it was ever written." The answer is not that the
+//! loss stops happening — it does not — but that it stops being silent.
+//! Eviction here is followed by exactly the marker `RunLogBroadcaster`
+//! already uses for the identical trade,
+//! [`broadcast::truncation_marker`](crate::infra::logs::broadcast::truncation_marker),
+//! so a run that overflows this buffer has that fact recorded in its own
+//! archived text, not merely absent from it.
+//!
+//! # The residual this hands Task 13's resume guard, named rather than left implicit
+//!
+//! `LogResume::from_archived_text` recovers each execution node's
+//! `first_line`/`last_line` anchors by re-parsing the archived text's own
+//! `"[node] "` prefixes (`domain::repos::run_logs_repo`), and
+//! `infra::executor::argo::watch`'s re-attach guard suppresses a node's
+//! replayed output only while a fresh re-read's first line still matches the
+//! archived `first_line` for that node. Eviction interacts with that guard
+//! two different ways, depending on *which* flush window it hits.
+//!
+//! **Eviction on a node's very first flush window.** If this cap ever
+//! evicts a node's true first archived line — the line the guard was built
+//! to compare against — the archive's first line for that node stops being
+//! the pod's actual first line. The next re-attach's first-line guard then
+//! mismatches by construction, suppression is disabled *for that node* for
+//! the rest of the run (that guard's own doc: "the archive's first line will
+//! never match the retained window again"), and the run re-duplicates its
+//! whole retained window on every re-attach after that.
+//!
+//! **Eviction on a later flush window, once the node has already flushed
+//! successfully at least once — the common case, since it only takes one
+//! flush tick's worth of quiet before a run turns chatty.** The node's true
+//! first archived line was written by that earlier, un-evicted flush and is
+//! untouched, so the first-line guard matches normally and suppression is
+//! not disabled. What eviction leaves behind instead is a *hole*: the
+//! archived text for that node stops being a contiguous prefix of what the
+//! pod printed, because the evicted lines never reached the archive at all —
+//! they are exactly the marker's `dropped` count, not a gap `lines_for` can
+//! see (`lines_for` only counts what is actually there). `consume` still
+//! suppresses exactly `lines_for(node)` lines of a fresh, gapless re-read
+//! counted from byte 0. That re-suppresses the same lines the marker already
+//! recorded as gone — no *new* loss, they were already gone — but it stops
+//! short of where the archive's own tail (the lines *after* the hole)
+//! actually sits in that re-read, so the tail is re-emitted and re-archived:
+//! duplicated, not lost. This is not silent either: `consume`'s *last*-line
+//! guard compares the last suppressed line against archived
+//! `last_line_for(node)`, and a hole makes that comparison fail, firing the
+//! same `error!` the pre-fix-inflated-count case already fires for.
+//!
+//! Neither Task 13 nor this crate's plan anticipated a *cap* being the thing
+//! that moves the window or opens a hole; both are named here because the
+//! connection is easy to miss from either file alone. Neither is fixed here,
+//! and neither needs to be — both fail toward duplication, which is the
+//! direction `LineSkip`'s own header already documents this crate accepting:
+//! "safe, because emitting everything is the duplication direction, never
+//! the loss direction." A cap that could instead cause an *over-count* —
+//! `lines_for(node)` answering more than the archive truly holds for that
+//! node, which would make `consume` suppress lines the archive never
+//! actually has — would not be safe by that same argument; this one cannot,
+//! for the reason in the next paragraph. That is narrower than "cannot cause
+//! a positional mismatch": the hole case just above **is** one, and it is
+//! safe for the reason already given there — detected by the last-line
+//! guard, and duplicating rather than losing — not because a hole cannot
+//! occur.
+//!
+//! [`broadcast::truncation_marker`](crate::infra::logs::broadcast::truncation_marker)'s
+//! own text — `"[qa-runs] log truncated: …"` — happens to parse as a
+//! `"[node] "` prefix too, filed under a phantom node named `qa-runs`. That
+//! cannot inflate a real node's count: `LogResume::lines_for` is only ever
+//! consulted with a real node name (`repo-{uuid}`, `ExecutionNode::name`'s
+//! one production source), so the phantom's count is never read by anything.
+//! **Do not "fix" the marker's wording so it stops parsing as a bracketed
+//! prefix** — nothing needs that, and the real hazard runs the other way: a
+//! marker that ever collided with an actual node name would turn a harmless
+//! phantom into a real over-count, which is loss.
+//!
+//! # What is actually true about the cap, stated rather than asserted
+//!
+//! Every fix in the round before this one closed a data-loss path that the
+//! round before *that* had called impossible in a doc comment, so this is
+//! deliberately not written as an absolute:
+//!
+//! - **One line longer than the cap is kept whole.** [`Pending::enforce_cap`]
+//!   refuses to evict a run's last remaining line, so a single line larger
+//!   than [`MAX_PENDING_BYTES_PER_RUN`] leaves the buffer one line over
+//!   budget rather than emptying it to nothing — the identical trade
+//!   `RunLogBroadcaster`'s own `retain` makes, for the identical reason.
+//! - **The marker's own bytes are never counted against the cap.** The cap
+//!   bounds what `record` receives; the marker is a small, fixed-shape
+//!   addition made once, in [`RunLogArchive::write`], never something a
+//!   chatty run can grow. `RunLogBroadcaster`'s own byte bound makes the same
+//!   choice for the same reason.
+//! - **A flush racing a `record` at the cap can produce a marker whose count
+//!   is exact but whose claimed position is approximate.** [`RunLogArchive::restore`]
+//!   merges a failed flush's already-taken text back in front of whatever
+//!   arrived while that write was in flight. If the arriving side
+//!   independently overflowed the cap before the merge, its evicted-line
+//!   count is summed into the one marker this module ever writes for that
+//!   buffer — but that marker still renders at the very front of the merged
+//!   text, describing lines that were, in truth, evicted from further in. The
+//!   count of lines lost is exact; which lines they were is not, in this one
+//!   compound case. It is narrower than it sounds: it needs a flush already
+//!   failing *and* another [`MAX_PENDING_BYTES_PER_RUN`] arriving before that
+//!   same write settles.
 //!
 //! # A newline is added here, once
 //!
@@ -74,6 +192,7 @@
 //! the `in_flight` check turns it into two real writes whose commit order
 //! reverses the stored text.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -83,9 +202,29 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::repos::RunLogsRepository;
+use crate::domain::repos::{LogResume, RunLogsRepository};
 use crate::domain::service::{DbProvider, FlushReport, LogArchive, actions, resources};
 use crate::domain::system_actor;
+use crate::infra::logs::broadcast::truncation_marker;
+
+/// The most one run's un-flushed buffer may hold, in bytes.
+///
+/// **The same budget as
+/// [`broadcast::MAX_RETAINED_BYTES_PER_RUN`](crate::infra::logs::broadcast::MAX_RETAINED_BYTES_PER_RUN),
+/// and a separate constant rather than a reuse of it** — because the two
+/// bound different buffers. That one bounds what a late SSE reader can still
+/// be shown; this one bounds what has not yet reached the database. They are
+/// equal because there is no reason for a run to be allowed more of one than
+/// the other, and they are named apart so that changing one does not
+/// silently change the other — a future change to either budget is a
+/// decision about one buffer, not both, and a single shared constant would
+/// make it both without anyone choosing that.
+///
+/// This bounds `Pending::text` alone. The marker [`RunLogArchive::write`]
+/// materializes at flush time is never counted against it — see this
+/// module's header, "The marker's own bytes are never counted against the
+/// cap."
+const MAX_PENDING_BYTES_PER_RUN: usize = 512 * 1024;
 
 /// One run's un-flushed text.
 ///
@@ -95,6 +234,67 @@ struct Pending {
     tenant_id: Uuid,
     text: String,
     lines: i64,
+    /// Real lines evicted from `text`'s front by [`Self::enforce_cap`], across
+    /// this `Pending`'s whole lifetime — reset only by a fresh `take` (see
+    /// `RunLogArchive::take`), because a taken buffer starts a new window.
+    /// Zero until the cap is first hit, and never decremented: a `restore`
+    /// merge sums two `Pending`s' counts rather than losing one — see this
+    /// module's header on what that sum's position claim does and does not
+    /// mean.
+    ///
+    /// Deliberately **not** materialized into `text` as it changes.
+    /// `RunLogArchive::write` builds the one marker line this produces,
+    /// once, from whatever this holds at flush time — matching
+    /// `RunLogBroadcaster::Inner::replay`, which builds its own marker fresh
+    /// from `RetainedLog::dropped` rather than storing one in `lines`. Doing
+    /// it here too, rather than rewriting an embedded marker line on every
+    /// eviction, is what keeps a `restore` merge a plain sum instead of a
+    /// search for a marker that may or may not already be present in two
+    /// different pieces of text.
+    dropped: u64,
+}
+
+impl Pending {
+    /// Enforce [`MAX_PENDING_BYTES_PER_RUN`] by evicting whole lines from the
+    /// front, never the tail — the head of a long log is the part a reader is
+    /// least likely to still need, and it is also the end `RunLogBroadcaster`
+    /// already evicts from, for the same reason.
+    ///
+    /// Never evicts a run down to nothing: a single line already longer than
+    /// the cap is kept whole rather than emptied out, matching
+    /// `RunLogBroadcaster::Inner::retain`'s identical guard
+    /// (`log.lines.len() > 1`) and for the identical reason — a stored row
+    /// with nothing in it but a marker is a worse failure than one that is
+    /// one line over budget.
+    fn enforce_cap(&mut self) {
+        while self.text.len() > MAX_PENDING_BYTES_PER_RUN && self.lines > 1 {
+            // Every stored line was appended by `record` with a trailing
+            // `\n` (this module's header, "A newline is added here, once"),
+            // so the first `\n` this finds is always a real line boundary,
+            // never a false split inside one line's own text.
+            let Some(newline_at) = self.text.find('\n') else {
+                // Cannot actually happen given the invariant above, and a
+                // `break` rather than `unreachable!()` for the same reason
+                // `RunLogBroadcaster::evict_retained_runs` gives: the cost of
+                // being wrong here is a buffer a little too large, not a
+                // panic on the path every archived line takes.
+                break;
+            };
+            self.text.drain(0..=newline_at);
+            self.lines -= 1;
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    /// How many lines [`RunLogArchive::write`] actually archives for this
+    /// buffer: `lines` plus one more exactly when a marker is written, since
+    /// `lines` itself never counts it (this type's own `dropped` doc). The
+    /// one place both `write` (the value it sends to `append_log`) and
+    /// `flush`'s success log read this, rather than each recomputing it —
+    /// so an operator's log line always matches what the stored row holds.
+    fn archived_lines(&self) -> i64 {
+        self.lines.saturating_add(i64::from(self.dropped > 0))
+    }
 }
 
 /// Reports `tenant_id` and `lines`, and `text`'s **length**, never `text`
@@ -126,6 +326,7 @@ impl std::fmt::Debug for Pending {
             .field("tenant_id", &self.tenant_id)
             .field("text_len", &self.text.len())
             .field("lines", &self.lines)
+            .field("dropped", &self.dropped)
             .finish()
     }
 }
@@ -254,17 +455,36 @@ where
 
     /// Put drained text back at the **front** of whatever has arrived since,
     /// preserving order. This is what makes a failed flush lossless.
+    ///
+    /// `dropped` is summed along with `lines` — see [`MAX_PENDING_BYTES_PER_RUN`]'s
+    /// own doc and this module's header for what that sum's position claim
+    /// does and does not mean when both sides evicted independently.
+    ///
+    /// Re-runs [`Pending::enforce_cap`] on the merged buffer before putting
+    /// it back. Without this, a merge of two buffers each already within the
+    /// cap on their own can land at up to twice it — `MAX_PENDING_BYTES_PER_RUN`'s
+    /// own doc says it bounds `Pending::text`, and that claim has to stay
+    /// true across this path too, not just across `record`. `enforce_cap`
+    /// updates `dropped` itself as it evicts, so a trim here is folded into
+    /// the same count `write` reads later — nothing extra to reconcile.
     fn restore(&self, run_id: Uuid, mut taken: Pending) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(newer) = state.pending.remove(&run_id) {
             taken.text.push_str(&newer.text);
             taken.lines += newer.lines;
+            taken.dropped = taken.dropped.saturating_add(newer.dropped);
+            taken.enforce_cap();
         }
         state.pending.insert(run_id, taken);
     }
 
     /// The one database write. Separated from `flush` so `flush` owns only the
     /// take/restore decision.
+    ///
+    /// Builds the single [`truncation_marker`] line from `taken.dropped` here,
+    /// once, rather than reading one out of `taken.text` — `Pending::dropped`'s
+    /// own doc explains why nothing embeds it earlier. `Cow` avoids allocating
+    /// a new string on the (ordinary) path where nothing was ever dropped.
     async fn write(&self, run_id: Uuid, taken: &Pending) -> Result<(), DomainError> {
         // `TenantBound::new` returns `None` for a nil tenant
         // (`domain::system_actor.rs`). A nil tenant here would mean `record`
@@ -288,16 +508,36 @@ where
             .await?;
 
         let conn = self.db.conn()?;
+        // `Pending::archived_lines` adds the marker's one line exactly when
+        // `taken.dropped` says one is written below, regardless of how many
+        // separate eviction rounds it actually summarizes.
+        let text: Cow<'_, str> = if taken.dropped > 0 {
+            Cow::Owned(format!(
+                "{}\n{}",
+                truncation_marker(taken.dropped),
+                taken.text
+            ))
+        } else {
+            Cow::Borrowed(taken.text.as_str())
+        };
+        let lines = taken.archived_lines();
         self.runs
-            .append_log(
-                &conn,
-                &scope,
-                run_id,
-                taken.tenant_id,
-                &taken.text,
-                taken.lines,
-            )
+            .append_log(&conn, &scope, run_id, taken.tenant_id, &text, lines)
             .await
+    }
+
+    /// `run_id`'s currently buffered byte count, `0` if nothing is pending.
+    ///
+    /// Test-only: nothing on the run path needs to read this, and the only
+    /// thing it exists to let a test assert is
+    /// [`MAX_PENDING_BYTES_PER_RUN`] actually holding.
+    #[cfg(test)]
+    fn pending_len(&self, run_id: Uuid) -> usize {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state
+            .pending
+            .get(&run_id)
+            .map_or(0, |pending| pending.text.len())
     }
 }
 
@@ -312,10 +552,12 @@ where
             tenant_id,
             text: String::new(),
             lines: 0,
+            dropped: 0,
         });
         entry.text.push_str(line);
         entry.text.push('\n');
         entry.lines += 1;
+        entry.enforce_cap();
     }
 
     async fn flush(&self, run_id: Uuid) -> Result<(), DomainError> {
@@ -333,7 +575,11 @@ where
         // a `clear_in_flight` statement placed after the `match`.
         match self.write(run_id, &taken).await {
             Ok(()) => {
-                debug!(run_id = %run_id, lines = taken.lines, "archived run log");
+                // `taken.archived_lines()`, not `taken.lines` — the latter
+                // never counts the marker `write` may have added, and this
+                // is the number an operator would otherwise compare against
+                // the stored row and find one short.
+                debug!(run_id = %run_id, lines = taken.archived_lines(), "archived run log");
                 Ok(())
             }
             Err(error) => {
@@ -386,6 +632,24 @@ where
         }
         report
     }
+
+    async fn resume_positions(
+        &self,
+        tenant: system_actor::TenantBound,
+        run_id: Uuid,
+    ) -> Result<LogResume, DomainError> {
+        // The same resolution `Self::write` performs for the write half — a
+        // fresh `qa.run` scope per call, via the enforcer, never hoisted or
+        // cached — except `GET`, not `DISPATCH`: this is a read of the run's
+        // own archive, not a write to it.
+        let ctx = system_actor::for_log_archive(tenant);
+        let scope = self
+            .policy_enforcer
+            .access_scope(&ctx, &resources::RUN, actions::GET, Some(run_id))
+            .await?;
+        let conn = self.db.conn()?;
+        self.runs.log_resume_positions(&conn, &scope, run_id).await
+    }
 }
 
 #[cfg(test)]
@@ -396,11 +660,12 @@ mod tests {
     use authz_resolver_sdk::PolicyEnforcer;
     use uuid::Uuid;
 
-    use super::RunLogArchive;
+    use super::{MAX_PENDING_BYTES_PER_RUN, RunLogArchive};
     use crate::domain::service::LogArchive;
     use crate::domain::service::test_support::{
         MockRunsRepository, PermissiveAuthZ, test_db_provider,
     };
+    use crate::infra::logs::broadcast::truncation_marker;
 
     /// Shared setup for this file's tests. `fixture` is `async` (unlike the
     /// task brief's illustrative call sites, which wrote `let fx = fixture();`
@@ -741,6 +1006,147 @@ mod tests {
             fx.append_calls(),
             0,
             "the repository must never be reached for a nil tenant",
+        );
+    }
+
+    /// **A single run's pending buffer is bounded.**
+    ///
+    /// `record` appended without limit between flushes. The module header
+    /// used to defend that as design §8's no-cap decision, "bounded in
+    /// practice by the flush period" -- true for a log read once, and it was
+    /// the second half of #50's growth while a re-attach re-appended the
+    /// whole log every 5 s. That is fixed (the preceding commit); this bounds
+    /// the case that is left, a genuinely enormous run.
+    ///
+    /// The front is dropped, not the tail -- see the marker test below for
+    /// the "recorded, not silent" half. Review finding #22.
+    #[tokio::test]
+    #[allow(
+        clippy::integer_division,
+        reason = "a whole number of 1 KiB lines guaranteed to overflow the byte cap; \
+                  a float here would only make the overflow margin fuzzy"
+    )]
+    async fn the_pending_buffer_is_capped_per_run() {
+        let fx = fixture().await;
+        let line = "x".repeat(1024);
+        for _ in 0..(MAX_PENDING_BYTES_PER_RUN / 1024 + 64) {
+            fx.archive.record(fx.tenant, fx.run_id, &line);
+        }
+
+        let pending = fx.archive.pending_len(fx.run_id);
+        assert!(
+            pending <= MAX_PENDING_BYTES_PER_RUN,
+            "the pending buffer must stay within {MAX_PENDING_BYTES_PER_RUN} bytes, was {pending}"
+        );
+    }
+
+    /// **The boundary the cap's own doc names**: one line longer than the
+    /// whole cap is kept whole rather than evicted to nothing, matching
+    /// `RunLogBroadcaster::Inner::retain`'s identical guard. A buffer with
+    /// only a marker and no real output would be a worse failure than one
+    /// that is one line over budget.
+    #[tokio::test]
+    async fn a_single_line_longer_than_the_cap_is_kept_whole() {
+        let fx = fixture().await;
+        let huge = "y".repeat(MAX_PENDING_BYTES_PER_RUN * 2);
+        fx.archive.record(fx.tenant, fx.run_id, &huge);
+
+        assert_eq!(
+            fx.archive.pending_len(fx.run_id),
+            huge.len() + 1,
+            "the whole line plus its one trailing newline must survive uncut"
+        );
+    }
+
+    /// **The loss is recorded, not silent** -- the objection this task's
+    /// change to the module header answers. A run that overflows the cap is
+    /// flushed with a `truncation_marker` naming exactly how many lines were
+    /// evicted, and the archived line count grows by one to cover that
+    /// marker line -- `Pending::dropped`'s own doc explains why `lines` itself
+    /// never counts it.
+    #[tokio::test]
+    #[allow(
+        clippy::integer_division,
+        reason = "a whole number of 1 KiB lines guaranteed to overflow the byte cap; \
+                  a float here would only make the overflow margin fuzzy"
+    )]
+    async fn an_overflowing_run_is_flushed_with_a_visible_truncation_marker() {
+        let fx = fixture().await;
+        let line = "x".repeat(1024);
+        let pushes = MAX_PENDING_BYTES_PER_RUN / 1024 + 64;
+        for _ in 0..pushes {
+            fx.archive.record(fx.tenant, fx.run_id, &line);
+        }
+
+        let report = fx.archive.flush_due().await;
+        assert_eq!(report.failed, 0, "the write itself must still succeed");
+
+        let stored = fx.stored_text();
+        let stored_lines: Vec<&str> = stored.lines().collect();
+        assert_eq!(
+            stored_lines.len() as u64,
+            report.lines + 1,
+            "the marker line plus every real line the report says was archived"
+        );
+
+        let dropped = u64::try_from(pushes).unwrap().saturating_sub(report.lines);
+        assert!(dropped > 0, "this push count must have overflowed the cap");
+        assert_eq!(
+            stored_lines[0],
+            truncation_marker(dropped),
+            "the marker must name exactly how many lines were evicted, not a \
+             stale or approximate count"
+        );
+    }
+
+    /// **Fix round 1: `restore` must not merely concatenate past the cap.**
+    /// Two buffers each individually within `MAX_PENDING_BYTES_PER_RUN` can
+    /// sum to roughly twice it once merged by a failed flush's `restore`;
+    /// nothing else would trim that until the next `record`, so a run gone
+    /// quiet right after the failure would sit oversized indefinitely.
+    /// `restore` re-runs `enforce_cap` on the merged buffer to close that gap.
+    #[tokio::test]
+    #[allow(
+        clippy::integer_division,
+        reason = "a whole number of 1 KiB lines, not a byte-exact target"
+    )]
+    async fn a_restore_merge_past_the_cap_is_trimmed_back_down() {
+        let fx = fixture().await;
+        let line = "x".repeat(1024);
+        // ~60% of the cap each, individually under it, so neither batch's own
+        // `record` calls trigger eviction on their own -- only the merge does.
+        let batch = MAX_PENDING_BYTES_PER_RUN / 1024 * 3 / 5;
+
+        for _ in 0..batch {
+            fx.archive.record(fx.tenant, fx.run_id, &line);
+        }
+        assert!(
+            fx.archive.pending_len(fx.run_id) <= MAX_PENDING_BYTES_PER_RUN,
+            "the first batch alone must not already be over the cap"
+        );
+
+        let gate = fx.mock.block_next_append();
+        let flush = fx.archive.flush(fx.run_id);
+        let arrive_while_the_write_is_in_flight = async {
+            // Only proceeds once the first flush has already taken the first
+            // batch out of the pending map and is blocked inside its write —
+            // same synchronization the merge-order tests above use.
+            gate.wait_for_entry().await;
+            for _ in 0..batch {
+                fx.archive.record(fx.tenant, fx.run_id, &line);
+            }
+            gate.release();
+        };
+        let (flush_result, ()) = tokio::join!(flush, arrive_while_the_write_is_in_flight);
+        assert!(
+            flush_result.is_err(),
+            "the gated append must fail, which is what drives restore's merge",
+        );
+
+        let pending = fx.archive.pending_len(fx.run_id);
+        assert!(
+            pending <= MAX_PENDING_BYTES_PER_RUN,
+            "restore must trim the merged buffer back under the cap, was {pending}"
         );
     }
 }

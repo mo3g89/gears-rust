@@ -27,6 +27,7 @@ use qa_product_sdk::observation::{
     PluginObservation,
 };
 use qa_product_sdk::testing::Canary;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::domain::ports::{PluginUnavailable, ProductPluginPort};
@@ -114,7 +115,10 @@ async fn the_cycle_resolves_the_plugin_for_the_environments_product() {
         "one resolution per create, each naming that environment's product"
     );
 
-    let report = services.environments.run_observation_cycle().await;
+    let report = services
+        .environments
+        .run_observation_cycle(&CancellationToken::new())
+        .await;
 
     assert_eq!(report.attempted, 3);
     assert_eq!(report.observed, 3);

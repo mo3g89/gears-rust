@@ -110,7 +110,7 @@ use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::repos::{ArchivedLog, RunLogsRepository};
+use crate::domain::repos::{ArchivedLog, LogResume, RunLogsRepository};
 use crate::infra::storage::db::db_err;
 use crate::infra::storage::entity::run_log::{self, Column as LogColumn, Entity as LogEntity};
 use crate::infra::storage::runs_sea_repo::OrmRunsRepository;
@@ -183,6 +183,29 @@ impl RunLogsRepository for OrmRunsRepository {
         Ok(found.map(|m| ArchivedLog {
             text: m.text,
             lines: m.lines,
+        }))
+    }
+
+    async fn log_resume_positions<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        run_id: Uuid,
+    ) -> Result<LogResume, DomainError> {
+        let found = LogEntity::find()
+            .filter(LogColumn::RunId.eq(run_id))
+            .secure()
+            .scope_with(scope)
+            .one(runner)
+            .await
+            .map_err(db_err)?;
+
+        // No row: nothing archived yet, so an empty `LogResume` is the right
+        // answer — see the trait doc's "first attach" case. A row: recover a
+        // per-node count from the interleaved text via the one shared
+        // implementation — see `LogResume::from_archived_text`'s own doc.
+        Ok(found.map_or_else(LogResume::default, |model| {
+            LogResume::from_archived_text(&model.text)
         }))
     }
 }
@@ -410,6 +433,70 @@ mod tests {
                 .expect("the owner's row exists")
                 .text,
             "[a] mine\n",
+        );
+    }
+
+    /// A run with nothing archived yet answers an empty [`LogResume`] — the
+    /// case that must make a first attach read from the beginning rather than
+    /// resume from a position that does not exist.
+    ///
+    /// The per-node counting itself — two nodes' interleaved text told apart
+    /// and counted correctly — is `LogResume::from_archived_text`'s own unit
+    /// test (`domain::repos::run_logs_repo`), the one implementation this
+    /// method and `test_support::MockRunsRepository`'s both call. What this
+    /// test adds is the thing only a real row can prove: a run with **no**
+    /// row reads as empty, not as a database error.
+    #[tokio::test]
+    async fn a_run_with_no_archived_log_has_no_resume_position() {
+        let fx = fixture().await;
+        let run_id = fx.seed_run().await;
+
+        let resume = fx
+            .repo
+            .log_resume_positions(&fx.conn(), &fx.scope, run_id)
+            .await
+            .unwrap();
+
+        assert_eq!(resume.lines_for("a"), 0);
+    }
+
+    /// The same recovery, against a real row built from two separate
+    /// `append_log` calls — the way two pods' drains would actually arrive —
+    /// rather than a single in-memory string, which is all
+    /// `LogResume::from_archived_text`'s own unit test can exercise.
+    #[tokio::test]
+    async fn resume_positions_are_counted_per_node_from_a_row_built_by_two_appends() {
+        let fx = fixture().await;
+        let run_id = fx.seed_run().await;
+
+        fx.repo
+            .append_log(
+                &fx.conn(),
+                &fx.scope,
+                run_id,
+                fx.tenant,
+                "[a] one\n[b] uno\n",
+                2,
+            )
+            .await
+            .unwrap();
+        fx.repo
+            .append_log(&fx.conn(), &fx.scope, run_id, fx.tenant, "[a] two\n", 1)
+            .await
+            .unwrap();
+
+        let resume = fx
+            .repo
+            .log_resume_positions(&fx.conn(), &fx.scope, run_id)
+            .await
+            .unwrap();
+
+        assert_eq!(resume.lines_for("a"), 2, "node a has two of its own lines");
+        assert_eq!(resume.lines_for("b"), 1, "node b has one, not three");
+        assert_eq!(
+            resume.lines_for("never-appeared"),
+            0,
+            "a node this run never emitted answers 0, not a missing-key panic",
         );
     }
 }

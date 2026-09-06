@@ -58,6 +58,18 @@
       # ConfigMap are lost. Inserted into the gears' rendered config after
       # the QA_RUNS_ARGO_ANCHOR line by deploy/docker/entrypoint.sh.
       executor: argo
+      # NOT an `ArgoExecutorConfig` field -- `QaRunsConfig::max_concurrent_runs`,
+      # a sibling of `dispatcher_enabled` in the committed stack file, which is
+      # why it sits at the fragment's own six-space depth rather than inside
+      # `argo:` below. It rides this fragment because this fragment is the only
+      # insertion point the chart has into `gears.qa-runs.config` (the stack
+      # file itself is embedded verbatim) and because gears-deployment.yaml sets
+      # QA_RUNS_ARGO_CONFIG unconditionally, so this fragment is always
+      # inserted. `0` is the documented "unbounded" opt-out and was
+      # unreachable in the shipped image before this row -- whole-branch
+      # review I1. See values.yaml's `qaRuns` block for why `${VAR:-...}` in
+      # the stack file is not an alternative.
+      max_concurrent_runs: {{ .Values.qaRuns.maxConcurrentRuns }}
       argo:
         namespace: {{ .Values.argo.namespace }}
         # NO kubeconfig_path -- see this file's header comment.
@@ -65,6 +77,7 @@
         workflow_service_account: {{ .Values.argo.workflowServiceAccount | quote }}
         workflow_ttl_seconds: {{ .Values.argo.workflowTtlSeconds }}
         status_poll_seconds: {{ .Values.argo.statusPollSeconds }}
+        log_follow_idle_seconds: {{ .Values.argo.logFollowIdleSeconds }}
         # A workflow pod reaches the gears through the in-cluster Service
         # directly -- unlike compose's bundle_base_url (which had to go
         # through the ui container's nginx because docker-compose.yml binds

@@ -36,6 +36,7 @@ use uuid::Uuid;
 use crate::domain::error::DomainError;
 use crate::domain::ports::bundle_store::BundleStore;
 use crate::domain::ports::repo_sync::{RepoSyncPort, SyncResult};
+use crate::domain::repos::BundlesRepository;
 use crate::domain::service::{AppServices, QaProductRegistry, ServiceDeps, SyncCache};
 use crate::gear::ConcreteAppServices;
 use crate::infra::storage::{
@@ -341,6 +342,39 @@ impl BundleStore for NoopBundleStore {
 /// scoping tests exercise row-level DB isolation, not the git/blob planes).
 pub fn build_services(db: Db, authz: Arc<dyn AuthZResolverClient>) -> Arc<ConcreteAppServices> {
     build_services_with_engine(db, authz, Arc::new(NoopSyncEngine), throwaway_repos_dir())
+}
+
+/// A bundle descriptor expired at `offset` from now, seeded straight through
+/// [`OrmBundlesRepository`] under [`AccessScope::allow_all`] — ground truth,
+/// bypassing `BundlesService::create_bundle` entirely, since that method
+/// always sets `expires_at` from the configured TTL and can never produce an
+/// already-expired row.
+///
+/// A copy of `domain::service::tests_tenant_scoping`'s private helper of the
+/// same name, made `pub` and moved to this exempt seam
+/// (`unscoped_read_guard_tests`'s module doc names both this file and that one
+/// as the crate's only `AccessScope::allow_all()` call sites outside
+/// `domain::elevated`) so `gear::tests` can seed the same ground truth without
+/// tripping `no_production_path_uses_allow_all`.
+pub async fn seed_expired_bundle(db: &Db, tenant_id: Uuid, offset: time::Duration) {
+    let conn = db.conn().expect("conn");
+    let now = time::OffsetDateTime::now_utc();
+    OrmBundlesRepository
+        .create(
+            &conn,
+            &toolkit_security::AccessScope::allow_all(),
+            tenant_id,
+            qa_catalog_sdk::TestBundle {
+                id: Uuid::new_v4(),
+                storage_ref: format!("mem:{tenant_id}"),
+                checksum_sha256: "0".repeat(64),
+                size_bytes: 1,
+                expires_at: now + offset,
+                created_at: now - time::Duration::hours(2),
+            },
+        )
+        .await
+        .expect("seed expired bundle");
 }
 
 /// A fresh, never-created path under the system temp dir. Suites that never

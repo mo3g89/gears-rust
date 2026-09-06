@@ -275,3 +275,7 @@ pub async fn preview_notification(
         .map_err(as_notification_error)?;
     Ok(Json(NotificationPreviewDto::from(preview)))
 }
+
+#[cfg(test)]
+#[path = "settings_handler_tests.rs"]
+mod settings_handler_tests;
