@@ -37,3 +37,16 @@ for v in '$sse_authorization' '$arg_access_token' '$http_authorization' '$uri' '
     fi
 done
 echo "PASS: nginx runtime variables survived envsubst"
+
+# The SSE location must not log the query string: `?access_token=eyJ...` is a
+# live bearer credential and nginx's default `combined` format writes the whole
+# request line. Review finding #51.
+grep -q 'log_format sse_no_query' "$rendered" \
+  || { echo "FAIL: no sse_no_query log_format"; exit 1; }
+grep -q 'access_log .* sse_no_query' "$rendered" \
+  || { echo "FAIL: sse_no_query is defined but never applied"; exit 1; }
+# And it must be applied inside the SSE location only -- a server-level
+# access_log would change every route's log shape, which is not what this is.
+awk '/location ~ \^\/qa\/v1\/runs/,/^    }/' "$rendered" | grep -q 'access_log .* sse_no_query' \
+  || { echo "FAIL: sse_no_query is not applied inside the SSE location"; exit 1; }
+echo "PASS: SSE location redacts the access-token query string from its access log"

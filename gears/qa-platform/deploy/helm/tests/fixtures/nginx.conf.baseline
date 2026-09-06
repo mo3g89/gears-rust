@@ -74,16 +74,21 @@ map $http_upgrade $connection_upgrade {
 # any other.
 #
 # THE COST, recorded for a human in gears/qa-platform/docs/CONTRACT-DIFF.md
-# section 12.5. It is one exposure, not three, and it is measured rather than
-# feared: **the token lands in this container's nginx access log**, whole and
-# in clear, because the access log format writes the full request line --
+# section 12.5. It is one exposure, not three, and it WAS measured rather than
+# feared: before the `log_format sse_no_query` below existed, this file set no
+# `access_log` of its own, so nginx's default `combined` format wrote the full
+# request line for this route --
 #
 #   "GET /qa/v1/runs/<id>/logs?access_token=eyJhbGciOi... HTTP/1.1" 200
 #
-# -- and therefore in `docker compose logs ui` too, where it accumulates one
-# line per stream open for the life of the container (`docker compose logs ui
-# | grep -c 'access_token=eyJ'` was 60 while this comment was being written,
-# and only ever grows).
+# -- and therefore in `docker compose logs ui` too, one line per stream open
+# for the life of the container (`docker compose logs ui | grep -c
+# 'access_token=eyJ'` was 60 while this comment was first written). Review
+# finding #51. That is now closed: the SSE location below applies
+# `sse_no_query`, which logs `$uri` instead of `$request`, so the query string
+# -- and the token in it -- is never written. See that log_format's own
+# comment, just below the map, for why a location-scoped access_log rather
+# than a server-wide one.
 #
 # NOT the browser's history, and that correction belongs here rather than only
 # in the diff document, because this block is what the next person editing it
@@ -108,6 +113,25 @@ map $arg_access_token $sse_authorization {
     ''      $http_authorization;
     default "Bearer $arg_access_token";
 }
+
+# The SSE log-line format: `$uri` rather than `$request`, so the path is logged
+# and the query string is not.
+#
+# The bridge above maps `?access_token=<jwt>` onto an `Authorization` header
+# because `EventSource` cannot set headers and the gears read a credential only
+# from `AUTHORIZATION`. That transport is by design (CONTRACT-DIFF 12.5). What
+# was not by design is nginx's default `combined` format writing the whole
+# request line -- token included -- to stdout, which in the Helm deployment goes
+# wherever the cluster ships container logs. Measured at 60 such lines while
+# this file's own comment above (now `THE COST`, at what was :80-86) was first
+# written.
+#
+# Applied inside the SSE location ONLY (`location ~ ^/qa/v1/runs/[^/]+/logs$`
+# below). A server-level `access_log` here would silently change the log shape
+# of every other route. Review finding #51.
+log_format sse_no_query '$remote_addr - $remote_user [$time_local] '
+                        '"$request_method $uri $server_protocol" '
+                        '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
 
 server {
     listen 80;
@@ -267,6 +291,11 @@ server {
     # That port loss is what `absolute_redirect off` above now prevents for
     # every nginx-generated redirect; this regex prevents the redirect itself.
     location ~ ^/qa/v1/runs/[^/]+/logs$ {
+        # See the `sse_no_query` log_format's own comment, beside the
+        # `$sse_authorization` map above, for why this location sets its own
+        # access_log rather than inheriting the server's. Review finding #51.
+        access_log /var/log/nginx/access.log sse_no_query;
+
         proxy_pass $gears;
 
         proxy_http_version 1.1;
