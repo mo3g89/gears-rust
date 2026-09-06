@@ -601,6 +601,30 @@ test-qa-platform-features: install-tools
 	cargo nextest run -p qa-runs --features argo --lib
 	cargo nextest run -p qa-environments --features runner-secret --lib
 
+.PHONY: helm-tests
+
+## Run the qa-platform Helm chart guards. No cluster needed -- these are
+## `helm template` plus file reads -- so the `lint` job holds them.
+## Includes `test_no_system_gear_changes.py`, the guard FOOTPRINT names for the
+## reverted system-gear changes, and `test_nginx_template.sh`, which is what
+## proves the SSE access-log redaction.
+##
+## Only test_no_system_gear_changes.py is pytest-shaped (it defines a
+## `test_*` function); `test_chart_file_sync.py`, `test_features.py`,
+## `test_no_environment_hardcode.py` and `test_pins.py` are standalone scripts
+## -- a `main()` run via `if __name__ == "__main__"` -- so
+## `python3 -m pytest tests/` collects zero items from them and would silently
+## skip four of the six guards. Each is invoked directly so all six actually
+## run; a non-zero exit from any of them fails this target.
+helm-tests:
+	@command -v helm >/dev/null || (echo "helm is required for helm-tests" && exit 1)
+	cd gears/qa-platform/deploy/helm && python3 -m pytest tests/ -q
+	python3 gears/qa-platform/deploy/helm/tests/test_chart_file_sync.py
+	python3 gears/qa-platform/deploy/helm/tests/test_features.py
+	python3 gears/qa-platform/deploy/helm/tests/test_no_environment_hardcode.py
+	python3 gears/qa-platform/deploy/helm/tests/test_pins.py
+	bash gears/qa-platform/deploy/helm/tests/test_nginx_template.sh
+
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
 ## Covers:
 ##   - cf-gears-toolkit         : bootstrap + init_crypto_provider dispatch
@@ -969,7 +993,7 @@ ci_test: fmt clippy
 ci_docs: lychee gts-docs
 
 # Run CI pipeline locally, requires docker
-ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git test-qa-platform-features lychee gts-docs dylint
+ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git test-qa-platform-features lychee gts-docs dylint helm-tests
 
 ## Build the cf-gears-example-server release binary using a toolchain from the rust-toolchain.toml
 .cargo-build:
