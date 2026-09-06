@@ -277,15 +277,8 @@ jobs:
       # `ui-contract` is deliberately absent: it regenerates types from a live
       # /openapi.json and needs the compose stack up on localhost:8087, which
       # this job has no gears to serve.
-      #
-      # `ui-lint` is deliberately absent too: the project has no
-      # eslint.config.js and ESLint 9 requires one, so the target cannot run
-      # at all. The lint gap it would otherwise catch is 15 errors and 1
-      # warning across 12 of 139 files, recorded with its full measurement in
-      # gears/qa-platform/docs/DECOMPOSITION.md section 2.6, under
-      # "Tracked follow-ups".
-      - name: Test and build the UI
-        run: make ui-test ui-build
+      - name: Lint, test and build the UI
+        run: make ui-lint ui-test ui-build
 
   integration:
     name: Integration tests

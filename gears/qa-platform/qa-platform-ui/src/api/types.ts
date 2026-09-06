@@ -34,7 +34,7 @@ export interface TestPlan {
    * `timeout_seconds` and `exclusive` ARE on `PlanDto`, but both are nullable there. */
   timeout_seconds?: number;
   node_selector?: Record<string, string>;
-  tolerations?: any[];
+  tolerations?: unknown[];
   validation?: boolean;
   /** Plan-level exclusivity from plan.yaml. null/undefined = inherit from tests. */
   exclusive?: boolean | null;

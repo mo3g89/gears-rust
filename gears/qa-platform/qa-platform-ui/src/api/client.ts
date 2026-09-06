@@ -144,7 +144,7 @@ export async function apiGet<T>(path: string, headers?: RequestHeaders): Promise
   return handleResponse<T>(response);
 }
 
-export async function apiPost<T>(path: string, body?: any, headers?: RequestHeaders): Promise<T> {
+export async function apiPost<T>(path: string, body?: unknown, headers?: RequestHeaders): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: 'POST',
     headers: withHeaders({
@@ -169,7 +169,7 @@ export async function apiPostFormData<T>(path: string, formData: FormData, heade
   return handleResponse<T>(response);
 }
 
-export async function apiPut<T>(path: string, body?: any, headers?: RequestHeaders): Promise<T> {
+export async function apiPut<T>(path: string, body?: unknown, headers?: RequestHeaders): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: 'PUT',
     headers: withHeaders({
@@ -232,7 +232,7 @@ export async function apiGetBlob(path: string, headers?: RequestHeaders): Promis
  *  `PUT /platforms/{name}` and its dedicated `POST .../rename` verb both became
  *  (CONTRACT-DIFF rows 53, 56) — a true partial update, so an omitted key means "leave
  *  this field alone" rather than "clear it". */
-export async function apiPatch<T>(path: string, body?: any, headers?: RequestHeaders): Promise<T> {
+export async function apiPatch<T>(path: string, body?: unknown, headers?: RequestHeaders): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: 'PATCH',
     headers: withHeaders({

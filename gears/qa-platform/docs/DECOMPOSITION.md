@@ -388,12 +388,6 @@ Strategy: foundations first (environments, catalog — no intra-subsystem depend
 
 - **Data**: none
 
-- **Tracked follow-ups** (real gaps, deliberately not built — recorded so they are not rediscovered as bugs). Subsection added 2026-09-06, during the review-remediation branch's CI-wiring phase:
-
-  - **`make ui-lint` has never been able to run, and the UI therefore has no lint gate.** `package.json` pins `eslint: ^9.17.0`, which reads only flat config, and **no `eslint.config.js` has ever been committed on any branch** (`git log --all` over `eslint.config.*` and `.eslintrc*` is empty). The `lint` script also still passes `--ext ts,tsx`, a flag ESLint 9 removed. The target was added alongside `ui-test`/`ui-build` and nothing ever invoked it, so the breakage was invisible — which is review finding #49's own thesis one level down: a target no job runs is a target nobody discovers is broken.
-    **Measured scope, so this is not rediscovered as unbounded:** a probe flat config using `@typescript-eslint/recommended` reports **15 errors and 1 warning across 12 of 139 files** — `react-hooks/exhaustive-deps` ×7, `@typescript-eslint/no-explicit-any` ×6, `@typescript-eslint/no-empty-object-type` ×2, plus one parse-level message. Closing it is roughly a 40-line flat config plus those 15 fixes, and a decision about which rule set the team wants — which is why it was not folded into a CI-wiring task.
-    **Until it is closed**, the `ui` job in `.github/workflows/ci.yml` deliberately runs `make ui-test ui-build` only, with a comment at the run step recording the same reason. The UI does have a real gate — 231 vitest tests plus `tsc` — just not a lint one.
-
 ### 2.7 Serverless Execution & Runner Migration - HIGH (blocked)
 
 - [ ] `p2` - **ID**: `cpt-cf-qa-feature-execution`

@@ -171,6 +171,5 @@ export function useAttributedRepoIds(
       return [...ids];
     }
     return [];
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [standardPlan?.repo_id, customPlan, standardPlans, customPlans]);
 }
