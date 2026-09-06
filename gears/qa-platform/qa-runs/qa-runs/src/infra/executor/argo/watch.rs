@@ -69,7 +69,7 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::{
     ExecutionEvent, ExecutionRef, ExecutionSink, ExecutionStream, NodeOutcome, TestObservation,
 };
-use crate::domain::repos::LogResume;
+use crate::domain::repos::{LogResume, flatten_log_char};
 use crate::domain::state_machine::ExecutorOutcome;
 use crate::infra::executor::argo::markers::MarkerParser;
 use crate::infra::executor::argo::workflow::NODE_ANNOTATION;
@@ -241,10 +241,26 @@ fn node_of(pod: &Pod) -> String {
 /// longer this node's true byte 0, and suppressing by the archived count
 /// alone would drop real, never-archived lines — on exactly the long, chatty
 /// run `cpt-cf-qa-nfr-run-duration` exists for. See "Two guards" below for
-/// the fix; the property that survives is narrower than originally claimed:
-/// **guarded**, a count can only ever *under*-suppress relative to the real
-/// log (which re-duplicates, the direction this crate has always
-/// tolerated), never lose a line the archive did not already have.
+/// the fix.
+///
+/// **The guarded property is not an absolute either, and this paragraph
+/// used to claim one — the same mistake rounds 0 and 1 each made once
+/// already.** Two residuals survive, both named on "Two guards"' own
+/// paragraphs rather than repeated here in full: the inflated-count case is
+/// detected, not recovered, so whatever it wrongly suppresses before the
+/// last-line check fires is genuinely lost; and once the first-line guard
+/// trips for a node, that node's count is dead for the rest of the run —
+/// the archive's first line will never match the retained window again
+/// after rotation moves it, so every later re-attach re-suppresses nothing
+/// and the archive grows by this node's whole retained window each time,
+/// unbounded for as long as the run and its rotation both continue. Neither
+/// residual is a regression against the bug this task fixes — both fail
+/// toward duplication, never toward silent loss beyond what "detected, not
+/// recovered" already names — but "guarded" was never "solved", and the
+/// property that holds without exception is narrower still: a count can
+/// only ever *under*-suppress relative to the real log, or be caught
+/// failing to align with it. It cannot silently lose a line the archive
+/// did not already have.
 ///
 /// The cost is an unchanged one: a re-attach re-reads a node's whole log over
 /// the network, exactly as every attach always has. Finding #50 was about
@@ -335,16 +351,31 @@ impl LineSkip {
     /// again; `false` if it should. See this type's "Two guards" doc for
     /// the two checks this performs around the count, and
     /// [`domain::repos::LogPosition`]'s "Two anchors" for why both exist.
+    ///
+    /// **`line` is flattened through [`flatten_log_char`] before either
+    /// guard compares it — fix-round 3.** The anchors hold *flattened* text:
+    /// `fan_out_log` maps every `'\n'`/`'\r'` to a space before archiving, so
+    /// one archived entry can never split into two. `line` here is a fresh,
+    /// raw pod line, and `futures`' `Lines` strips only its *trailing*
+    /// terminator — an embedded `\r` survives. Comparing the raw line
+    /// against a flattened anchor made every guard fail on any line
+    /// carrying one, permanently for that node (the first-line guard has no
+    /// second chance) and spuriously for the last-line guard (a false
+    /// "pre-fix duplicate" alarm on a perfectly healthy archive). Both sides
+    /// must go through the one shared flattening, not just the write side.
     fn consume(&mut self, line: &str) -> bool {
+        let line: String = line.chars().map(flatten_log_char).collect();
         if !self.checked_first {
             self.checked_first = true;
-            if self.remaining > 0 && self.first_line.as_deref() != Some(line) {
+            if self.remaining > 0 && self.first_line.as_deref() != Some(line.as_str()) {
                 debug!(
                     execution_ref = %self.execution_ref,
                     node = %self.node,
                     "this node's re-read log does not start where its archive does (log \
                      rotation is the expected cause on a long-running node); resuming \
-                     without suppression for it rather than trusting a misaligned count",
+                     without suppression for it rather than trusting a misaligned count -- \
+                     this node's count is now dead for the rest of this run and its archive \
+                     will grow unbounded on every further re-attach",
                 );
                 self.misaligned = true;
                 self.remaining = 0;
@@ -356,7 +387,7 @@ impl LineSkip {
             return false;
         }
 
-        self.last_suppressed = Some(line.to_owned());
+        self.last_suppressed = Some(line);
         self.remaining -= 1;
 
         if self.remaining == 0 && self.total > 0 {
@@ -710,7 +741,13 @@ mod tests {
     //! last-line guard is Important (a pre-fix archive's inflated count is
     //! detected, though not recovered — that half is exercised through
     //! `tracing_test` rather than its own dedicated test, since its only
-    //! observable effect is the `error!` line).
+    //! observable effect is the `error!` line). Fix-round 3 added two more:
+    //! a normalisation test (an anchor and a fresh line must be flattened
+    //! the same way, or a `\r` this crate's own `fan_out_log` strips before
+    //! archiving would never match its own anchor), and a negative pin on
+    //! the fully-aligned path added to the existing matching-first-line
+    //! test, so the last-line `error!` staying inside its `if !matches`
+    //! guard is itself covered rather than merely inspected.
     //!
     //! These run under `--features argo`, which is this module's own gate —
     //! no separate `#[cfg]` needed on the module itself.
@@ -765,7 +802,15 @@ mod tests {
     /// agrees with the fresh read's first line suppresses exactly the first
     /// `N` and lets every line after them through — fix-round 1's original
     /// property, now under the guard fix-round 2 added.
+    ///
+    /// **Also pins fix-round 3's Minor**: the aligned path must never log
+    /// the last-line mismatch `error!` — nothing here should trip an alarm
+    /// meant for a misaligned count. `#[traced_test]` so a future change
+    /// that hoisted that `error!` out of its `if !matches` guard, logging it
+    /// unconditionally, would turn this red instead of staying silently
+    /// green.
     #[test]
+    #[tracing_test::traced_test]
     fn a_matching_first_line_suppresses_the_full_count() {
         let resume = aligned_resume("a", &["l0", "l1", "l2"]);
         let mut skip = LineSkip::for_node(&resume, "wf-1", "a");
@@ -779,6 +824,34 @@ mod tests {
             suppressed,
             vec![true, true, true, false, false],
             "the first 3 are suppressed, the 4th and 5th are not",
+        );
+        assert!(
+            !logs_contain("archived line count did not match its re-read log"),
+            "a fully aligned resume must never trip the last-line mismatch alarm",
+        );
+    }
+
+    /// **Normalisation must agree on both sides of the guard — the
+    /// Important fix, fix-round 3.** `fan_out_log` flattens every `'\n'` and
+    /// `'\r'` in a line to a space before archiving it, so the anchor for a
+    /// node whose real output was `"a\rb\rc"` is the flattened `"a b c"`.
+    /// `futures`' `Lines` strips only the *trailing* terminator, so a fresh
+    /// re-read still hands `consume` the raw `"a\rb\rc"`. Without matching
+    /// normalisation on the read side, this would never match its own
+    /// anchor — disabling suppression for this node permanently, for a
+    /// reason that has nothing to do with log rotation.
+    #[test]
+    fn an_embedded_carriage_return_in_the_first_line_still_matches_its_anchor() {
+        let resume = resume_with("a", 1, "a b c", "a b c");
+        let mut skip = LineSkip::for_node(&resume, "wf-1", "a");
+
+        assert!(
+            skip.consume("a\rb\rc"),
+            "the raw line must match its flattened archived anchor"
+        );
+        assert!(
+            !skip.consume("next line"),
+            "the count (1) is exhausted after the one archived line"
         );
     }
 

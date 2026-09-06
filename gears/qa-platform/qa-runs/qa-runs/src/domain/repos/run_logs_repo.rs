@@ -179,13 +179,50 @@ impl std::fmt::Debug for ArchivedLog {
 /// not "recover".
 ///
 /// Both anchors hold the archived line's own text, without the `"[{node}] "`
-/// prefix — the same text a fresh re-read produces, so the comparison is a
-/// direct string equality with no reconstruction on either side.
+/// prefix. **It is not true that this needs no reconstruction on either
+/// side — an earlier revision of this sentence said so, and fix-round 3
+/// found the counter-example**: `domain::service::ingest::fan_out_log` maps
+/// every `'\n'` and `'\r'` in a line to a plain space before archiving it
+/// (so one archived entry can never accidentally split into two), which
+/// means an anchor is the *flattened* text, not the raw text a pod ever
+/// printed. A comparison against a freshly re-read raw line — which can
+/// still carry an embedded `\r`, since `futures`' `Lines` strips only the
+/// trailing terminator — must flatten that raw line the same way first, or
+/// a line with an embedded `\r` never matches its own anchor. [`flatten_log_char`]
+/// is the one shared definition of that flattening, used by both
+/// `fan_out_log` (building what gets archived) and
+/// `infra::executor::argo::watch`'s `LineSkip` (normalising what it compares
+/// an anchor against) — two independent copies of this rule already drifted
+/// once, which is the counter-example above.
 #[derive(Clone)]
 pub struct LogPosition {
     pub lines: i64,
     pub first_line: String,
     pub last_line: String,
+}
+
+/// Map one character the way a line is flattened before it is archived:
+/// `'\n'` and `'\r'` become a plain space, everything else is unchanged.
+///
+/// The one definition of "how a log line is flattened for storage" this
+/// crate has. `domain::service::ingest::fan_out_log` maps every character of
+/// `node` and `line` through this before building the `"[{node}] {line}"`
+/// text [`LogArchive::record`](crate::domain::service::LogArchive::record)
+/// receives; `infra::executor::argo::watch`'s `LineSkip` maps every
+/// character of a freshly re-read raw line through it the same way before
+/// comparing against [`LogPosition`]'s `first_line`/`last_line`, which
+/// `LogResume::from_archived_text` recovered from already-flattened text.
+///
+/// Two independent copies of this one rule already drifted once — a raw
+/// `\r` survived a fresh re-read while its archived anchor had already been
+/// flattened to a space, so the two could never compare equal, which
+/// silently disabled the rotation guard (permanently, for that node, for
+/// the rest of the run) for any node whose first archived line happened to
+/// carry one. There is now exactly one definition, and both call sites are
+/// it.
+#[must_use]
+pub fn flatten_log_char(c: char) -> char {
+    if c == '\n' || c == '\r' { ' ' } else { c }
 }
 
 /// Reports `lines` and whether each anchor is present, never their text —

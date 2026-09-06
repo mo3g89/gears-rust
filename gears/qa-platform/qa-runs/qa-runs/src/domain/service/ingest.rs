@@ -131,7 +131,7 @@ use crate::domain::ports::run_executor::{
 };
 use crate::domain::repos::{
     LogResume, NewTestResult, QueueRepository, RunResultDelta, RunStatePatch, RunsRepository,
-    TestResultRow,
+    TestResultRow, flatten_log_char,
 };
 use crate::domain::state_machine::{
     ExecutorOutcome, can_transition, derive_terminal_state, is_terminal, reconcile_recorded_state,
@@ -941,13 +941,19 @@ where
         // flattened here rather than assumed. See this method's doc above.
         // Built in one pass rather than `format!(..)` followed by a second
         // scan over the whole prefixed string: the allocation is sized once
-        // and each half is copied exactly once.
-        let flatten = |c: char| if c == '\n' || c == '\r' { ' ' } else { c };
+        // and each half is copied exactly once. `flatten_log_char`
+        // (`domain::repos::run_logs_repo`) rather than a local closure: it is
+        // the one shared definition of this flattening, and
+        // `infra::executor::argo::watch`'s `LineSkip` must normalise a
+        // freshly re-read line the same way before comparing it against an
+        // anchor built from this method's own output — see that function's
+        // doc for the fix-round 3 bug two independent copies of this rule
+        // once produced.
         let mut prefixed = String::with_capacity(node.len() + line.len() + 3);
         prefixed.push('[');
-        prefixed.extend(node.chars().map(flatten));
+        prefixed.extend(node.chars().map(flatten_log_char));
         prefixed.push_str("] ");
-        prefixed.extend(line.chars().map(flatten));
+        prefixed.extend(line.chars().map(flatten_log_char));
         // The archive gets the **same string** the subscribers get — see this
         // method's "The prefix" doc section above.
         self.archive
