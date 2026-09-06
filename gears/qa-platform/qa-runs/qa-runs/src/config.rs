@@ -576,7 +576,9 @@ pub struct ArgoExecutorConfig {
     /// exiting 0 despite failures therefore produced a run reported
     /// **Succeeded with a truncated, all-passing result set**.
     ///
-    /// **What the give-up does now**: it ends the whole observation without a
+    /// **What the give-up does now**: it leaves that pod un-drained and
+    /// reports `FollowOutcome::Incomplete`, so the pass goes on to follow the
+    /// pod's siblings and `Watcher::run` then ends the observation without a
     /// `Finished` — see
     /// [`Watcher::follow`](crate::infra::executor::argo::watch::Watcher::follow)'s
     /// own doc for the trace, for why end-of-file is the only exit that still
@@ -607,12 +609,22 @@ pub struct ArgoExecutorConfig {
     ///   TTL that is the steady state.
     ///
     /// Lowering this value tightens the loop; raising it loosens the loop and
-    /// lengthens the window in which a wedged pod's siblings go unfollowed —
-    /// `drain_pods` follows pods one at a time and now **aborts** at the first
-    /// give-up rather than skipping past it, so on a multi-pod workflow the
-    /// siblings behind a persistently wedged pod are not merely delayed. See
-    /// `follow`'s own doc, which names that regression and the per-pod shape
-    /// that would fix it. That is the trade this number now makes, and neither
+    /// lengthens the window in which a wedged pod's siblings wait — the pods
+    /// are followed one at a time, so each wedged pod ahead of them costs
+    /// this many seconds on every pass.
+    ///
+    /// **That is a delay, and the version of this paragraph that stood here
+    /// called it an abort, correctly, about the code it was written
+    /// against.** C1's give-up returned the same `false` as "the observer has
+    /// gone away", `drain_pods` read every `false` as the second, and so it
+    /// returned at the first pod that gave up: with a stable `list` order and
+    /// a per-`Watcher` `drained` set, a persistently wedged pod that sorted
+    /// first meant its siblings' logs were never read for the life of the
+    /// run. `FollowOutcome` separates the two meanings and `drain_pods` now
+    /// walks past a give-up to the pods behind it — see `follow`'s own doc.
+    /// A long deadline against a short run can still have the timeout sweep
+    /// reclaim the run before a sibling is reached, so this is not a promise
+    /// that nothing is lost; what is gone is the permanence. Neither
     /// direction silently reports a verdict over a log it did not read.
     ///
     /// Read through `.max(1)` at the call site (`Watcher::follow`), the same
