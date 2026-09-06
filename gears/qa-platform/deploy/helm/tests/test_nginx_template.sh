@@ -47,6 +47,15 @@ grep -q 'access_log .* sse_no_query' "$rendered" \
   || { echo "FAIL: sse_no_query is defined but never applied"; exit 1; }
 # And it must be applied inside the SSE location only -- a server-level
 # access_log would change every route's log shape, which is not what this is.
-awk '/location ~ \^\/qa\/v1\/runs/,/^    }/' "$rendered" | grep -q 'access_log .* sse_no_query' \
+#
+# Anchored to `^    location ~` -- the real directive, indented four spaces --
+# rather than a bare `/location ~ .../` search. The template's own doc comment
+# beside the log_format quotes this same location pattern in a `#`-prefixed
+# line starting at column 0, so an unanchored search matches that comment
+# first and opens its range there instead of at the real location, closing at
+# the first unrelated `^    }` it finds (the SPA's `location /` block) -- a
+# false PASS that a reviewer reproduced by moving access_log to server level
+# and watching this check not notice.
+awk '/^    location ~ \^\/qa\/v1\/runs/,/^    }/' "$rendered" | grep -q 'access_log .* sse_no_query' \
   || { echo "FAIL: sse_no_query is not applied inside the SSE location"; exit 1; }
 echo "PASS: SSE location redacts the access-token query string from its access log"
