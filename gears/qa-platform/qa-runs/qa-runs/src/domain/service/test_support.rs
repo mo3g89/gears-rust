@@ -70,9 +70,9 @@ use toolkit_db::secure::SecureEntityExt;
 
 use crate::domain::repos::SchedulesRepository;
 use crate::domain::repos::{
-    ArchivedLog, LogPosition, LogResume, NewRun, NewTestResult, OwnedRunId, RunLogsRepository,
-    RunResultDelta, RunStatePatch, RunWithResult, RunsRepository, TestResultRow, TimeoutCandidate,
-    WatchCandidate, Windowed,
+    ArchivedLog, LogResume, NewRun, NewTestResult, OwnedRunId, RunLogsRepository, RunResultDelta,
+    RunStatePatch, RunWithResult, RunsRepository, TestResultRow, TimeoutCandidate, WatchCandidate,
+    Windowed,
 };
 
 /// Wrap a double's whole fixture as a single page.
@@ -752,42 +752,24 @@ impl RunLogsRepository for MockRunsRepository {
         Ok(self.logs.lock().unwrap().get(&run_id).cloned())
     }
 
-    /// Mirrors `infra::storage::run_logs_sea_repo`'s real implementation —
-    /// counting lines by their `"[{node}] "` prefix — rather than stubbing
+    /// Calls the one shared implementation
+    /// (`domain::repos::LogResume::from_archived_text`) rather than stubbing
     /// `unsupported`, so a test built over this double can exercise
-    /// `RunLogArchive::resume_positions` too. `since_time` is always `None`:
-    /// this double has no `updated_at` column to stand in for it, and no
-    /// test here needs one — see `LogPosition`'s doc for what a real
-    /// implementation uses it for.
+    /// `RunLogArchive::resume_positions` too.
     async fn log_resume_positions<C: DBRunner>(
         &self,
         _runner: &C,
         _scope: &AccessScope,
         run_id: Uuid,
     ) -> Result<LogResume, DomainError> {
-        let Some(log) = self.logs.lock().unwrap().get(&run_id).cloned() else {
-            return Ok(LogResume::default());
-        };
-        let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
-        for line in log.text.lines() {
-            if let Some(rest) = line.strip_prefix('[')
-                && let Some(end) = rest.find(']')
-            {
-                *counts.entry(rest[..end].to_owned()).or_insert(0) += 1;
-            }
-        }
-        Ok(counts
-            .into_iter()
-            .map(|(node, lines)| {
-                (
-                    node,
-                    LogPosition {
-                        lines,
-                        since_time: None,
-                    },
-                )
-            })
-            .collect())
+        Ok(self
+            .logs
+            .lock()
+            .unwrap()
+            .get(&run_id)
+            .map_or_else(LogResume::default, |log| {
+                LogResume::from_archived_text(&log.text)
+            }))
     }
 }
 

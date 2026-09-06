@@ -18,7 +18,6 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
 use toolkit_security::AccessScope;
 use uuid::Uuid;
@@ -84,37 +83,58 @@ impl std::fmt::Debug for ArchivedLog {
 /// Where one execution node's contribution to a run's archived log currently
 /// ends.
 ///
-/// Unlike [`ArchivedLog`], this holds no log text at all — only a count and a
-/// timestamp — so it needs no hand-written `Debug` and no ban on `PartialEq`:
-/// there is nothing here an `assert_eq!` failure could print that this crate's
+/// Unlike [`ArchivedLog`], this holds no log text at all — only a count — so
+/// it needs no hand-written `Debug` and no ban on `PartialEq`: there is
+/// nothing here an `assert_eq!` failure could print that this crate's
 /// no-log-text rule cares about.
 ///
-/// # Why both fields, and why `since_time` is the one that matters
+/// # Why this is a count, and not a timestamp — fix-round 1
 ///
-/// `qa_run_logs` has one row **per run**, not per node (`lines`/`text` are
-/// whole-run totals; see [`RunLogsRepository::log_resume_positions`]'s own
-/// doc for how a per-node count is recovered from that). So `since_time` is
-/// the row's `updated_at` — the last time *anything* was flushed for the run,
-/// which is always at or after this node's own last archived line, never
-/// before it. Handed to Kubernetes as `since_time`, that is the *safe*
-/// direction: it can re-request a few lines already archived (a bounded
-/// duplicate, at most one flush period's worth), but it cannot skip past a
-/// line that was never archived, so it cannot reopen Finding #50's gap.
+/// An earlier revision of this type also carried the archive row's
+/// `updated_at` as a per-node `since_time`, handed to Kubernetes as
+/// `LogParams::since_time`. Review found that compares two different clocks:
+/// `updated_at` is stamped by the **control plane**, at the instant a flush
+/// *writes* the row (`run_logs_sea_repo.rs`'s `append_log`); Kubernetes
+/// filters pod log entries by each entry's own **kubelet-recorded emission
+/// time**. A line can reach the executor — `ExecutionStream` delivers it, so
+/// it is "observed" — and still be sitting behind a database round trip when
+/// the tick's `flush_due` stamps `updated_at = now` for whatever *had*
+/// reached the archive by then. Re-attaching with `since_time` set to that
+/// stamp filters out every such line, because its own kubelet timestamp is
+/// **earlier** than the stamp being compared against, and there is no re-read
+/// path to recover it: exactly the loss direction Finding #50's fix must not
+/// open, worse than the bug it replaced (which duplicated, never lost).
 ///
-/// `lines` is exact — a real count of this node's own archived lines (see
-/// same doc) — but is unsafe to hand to Kubernetes as `tail_lines` for a
-/// `follow: true` resume: `tail_lines` means "the last N lines of the log as
-/// it stands right now", not "skip the first N", so if the pod produced more
-/// than `2 * lines` new lines during the gap since the last observer ended,
-/// `tail_lines = lines` would return only recent output and silently drop the
-/// middle — the loss direction this whole task must not open. That is why
-/// [`LogResume::tail_lines_for`] only ever answers when `since_time` does
-/// not: `lines` is this type's fallback for a hypothetical implementation
-/// with counts but no timestamp, not a mechanism this one relies on.
+/// A count has no clock in it. [`RunExecutor::watch`](crate::domain::ports::run_executor::RunExecutor::watch)'s
+/// adapters that can resume are expected to re-read a node's log from the
+/// beginning and suppress the first `lines` of what they read for that node,
+/// rather than ask the log source to filter by any timestamp. That can only
+/// ever *under*-count relative to what was truly archived — which
+/// re-duplicates a little, the direction this crate has always tolerated —
+/// never over-count relative to what actually reached the pod's log, because
+/// [`RunLogsRepository::log_resume_positions`] counts only lines this same
+/// text-parsing pass can already see, and `IngestService::fan_out_log`
+/// (`domain::service::ingest`) is the only production caller of
+/// [`LogArchive::record`](crate::domain::service::LogArchive::record),
+/// archiving exactly one line per delivered
+/// [`ExecutionEvent::Log`](crate::domain::ports::run_executor::ExecutionEvent::Log).
+///
+/// The cost is honest and unhidden: a re-attach re-reads a pod's log from
+/// byte 0 over the network on every re-attach, paying that bandwidth again
+/// for a long run. **This is not a regression** — the pre-Task-13 code paid
+/// exactly the same read for exactly the same reason; Finding #50 was about
+/// the `CONCAT` duplicating what came back, never about the read itself. A
+/// real per-line emission timestamp — `LogParams::timestamps: true`, parsing
+/// and stripping the RFC3339 prefix Kubernetes prepends, and a schema change
+/// to store one per node — would let a resumed read start late instead of at
+/// byte 0. That is a real optimisation and it is not this task's: it needs a
+/// parser and a migration neither of which exists yet, and is recorded here
+/// so the next person who wants to speed up a re-attach finds this paragraph
+/// before re-deriving the clock-mismatch trap the timestamp version fell
+/// into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogPosition {
     pub lines: i64,
-    pub since_time: Option<OffsetDateTime>,
 }
 
 /// A run's archive read-position, per execution node — where
@@ -122,46 +142,63 @@ pub struct LogPosition {
 /// should resume rather than replay from byte 0 (Finding #50).
 ///
 /// An empty map — [`LogResume::default`] — is the correct answer for a run
-/// with no archived log yet: every accessor then answers `None`/`0` for any
+/// with no archived log yet: [`Self::lines_for`] then answers `0` for any
 /// node, which is what makes a first attach read from the beginning exactly
 /// as it always has.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LogResume(BTreeMap<String, LogPosition>);
 
 impl LogResume {
-    /// The timestamp to resume `node` from, or `None` when nothing is
-    /// archived for it yet — the caller's cue to read from the beginning.
+    /// Build a resume position from one run's whole archived text.
+    ///
+    /// The one implementation of the per-node line count both
+    /// `infra::storage::run_logs_sea_repo` (over a real database) and
+    /// `domain::service::test_support::MockRunsRepository` (over an in-memory
+    /// double) need — see [`RunLogsRepository::log_resume_positions`]'s own
+    /// doc for why counting `"[{node}] "`-prefixed lines is how a per-node
+    /// answer is recovered from a schema with no per-node column at all, and
+    /// [`LogPosition`]'s doc for why a count rather than a timestamp.
+    ///
+    /// A node name containing `]` would truncate early here and be
+    /// mis-attributed under a shortened key — unreachable today
+    /// (`ExecutionNode::name`'s one production source is
+    /// `format!("repo-{repo_id}")`) and merely mis-attributed, not unsound,
+    /// if it ever happened: the total line count across all nodes is
+    /// unaffected, only which node a given count is filed under.
     #[must_use]
-    pub fn since_time_for(&self, node: &str) -> Option<OffsetDateTime> {
-        self.0.get(node).and_then(|position| position.since_time)
-    }
-
-    /// The fallback line count for `node`, used only when
-    /// [`Self::since_time_for`] answers `None` for the same node *and*
-    /// something has still been archived for it. See [`LogPosition`]'s doc for
-    /// why an implementation that always has a timestamp once `lines > 0` —
-    /// `infra::storage::run_logs_sea_repo`'s does — makes this
-    /// effectively unreachable there, and why that is a feature rather than
-    /// dead code: it is the difference between "no mechanism happens to fire"
-    /// and "no mechanism exists" for a future `RunLogsRepository` that tracks
-    /// counts without a timestamp.
-    #[must_use]
-    pub fn tail_lines_for(&self, node: &str) -> Option<i64> {
-        self.0.get(node).and_then(|position| {
-            (position.since_time.is_none() && position.lines > 0).then_some(position.lines)
-        })
+    pub fn from_archived_text(text: &str) -> Self {
+        let mut counts: BTreeMap<String, LogPosition> = BTreeMap::new();
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix('[')
+                && let Some(end) = rest.find(']')
+            {
+                counts
+                    .entry(rest[..end].to_owned())
+                    .or_insert(LogPosition { lines: 0 })
+                    .lines += 1;
+            }
+        }
+        Self(counts)
     }
 
     /// The exact count already archived for `node`, `0` if none.
     ///
-    /// This is the one accessor [`MockRunExecutor`](crate::infra::executor::mock::MockRunExecutor)
-    /// uses: it holds its own scripted sequence rather than a real log stream,
-    /// so it can skip exactly this many already-replayed
+    /// Every resuming caller uses this and only this:
+    /// [`MockRunExecutor`](crate::infra::executor::mock::MockRunExecutor)
+    /// skips exactly this many already-replayed
     /// [`ExecutionEvent::Log`](crate::domain::ports::run_executor::ExecutionEvent::Log)
-    /// entries per node — an exact resume with no Kubernetes-shaped
-    /// approximation, which is what makes the *no-duplication* direction
-    /// falsifiable for the mock without weakening the *no-loss* direction it
-    /// already had.
+    /// entries from its own scripted sequence, and the Argo adapter
+    /// (`infra::executor::argo::watch`) skips exactly this many lines it
+    /// re-reads from a pod's log, from the beginning. Both assume one
+    /// archived line per delivered `Log` event for that node — true by
+    /// construction from `fan_out_log` onward (see [`LogPosition`]'s doc) —
+    /// so an archive carrying pre-fix (pre-Task-13) duplicate lines from a
+    /// run that hit Finding #50 before this shipped would inflate this count
+    /// relative to what either resuming caller actually has left to deliver,
+    /// and cause an over-skip. Unreachable for a run created after this fix
+    /// (the invariant holds from here on) and not modelled by any test here,
+    /// which construct `LogResume` values directly rather than through a
+    /// legacy row.
     #[must_use]
     pub fn lines_for(&self, node: &str) -> i64 {
         self.0.get(node).map_or(0, |position| position.lines)
@@ -224,11 +261,9 @@ pub trait RunLogsRepository: Send + Sync {
     /// never contains the line terminator that would make it ambiguous
     /// (`domain::service::ingest`, `fan_out_log`'s doc). A per-node count is
     /// therefore recoverable by counting how many stored lines start with
-    /// each node's own `"[{node}] "`, which is what
-    /// `infra::storage::run_logs_sea_repo`'s implementation does, and the
-    /// run's single `updated_at` stands in for every node's `since_time` —
-    /// see [`LogPosition`]'s doc for why that over-approximation is the safe
-    /// direction rather than a shortcut.
+    /// each node's own `"[{node}] "` — [`LogResume::from_archived_text`] is
+    /// that one implementation, shared by every `RunLogsRepository`
+    /// implementor rather than duplicated per adapter.
     ///
     /// **Cost, named rather than hidden.** This scans the whole archived
     /// text on every call, which is the same "no size cap" tradeoff this
@@ -242,4 +277,49 @@ pub trait RunLogsRepository: Send + Sync {
         scope: &AccessScope,
         run_id: Uuid,
     ) -> Result<LogResume, DomainError>;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// The base case both callers rely on: an empty (or entirely
+    /// unprefixed) archive resumes nothing, which is what makes a first
+    /// attach read from the beginning.
+    #[test]
+    fn empty_text_yields_an_empty_resume() {
+        assert_eq!(LogResume::from_archived_text(""), LogResume::default());
+        assert_eq!(
+            LogResume::from_archived_text("no prefix at all\nstill none\n"),
+            LogResume::default()
+        );
+    }
+
+    /// **The property both `run_logs_sea_repo` and `MockRunsRepository` rely
+    /// on this one implementation for**: two nodes' output, interleaved in
+    /// one archive exactly as two pods' drains would arrive, told apart and
+    /// counted correctly, with neither contaminating the other's count.
+    #[test]
+    fn two_interleaved_nodes_are_counted_independently() {
+        let resume = LogResume::from_archived_text("[a] one\n[b] uno\n[a] two\n[a] three\n");
+
+        assert_eq!(resume.lines_for("a"), 3);
+        assert_eq!(resume.lines_for("b"), 1);
+        assert_eq!(
+            resume.lines_for("never-appeared"),
+            0,
+            "a node this text never mentions answers 0, not a missing-key panic",
+        );
+    }
+
+    /// A line missing the closing `]` (truncated mid-write, or simply
+    /// malformed) is not a prefixed line at all — it contributes to no
+    /// node's count rather than panicking on the missing delimiter.
+    #[test]
+    fn an_unterminated_prefix_counts_toward_no_node() {
+        let resume = LogResume::from_archived_text("[a incomplete\n[a] one\n");
+
+        assert_eq!(resume.lines_for("a"), 1);
+    }
 }

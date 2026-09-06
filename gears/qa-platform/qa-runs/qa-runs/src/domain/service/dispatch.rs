@@ -1790,12 +1790,21 @@ where
     /// is what a re-attach that replayed in full, as this method's own
     /// `reattach_watchers` caller now exercises on every unwatched live run,
     /// would fail. `mock::watch_resumes_without_duplicating_or_dropping_log_lines`
-    /// is the mock-level pin for the same two directions. The Argo adapter's
-    /// `since_time`-based resume (`infra::executor::argo::watch`) is weaker
-    /// than the mock's exact skip — a Kubernetes timestamp is not a line
-    /// offset — but is still the safe direction: see
-    /// `domain::repos::LogPosition`'s doc for why it can duplicate a few
-    /// lines at the boundary but cannot open a gap.
+    /// is the mock-level pin for the same two directions. **Fix-round 1**:
+    /// the Argo adapter's first version instead asked Kubernetes to filter by
+    /// `LogParams::since_time`, using the archive row's `updated_at` as a
+    /// stand-in for a node's last archived line — review found that compares
+    /// the control plane's write clock against each line's own kubelet
+    /// emission time, two different events, and can *lose* a line queued
+    /// behind a database round trip when the observer ends before it
+    /// flushes, which is worse than the bug this task fixes. The shipped
+    /// mechanism (`infra::executor::argo::watch`'s `LineSkip`) has no clock
+    /// in it: it re-reads a node's log from byte 0, exactly as before this
+    /// task, and suppresses the same count the mock does — see
+    /// `domain::repos::LogPosition`'s doc for why a count can only
+    /// under-suppress (re-duplicating a little, the tolerated direction)
+    /// and never over-suppress relative to what actually reached the pod's
+    /// log.
     async fn list_watch_candidates(
         &self,
         // Kept, unused, so the caller's audit-logging `system_actor::for_watch_scan`

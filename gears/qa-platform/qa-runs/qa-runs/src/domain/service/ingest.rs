@@ -687,18 +687,46 @@ where
     /// Where `run_id`'s archive currently ends, per node — Task 13, review
     /// finding #50.
     ///
-    /// A thin delegation to `self.archive`, which is private to this struct
-    /// (`IngestDeps::archive`'s own doc: `get_log` must not sit next to
-    /// `list`, and the same reach argument applies to `archive` itself —
-    /// nothing outside this module should be able to call `record`/`flush`
-    /// directly). [`super::watch`]'s `drain` is the one caller: it reads this
-    /// before calling [`RunExecutor::watch`](crate::domain::ports::run_executor::RunExecutor::watch)
+    /// **Flushes before it reads, and that is not incidental.** `record`
+    /// buffers a line in memory; only a periodic `flush_due` tick or
+    /// `Self::finish` writes it to the row this reads. Without the flush
+    /// here, a re-attach whose previous observer queued lines but never got
+    /// to flush them — the ordinary case, since `gear.rs` runs `flush_due`
+    /// *after* the dispatcher tick that calls this — would read a position
+    /// that undercounts by up to a full tick's worth of this run's own
+    /// output, and the resuming executor would re-fetch and re-archive
+    /// exactly that tail. Flushing first closes the window (fix-round 1;
+    /// found by review, not covered by the original commit's test, which
+    /// force-flushed in its own polling loop and so could not see it).
+    ///
+    /// A flush failure here is not fatal to the read: `flush_due` and
+    /// `Self::finish` still own eventually writing this run's buffer, so a
+    /// transient failure here only means the position read is stale by
+    /// whatever is still pending — which re-duplicates that pending tail on
+    /// this resume, the direction this crate has always tolerated, not one
+    /// this method introduces.
+    ///
+    /// The rest is a thin delegation to `self.archive`, which is private to
+    /// this struct (`IngestDeps::archive`'s own doc: `get_log` must not sit
+    /// next to `list`, and the same reach argument applies to `archive`
+    /// itself — nothing outside this module should be able to call
+    /// `record`/`flush` directly). `domain::service::watch`'s `drain` is the
+    /// one caller: it reads this before calling
+    /// [`RunExecutor::watch`](crate::domain::ports::run_executor::RunExecutor::watch)
     /// so the executor can resume rather than replay.
     pub(in crate::domain::service) async fn resume_positions(
         &self,
         tenant: system_actor::TenantBound,
         run_id: Uuid,
     ) -> Result<LogResume, DomainError> {
+        if let Err(error) = self.archive.flush(run_id).await {
+            warn!(
+                %run_id,
+                %error,
+                "could not flush this run's log before reading its resume position; the \
+                 position may undercount a still-pending tail, which will be re-archived",
+            );
+        }
         self.archive.resume_positions(tenant, run_id).await
     }
 }

@@ -208,24 +208,70 @@ fn node_of(pod: &Pod) -> String {
         .unwrap_or_else(|| pod.name_any())
 }
 
-/// `resume`'s `since_time` for `node`, converted to what `kube`'s
-/// [`LogParams`] needs.
+/// How many more of one node's lines to suppress before letting them reach
+/// the sink — Task 13, review finding #50, **fix-round 1**.
 ///
-/// `kube-core` types `since_time` as `jiff::Timestamp` (not this crate's own
-/// `time::OffsetDateTime`, which is what `LogResume` carries — see
-/// `domain::repos::run_logs_repo`), so this is the one conversion point. It
-/// answers `None` on either the domain side having nothing for `node` (a
-/// first attach — read from the beginning, unchanged) or, defensively, on a
-/// conversion failure: `time::OffsetDateTime::unix_timestamp_nanos` and
-/// `jiff::Timestamp::from_nanosecond` cover the same practical range for any
-/// value this crate produces (`OffsetDateTime::now_utc()`-derived, always),
-/// so a conversion failure is not expected — but this is a resume
-/// *optimisation*, and falling back to "read from the beginning" on the
-/// unexpected path is the same safe direction every other failure in this
-/// module takes, not a new one invented for this case.
-fn since_time_for(resume: &LogResume, node: &str) -> Option<jiff::Timestamp> {
-    let at = resume.since_time_for(node)?;
-    jiff::Timestamp::from_nanosecond(at.unix_timestamp_nanos()).ok()
+/// # Why a count, and not `LogParams::since_time`
+///
+/// The first version of this fix asked Kubernetes to filter by
+/// `since_time`, using the archive row's `updated_at` as a stand-in for "this
+/// node's last archived line". Review found that compares two different
+/// clocks: `updated_at` is the **control plane's** write-time — stamped when
+/// a flush *commits* the row — while Kubernetes filters by each log entry's
+/// own **kubelet-recorded emission time**. A line can reach this process
+/// (queued in `ExecutionStream`, which is a 512-slot channel, each entry
+/// costing the consumer a database round trip before it is archived) and
+/// still be sitting unflushed when a tick stamps `updated_at = now` for
+/// whatever *had* been archived by then. Re-attaching with `since_time` set
+/// to that stamp filters out every such line — its own emission time is
+/// **earlier** than the stamp — and `RunLogsRepository` has no re-read to
+/// recover it. That is permanent loss, worse than the bug this task fixes
+/// (which only duplicated), so it was dropped before landing.
+///
+/// A count has no clock in it. This re-reads a node's pod log from byte 0,
+/// exactly as before this task, and suppresses the first `lines` of what
+/// comes back — the same lines [`domain::repos::LogResume::from_archived_text`]
+/// already counted as archived for that node. It can only ever
+/// *under*-suppress relative to the real log (which re-duplicates, the
+/// direction this crate has always tolerated), never over-suppress relative
+/// to what actually reached the executor, because the archive counts
+/// nothing this mechanism could not also see on a fresh read.
+///
+/// The cost is an unchanged one: a re-attach re-reads a node's whole log over
+/// the network, exactly as every attach always has. Finding #50 was about
+/// `append_log`'s `CONCAT` duplicating what came back, never about paying for
+/// the read itself — a real per-line emission timestamp (`LogParams::
+/// timestamps: true`, parsed and stored per node) would let a resumed read
+/// start late instead of at byte 0, and is a real future optimisation that
+/// needs a parser and a schema change neither of which exists yet.
+///
+/// Pulled out of [`Watcher::follow`] as its own type so the suppression
+/// decision — the actual fix — is unit-testable without a Kubernetes API
+/// server: `follow` needs one to open the log stream; this needs only a
+/// [`LogResume`] and a sequence of node names.
+struct LineSkip(i64);
+
+impl LineSkip {
+    /// Seeded from `resume`'s count for `node` — `0` (suppress nothing) for
+    /// a node `resume` says nothing about, which is what a first attach's
+    /// empty [`LogResume`] produces for every node.
+    fn for_node(resume: &LogResume, node: &str) -> Self {
+        Self(resume.lines_for(node))
+    }
+
+    /// `true` if the next line is already archived and must not reach the
+    /// sink again; `false` if it should. Decrements at most to `0`: consuming
+    /// more lines than were seeded — a resume position larger than what this
+    /// fresh read actually has left — suppresses everything this read
+    /// produces and never underflows.
+    fn consume(&mut self) -> bool {
+        if self.0 > 0 {
+            self.0 -= 1;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Open an observation of one execution.
@@ -300,10 +346,10 @@ struct Watcher {
     /// re-attach.
     drained: HashSet<String>,
     /// Where to resume each pod's log read from, keyed by node — see
-    /// [`LogResume`]'s own doc. Consulted once per pod, in
-    /// [`Self::open_log`], the first time that pod is followed by *this*
-    /// `watch` call; `drained` above is what stops a second consultation
-    /// for the same pod on a later poll tick.
+    /// [`LogResume`]'s own doc. Consulted once per pod, at the start of
+    /// [`Self::follow`] via [`LineSkip::for_node`], the first time that pod
+    /// is followed by *this* `watch` call; `drained` above is what stops a
+    /// second consultation for the same pod on a later poll tick.
     resume: LogResume,
 }
 
@@ -430,16 +476,29 @@ impl Watcher {
     /// Stream one pod's `main` container log to end-of-file, emitting a
     /// [`ExecutionEvent::Log`] per line and a
     /// [`ExecutionEvent::TestResult`] per completed test.
+    ///
+    /// **Re-reads from byte 0 every time**, exactly as before Task 13 — see
+    /// [`LineSkip`]'s doc for why that read is unchanged and only the
+    /// archive-facing half of what it produces is suppressed. `skip` is
+    /// seeded once per pod, here, from `self.resume`'s count for `node`;
+    /// a line it says is already archived still reaches the marker parser
+    /// (`upsert_test_result` replaces a row rather than appending, so
+    /// re-parsing a marker is harmless) but not the sink's `Log` event, which
+    /// is what `append_log`'s `CONCAT` would otherwise duplicate.
     async fn follow(&mut self, pod_name: &str, node: &str) -> bool {
-        let Some(stream) = self.open_log(pod_name, node).await else {
+        let Some(stream) = self.open_log(pod_name).await else {
             return true;
         };
         let mut parser = MarkerParser::new(node);
+        let mut skip = LineSkip::for_node(&self.resume, node);
         let mut lines = stream.lines();
         loop {
             match lines.try_next().await {
                 Ok(Some(line)) => {
-                    if !self.emit_line(&mut parser, node, line).await {
+                    if !self
+                        .emit_line(&mut parser, node, line, skip.consume())
+                        .await
+                    {
                         return false;
                     }
                 }
@@ -463,43 +522,18 @@ impl Watcher {
         true
     }
 
-    /// Open a follow-mode stream on one pod's `main` container log.
+    /// Open a follow-mode stream on one pod's `main` container log, from
+    /// byte 0 — see [`LineSkip`]'s doc for why this carries no resume-shaped
+    /// parameter at all.
     ///
     /// `None` is "not yet", not "never": a pod that has only just gone Running
     /// can still refuse a log request, so the caller retries on the next pass
     /// rather than marking the pod drained. Boxed so the type is nameable,
     /// which is what lets [`Self::follow`] stay small.
-    async fn open_log(
-        &self,
-        pod_name: &str,
-        node: &str,
-    ) -> Option<Pin<Box<dyn AsyncBufRead + Send>>> {
+    async fn open_log(&self, pod_name: &str) -> Option<Pin<Box<dyn AsyncBufRead + Send>>> {
         let params = LogParams {
             container: Some(MAIN_CONTAINER.to_owned()),
             follow: true,
-            // Resume, don't replay — Task 13, review finding #50. A fresh
-            // `Watcher` starts with an empty `drained` set (this struct's own
-            // doc) and this used to be plain `..LogParams::default()`, so
-            // every re-attach re-read each pod's log from byte 0 and
-            // `append_log`'s `CONCAT` wrote it all again — the archive was
-            // the one place that replay was not safe (see `resume`'s doc).
-            //
-            // `since_time` only, deliberately not `tail_lines` even though
-            // `resume.tail_lines_for` exists: for a `follow: true` stream
-            // `tail_lines` means "the last N lines of the log as it stands
-            // right now", not "skip the first N", so if this pod produced
-            // more than `2 * N` lines during the gap since the last observer
-            // ended, `tail_lines = N` would return only recent output and
-            // silently drop the middle — reopening the loss direction this
-            // fix must not open. `since_time` has no such failure mode: it
-            // can re-request a few lines already archived (at most one flush
-            // period's worth — see `LogPosition`'s doc), never skip past one
-            // that was not. `resume.tail_lines_for` is still called by the
-            // `LogResume` API surface Task 15/16/17 build on; it is simply
-            // never `Some` here, because `run_logs_sea_repo`'s
-            // `log_resume_positions` always has a timestamp once it has a
-            // count.
-            since_time: since_time_for(&self.resume, node),
             ..LogParams::default()
         };
         match self.pods.log_stream(pod_name, &params).await {
@@ -511,14 +545,28 @@ impl Watcher {
         }
     }
 
-    /// One log line: whatever it completed first, then the line itself.
+    /// One log line: whatever it completed first, then the line itself —
+    /// unless `suppress`, in which case the line has already been archived by
+    /// an earlier `watch()` and must not reach the sink a second time (Task
+    /// 13, review finding #50; see [`LineSkip`]'s doc for the mechanism).
     ///
-    /// **Results before the line that produced them** so a consumer reading
-    /// both streams never sees a `TEST_RESULT` marker in the log before the
-    /// result it announced.
-    async fn emit_line(&self, parser: &mut MarkerParser, node: &str, line: String) -> bool {
+    /// **Results before the line that produced them**, and **always**, even
+    /// when `suppress` is set — so a consumer reading both streams never sees
+    /// a `TEST_RESULT` marker in the log before the result it announced, and
+    /// a re-attach never fails to notice a marker just because its line is
+    /// being resumed past.
+    async fn emit_line(
+        &self,
+        parser: &mut MarkerParser,
+        node: &str,
+        line: String,
+        suppress: bool,
+    ) -> bool {
         if !self.emit_results(parser.line(&line)).await {
             return false;
+        }
+        if suppress {
+            return true;
         }
         self.sink
             .emit(ExecutionEvent::Log {
@@ -540,5 +588,84 @@ impl Watcher {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    //! `LineSkip` is the actual fix for review finding #50 in this adapter —
+    //! the four properties below are what Critical 2 of fix-round 1 found
+    //! untested: every test that shipped with the original commit drove
+    //! `MockRunExecutor`, never this file, because `argo/watch.rs` had no
+    //! `#[cfg(test)]` module at all and the only test here that builds a
+    //! resume value is the `#[ignore]`d cluster suite, which always passes
+    //! `LogResume::default()`. These run under `--features argo`, which is
+    //! this module's own gate — no separate `#[cfg]` needed on the module
+    //! itself.
+
+    use super::LineSkip;
+    use crate::domain::repos::{LogPosition, LogResume};
+
+    fn resume_of(entries: impl IntoIterator<Item = (&'static str, i64)>) -> LogResume {
+        entries
+            .into_iter()
+            .map(|(node, lines)| (node.to_owned(), LogPosition { lines }))
+            .collect()
+    }
+
+    /// An empty resume — what every first attach passes — suppresses
+    /// nothing at all.
+    #[test]
+    fn an_empty_resume_suppresses_nothing() {
+        let mut skip = LineSkip::for_node(&LogResume::default(), "a");
+
+        for _ in 0..5 {
+            assert!(!skip.consume(), "nothing is archived for this node yet");
+        }
+    }
+
+    /// A resume of `N` suppresses exactly the first `N` lines for that node
+    /// and lets every line after them through.
+    #[test]
+    fn a_resume_of_n_suppresses_exactly_the_first_n() {
+        let resume = resume_of([("a", 3)]);
+        let mut skip = LineSkip::for_node(&resume, "a");
+
+        let suppressed: Vec<bool> = (0..5).map(|_| skip.consume()).collect();
+
+        assert_eq!(
+            suppressed,
+            vec![true, true, true, false, false],
+            "the first 3 are suppressed, the 4th and 5th are not",
+        );
+    }
+
+    /// A resume larger than the lines this read will ever produce suppresses
+    /// all of them and does not panic or underflow — the case a stale or
+    /// otherwise-too-high resume position produces.
+    #[test]
+    fn a_resume_larger_than_available_lines_suppresses_all_of_them() {
+        let resume = resume_of([("a", 1_000_000)]);
+        let mut skip = LineSkip::for_node(&resume, "a");
+
+        for _ in 0..10 {
+            assert!(skip.consume(), "a read this short never exhausts the count");
+        }
+    }
+
+    /// Suppression is per node, not global: a resume for one node must not
+    /// suppress a single line of another's, however large its own count is.
+    #[test]
+    fn suppression_is_per_node_not_global() {
+        let resume = resume_of([("a", 10)]);
+        let mut skip_a = LineSkip::for_node(&resume, "a");
+        let mut skip_b = LineSkip::for_node(&resume, "b");
+
+        assert!(skip_a.consume(), "node a has 10 archived lines to skip");
+        assert!(
+            !skip_b.consume(),
+            "node b has none, regardless of node a's count",
+        );
     }
 }

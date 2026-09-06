@@ -491,11 +491,6 @@ chrono = { version = "0.4", default-features = false, features = ["serde"] }
 # Kubernetes client (optional, for k8s feature gate)
 kube = { version = "3.0", default-features = false }
 k8s-openapi = { version = "0.27", default-features = false }
-# `kube-core`'s `LogParams::since_time` is typed `jiff::Timestamp`, not this
-# workspace's usual `time::OffsetDateTime` — a crate that constructs one
-# (qa-runs' `argo` feature, resuming a pod log read rather than replaying it,
-# Task 13 / review finding #50) needs `jiff` directly to name the type.
-jiff = "0.2"
 
 # DSN parsing
 dsn = "1.1.1"

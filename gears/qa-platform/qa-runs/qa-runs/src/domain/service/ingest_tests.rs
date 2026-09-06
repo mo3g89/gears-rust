@@ -194,17 +194,19 @@ impl LogArchive for RecordingArchive {
         report
     }
 
-    /// No test in this file drives a re-attach through `RecordingArchive`
-    /// (that composition is `service::watch`'s, covered end to end in
-    /// `watch_tests.rs`), so this double answers the same "nothing archived,
-    /// nothing to resume" empty map `NullLogArchive` does rather than
-    /// modelling per-node counts it has no reader for.
+    /// Reads `self.stored` through the one shared parser
+    /// (`domain::repos::LogResume::from_archived_text`) — **not**
+    /// `self.pending` — which is what makes
+    /// `resume_positions_flushes_a_pending_tail_before_reading_it` below able
+    /// to prove `IngestService::resume_positions` flushes before it reads:
+    /// against a double that read `pending` directly, a missing flush would
+    /// be invisible.
     async fn resume_positions(
         &self,
         _tenant: system_actor::TenantBound,
-        _run_id: Uuid,
+        run_id: Uuid,
     ) -> Result<LogResume, DomainError> {
-        Ok(LogResume::default())
+        Ok(LogResume::from_archived_text(&self.stored_text(run_id)))
     }
 }
 
@@ -731,6 +733,50 @@ async fn the_stored_status_is_trimmed_before_the_column_truncates_it() {
         },
         "PASSE matches no counter, so a wrong order is silent in the row and \
          visible only here"
+    );
+}
+
+/// **`resume_positions` flushes before it reads — fix-round 1, Important 3.**
+///
+/// `record` only buffers; a periodic `flush_due` tick or `finish` is what
+/// writes the row `log_resume_positions` reads. `gear.rs` runs `flush_due`
+/// *after* the dispatcher tick that triggers a re-attach, so without an
+/// explicit flush here, a run whose previous observer queued lines but never
+/// got to flush them would read a resume position that undercounts by up to a
+/// full tick's worth of its own output — and the resuming executor would
+/// re-fetch and re-archive exactly that tail.
+///
+/// `RecordingArchive::resume_positions` reads only `stored`, never `pending`
+/// (see that impl's own doc), so this is the one test that can tell "flushed
+/// first" apart from "read straight through": against a double that read
+/// `pending` directly, a missing flush would be invisible, which is exactly
+/// how this went unnoticed in the original commit.
+#[tokio::test]
+async fn resume_positions_flushes_a_pending_tail_before_reading_it() {
+    let h = harness(RunState::Running, LeaseState::Free).await;
+    h.ingest_log_line("a", "line one").await;
+
+    // Premise: nothing has been flushed yet, so a read that skipped the
+    // flush would see an empty archive.
+    assert!(
+        h.stored_text().is_empty(),
+        "premise: the line is only buffered, not yet flushed"
+    );
+
+    let resume = h
+        .ingest
+        .resume_positions(system_actor::TenantBound::new(OWNER_TENANT).unwrap(), RUN)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resume.lines_for("a"),
+        1,
+        "the pending line must be flushed before this reads, or it answers 0"
+    );
+    assert!(
+        !h.stored_text().is_empty(),
+        "the flush must have actually happened as an observable side effect"
     );
 }
 

@@ -672,7 +672,12 @@ impl ResumeHarness {
 
     /// One dispatcher tick — which attaches `run_id` if it is not already
     /// watched — then wait for the spawned observer to finish and settle
-    /// into the archive.
+    /// into the archive. Returns the tick's `attached` count, so a caller can
+    /// assert a re-attach actually happened rather than only that the
+    /// archive looks unchanged — see this file's
+    /// `a_reattach_does_not_duplicate_the_archived_log`, whose own history
+    /// (fix-round 1, Important 4) is that discarding this count let the test
+    /// pass vacuously if `reattach_watchers` stopped re-attaching altogether.
     ///
     /// There is no accessor for `is_watching` from outside `domain::service`
     /// (`AppServices::watcher`'s own doc: "no accessor... production surface
@@ -680,8 +685,8 @@ impl ResumeHarness {
     /// here — the archived line count — until it stops moving, forcing a
     /// flush each time since this script never emits `Finished` and so never
     /// triggers `IngestService::finish`'s own flush.
-    async fn attach_and_drain(&self, run_id: Uuid) {
-        self.services.dispatch.run_tick().await;
+    async fn attach_and_drain(&self, run_id: Uuid) -> usize {
+        let report = self.services.dispatch.run_tick().await;
 
         let mut last = -1_i64;
         let mut stable_polls = 0;
@@ -692,7 +697,7 @@ impl ResumeHarness {
             if current == last {
                 stable_polls += 1;
                 if stable_polls >= 3 {
-                    return;
+                    return report.attached;
                 }
             } else {
                 stable_polls = 0;
@@ -728,7 +733,11 @@ async fn a_reattach_does_not_duplicate_the_archived_log() {
     let h = resume_harness().await;
     let run_id = h.live_run_with_execution_ref().await;
 
-    h.attach_and_drain(run_id).await;
+    let attached_first = h.attach_and_drain(run_id).await;
+    assert_eq!(
+        attached_first, 1,
+        "the first tick must have attached the run"
+    );
     let after_first = h
         .archived_log(run_id)
         .await
@@ -738,7 +747,17 @@ async fn a_reattach_does_not_duplicate_the_archived_log() {
     // The observer ended (the script has no `Finished`); the slot is freed
     // by `AttachedSlot`'s Drop, and the next tick's `reattach_watchers`
     // re-attaches because the run is still `Running` and unwatched.
-    h.attach_and_drain(run_id).await;
+    //
+    // Asserted explicitly (fix-round 1, Important 4): without this, a
+    // regression that stopped `reattach_watchers` from re-attaching at all
+    // would leave `after_second == after_first` trivially — nothing would
+    // have been read a second time for there to be anything to duplicate —
+    // and this test would stay green while pinning nothing.
+    let attached_second = h.attach_and_drain(run_id).await;
+    assert_eq!(
+        attached_second, 1,
+        "the second tick must have re-attached, or nothing below is evidence of anything"
+    );
     let after_second = h.archived_log(run_id).await.expect("the row still exists");
 
     assert_eq!(

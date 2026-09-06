@@ -402,8 +402,12 @@ pub fn for_schedule_fire(tenant: TenantBound) -> SecurityContext {
     build_inner(Some(tenant))
 }
 
-/// Flushing one run's accumulated log lines into `qa_run_logs`. Tenant-bound to
-/// the run's own tenant.
+/// Flushing one run's accumulated log lines into `qa_run_logs` — a write —
+/// and, since Task 13 (review finding #50), reading back that same run's
+/// per-node resume position before a re-attach — a `GET`. Tenant-bound to
+/// the run's own tenant either way; the two actions share this one factory
+/// because both are `RunLogArchive` acting on a run's own log, not because
+/// the read was folded in as an afterthought.
 ///
 /// **There is no `for_log_archive_sweep`, and that is deliberate.**
 /// `for_schedule_tick` / `for_schedule_fire` exist as a pair because a sweep

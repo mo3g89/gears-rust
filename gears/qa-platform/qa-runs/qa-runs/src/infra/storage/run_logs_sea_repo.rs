@@ -101,8 +101,6 @@
 //! next reader to reach for it while debugging a query will reach for it in
 //! this file.
 
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
 use sea_orm::sea_query::{Alias, Expr, Func};
 use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter};
@@ -112,7 +110,7 @@ use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::repos::{ArchivedLog, LogPosition, LogResume, RunLogsRepository};
+use crate::domain::repos::{ArchivedLog, LogResume, RunLogsRepository};
 use crate::infra::storage::db::db_err;
 use crate::infra::storage::entity::run_log::{self, Column as LogColumn, Entity as LogEntity};
 use crate::infra::storage::runs_sea_repo::OrmRunsRepository;
@@ -203,49 +201,12 @@ impl RunLogsRepository for OrmRunsRepository {
             .map_err(db_err)?;
 
         // No row: nothing archived yet, so an empty `LogResume` is the right
-        // answer — see the trait doc's "first attach" case.
-        let Some(model) = found else {
-            return Ok(LogResume::default());
-        };
-
-        // Recover a per-node count from the interleaved text — see the trait
-        // doc's "There is no per-node column" section for why this is
-        // possible at all and what it costs. `str::lines` rather than
-        // `split('\n')`: `record` terminates every line with exactly one
-        // `\n` (`infra::logs::archive`'s module doc), so `split` would yield
-        // one trailing empty string per call and `lines` does not.
-        let mut counts: BTreeMap<&str, i64> = BTreeMap::new();
-        for line in model.text.lines() {
-            // Every archived line is `"[{node}] {line}"` by construction
-            // (`domain::service::ingest::fan_out_log`), so the substring
-            // between the first `[` and the first `]` is the node. A node
-            // name containing `]` would truncate early here; unreachable
-            // today (`ExecutionNode::name`'s one producer is
-            // `format!("repo-{repo_id}")`) and merely mis-attributed, not
-            // unsound, if it ever happened.
-            if let Some(rest) = line.strip_prefix('[')
-                && let Some(end) = rest.find(']')
-            {
-                *counts.entry(&rest[..end]).or_insert(0) += 1;
-            }
-        }
-
-        Ok(counts
-            .into_iter()
-            .map(|(node, lines)| {
-                (
-                    node.to_owned(),
-                    LogPosition {
-                        lines,
-                        // The row's own `updated_at` stands in for every
-                        // node's `since_time` — see `LogPosition`'s doc for
-                        // why that is the safe over-approximation rather
-                        // than a shortcut.
-                        since_time: Some(model.updated_at),
-                    },
-                )
-            })
-            .collect())
+        // answer — see the trait doc's "first attach" case. A row: recover a
+        // per-node count from the interleaved text via the one shared
+        // implementation — see `LogResume::from_archived_text`'s own doc.
+        Ok(found.map_or_else(LogResume::default, |model| {
+            LogResume::from_archived_text(&model.text)
+        }))
     }
 }
 
@@ -478,6 +439,13 @@ mod tests {
     /// A run with nothing archived yet answers an empty [`LogResume`] — the
     /// case that must make a first attach read from the beginning rather than
     /// resume from a position that does not exist.
+    ///
+    /// The per-node counting itself — two nodes' interleaved text told apart
+    /// and counted correctly — is `LogResume::from_archived_text`'s own unit
+    /// test (`domain::repos::run_logs_repo`), the one implementation this
+    /// method and `test_support::MockRunsRepository`'s both call. What this
+    /// test adds is the thing only a real row can prove: a run with **no**
+    /// row reads as empty, not as a database error.
     #[tokio::test]
     async fn a_run_with_no_archived_log_has_no_resume_position() {
         let fx = fixture().await;
@@ -490,17 +458,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(resume.lines_for("a"), 0);
-        assert_eq!(resume.since_time_for("a"), None);
     }
 
-    /// **The per-node count, recovered from one run's interleaved text.**
-    /// `qa_run_logs` has no node column — see `log_resume_positions`'s own
-    /// doc — so this is what proves the recovery is exact: two nodes'
-    /// output, appended in two separate `append_log` calls the way two
-    /// pods' drains would arrive, must be told apart and counted
-    /// correctly, with neither node's count contaminating the other's.
+    /// The same recovery, against a real row built from two separate
+    /// `append_log` calls — the way two pods' drains would actually arrive —
+    /// rather than a single in-memory string, which is all
+    /// `LogResume::from_archived_text`'s own unit test can exercise.
     #[tokio::test]
-    async fn resume_positions_are_counted_per_node_from_the_interleaved_text() {
+    async fn resume_positions_are_counted_per_node_from_a_row_built_by_two_appends() {
         let fx = fixture().await;
         let run_id = fx.seed_run().await;
 
@@ -528,14 +493,6 @@ mod tests {
 
         assert_eq!(resume.lines_for("a"), 2, "node a has two of its own lines");
         assert_eq!(resume.lines_for("b"), 1, "node b has one, not three");
-        assert!(resume.since_time_for("a").is_some());
-        assert!(resume.since_time_for("b").is_some());
-        assert_eq!(
-            resume.since_time_for("a"),
-            resume.since_time_for("b"),
-            "the row has one updated_at for both nodes - see LogPosition's doc \
-             for why that over-approximation is the safe direction",
-        );
         assert_eq!(
             resume.lines_for("never-appeared"),
             0,

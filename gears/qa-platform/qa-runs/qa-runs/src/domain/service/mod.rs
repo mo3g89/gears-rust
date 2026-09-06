@@ -266,7 +266,7 @@ pub trait LogArchive: Send + Sync {
     /// reach that resolution any more than it may reach a write — see
     /// `domain::system_actor::TenantBound`'s own doc.
     ///
-    /// [`super::service::watch`]'s `drain` is the one caller, and treats a
+    /// `domain::service::watch`'s `drain` is the one caller, and treats a
     /// failure here as "resume position unknown" rather than as a reason to
     /// abandon the attach: it falls back to
     /// [`crate::domain::repos::LogResume::default`], which is exactly what a

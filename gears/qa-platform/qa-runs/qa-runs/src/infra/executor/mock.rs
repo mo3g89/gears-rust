@@ -332,21 +332,18 @@ impl RunExecutor for MockRunExecutor {
         let events = self.lock().script_for(execution_ref);
         let (sink, stream) = ExecutionStream::channel(events.len().max(1));
         // **Resume, not replay** — Task 13, review finding #50. The mock has
-        // no real log to seek within, so it does what an adapter with true
-        // per-line resumption would achieve by construction: skip exactly the
-        // `Log` entries `resume` says this node's archive already has, in
-        // order, and keep everything else. `remaining` starts at
-        // `resume.lines_for(node)` per node the first time that node is seen
-        // and counts down, so a node `resume` says nothing about (the common
-        // case: a first attach, where `resume` is empty) skips nothing.
+        // no real log to seek within, so it does what the Argo adapter now
+        // does too (fix-round 1): skip exactly the `Log` entries `resume`
+        // says this node's archive already has, in order, and keep
+        // everything else. `remaining` starts at `resume.lines_for(node)` per
+        // node the first time that node is seen and counts down, so a node
+        // `resume` says nothing about (the common case: a first attach,
+        // where `resume` is empty) skips nothing.
         //
-        // This is deliberately **exact**, unlike the Argo adapter's
-        // `since_time`/`tail_lines`: the mock holds its own scripted sequence
-        // rather than asking Kubernetes, so there is no approximation to make
-        // and no reason to accept one. That asymmetry is what keeps this
-        // mock's long-standing "replays from the beginning" guarantee (no
-        // lines lost — `watch_is_re_attachable_and_replays_from_the_beginning`
-        // below) while making the *duplication* direction falsifiable too
+        // This keeps the mock's long-standing "replays from the beginning"
+        // guarantee (no lines lost —
+        // `watch_is_re_attachable_and_replays_from_the_beginning` below) while
+        // making the *duplication* direction falsifiable too
         // (`watch_resumes_without_duplicating_or_dropping_log_lines`), which
         // an adapter that silently dropped the gap could not pass.
         let mut remaining: HashMap<String, i64> = HashMap::new();
@@ -548,12 +545,11 @@ mod tests {
         assert_eq!(first_events.len(), 2);
     }
 
-    /// **Both directions of Finding #50's fix, on the one double that can
-    /// make them exact.** The Argo adapter's `since_time`/`tail_lines` are
-    /// Kubernetes approximations (`domain::repos::LogPosition`'s doc); the
-    /// mock has no such excuse; it holds the script itself, so this pins
-    /// what "resume, don't replay" should mean when nothing stands in the
-    /// way of doing it exactly.
+    /// **Both directions of Finding #50's fix.** Since fix-round 1 the Argo
+    /// adapter uses this same count-based mechanism against its own re-read
+    /// pod log (`infra::executor::argo::watch`'s `LineSkip`); this pins what
+    /// "resume, don't replay" means against the mock's in-memory script,
+    /// where nothing stands in the way of doing it exactly.
     ///
     /// Two nodes, so a resume position for one cannot be satisfied by
     /// accident from the other's count.
@@ -589,10 +585,7 @@ mod tests {
         // answer partway through this script.
         let resume: LogResume = [(
             "a".to_owned(),
-            crate::domain::repos::LogPosition {
-                lines: 2,
-                since_time: None,
-            },
+            crate::domain::repos::LogPosition { lines: 2 },
         )]
         .into_iter()
         .collect();
