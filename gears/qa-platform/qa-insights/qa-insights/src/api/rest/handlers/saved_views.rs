@@ -151,3 +151,7 @@ pub async fn delete_saved_view(
         .map_err(as_saved_view_error)?;
     Ok(no_content().into_response())
 }
+
+#[cfg(test)]
+#[path = "saved_views_handler_tests.rs"]
+mod saved_views_handler_tests;

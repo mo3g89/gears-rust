@@ -155,8 +155,8 @@ use crate::infra::storage::jira_sea_repo::OrmJiraRepository;
 use crate::infra::storage::notify_sea_repo::OrmNotifyRepository;
 use crate::infra::storage::results_sea_repo::OrmResultsRepository;
 use crate::infra::storage::saved_views_sea_repo::OrmSavedViewsRepository;
-use crate::infra::storage::watermark_sea_repo::OrmWatermarkRepository;
 use crate::infra::storage::test_db::{inmem_db, scope};
+use crate::infra::storage::watermark_sea_repo::OrmWatermarkRepository;
 
 /// One run as this fake holds it: its metadata and its per-test rows.
 type StoredRun = (Run, Vec<RunTestResult>);
@@ -1239,11 +1239,36 @@ impl Fleet {
     /// one dependency Task 7's tests vary. See this struct's own doc for
     /// every other collaborator.
     pub async fn new(signing_secret: &str) -> Self {
+        Self::build(
+            signing_secret,
+            Arc::new(TenantScopedAuthZ) as Arc<dyn AuthZResolverClient>,
+        )
+        .await
+    }
+
+    /// A [`Fleet`] whose policy decision point refuses everything, as a
+    /// deployment whose policy engine has not yet been taught one of this
+    /// gear's resource types does — the most likely error an operator sees
+    /// first, and Task 8's fixture for pinning which resource type an
+    /// endpoint names in that refusal.
+    ///
+    /// `signing_secret` is irrelevant to every caller of this constructor: a
+    /// PDP denial is decided before `collect::CollectService` ever reaches
+    /// its signature check, so an arbitrary constant stands in for it.
+    pub async fn denying() -> Self {
+        Self::build(
+            "unused-denying-fleet-secret",
+            Arc::new(DenyAllAuthZ) as Arc<dyn AuthZResolverClient>,
+        )
+        .await
+    }
+
+    async fn build(signing_secret: &str, authz: Arc<dyn AuthZResolverClient>) -> Self {
         let db = Arc::new(DbProvider::new(inmem_db().await));
 
         let deps = ServiceDeps {
             db: Arc::clone(&db),
-            authz: Arc::new(TenantScopedAuthZ) as Arc<dyn AuthZResolverClient>,
+            authz,
             runs: Arc::new(FakeRuns::default()) as Arc<dyn RunsReader>,
             catalog: Arc::new(FakeCatalog::default()) as Arc<dyn CatalogReader>,
             platforms: Arc::new(FakePlatforms::default()) as Arc<dyn EnvironmentReader>,
