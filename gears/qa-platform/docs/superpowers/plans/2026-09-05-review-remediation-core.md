@@ -429,7 +429,11 @@ system-gear changes; Task 10 of this plan also depends on
 ## proves the SSE access-log redaction.
 helm-tests:
 	@command -v helm >/dev/null || (echo "helm is required for helm-tests" && exit 1)
-	cd gears/qa-platform/deploy/helm && python3 -m pytest tests/ -q
+	cd gears/qa-platform/deploy/helm && python3 -m pytest tests/test_no_system_gear_changes.py -q
+	python3 gears/qa-platform/deploy/helm/tests/test_chart_file_sync.py
+	python3 gears/qa-platform/deploy/helm/tests/test_features.py
+	python3 gears/qa-platform/deploy/helm/tests/test_no_environment_hardcode.py
+	python3 gears/qa-platform/deploy/helm/tests/test_pins.py
 	bash gears/qa-platform/deploy/helm/tests/test_nginx_template.sh
 ```
 
@@ -439,14 +443,28 @@ helm-tests:
 make helm-tests
 ```
 
-Expected: five pytest modules collect and pass, then the shell script passes.
-**If pytest reports "no tests ran", stop and fix the path.**
+Expected: all six guards run and pass.
+
+**Only `test_no_system_gear_changes.py` is pytest-shaped.** The other four
+`.py` guards define `main()` and no `test_` functions, so `pytest tests/`
+imports them, finds nothing, and collects **one** test out of five — a green
+target covering one guard in six. They are invoked directly for that reason.
+Confirm with `python3 -m pytest tests/ -q --collect-only`, which reports
+"1 test collected". If a future guard is added, check which shape it is.
 
 - [ ] **Step 3: Prove the gate can fail**
 
-Temporarily change a pinned image tag in
-`gears/qa-platform/deploy/helm/qa-platform/values.yaml`, run `make helm-tests`,
-confirm `test_pins.py` FAILs, revert, confirm green.
+Temporarily reinstate the historical hardcoded origin in
+`gears/qa-platform/deploy/helm/qa-platform/values.yaml` —
+`publicOrigin: "https://10.136.20.200"` — run `make helm-tests`, confirm
+`test_no_environment_hardcode.py` FAILs and that `make` aborts there rather
+than continuing, then revert and confirm `values.yaml` is byte-identical and
+the suite is green.
+
+**Not an image-tag change.** `test_pins.py` is about login pins deriving from
+`.Values.publicOrigin` (its own docstring, line 1), not pinned image versions;
+no guard asserts on `.Values.images.*.tag`, so a tag edit leaves all six
+green.
 
 - [ ] **Step 4: Wire into the `lint` job and `ci:`**
 
