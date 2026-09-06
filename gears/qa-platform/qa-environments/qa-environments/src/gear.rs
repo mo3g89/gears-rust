@@ -302,8 +302,11 @@ impl QaEnvironments {
     /// cancelled. The cycle's body
     /// ([`crate::domain::service::EnvironmentsService::run_observation_cycle`],
     /// reached through `services.environments`) owns "one environment's failure
-    /// never aborts the cycle for the others"; this loop owns only the
-    /// timing and the shutdown path.
+    /// never aborts the cycle for the others" *and* stopping early between
+    /// environments once `cancel` fires — it is handed the same token this
+    /// loop holds, because it is the one paying for the round trips a
+    /// shutdown wants to cut off. This loop owns only the tick timing and the
+    /// outer shutdown path, between cycles rather than within one.
     ///
     /// No leader election, unlike `qa-runs`' and `qa-insights`' tickers: every
     /// unit of work here is idempotent by construction —
@@ -341,7 +344,7 @@ impl QaEnvironments {
                         return;
                     }
                     _ = ticker.tick() => {
-                        let report = services.environments.run_observation_cycle().await;
+                        let report = services.environments.run_observation_cycle(&cancel).await;
                         debug!(
                             attempted = report.attempted,
                             observed = report.observed,

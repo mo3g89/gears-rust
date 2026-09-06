@@ -26,6 +26,7 @@ use credstore_sdk::{
     SharingMode, TenantId, WriteOptions, WritePrecondition,
 };
 use sea_orm_migration::MigratorTrait;
+use tokio_util::sync::CancellationToken;
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::{ConnectOpts, DBProvider, Db, DbError, connect_db};
 use toolkit_security::{SecurityContext, pep_properties};
@@ -692,6 +693,12 @@ pub struct ScriptedPlugin {
     /// **Keys only, never values** — recording submitted credential bytes in
     /// a test double is the 2026-08-28 leak with a shorter blast radius.
     validated: Mutex<Vec<Vec<String>>>,
+    /// Fired from inside `observe`, once, on the call after which it should
+    /// take effect — how a test pins that a cancelled observation cycle stops
+    /// *between* environments rather than running the whole pass and checking
+    /// only at the end. `Mutex<Option<_>>` rather than a plain field so
+    /// `observe` (which takes `&self`) can `take()` it and fire exactly once.
+    cancel_after_first_observe: Mutex<Option<CancellationToken>>,
 }
 
 /// One `CredentialSlot` as a test can compare it: the key, the reference,
@@ -724,6 +731,7 @@ impl ScriptedPlugin {
             credential_rejection: None,
             extra_classification: None,
             validated: Mutex::new(Vec::new()),
+            cancel_after_first_observe: Mutex::new(None),
         }
     }
 
@@ -771,6 +779,13 @@ impl ScriptedPlugin {
     #[must_use]
     pub fn handles(&self) -> Vec<RecordedHandle> {
         self.handles.lock().unwrap().clone()
+    }
+
+    /// Cancel `cancel` once this plugin's next `observe` call returns —
+    /// simulating a shutdown that lands mid-cycle, between two environments,
+    /// rather than before the cycle starts or after it finishes.
+    pub fn cancel_after_first_observe(&self, cancel: CancellationToken) {
+        *self.cancel_after_first_observe.lock().unwrap() = Some(cancel);
     }
 
     /// The handle from the most recent `observe` call.
@@ -909,6 +924,9 @@ impl QaProductPluginV1 for ScriptedPlugin {
             config: env.config.clone(),
             observed: env.observed.cloned(),
         });
+        if let Some(cancel) = self.cancel_after_first_observe.lock().unwrap().take() {
+            cancel.cancel();
+        }
         self.outcome.lock().unwrap().clone()
     }
 

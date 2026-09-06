@@ -415,7 +415,7 @@ impl QaCatalog {
                 tokio::select! {
                     biased;
                     () = token.cancelled() => break,
-                    _ = iv.tick() => Self::run_bundle_gc(&rt).await,
+                    _ = iv.tick() => Self::run_bundle_gc(&rt, &token).await,
                 }
             }
         })
@@ -437,7 +437,12 @@ impl QaCatalog {
     /// considered and rejected: it would widen a *write* across every tenant
     /// in one transaction, which is exactly the escape `domain::elevated`'s
     /// "read paths only" contract exists to close.
-    async fn run_bundle_gc(rt: &QaCatalogRuntime) {
+    ///
+    /// Also mirrors [`Self::refresh_branch_caches`] in stopping between
+    /// tenants once `token` fires, rather than after the pass: a purge is a
+    /// database round trip per tenant, so checking only at the end would have
+    /// already paid for every one of them.
+    async fn run_bundle_gc(rt: &QaCatalogRuntime, token: &CancellationToken) {
         let enumeration_ctx = system_actor::for_bundle_gc();
         let tenants = match rt
             .services
@@ -455,6 +460,9 @@ impl QaCatalog {
         debug!(tenants = tenants.len(), "qa-catalog: bundle GC pass");
         let mut total_purged = 0usize;
         for tenant_id in tenants {
+            if token.is_cancelled() {
+                return;
+            }
             total_purged += Self::purge_one_tenants_bundles(rt, tenant_id).await;
         }
 
