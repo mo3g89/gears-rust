@@ -396,6 +396,52 @@ async fn a_cancelled_observation_cycle_stops_between_environments() {
     );
 }
 
+/// The discriminating case the test above cannot cover: a token already
+/// cancelled *before* the cycle is ever entered.
+///
+/// Cancelling from inside the first `observe` call (as the test above does)
+/// cannot distinguish a check at the top of the loop from one at the bottom:
+/// both see the token fire during the first iteration and both stop after
+/// exactly one, so `attempted < 20` passes either way. Pre-cancelling proves
+/// the placement instead -- a top-of-loop check never starts the first
+/// iteration at all (`attempted == 0`, no round trip paid), while a
+/// bottom-of-loop check would still pay for one full iteration before ever
+/// consulting the token (`attempted == 1`). Fix round 1 confirmed the two
+/// tests are not redundant by moving the check to the bottom of the loop: this
+/// one went red while `a_cancelled_observation_cycle_stops_between_environments`
+/// stayed green.
+#[tokio::test]
+async fn a_cycle_cancelled_before_it_starts_attempts_nothing() {
+    let plugin = Arc::new(ScriptedPlugin::vhp_shaped(detected("1.0.0")));
+    let resolver = Arc::new(FixedPluginPort::new(Arc::clone(&plugin) as Arc<_>));
+    let services = build_services_tenant_scoped_with_plugin(
+        inmem_db().await,
+        Arc::clone(&resolver) as Arc<dyn ProductPluginPort>,
+    );
+    let tenant = Uuid::new_v4();
+
+    services
+        .environments
+        .create_environment(&ctx(tenant), pasted("environment-a", "kubeconfig-a"))
+        .await
+        .unwrap();
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let report = services.environments.run_observation_cycle(&cancel).await;
+
+    assert_eq!(
+        report.attempted, 0,
+        "a cycle cancelled before it starts must not attempt even the first environment"
+    );
+    assert!(
+        plugin.handles().is_empty(),
+        "and must never reach the plugin -- no round trip paid for an environment this cycle \
+         never gets to"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Addition 1's three VPADM_NAMESPACE tests were DELETED by Task 15
 // ---------------------------------------------------------------------------

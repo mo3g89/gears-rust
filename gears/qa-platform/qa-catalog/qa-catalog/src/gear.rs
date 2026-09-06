@@ -584,7 +584,55 @@ fn log_ticker_exit(name: &str, res: Result<(), tokio::task::JoinError>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_BRANCH_REFRESH_INTERVAL_SECONDS, effective_branch_refresh_interval};
+    use super::{
+        MIN_BRANCH_REFRESH_INTERVAL_SECONDS, QaCatalog, QaCatalogRuntime,
+        effective_branch_refresh_interval,
+    };
+    use crate::domain::system_actor;
+    use crate::test_support::{build_services_tenant_scoped, inmem_db, seed_expired_bundle};
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    /// A pre-cancelled bundle GC pass purges nothing.
+    ///
+    /// This is the discriminating case for the check `run_bundle_gc` added
+    /// (Task 18, review finding #31): with the token already cancelled
+    /// *before* the loop is ever entered, a check at the top of the
+    /// per-tenant loop skips the one seeded tenant with zero purges, while a
+    /// check placed after `purge_one_tenants_bundles` would still purge that
+    /// tenant once before ever consulting the token. A token cancelled mid-loop
+    /// (as a side effect of the first purge) cannot tell the two placements
+    /// apart -- see qa-environments' `a_cancelled_observation_cycle_stops_between_environments`
+    /// for the same distinction, made explicit there.
+    #[tokio::test]
+    async fn a_pre_cancelled_bundle_gc_purges_nothing() {
+        let db = inmem_db().await;
+        let tenant = Uuid::new_v4();
+        seed_expired_bundle(&db, tenant, -time::Duration::seconds(1)).await;
+
+        let services = build_services_tenant_scoped(db);
+        let rt = QaCatalogRuntime {
+            services: services.clone(),
+            branch_refresh_interval_seconds: 0,
+        };
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        QaCatalog::run_bundle_gc(&rt, &cancel).await;
+
+        let tenants = services
+            .bundles
+            .tenants_with_expired_bundles(&system_actor::for_bundle_gc())
+            .await
+            .expect("enumeration");
+        assert_eq!(
+            tenants,
+            vec![tenant],
+            "a pre-cancelled pass must purge nothing -- the seeded expired bundle must still be \
+             there"
+        );
+    }
 
     #[test]
     fn zero_still_disables_the_refresher() {
