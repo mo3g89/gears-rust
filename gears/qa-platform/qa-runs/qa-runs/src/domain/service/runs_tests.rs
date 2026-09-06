@@ -32,7 +32,7 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use super::*;
-use crate::domain::repos::QueueRowRecord;
+use crate::domain::repos::{LogResume, QueueRowRecord};
 use crate::domain::service::LogFanout;
 use crate::domain::service::admission::tests::fakes::{
     FakeCatalog, FakeEnvironments, FakeQueue, FakeRuns, PLATFORM_A, REPO, SystemGrantingAuthZ,
@@ -138,8 +138,9 @@ impl RunExecutor for CountingExecutor {
     async fn watch(
         &self,
         execution_ref: &ExecutionRef,
+        resume: LogResume,
     ) -> Result<crate::domain::ports::run_executor::ExecutionStream, DomainError> {
-        self.inner.watch(execution_ref).await
+        self.inner.watch(execution_ref, resume).await
     }
 
     async fn cancel(&self, execution_ref: &ExecutionRef) -> Result<(), DomainError> {
@@ -1227,6 +1228,7 @@ async fn the_container_wires_ingest_and_the_operator_actions_to_the_same_halves(
             admitter: None,
             dispatcher: None,
             watcher: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
             default_timeout_seconds: 900,
             limits: QueueLimits {
                 queue_max_depth: 20,

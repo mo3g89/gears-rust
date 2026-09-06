@@ -1035,12 +1035,37 @@ reliable one (guide lines 179-184).
 Three admission limits also belong here and were absent from every spec
 document. All three are operator settings with `0` meaning "disabled":
 `max_concurrent_runs` (cluster-wide; 429 at admission, never a queued row —
-`run_queue.rs:34-54, 879-891`), `queue_ttl_seconds` (per queued row; default
+`run_queue.rs:34-54, 879-891`; **default changed, see the correction below**),
+`queue_ttl_seconds` (per queued row; default
 7200 — `models.rs:767-769`, arithmetic in `run_queue.rs:736-759`), and
 `queue_max_depth` (**per tenant scope, per platform** — see the correction below; default 20 — `models.rs:774-776`; the 429
 and its operator message at `run_dispatcher.rs:161-172`, the predicate at
 `run_queue.rs:830-832`). They are what make `cpt-cf-qa-fr-runs-launch`'s
 "rejected with the limit that was hit" a closed set of exactly two causes.
+
+**Correction, 2026-09-06 (qa-runs Task 16, review findings #18/#19).**
+`max_concurrent_runs`'s shipped default changed from `0` (no cap, the port's
+legacy value) to **50**, derived from `cpt-cf-qa-nfr-scale`'s own requirement
+that this subsystem handle 50 concurrently executing runs — the qa-runs port
+was, until this task, the one deployment that could exceed its own scale
+target with no operator having changed anything. `0` remains available as an
+explicit "unbounded" opt-out (`qa-runs/src/config.rs`,
+`QaRunsConfig::max_concurrent_runs`).
+
+The consequence is larger than the 429 alone: enabling the cap by default puts
+a cross-plane `executor.list_active()` call on the front of **every** launch,
+where a disabled cap short-circuits before that call is made
+(`admission::GlobalCapGate::reserve`), and that call's failure direction is the
+strict one this section's own `AdmissionService::enforce_global_cap` note
+already states — an unreadable executor now fails the launch, where the depth
+limit fails open. Concretely: a launch that would previously have succeeded
+during an Argo outage can now return 500 instead. The cap also **refuses
+rather than queues** a burst past the limit, so it does not restore the queue
+as a buffer the way `queue_max_depth` does. All three are the ruled trade-off
+for closing review finding #19 (an unbounded process-local resource — see
+`qa-runs`'s `domain::service::watch::SpawningRunWatcher` header), not a
+defect, but they are new operational surface an upgrading deployment will
+notice.
 
 **Correction, 2026-08-14 (qa-runs Task 14 security review).** `queue_max_depth` is
 enforced **per (tenant scope, platform)**, not per platform, because `queued_depth`

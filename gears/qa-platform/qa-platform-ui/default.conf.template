@@ -74,16 +74,50 @@ map $http_upgrade $connection_upgrade {
 # any other.
 #
 # THE COST, recorded for a human in gears/qa-platform/docs/CONTRACT-DIFF.md
-# section 12.5. It is one exposure, not three, and it is measured rather than
-# feared: **the token lands in this container's nginx access log**, whole and
-# in clear, because the access log format writes the full request line --
+# section 12.5. It is one exposure, not three, and it WAS measured rather than
+# feared: before the `log_format sse_no_query` below existed, this file set no
+# `access_log` of its own, so nginx's default `combined` format wrote the full
+# request line for this route --
 #
 #   "GET /qa/v1/runs/<id>/logs?access_token=eyJhbGciOi... HTTP/1.1" 200
 #
-# -- and therefore in `docker compose logs ui` too, where it accumulates one
-# line per stream open for the life of the container (`docker compose logs ui
-# | grep -c 'access_token=eyJ'` was 60 while this comment was being written,
-# and only ever grows).
+# -- and therefore in `docker compose logs ui` too, one line per stream open
+# for the life of the container (`docker compose logs ui | grep -c
+# 'access_token=eyJ'` was 60 while this comment was first written). Review
+# finding #51. The ACCESS-log half is closed: the SSE location below applies
+# `sse_no_query`, which logs `$uri` instead of `$request`, so the query string
+# -- and the token in it -- is never written there. See that log_format's own
+# comment, just below the map, for why a location-scoped access_log rather
+# than a server-wide one.
+#
+# IT WAS NOT ONE EXPOSURE. This block used to say "It is one exposure, not
+# three ... That is now closed", and the second clause was wrong because the
+# first was: `log_format` governs the ACCESS log only. nginx writes upstream
+# failures to the ERROR log, in its own fixed format, and that format carries
+# the full request line. Driven against a local nginx 1.24 with a dead
+# upstream, which is exactly what a `gears` restart produces:
+#
+#   [error] connect() failed (111: Connection refused) while connecting to
+#   upstream, client: ..., request: "GET /leaky/logs?access_token=eyJLEAK
+#   HTTP/1.1", upstream: "http://127.0.0.1:19999/leaky/logs?access_token=eyJLEAK"
+#
+# -- the token TWICE per failure, once in `request:` and once in `upstream:`.
+# And this is the route where it matters most: an `EventSource` reconnects on
+# its own, so a gears restart produces a reconnect LOOP against a 502, i.e. the
+# leak recurs precisely when the deployment is unhealthy and somebody is
+# reading logs.
+#
+# CLOSED, at a diagnosability cost that is stated rather than hidden: the SSE
+# location below sets `error_log ... crit;`, which drops `error`-level entries
+# for that location only. Measured the same way -- the identical request
+# against a location carrying that directive wrote ZERO bytes to its own error
+# log and nothing to the server-level one either. What is lost is the upstream
+# DETAIL for this one route (the address, and nginx's reason string); what
+# remains is the 502 itself in the access log above, with `$uri` and no query.
+# Every other route keeps its full error log. If that trade ever needs
+# reversing, delete the directive -- and know that the token comes back with
+# it. deploy/helm/tests/test_nginx_template.sh pins the directive so it cannot
+# be deleted silently.
 #
 # NOT the browser's history, and that correction belongs here rather than only
 # in the diff document, because this block is what the next person editing it
@@ -108,6 +142,25 @@ map $arg_access_token $sse_authorization {
     ''      $http_authorization;
     default "Bearer $arg_access_token";
 }
+
+# The SSE log-line format: `$uri` rather than `$request`, so the path is logged
+# and the query string is not.
+#
+# The bridge above maps `?access_token=<jwt>` onto an `Authorization` header
+# because `EventSource` cannot set headers and the gears read a credential only
+# from `AUTHORIZATION`. That transport is by design (CONTRACT-DIFF 12.5). What
+# was not by design is nginx's default `combined` format writing the whole
+# request line -- token included -- to stdout, which in the Helm deployment goes
+# wherever the cluster ships container logs. Measured at 60 such lines while
+# this file's own comment above (now `THE COST`, at what was :80-86) was first
+# written.
+#
+# Applied inside the SSE location ONLY (`location ~ ^/qa/v1/runs/[^/]+/logs$`
+# below). A server-level `access_log` here would silently change the log shape
+# of every other route. Review finding #51.
+log_format sse_no_query '$remote_addr - $remote_user [$time_local] '
+                        '"$request_method $uri $server_protocol" '
+                        '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
 
 server {
     listen 80;
@@ -267,6 +320,22 @@ server {
     # That port loss is what `absolute_redirect off` above now prevents for
     # every nginx-generated redirect; this regex prevents the redirect itself.
     location ~ ^/qa/v1/runs/[^/]+/logs$ {
+        # See the `sse_no_query` log_format's own comment, beside the
+        # `$sse_authorization` map above, for why this location sets its own
+        # access_log rather than inheriting the server's. Review finding #51.
+        access_log /var/log/nginx/access.log sse_no_query;
+
+        # The OTHER half of the same leak, and the access_log above does not
+        # cover it -- `log_format` governs the access log alone, while nginx
+        # writes upstream failures to the error log in a fixed format carrying
+        # the whole request line, `?access_token=eyJ...` included. `crit` drops
+        # `error`-level entries for THIS LOCATION ONLY; the file is unchanged
+        # (in the nginx image it is a symlink to stderr), so every other route
+        # still logs everything. See `THE COST` beside the
+        # `$sse_authorization` map above for the measurement and for what this
+        # gives up.
+        error_log /var/log/nginx/error.log crit;
+
         proxy_pass $gears;
 
         proxy_http_version 1.1;

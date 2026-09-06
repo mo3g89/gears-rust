@@ -449,8 +449,11 @@ pub trait QueueRepository: Send + Sync {
     /// ([`MAX_QUEUE_READ_LIMIT`] governs [`Self::list_for_read`] and does not
     /// apply here), and the dispatcher issues it twice per tick, adding one
     /// scoped run read and one fresh `access_scope` per claim returned. Nothing
-    /// else bounds how many claims exist: `max_concurrent_runs` defaults to `0`.
-    /// So the read has to be windowed.
+    /// else bounds how many claims exist: `max_concurrent_runs` is an operator
+    /// setting that can still be `0` — the explicit "unbounded" opt-out; the
+    /// shipped default is now 50 (`crate::config::QaRunsConfig::max_concurrent_runs`),
+    /// but an operator can always dial it back to unbounded. So the read has to
+    /// be windowed regardless of which is configured.
     ///
     /// **A window over a *stable* ordering starves.** This method shipped
     /// ordered `enqueued_at ASC` on 2026-08-15 and was measured against real SQL

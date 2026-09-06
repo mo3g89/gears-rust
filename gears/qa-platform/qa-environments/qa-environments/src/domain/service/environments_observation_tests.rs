@@ -34,6 +34,7 @@
 use std::sync::{Arc, Mutex};
 
 use qa_environments_sdk::{CredentialMaterial, EnvironmentPatch, NewEnvironment};
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
 
@@ -181,7 +182,10 @@ async fn one_environments_failure_does_not_abort_the_cycle_for_the_others() {
         .await
         .unwrap();
 
-    let report = services.environments.run_observation_cycle().await;
+    let report = services
+        .environments
+        .run_observation_cycle(&CancellationToken::new())
+        .await;
 
     assert_eq!(
         report.attempted, 3,
@@ -231,7 +235,10 @@ async fn an_environment_whose_kubeconfig_cannot_be_resolved_says_so_on_its_row()
         .await
         .unwrap();
 
-    services.environments.run_observation_cycle().await;
+    services
+        .environments
+        .run_observation_cycle(&CancellationToken::new())
+        .await;
 
     let row = services
         .environments
@@ -298,7 +305,10 @@ async fn the_middle_environments_failed_detection_still_lets_the_outer_two_be_re
         .await
         .unwrap();
 
-    let report = services.environments.run_observation_cycle().await;
+    let report = services
+        .environments
+        .run_observation_cycle(&CancellationToken::new())
+        .await;
 
     assert_eq!(report.attempted, 3);
     assert_eq!(
@@ -336,6 +346,100 @@ async fn the_middle_environments_failed_detection_still_lets_the_outer_two_be_re
         .unwrap();
     assert_eq!(refreshed_c.observed_version.as_deref(), Some("4.5.6"));
     assert!(refreshed_c.version_detect_error.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// A shutdown does not wait for every environment to be observed
+// ---------------------------------------------------------------------------
+
+/// `run_observation_cycle` used to take no token, so its per-environment loop
+/// could not be interrupted. Each iteration is a network round trip to that
+/// environment's own cluster, so at `cpt-cf-qa-nfr-scale`'s 100 environments a
+/// shutdown waited for 100 round trips -- the whole budget, spent after the
+/// operator asked it to stop. The ticker's own `select!` already held a
+/// token; the loop body just could not see it. Review finding #32.
+///
+/// Twenty environments, a plugin that cancels the token right after its first
+/// `observe` call returns, and the assertion is `attempted < 20`: whatever the
+/// exact count, a cancelled cycle must stop somewhere in the middle rather
+/// than pay for the whole pass.
+#[tokio::test]
+async fn a_cancelled_observation_cycle_stops_between_environments() {
+    let plugin = Arc::new(ScriptedPlugin::vhp_shaped(detected("1.0.0")));
+    let resolver = Arc::new(FixedPluginPort::new(Arc::clone(&plugin) as Arc<_>));
+    let services = build_services_tenant_scoped_with_plugin(
+        inmem_db().await,
+        Arc::clone(&resolver) as Arc<dyn ProductPluginPort>,
+    );
+    let tenant = Uuid::new_v4();
+
+    for i in 0..20 {
+        services
+            .environments
+            .create_environment(
+                &ctx(tenant),
+                pasted(&format!("environment-{i}"), &format!("kubeconfig-{i}")),
+            )
+            .await
+            .unwrap();
+    }
+
+    let cancel = CancellationToken::new();
+    plugin.cancel_after_first_observe(cancel.clone());
+
+    let report = services.environments.run_observation_cycle(&cancel).await;
+
+    assert!(
+        report.attempted < 20,
+        "a cancelled cycle must stop early; it attempted all {} of them",
+        report.attempted
+    );
+}
+
+/// The discriminating case the test above cannot cover: a token already
+/// cancelled *before* the cycle is ever entered.
+///
+/// Cancelling from inside the first `observe` call (as the test above does)
+/// cannot distinguish a check at the top of the loop from one at the bottom:
+/// both see the token fire during the first iteration and both stop after
+/// exactly one, so `attempted < 20` passes either way. Pre-cancelling proves
+/// the placement instead -- a top-of-loop check never starts the first
+/// iteration at all (`attempted == 0`, no round trip paid), while a
+/// bottom-of-loop check would still pay for one full iteration before ever
+/// consulting the token (`attempted == 1`). Fix round 1 confirmed the two
+/// tests are not redundant by moving the check to the bottom of the loop: this
+/// one went red while `a_cancelled_observation_cycle_stops_between_environments`
+/// stayed green.
+#[tokio::test]
+async fn a_cycle_cancelled_before_it_starts_attempts_nothing() {
+    let plugin = Arc::new(ScriptedPlugin::vhp_shaped(detected("1.0.0")));
+    let resolver = Arc::new(FixedPluginPort::new(Arc::clone(&plugin) as Arc<_>));
+    let services = build_services_tenant_scoped_with_plugin(
+        inmem_db().await,
+        Arc::clone(&resolver) as Arc<dyn ProductPluginPort>,
+    );
+    let tenant = Uuid::new_v4();
+
+    services
+        .environments
+        .create_environment(&ctx(tenant), pasted("environment-a", "kubeconfig-a"))
+        .await
+        .unwrap();
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let report = services.environments.run_observation_cycle(&cancel).await;
+
+    assert_eq!(
+        report.attempted, 0,
+        "a cycle cancelled before it starts must not attempt even the first environment"
+    );
+    assert!(
+        plugin.handles().is_empty(),
+        "and must never reach the plugin -- no round trip paid for an environment this cycle \
+         never gets to"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -446,7 +550,10 @@ async fn a_self_heal_failure_is_logged_with_the_environment_attached() {
         .await
         .unwrap();
 
-    let _report = services.environments.run_observation_cycle().await;
+    let _report = services
+        .environments
+        .run_observation_cycle(&CancellationToken::new())
+        .await;
     drop(guard);
 
     let log = buffer.contents();

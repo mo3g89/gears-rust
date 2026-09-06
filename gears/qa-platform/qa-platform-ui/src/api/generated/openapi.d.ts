@@ -5011,19 +5011,34 @@ export interface components {
             /** @description The **case**-level bug reference; see [`TestResultDto::jira_key`]. */
             ticket?: string | null;
         };
-        /** @description REST DTO for a registered git test repository. */
+        /**
+         * @description A test repository as published over REST.
+         *
+         *     **`credential_ref` is intentionally absent.** It names the credstore entry
+         *     holding this repository's git credentials, and a LIST or GET caller can
+         *     redeem a reference it has been handed. `SshKeyDto` and qa-environments'
+         *     `PlatformDto` drop their credstore refs for the same reason. Do not add it
+         *     back. The reference stays on the SDK model
+         *     (`qa_catalog_sdk::TestRepository::credential_ref`), which is where the sync
+         *     path reads it. Review finding #2.
+         */
         TestRepositoryDto: {
             /** @description Subdirectory within the repo that contains test content ("" = root). */
             content_root: string;
             /** Format: date-time */
             created_at: string;
-            /**
-             * @description Reference to the access credential in credstore. The secret material
-             *     itself is never returned over this or any other API. `null` = public
-             *     repository.
-             */
-            credential_ref?: string | null;
             default_branch: string;
+            /**
+             * @description Whether an access credential is configured for this repository.
+             *
+             *     A boolean, deliberately, not the `credential_ref` this field replaced: the
+             *     reference names a credstore entry a LIST or GET caller could redeem, and
+             *     that was the leak. Whether auth is configured is not itself sensitive — the
+             *     URL already implies it — and an operator diagnosing a failed sync on a
+             *     private repository needs it. `SshKeyDto` makes the same trade the same way,
+             *     publishing a `fingerprint` rather than its `credstore_ref`.
+             */
+            has_credential: boolean;
             /** Format: uuid */
             id: string;
             /** Format: date-time */

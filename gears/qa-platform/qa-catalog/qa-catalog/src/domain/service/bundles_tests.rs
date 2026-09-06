@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use authz_resolver_sdk::models::{EvaluationRequest, EvaluationResponse, EvaluationResponseContext};
+use authz_resolver_sdk::models::{
+    EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
+};
 use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
 use flate2::read::GzDecoder;
 use qa_catalog_sdk::{BundleRequest, TestBundle};
@@ -807,13 +809,7 @@ async fn tenants_with_expired_bundles_lists_each_expired_tenant_once() {
     let (tmp, repos) = synced_fixture(repo_id);
     let bundles = Arc::new(MockBundlesRepository::default());
     let store = Arc::new(InMemoryBundleStore::default());
-    let svc = build_service(
-        Arc::clone(&bundles),
-        repos,
-        store,
-        tmp.path().to_path_buf(),
-    )
-    .await;
+    let svc = build_service(Arc::clone(&bundles), repos, store, tmp.path().to_path_buf()).await;
 
     let now = OffsetDateTime::now_utc();
     // Two expired bundles for tenant_a (DISTINCT must collapse them), one
@@ -868,13 +864,7 @@ async fn tenants_with_expired_bundles_excludes_the_nil_tenant() {
     let (tmp, repos) = synced_fixture(repo_id);
     let bundles = Arc::new(MockBundlesRepository::default());
     let store = Arc::new(InMemoryBundleStore::default());
-    let svc = build_service(
-        Arc::clone(&bundles),
-        repos,
-        store,
-        tmp.path().to_path_buf(),
-    )
-    .await;
+    let svc = build_service(Arc::clone(&bundles), repos, store, tmp.path().to_path_buf()).await;
 
     let now = OffsetDateTime::now_utc();
     for (tenant, expires_at) in [
@@ -965,13 +955,7 @@ async fn purging_each_enumerated_tenant_removes_only_that_tenants_rows() {
     let (tmp, repos) = synced_fixture(repo_id);
     let bundles = Arc::new(MockBundlesRepository::default());
     let store = Arc::new(InMemoryBundleStore::default());
-    let svc = build_service(
-        Arc::clone(&bundles),
-        repos,
-        store,
-        tmp.path().to_path_buf(),
-    )
-    .await;
+    let svc = build_service(Arc::clone(&bundles), repos, store, tmp.path().to_path_buf()).await;
 
     let now = OffsetDateTime::now_utc();
     let id_a = Uuid::new_v4();

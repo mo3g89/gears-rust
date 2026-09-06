@@ -1089,6 +1089,58 @@ async fn a_refused_search_still_files_the_issue() {
     assert_eq!(gateway.requests().len(), 2);
 }
 
+/// **A non-JSON 200 from the dedupe search still files the issue — and,
+/// unlike before the fix, says why nothing was found.** Review finding #28.
+///
+/// Before the fix, `search_for_open_issue`'s
+/// `serde_json::from_slice(&body).ok()?` dropped a body that failed to parse
+/// with nothing written down: indistinguishable, to an operator, from a
+/// legitimate "no matching issue" search result, and the poller's next act on
+/// a *real* duplicate storm is to re-file a bug it believes is still open.
+///
+/// # What this test can and cannot show
+///
+/// The observable **behaviour** this test drives — a search miss still files
+/// a new issue — is unchanged by the fix: `None` from the search was always
+/// legacy's own fall-through (see `a_refused_search_still_files_the_issue`
+/// just above), and still is. What changed is only the `warn!` line the fix
+/// adds. This crate carries no log-capture harness — `qa-product-sdk`'s
+/// `testing` module is `assert_no_leak`/`Canary`, leak canaries rather than
+/// line captures, and no `tracing-test`/`tracing-subscriber` dev-dependency
+/// exists here the way qa-environments' does (that crate's own `Cargo.toml`
+/// explains why it built a raw-`tracing`-output capture instead of adopting
+/// `tracing-test`). Task 9's brief is explicit that this crate must not grow
+/// one just for this test, so the `warn!` text itself is asserted nowhere:
+/// this test pins the control flow only, and this doc says so rather than
+/// implying a red/green pair that a log assertion would have given it.
+#[tokio::test]
+async fn a_non_json_search_body_still_files_the_issue() {
+    let gateway = std::sync::Arc::new(FakeGateway::new(
+        Scripted {
+            status: 200,
+            body: "<html>gateway error</html>".to_owned(),
+        },
+        Scripted {
+            status: 201,
+            body: r#"{"key":"VHP-322"}"#.to_owned(),
+        },
+    ));
+    let client = OagwJiraClient::new(gateway.clone());
+
+    let filed = client
+        .create_or_find_issue(&ctx(TENANT), &config(), issue())
+        .await
+        .unwrap();
+
+    assert_eq!(filed.jira_key, "VHP-322");
+    assert!(filed.created);
+    assert_eq!(
+        gateway.requests().len(),
+        2,
+        "one search (whose body could not be parsed), one create",
+    );
+}
+
 /// A create JIRA accepts but answers without a key is an error, not a silently
 /// unregistered issue — legacy's `"No key in JIRA response"` (`jira.rs:174`).
 #[tokio::test]

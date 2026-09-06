@@ -49,6 +49,7 @@ use std::sync::Arc;
 use credstore_sdk::{
     CredStoreClientV1, CredStoreError, SecretRef, SecretValue, SharingMode, WritePrecondition,
 };
+use tokio_util::sync::CancellationToken;
 use toolkit_macros::domain_model;
 use tracing::{debug, info, instrument, warn};
 
@@ -966,9 +967,29 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// on failure — a credstore miss, a PEP denial, an unreachable cluster, a
     /// `409` from the self-heal are all just one more warning line, never a
     /// `return` that would strand every environment after the one that failed.
-    /// Only a panic partway through (which [`crate::gear`]'s supervisor
-    /// reports, exactly as it would for any other ticker) can stop this from
-    /// visiting every environment it started with.
+    /// A panic partway through (which [`crate::gear`]'s supervisor reports,
+    /// exactly as it would for any other ticker) is one way this stops short of
+    /// every environment it started with; `cancel` firing mid-pass is the
+    /// other, and it is not a failure mode — see the next section.
+    ///
+    /// # A cancelled cycle returns its partial report, not an error
+    ///
+    /// `cancel` is checked at the *top* of the per-environment loop, before
+    /// that iteration's round trip to its cluster — checking after would have
+    /// already spent the cost a shutdown exists to cut off, which at
+    /// `cpt-cf-qa-nfr-scale`'s 100 environments is the entire shutdown budget.
+    /// Review finding #32.
+    ///
+    /// Stopping early returns [`ObservationCycleReport`] exactly as it stands,
+    /// counting only what this call actually attempted — not an error, because
+    /// a cancelled cycle did the work it did, and the ticker's next tick (or
+    /// the next process start, if the whole gear is shutting down) re-sweeps
+    /// every environment from scratch. A short `attempted` is therefore
+    /// ambiguous by design between "the gear has this many environments" and
+    /// "this call was cut short" — the caller does not need to tell them
+    /// apart, since both are handled by the same next pass, but a reader
+    /// inferring the environment population from one report's `attempted`
+    /// would be wrong to.
     ///
     /// # No `SecurityContext` in, one out per environment
     ///
@@ -995,7 +1016,10 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                   Err), each of which owes an operator a distinct log line - same diagnosis as \
                   qa-runs' `service::dispatch::run_tick`/`reconcile_claims`"
     )]
-    pub(crate) async fn run_observation_cycle(&self) -> ObservationCycleReport {
+    pub(crate) async fn run_observation_cycle(
+        &self,
+        cancel: &CancellationToken,
+    ) -> ObservationCycleReport {
         let mut report = ObservationCycleReport::default();
 
         let conn = match self.db.conn() {
@@ -1074,6 +1098,18 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         };
 
         for (environment, tenant_id) in environments {
+            // Checked before the round trip, not after: each iteration below
+            // contacts that environment's own cluster, so a check placed
+            // after the work would have already spent the very cost a
+            // shutdown is trying to cut off. Review finding #32.
+            if cancel.is_cancelled() {
+                info!(
+                    attempted = report.attempted,
+                    "qa-environments observation cycle stopping early (shutdown)"
+                );
+                return report;
+            }
+
             report.attempted += 1;
 
             if tenant_id.is_nil() {
@@ -1515,6 +1551,11 @@ fn map_credstore_error(e: CredStoreError) -> DomainError {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ObservationCycleReport {
     /// Every environment the cycle attempted, whether or not it succeeded.
+    ///
+    /// A cancelled cycle (`run_observation_cycle`'s doc) returns before
+    /// visiting the rest, so this can be smaller than the gear's true
+    /// environment count — it is not a census, only a count of what this one
+    /// call got to.
     pub attempted: u32,
     /// Environments for which [`EnvironmentsService::observe_environment`] returned
     /// `Ok` — a detection *outcome* was persisted, successful or not (see

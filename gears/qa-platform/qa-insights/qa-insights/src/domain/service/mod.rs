@@ -624,8 +624,12 @@ pub(crate) mod actions {
 /// the compiler turns empty constraints into `ConstraintsRequiredButAbsent` and
 /// total compilation failure into `AllConstraintsFailed`
 /// (`authz-resolver-sdk/src/pep/compiler.rs:83-89`), both of which surface as
-/// `EnforcerError::CompileFailed` and become [`DomainError::Forbidden`] before
-/// reaching here. **Verified, not assumed** — and both are still refused below,
+/// `EnforcerError::CompileFailed` and error out — never producing an
+/// `AccessScope` — before reaching here: `ConstraintsRequiredButAbsent` as
+/// [`DomainError::Forbidden`] (a documented deny, not a fault — the PEP asked
+/// for row-level constraints and got none) and `AllConstraintsFailed` as
+/// [`DomainError::Internal`] (a policy this PEP cannot compile; review finding
+/// #3). **Verified, not assumed** — and both are still refused below,
 /// because `validate_tenant_in_scope` returns `Ok` for an unconstrained scope
 /// (`db_ops.rs:285-287`) while `scope_with` applies no filter to it, which would
 /// make the per-run delete cross **every tenant**. One

@@ -52,6 +52,7 @@ jobs:
       dylint: ${{ steps.filter.outputs.dylint }}
       deps:   ${{ steps.filter.outputs.deps }}
       ci:     ${{ steps.filter.outputs.ci }}
+      ui:     ${{ steps.filter.outputs.ui }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -80,6 +81,9 @@ jobs:
               - 'deny.toml'
             ci:
               - '.github/workflows/**'
+            ui:
+              - 'gears/qa-platform/qa-platform-ui/**'
+              - 'Makefile'
 
   # ── Jobs ──────────────────────────────────────────────────────────────
 
@@ -247,6 +251,42 @@ jobs:
       - name: cargo test (no macros)
         run: make test-no-macros
 
+  ui:
+    name: QA Platform UI
+    needs: changes
+    if: >-
+      !cancelled()
+      && (needs.changes.result != 'success'
+      || needs.changes.outputs.ui == 'true'
+      || needs.changes.outputs.ci == 'true'
+      || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gears/qa-platform/qa-platform-ui/package-lock.json
+
+      # `ui-contract` is deliberately absent: it regenerates types from a live
+      # /openapi.json and needs the compose stack up on localhost:8087, which
+      # this job has no gears to serve.
+      #
+      # `ui-lint` is deliberately absent too: the project has no
+      # eslint.config.js and ESLint 9 requires one, so the target cannot run
+      # at all. The lint gap it would otherwise catch is 15 errors and 1
+      # warning across 12 of 139 files, recorded with its full measurement in
+      # gears/qa-platform/docs/DECOMPOSITION.md section 2.6, under
+      # "Tracked follow-ups".
+      - name: Test and build the UI
+        run: make ui-test ui-build
+
   integration:
     name: Integration tests
     needs: changes
@@ -330,6 +370,15 @@ jobs:
 
       - name: Test qa-runs with Postgres (integration)
         run: make test-qa-runs-pg
+
+      - name: Test qa-insights with Postgres (integration)
+        run: make test-qa-insights-pg
+
+      - name: Test qa-catalog with the real git transport (integration)
+        run: make test-qa-catalog-git
+
+      - name: Test qa-platform feature-gated adapters (argo, runner-secret)
+        run: make test-qa-platform-features
 
       - name: Test toolkit-db (sqlite integration)
         run: make test-sqlite
@@ -582,6 +631,20 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+
+      - name: Install pytest
+        run: python3 -m pip install --quiet pytest pyyaml
+
+      - name: Run the qa-platform Helm chart guards
+        run: make helm-tests
 
       - name: Install protoc
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0

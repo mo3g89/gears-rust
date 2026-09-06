@@ -74,14 +74,23 @@ use uuid::Uuid;
 /// run.
 ///
 /// The quantity is therefore **unbounded in bytes by this constant alone**, and
-/// what actually bounds it is the executor adapter: nothing between
-/// `ExecutionEvent::Log`'s `line: String` and here caps a line's length. Capping
-/// it *here* was considered and declined — truncating an operator's log line
-/// silently is the same class of harm as truncating a status, and this module has
-/// no way to say "the rest of this line is in the archived log". **The cap belongs
-/// to whoever writes the adapter (feature 2.7)**, and it is recorded as an
-/// obligation rather than implied: an adapter that forwards unbounded lines makes
-/// this constant a multiplier on an unbounded quantity.
+/// what actually bounds it is the executor adapter: capping it *here* was
+/// considered and declined — truncating an operator's log line silently is the
+/// same class of harm as truncating a status, and this module has no way to say
+/// "the rest of this line is in the archived log". **The cap belongs to
+/// whoever writes the adapter**, and it is recorded as an obligation rather
+/// than implied: an adapter that forwards unbounded lines makes this constant
+/// a multiplier on an unbounded quantity.
+///
+/// **Task 15 (review finding #30) is one adapter taking that obligation up.**
+/// `infra::executor::argo::watch::handle_line` now truncates with
+/// `api::rest::sse::sanitize_line_for_archive` before a line ever reaches
+/// `ExecutionEvent::Log`, so the argo adapter's own contribution to this
+/// buffer is bounded. This is not true of every adapter: `MockRunExecutor`
+/// does not truncate, and neither would the HTTP-push producer this
+/// module's own doc anticipates landing one day (`domain::service::ingest`'s
+/// `apply` is `pub`) unless it is written to. The obligation above is still
+/// live for any adapter that has not taken it up.
 ///
 /// Nothing tests the sizing, because "how far behind does a real SSE client fall"
 /// is not a question this crate can answer; what *is* tested is that overflowing

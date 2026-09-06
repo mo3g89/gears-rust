@@ -404,11 +404,7 @@ pub(super) fn sha256_hex(bytes: &[u8]) -> String {
 /// to the content root instead of to the selection. For the repository above:
 /// 6.6 MB / 457 files, 71 kB gzipped. A repository whose `content_root` is the
 /// checkout root pays for the whole checkout, minus [`EXCLUDED_BUNDLE_DIRS`].
-fn build_bundle(
-    root: &Path,
-    content_root: &str,
-    files: &[String],
-) -> Result<Vec<u8>, DomainError> {
+fn build_bundle(root: &Path, content_root: &str, files: &[String]) -> Result<Vec<u8>, DomainError> {
     for file in files {
         let resolved = resolve_under_root(root, file)?
             .ok_or_else(|| DomainError::FileNotFound { path: file.clone() })?;

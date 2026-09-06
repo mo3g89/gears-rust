@@ -92,6 +92,19 @@ integration = ["dep:testcontainers", "dep:testcontainers-modules"]
 # * `regex` — the runner's log-marker grammar
 #   (`manager/src/services/argo.rs:2736-2996`).
 # * `base64` — `=== TEST_CASE: <base64-json> ===` markers (`argo.rs:2921`).
+#
+# `tower`, `http-body` and `bytes` — `watch`'s own `#[cfg(test)]` module's
+# loopback `kube::Client` doubles (Task 17, review findings #20/#21; see that
+# module's doc for what they build and why `qa-plugin-k8s`'s own stub server
+# could not be reused as-is) — are **not** here. Fix round 1 moved them to
+# `[dev-dependencies]` below: a dev-dependency never ships, so it does not
+# need to be optional or named in this feature at all, and every real use of
+# all three is confined to `argo/watch.rs`'s `#[cfg(test)] mod tests` (the
+# module itself gated on this same `argo` feature). The first version put
+# them here on the reasoning "Cargo does not allow optional dev-dependencies"
+# — true, but the wrong conclusion: that rule only bites a dependency that
+# *needs* to be optional, and a dev-dependency's whole point is that it never
+# ships, so there was nothing to make optional in the first place.
 argo = ["dep:kube", "dep:k8s-openapi", "dep:regex", "dep:base64"]
 
 [dependencies]
@@ -209,6 +222,16 @@ regex = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 
 [dev-dependencies]
+# For `infra::executor::argo::watch`'s own loopback `kube::Client` doubles
+# (Task 17, fix round 1) — see the `[features]` note's `argo` entry for why
+# these live here rather than as optional entries in `[dependencies]`. Never
+# ships: real use is confined to that module's `#[cfg(test)]`, itself gated on
+# the non-default `argo` feature, so a default `cargo test` builds neither the
+# module nor these three. `util` is the feature `tower::service_fn` lives
+# behind.
+tower = { workspace = true, features = ["util"] }
+http-body = { workspace = true }
+bytes = { workspace = true }
 # Log-output assertions. Several guarantees in this crate are discharged by a
 # `tracing` event and nothing else — the frozen guide's mandatory expiry alert,
 # `lease_occupancy`'s fail-closed ERROR, and the dispatcher's one-WARN-per-pass
