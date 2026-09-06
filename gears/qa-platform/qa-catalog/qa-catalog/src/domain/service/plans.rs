@@ -177,14 +177,27 @@ impl<R: TestReposRepository> PlansService<R> {
             path: path.to_owned(),
         })?;
 
-        let content =
-            tokio::fs::read_to_string(&file)
-                .await
-                .map_err(|_| DomainError::PlanNotFound {
+        let content = match tokio::fs::read_to_string(&file).await {
+            Ok(source) => source,
+            // Genuinely not there: the caller-facing answer stays 404.
+            Err(error) if io_is_absent(&error) => {
+                return Err(DomainError::PlanNotFound {
                     repo_id,
                     branch: branch.to_owned(),
                     path: path.to_owned(),
-                })?;
+                });
+            }
+            // Anything else (EACCES, a mid-read IO failure, ...) is a fault,
+            // not an absence -- folding it into `PlanNotFound` told an
+            // operator with a misconfigured snapshot directory that their
+            // plan does not exist. Review finding #6.
+            Err(error) => {
+                return Err(DomainError::Internal(format!(
+                    "plan '{path}' in repository {repo_id} branch '{branch}' could not be \
+                     read: {error}"
+                )));
+            }
+        };
 
         let parsed = parse_plan_yaml(&content)?;
         Ok(to_sdk_plan(
@@ -225,9 +238,22 @@ impl<R: TestReposRepository> PlansService<R> {
         for file in files {
             let resolved = resolve_under_root(&root, file)?
                 .ok_or_else(|| DomainError::FileNotFound { path: file.clone() })?;
-            let source = tokio::fs::read_to_string(&resolved)
-                .await
-                .map_err(|_| DomainError::FileNotFound { path: file.clone() })?;
+            let source = match tokio::fs::read_to_string(&resolved).await {
+                Ok(source) => source,
+                // Genuinely not there: same 404-shaped answer as before.
+                Err(error) if io_is_absent(&error) => {
+                    return Err(DomainError::FileNotFound { path: file.clone() });
+                }
+                // Anything else is a fault: an EACCES here used to read as
+                // "file not found" and silently drop the file's exclusivity
+                // vote. Review finding #7.
+                Err(error) => {
+                    return Err(DomainError::Internal(format!(
+                        "file '{file}' in repository {repo_id} branch '{branch}' could not be \
+                         read: {error}"
+                    )));
+                }
+            };
             let parsed = parse_test_meta(&source);
             metas.push(TestFileMeta {
                 path: file.clone(),
@@ -375,18 +401,20 @@ fn walk_repo_universe(repo_id: Uuid, root: &Path) -> Vec<UniverseTest> {
         for test_file in &plan.test_files {
             // `test_files` is already normalized by the plan parser, which
             // ports legacy's `normalize_test_path` byte-for-byte.
-            let Ok(Some(resolved)) = resolve_under_root(root, test_file) else {
-                // Absent on this branch (or escaping the root): drop the
-                // entry rather than resolving it from somewhere else. This is
-                // legacy's branch-filtered behavior (`analytics.rs:861-865`);
-                // its lenient no-filter path fell back to other cached branch
-                // worktrees, which has no counterpart here because a read is
-                // always served from exactly one branch snapshot.
-                continue;
-            };
-            // One read per file, feeding both parsers — the reason
+            //
+            // This function returns `Vec<UniverseTest>`, not a `Result`, so a
+            // fault here still cannot fail the whole universe listing (that
+            // would turn one bad file into an outage for an analytics read,
+            // a bigger behaviour change than any review finding asked for —
+            // see finding #28's fix for the same shape). What changed is
+            // that "absent on this branch (or escaping the root)" is no
+            // longer the only reason this entry is dropped: an `EACCES` or
+            // other non-absent IO failure drops it too, and is warned rather
+            // than silently folded into "absent" (review finding #8).
+            //
+            // One read per file, feeding both parsers below — the reason
             // `case_count` lives beside `test_meta`.
-            let Ok(content) = std::fs::read_to_string(&resolved) else {
+            let Some(content) = read_universe_test_file(repo_id, root, test_file) else {
                 continue;
             };
             let meta = parse_test_meta(&content);
@@ -484,6 +512,38 @@ fn walk_repo_universe(repo_id: Uuid, root: &Path) -> Vec<UniverseTest> {
         .collect()
 }
 
+/// Resolve `test_file` under `root` and read its content for
+/// [`walk_repo_universe`]. `None` means "drop this entry from the universe",
+/// for either of two reasons: a plain absence (or an out-of-root escape),
+/// which stays silent as it always has, or a fault (EACCES, a mid-read IO
+/// failure) which is warned so it is not misread as an absence. Split out of
+/// `walk_repo_universe` to keep that function under the cognitive-complexity
+/// lint's threshold. Review finding #8.
+fn read_universe_test_file(repo_id: Uuid, root: &Path, test_file: &str) -> Option<String> {
+    let resolved = match resolve_under_root(root, test_file) {
+        Ok(Some(resolved)) => resolved,
+        Ok(None) => return None,
+        Err(error) => {
+            warn!(
+                repo_id = %repo_id, test_file = %test_file, error = %error,
+                "Skipping universe test file: could not resolve under content root"
+            );
+            return None;
+        }
+    };
+    match std::fs::read_to_string(&resolved) {
+        Ok(content) => Some(content),
+        Err(error) if io_is_absent(&error) => None,
+        Err(error) => {
+            warn!(
+                repo_id = %repo_id, test_file = %test_file, error = %error,
+                "Skipping universe test file: could not read file"
+            );
+            None
+        }
+    }
+}
+
 /// `TEST_META`'s `component`, else inferred from the path.
 ///
 /// Legacy `infer_component_from_path` (`analytics.rs:1794-1803`): the second
@@ -542,6 +602,23 @@ fn to_sdk_plan(
 // ---------------------------------------------------------------------------
 // Shared working-copy helpers (also used by `super::repos` / `super::bundles`)
 // ---------------------------------------------------------------------------
+
+/// Whether an IO error means "this path is not there" as opposed to "this
+/// path could not be read".
+///
+/// The distinction is load-bearing in this module: the not-there answers are
+/// `PlanNotFound` / `FileNotFound` / `Ok(None)`, which the REST layer renders
+/// 404 and which the exclusivity tier reads as "this file has no opinion". An
+/// `EACCES`, a `NotADirectory` or a mid-read IO failure answered the same
+/// way, so a misconfigured snapshot directory presented as a missing plan
+/// and an unreadable test file silently dropped its exclusivity vote.
+///
+/// `domain::service::repos` already draws this line at `:297` and `:336`.
+/// This is the same rule, named once so the sites below cannot drift.
+/// Review findings #6, #7, #8, #26.
+fn io_is_absent(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+}
 
 /// Validate a client-supplied relative path: non-empty, relative, no `..`
 /// (or root/prefix) components, no backslashes. Rejects with
@@ -605,7 +682,9 @@ pub(super) fn require_synced(repo: &TestRepository, branch: &str) -> Result<(), 
 /// (`<repos_dir>/<repo_id>/branches/<branch_dir>/<content_root>`), verifying
 /// it stays inside that branch's snapshot. A missing directory (never synced
 /// for this branch, or a wiped data dir) reads as
-/// [`DomainError::RepoNotSynced`].
+/// [`DomainError::RepoNotSynced`]; a directory that exists but could not be
+/// resolved (EACCES, ...) is [`DomainError::Internal`] instead — that case is
+/// a fault, not evidence the branch was never synced. Review finding #26.
 pub(super) fn content_root_dir(
     repos_dir: &Path,
     repo: &TestRepository,
@@ -626,8 +705,29 @@ pub(super) fn content_root_dir(
         workdir.join(&repo.content_root)
     };
 
-    let canonical_workdir = workdir.canonicalize().map_err(|_| not_synced())?;
-    let canonical_root = root.canonicalize().map_err(|_| not_synced())?;
+    // `RepoNotSynced` is right when the path is genuinely absent (never
+    // synced, or a wiped data dir); anything else (EACCES, ...) is a fault
+    // and must not be told to the caller as "not synced". Review finding #26.
+    let canonical_workdir = match workdir.canonicalize() {
+        Ok(path) => path,
+        Err(error) if io_is_absent(&error) => return Err(not_synced()),
+        Err(error) => {
+            return Err(DomainError::Internal(format!(
+                "repository {} working directory exists but could not be resolved: {error}",
+                repo.id
+            )));
+        }
+    };
+    let canonical_root = match root.canonicalize() {
+        Ok(path) => path,
+        Err(error) if io_is_absent(&error) => return Err(not_synced()),
+        Err(error) => {
+            return Err(DomainError::Internal(format!(
+                "repository {} content root exists but could not be resolved: {error}",
+                repo.id
+            )));
+        }
+    };
     if !canonical_root.starts_with(&canonical_workdir) {
         return Err(DomainError::Validation {
             field: "content_root".to_owned(),
@@ -642,12 +742,24 @@ pub(super) fn content_root_dir(
 
 /// Resolve `rel` under the canonicalized `root`, enforcing containment (this
 /// also neutralizes symlinks inside the working copy that point outside it).
-/// `Ok(None)` means the file does not exist; escapes are a `Validation` error.
+/// `Ok(None)` means the file does not exist; escapes are a `Validation`
+/// error; any other non-absent IO failure (EACCES, ...) is `Internal`
+/// (review finding #8).
 pub(super) fn resolve_under_root(root: &Path, rel: &str) -> Result<Option<PathBuf>, DomainError> {
     validate_rel_path("path", rel)?;
     let joined = root.join(rel);
-    let Ok(canonical) = joined.canonicalize() else {
-        return Ok(None);
+    let canonical = match joined.canonicalize() {
+        Ok(canonical) => canonical,
+        // Only "not there" is `Ok(None)`. An `EACCES` here used to read as
+        // "this file does not exist", which the caller turns into a 404 and
+        // the exclusivity tier turns into a dropped vote.
+        Err(error) if io_is_absent(&error) => return Ok(None),
+        Err(error) => {
+            return Err(DomainError::Internal(format!(
+                "path '{}' could not be resolved: {error}",
+                joined.display()
+            )));
+        }
     };
     if !canonical.starts_with(root) {
         return Err(DomainError::Validation {
@@ -806,7 +918,7 @@ fn list_test_files(root: &Path, plan_dir: &str) -> Vec<String> {
               file name (plans.rs:760), so `TEST_A.PY` is not a test file there either"
 )]
 fn collect_test_files(root: &Path, current: &Path, prefix: &str, files: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(current) else {
+    let Some(entries) = read_test_dir(current) else {
         return;
     };
 
@@ -835,19 +947,73 @@ fn collect_test_files(root: &Path, current: &Path, prefix: &str, files: &mut Vec
         }
 
         let rel = normalize_test_path(&format!("{prefix}/{name}"));
-        match resolve_under_root(root, &rel) {
-            Ok(Some(_)) => files.push(rel),
-            Ok(None) | Err(_) => {
-                warn!(file = %path.display(), "Skipping derived test path outside the content root");
-            }
+        record_derived_test_file(root, &path, rel, files);
+    }
+}
+
+/// `std::fs::read_dir` for [`collect_test_files`]'s recursive walk.
+///
+/// `list_test_files` returns `Vec<String>` (see its doc comment), so this
+/// cannot propagate a `Result` without cascading through it and
+/// `PlansService::get_plan`'s parse path (plans.rs:775) -- the same outage
+/// tradeoff `walk_repo_universe` avoids above. An absent directory (never
+/// materialized) stays a silent empty result; anything else is warned so an
+/// unreadable *directory* does not read as "no tests here" (review finding
+/// #8's rule, applied to the discovery walk). Split out to keep
+/// `collect_test_files` under the cognitive-complexity lint's threshold.
+fn read_test_dir(current: &Path) -> Option<std::fs::ReadDir> {
+    match std::fs::read_dir(current) {
+        Ok(entries) => Some(entries),
+        Err(error) if io_is_absent(&error) => None,
+        Err(error) => {
+            warn!(dir = %current.display(), error = %error, "Skipping unreadable test directory");
+            None
+        }
+    }
+}
+
+/// Resolve a derived test path back under `root` and record it, for
+/// [`collect_test_files`]. Split out to keep that function under the
+/// cognitive-complexity lint's threshold.
+///
+/// `Ok(None)` (not resolvable under the root at all: does not exist, or a
+/// symlink escape) keeps the message this always had. A fault (e.g. EACCES)
+/// is not the same claim as "outside the content root": it gets its own
+/// message naming the error rather than being folded into that one --
+/// `Ok(None) | Err(_)` used to answer both the same way (review finding #8).
+fn record_derived_test_file(root: &Path, path: &Path, rel: String, files: &mut Vec<String>) {
+    match resolve_under_root(root, &rel) {
+        Ok(Some(_)) => files.push(rel),
+        Ok(None) => {
+            warn!(file = %path.display(), "Skipping derived test path outside the content root");
+        }
+        Err(error) => {
+            warn!(
+                file = %path.display(), error = %error,
+                "Skipping derived test path: could not resolve under content root"
+            );
         }
     }
 }
 
 /// Legacy `file_contains_test_meta` (plans.rs:776-780): an unreadable file
-/// simply does not qualify.
+/// simply does not qualify -- true only when the file is genuinely absent.
+/// This still returns `bool`, not `Result`: propagating would cascade
+/// through `list_test_files` and `collect_test_files` up to the plan-parsing
+/// call at plans.rs:775, failing an entire plan over one unreadable test
+/// file (the same tradeoff `collect_test_files` and `walk_repo_universe`
+/// avoid). A non-absent failure (EACCES, ...) is warned instead of silently
+/// answering `false`, so it is not misread as "no `TEST_META` here". Review
+/// findings #6, #7, #8, #26.
 fn file_contains_test_meta(path: &Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|content| content.contains("TEST_META"))
+    match std::fs::read_to_string(path) {
+        Ok(content) => content.contains("TEST_META"),
+        Err(error) if io_is_absent(&error) => false,
+        Err(error) => {
+            warn!(file = %path.display(), error = %error, "Could not read test file to check for TEST_META");
+            false
+        }
+    }
 }
 
 /// Read + parse one plan file; `None` (with a warning) on any failure —

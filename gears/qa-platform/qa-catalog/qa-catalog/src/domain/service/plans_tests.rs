@@ -38,6 +38,25 @@ async fn build_service(
     PlansService::new(db, repos, repos_dir, enforcer)
 }
 
+/// Whether mode bits actually deny access on this host.
+///
+/// Task 11 needs a reliable non-`NotFound` IO error (`PermissionDenied` on a
+/// `chmod 000` file) to prove an unreadable-but-present file is `Internal`,
+/// not "absent". Root cannot be denied by mode bits, so tests that need this
+/// probe first and skip rather than looking up the uid: creating the file,
+/// attempting the read, and checking whether it *succeeded* tests the
+/// property the test actually depends on ("can mode bits deny this
+/// process?"), not a proxy for it, and needs no `libc`/`nix` dependency.
+fn permissions_are_enforced() -> bool {
+    let probe = tempfile::NamedTempFile::new().unwrap();
+    std::fs::set_permissions(
+        probe.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+    std::fs::read(probe.path()).is_err()
+}
+
 /// Tempdir + synced repo fixture whose `main` branch snapshot exists under
 /// it (content reads resolve `<repos_dir>/<repo_id>/branches/<branch_dir>`).
 fn synced_fixture(repo_id: Uuid) -> (tempfile::TempDir, Arc<MockTestReposRepository>, PathBuf) {
@@ -481,6 +500,112 @@ fn require_synced_rejects_a_never_synced_repo() {
     ));
 }
 
+/// A working directory that exists but cannot be resolved is not "never
+/// synced". `content_root_dir` mapped every `canonicalize` failure on the
+/// workdir or the content root to `RepoNotSynced`, which is right when the
+/// path is absent and wrong otherwise. Review finding #26.
+///
+/// `EACCES` on `canonicalize` needs a directory with its execute bit
+/// removed somewhere *inside* the path being resolved (denying traversal),
+/// not just on the leaf: stat-ing an entry only needs search permission on
+/// its containing directory, not on the entry itself. So this chmods the
+/// `branches` directory that contains the branch workdir, not the workdir
+/// itself. Skipped when running as root, which cannot be denied this way.
+#[test]
+fn content_root_dir_reports_internal_not_not_synced_on_a_permission_failure() {
+    if !permissions_are_enforced() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_id = Uuid::new_v4();
+    let repo = repo_fixture(repo_id, true);
+    let workdir = crate::infra::git::layout::branch_workdir(tmp.path(), repo_id, "main");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let branches_dir = workdir.parent().unwrap();
+    std::fs::set_permissions(
+        branches_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+
+    let err = super::plans::content_root_dir(tmp.path(), &repo, "main").unwrap_err();
+
+    // Restore so the tempdir's own cleanup can traverse `branches` again.
+    std::fs::set_permissions(
+        branches_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    assert!(
+        matches!(err, DomainError::Internal(_)),
+        "an EACCES resolving the workdir must not read as RepoNotSynced; got {err:?}"
+    );
+}
+
+/// The other half: a genuinely never-materialized branch is still
+/// `RepoNotSynced`.
+#[test]
+fn content_root_dir_still_reports_not_synced_when_genuinely_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_id = Uuid::new_v4();
+    let repo = repo_fixture(repo_id, true);
+    // No workdir created at all: this branch was never materialized.
+    let err = super::plans::content_root_dir(tmp.path(), &repo, "main").unwrap_err();
+    assert!(
+        matches!(err, DomainError::RepoNotSynced { .. }),
+        "got {err:?}"
+    );
+}
+
+/// A path that cannot be resolved (EACCES on a directory in the middle of
+/// it) is not the same as a path that does not exist. `resolve_under_root`
+/// answered both with `Ok(None)`, which callers turn into a 404 (`get_plan`,
+/// `get_test_meta`) or a silently dropped exclusivity vote
+/// (`walk_repo_universe`). Review finding #8.
+///
+/// Skipped when running as root, which cannot be denied by mode bits.
+#[test]
+fn resolve_under_root_reports_internal_not_absent_on_a_permission_failure() {
+    if !permissions_are_enforced() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let locked_dir = root.join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    std::fs::write(locked_dir.join("file.py"), "pass\n").unwrap();
+    std::fs::set_permissions(
+        &locked_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+
+    let err = super::plans::resolve_under_root(root, "locked/file.py").unwrap_err();
+
+    // Restore so the tempdir's own cleanup can traverse `locked` again.
+    std::fs::set_permissions(
+        &locked_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    assert!(
+        matches!(err, DomainError::Internal(_)),
+        "an EACCES resolving a path must not silently read as absent; got {err:?}"
+    );
+}
+
+/// The other half: a genuinely missing path still resolves to `Ok(None)`.
+/// Without this, the fix above could regress every "does not exist" answer
+/// into an `Internal` error and still pass.
+#[test]
+fn resolve_under_root_still_reports_ok_none_when_genuinely_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolved = super::plans::resolve_under_root(tmp.path(), "nope.py").unwrap();
+    assert_eq!(resolved, None, "a genuinely missing path must stay Ok(None)");
+}
+
 #[tokio::test]
 async fn get_plan_returns_single_plan_by_path() {
     let tenant_id = Uuid::new_v4();
@@ -505,6 +630,59 @@ async fn get_plan_returns_single_plan_by_path() {
         matches!(err, DomainError::PlanNotFound { .. }),
         "got {err:?}"
     );
+}
+
+/// A file that exists but cannot be read is not a missing plan.
+///
+/// `get_plan` mapped every `read_to_string` failure to `PlanNotFound`, which
+/// the REST layer renders 404. An operator whose snapshot directory has
+/// wrong permissions was told the plan does not exist, and went looking in
+/// the repository instead of at the filesystem. `domain::service::repos`
+/// already draws this line correctly at `:297` and `:336`; this file did
+/// not. Review finding #6.
+///
+/// Skipped when running as root, which cannot be denied by mode bits.
+#[tokio::test]
+async fn an_unreadable_plan_file_is_internal_not_not_found() {
+    if !permissions_are_enforced() {
+        return;
+    }
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, workdir) = synced_fixture(repo_id);
+    write(&workdir, "plans/locked.yaml", "name: x\n");
+    std::fs::set_permissions(
+        workdir.join("plans/locked.yaml"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+    let err = svc
+        .get_plan(&ctx(tenant_id), repo_id, "main", "plans/locked.yaml")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, DomainError::Internal(_)),
+        "an EACCES on an existing plan must not be PlanNotFound; got {err:?}"
+    );
+}
+
+/// The other half: a genuinely absent plan is still a 404. Without this,
+/// the fix above could regress every 404 into a 500 and still pass.
+#[tokio::test]
+async fn a_genuinely_absent_plan_is_still_not_found() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _workdir) = synced_fixture(repo_id);
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+
+    let err = svc
+        .get_plan(&ctx(tenant_id), repo_id, "main", "plans/nope.yaml")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::PlanNotFound { .. }), "got {err:?}");
 }
 
 #[tokio::test]
@@ -568,6 +746,65 @@ async fn get_test_meta_rejects_path_traversal() {
             "expected traversal rejection for {escape:?}, got {err:?}"
         );
     }
+}
+
+/// A file that exists but cannot be read is not a missing test file.
+///
+/// `get_test_meta` mapped every `read_to_string` failure to `FileNotFound`,
+/// silently dropping the file's exclusivity vote instead of surfacing the
+/// permission problem. Review finding #7.
+///
+/// Skipped when running as root, which cannot be denied by mode bits.
+#[tokio::test]
+async fn an_unreadable_test_file_is_internal_not_file_not_found() {
+    if !permissions_are_enforced() {
+        return;
+    }
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, workdir) = synced_fixture(repo_id);
+    write(&workdir, "tests/test_locked.py", META);
+    std::fs::set_permissions(
+        workdir.join("tests/test_locked.py"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+    let err = svc
+        .get_test_meta(
+            &ctx(tenant_id),
+            repo_id,
+            "main",
+            &["tests/test_locked.py".to_owned()],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, DomainError::Internal(_)),
+        "an EACCES on an existing test file must not be FileNotFound; got {err:?}"
+    );
+}
+
+/// The other half: a genuinely absent test file is still `FileNotFound`.
+#[tokio::test]
+async fn a_genuinely_absent_test_file_is_still_file_not_found() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _workdir) = synced_fixture(repo_id);
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+
+    let err = svc
+        .get_test_meta(
+            &ctx(tenant_id),
+            repo_id,
+            "main",
+            &["tests/nope.py".to_owned()],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::FileNotFound { .. }), "got {err:?}");
 }
 
 // ---------------------------------------------------------------------------
