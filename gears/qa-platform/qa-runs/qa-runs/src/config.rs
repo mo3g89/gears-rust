@@ -579,21 +579,41 @@ pub struct ArgoExecutorConfig {
     /// **What the give-up does now**: it ends the whole observation without a
     /// `Finished` — see
     /// [`Watcher::follow`](crate::infra::executor::argo::watch::Watcher::follow)'s
-    /// own doc for the trace and for why end-of-file is the only exit that
-    /// still reports one. The run stays in `active_states`, `reattach_watchers`
-    /// re-attaches on its next 5 s tick, and `LogResume` suppresses whatever
-    /// was already archived. A pod that was merely quiet loses nothing at all;
-    /// it resumes.
+    /// own doc for the trace, for why end-of-file is the only exit that still
+    /// reports one, and for the two costs summarised below. The run stays in
+    /// `active_states`, `reattach_watchers` re-attaches on its next 5 s tick,
+    /// and `LogResume` suppresses whatever was already archived, so a pod that
+    /// was merely quiet resumes rather than duplicating its log — **unless that
+    /// node's log has rotated**, in which case `LineSkip`'s first-line guard
+    /// mismatches and that node's archive grows unbounded on every further
+    /// re-attach. Pre-existing, but reachable more often now that every reset
+    /// produces a re-attach where it used to produce none.
     ///
-    /// **The cost this field now buys is a loop, not a truncation.** A
-    /// genuinely wedged connection wedges the re-attach too, so the run
-    /// re-reads that pod's log every `log_follow_idle_seconds` until the
-    /// control-plane timeout sweep reclaims it — bounded, and loud: each pass
-    /// logs a `warn!` naming the pod, the node and this deadline. Lowering this
-    /// value tightens that loop; raising it loosens the loop and lengthens the
-    /// stall a wedged pod imposes on its siblings, since `drain_pods` follows
-    /// pods one at a time inside `run`'s own loop. That is the trade this
-    /// number now makes, and neither direction silently drops a test result.
+    /// **The cost this field now buys is a loop, not a truncation** — with two
+    /// qualifications that "bounded" and "loud" would otherwise paper over:
+    ///
+    /// * The loop terminates at the control-plane timeout sweep, **except** for
+    ///   a run whose `timeout_at` is NULL because an unclamped `plan.yaml`
+    ///   `timeout_seconds` saturated. `domain::service::launch` records that
+    ///   case and that `timeout_candidates_query` excludes it — *"a run the
+    ///   control-plane timeout sweep can never reclaim"* — so for those the
+    ///   loop has no terminator at all.
+    /// * Each pass logs a `warn!` naming the pod, the node and this deadline —
+    ///   **while the Argo workflow object still exists.** Once
+    ///   [`Self::workflow_ttl_seconds`] collects it, `run`'s `Ok(None)` arm
+    ///   returns immediately with no log line of its own and the period tightens
+    ///   from `this value + 5 s` to the bare 5 s tick, traced only by
+    ///   `service::watch`'s INFO. For a run whose timeout exceeds the workflow
+    ///   TTL that is the steady state.
+    ///
+    /// Lowering this value tightens the loop; raising it loosens the loop and
+    /// lengthens the window in which a wedged pod's siblings go unfollowed —
+    /// `drain_pods` follows pods one at a time and now **aborts** at the first
+    /// give-up rather than skipping past it, so on a multi-pod workflow the
+    /// siblings behind a persistently wedged pod are not merely delayed. See
+    /// `follow`'s own doc, which names that regression and the per-pod shape
+    /// that would fix it. That is the trade this number now makes, and neither
+    /// direction silently reports a verdict over a log it did not read.
     ///
     /// Read through `.max(1)` at the call site (`Watcher::follow`), the same
     /// guard [`Self::status_poll_seconds`] gets, so a misconfigured `0` cannot
