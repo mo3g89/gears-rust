@@ -5,7 +5,7 @@
 //! `infra::logs::RunLogBroadcaster`, which fans it out verbatim, and this module
 //! is the last thing between that string and an operator's browser.
 //!
-//! # The three properties this module owns
+//! # The three properties this endpoint holds
 //!
 //! 1. **A line cannot forge a frame.** SSE delimits events with newlines: a
 //!    payload containing `\n\nevent: alert\ndata: ...\n\n` becomes *two* events
@@ -26,15 +26,17 @@
 //!    adapter that has not taken it up.
 //! 3. **A stream ends.** See [`MAX_STREAM_DURATION`].
 //!
-//! # Where the first two properties are implemented
+//! # Where the first two are implemented, and why not here
 //!
-//! In [`domain::repos::log_line`](crate::domain::repos), since Task 21, and
-//! re-exported here: the write-side cap that
-//! `argo::watch::handle_line` truncates to is derived from
-//! [`MAX_LINE_BYTES`] and decides what the archive holds, so a domain module
-//! and an infra module both needed these and were importing them out of the
-//! transport layer to get them (review findings #15, #16, #39). This module's
-//! `MAX_LINE_BYTES` paragraph had named that complaint and deferred it.
+//! In `domain::repos::log_line` (re-exported from [`crate::domain::repos`])
+//! since Task 21, and re-exported again here so a handler's imports from this
+//! module are unchanged. The write-side cap `argo::watch::handle_line`
+//! truncates to is derived from [`MAX_LINE_BYTES`] and decides what the
+//! archive holds, so a domain module and an infra module both needed these
+//! numbers and were importing them out of the transport layer to get them
+//! (review findings #15, #16, #39). This module's own `MAX_LINE_BYTES`
+//! paragraph had named that complaint and deferred it; they are still the
+//! endpoint's properties, they are just no longer declared at the endpoint.
 //!
 //! What is still declared here is the framing itself: [`log_event`], which
 //! builds the endpoint's payload, and the two connection constants below.
