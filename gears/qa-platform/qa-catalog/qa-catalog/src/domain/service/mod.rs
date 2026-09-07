@@ -129,10 +129,8 @@ pub mod resources {
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
-    pub const PLAN: ResourceType = ResourceType::from_static(
-        "qa.plan",
-        &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
-    );
+    pub const PLAN: ResourceType =
+        ResourceType::from_static("qa.plan", &[pep_properties::OWNER_TENANT_ID]);
 
     pub const CUSTOM_PLAN: ResourceType = ResourceType::from_static(
         "qa.custom_plan",
@@ -284,5 +282,27 @@ where
             ),
             plugin_registry,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resources;
+    use toolkit_security::pep_properties;
+
+    /// **A declared PEP property that no call site supplies is a constraint
+    /// nothing can satisfy.**
+    ///
+    /// `qa.plan` declared `RESOURCE_ID` while every `resources::PLAN` call passes
+    /// `None` -- plans are addressed by (repo, branch, path), not by a row id, so
+    /// there is no id to supply. `qa.jira_config` already dropped its for the same
+    /// reason. Review finding #27.
+    #[test]
+    fn qa_plan_declares_only_the_properties_its_call_sites_supply() {
+        assert_eq!(
+            resources::PLAN.supported_properties(),
+            &[pep_properties::OWNER_TENANT_ID],
+            "qa.plan has no row id to constrain on"
+        );
     }
 }
