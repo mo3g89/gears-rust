@@ -97,6 +97,13 @@ toolkit-odata = { workspace = true, features = ["with-utoipa"] }
 toolkit-security = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
 toolkit-macros = { workspace = true }
+# Link-time GTS permission catalog (`src/gts/permissions.rs`): declares
+# AuthzPermissionV1 instances into the toolkit-gts inventory the
+# types-registry aggregates at boot.
+toolkit-gts = { workspace = true }
+# `gts_id!`'s upstream validation (`GtsIdPattern`) and `GTS_ID_PREFIX`, which
+# `toolkit-gts`'s macros delegate to.
+gts = { workspace = true }
 
 # ── The `runner-secret` feature's dependencies, all optional ──────────────────
 kube = { workspace = true, features = ["client", "rustls-tls", "aws-lc-rs"], optional = true }

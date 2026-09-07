@@ -56,6 +56,10 @@ toolkit-db-macros = { workspace = true }
 toolkit-security = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
 toolkit-macros = { workspace = true }
+# Link-time GTS permission catalog (`src/gts/permissions.rs`): declares
+# AuthzPermissionV1 instances into the toolkit-gts inventory the
+# types-registry aggregates at boot.
+toolkit-gts = { workspace = true }
 
 serde-saphyr = { workspace = true }
 regex = { workspace = true }

@@ -68,6 +68,9 @@ pub mod api;
 pub mod config;
 pub mod domain;
 pub mod gear;
+/// The GTS permission catalog (`AuthzPermissionV1` instances) — review
+/// finding #1.
+pub mod gts;
 pub mod infra;
 
 pub use gear::QaInsights;

@@ -374,6 +374,12 @@ lint:
 
 ## Validate GTS identifiers in .md and .json files (DE0903)
 # Uses gts-validator binary (install via: cargo install gts-validator)
+#
+# `tsconfig*.json` is excluded because tsconfig is JSONC by specification --
+# TypeScript's own format permits comments, and Vite's template ships them
+# ("/* Bundler mode */") -- so the validator's strict JSON parser reports a
+# scan error on a file that is not malformed. No tsconfig can contain a GTS
+# id, so nothing is lost by not scanning it.
 
 gts-docs:
 	$(call print_target_banner)
@@ -385,6 +391,7 @@ gts-docs:
 		--exclude "docs/web-docs/*" \
 		--exclude "gears/chat-engine/*" \
 		--exclude "**/helm/*/templates/*" \
+		--exclude "**/tsconfig*.json" \
 		docs gears libs examples
 
 install-tools:

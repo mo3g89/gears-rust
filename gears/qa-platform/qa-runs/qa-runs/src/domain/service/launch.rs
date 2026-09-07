@@ -16,7 +16,7 @@
 //!
 //! The source system does not sync during exclusivity resolution and says why:
 //! *"admission must stay cheap - the sync and the bundle build are what
-//! `dispatch` is for - so a TEST_META change pushed between the last sync and
+//! `dispatch` is for - so a `TEST_META` change pushed between the last sync and
 //! this launch is not seen. That is a documented limitation of the design, not
 //! an oversight"* (`manager/src/services/exclusivity.rs:397-400`; the whole doc
 //! comment on `scan_test_meta` is `:394-402`). Ported: this

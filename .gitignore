@@ -404,9 +404,21 @@ testing/e2e/logs/
 # runtime; a file here is an operator's local copy only.
 gears/qa-platform/deploy/remote/*kubeconfig*.yaml
 
-# A 280-line review of a DIFFERENT branch, swept into this tree's index by a
-# `git add -A` and untracked again by the product-plugins branch (finding I-6).
-# Ignored rather than deleted: it is someone's working copy, and the next
-# `git add -A` would otherwise put it straight back (re-review, N-4). Remove
-# this line if `docs/Reviews/` becomes a tracked directory.
+# THIS subsystem's own review: the 393-line, 55-finding merged list that the
+# whole review-remediation branch exists to answer, and which Phase 7 itself
+# edited (its "closed by" annotations are dated 2026-09-07). An earlier
+# 280-line version of the same document was deleted on
+# `backup/pre-squash-qa-product-plugins` (`dce9bbad4`, finding I-6); the
+# comment that used to stand here described that deletion and called the file
+# "a review of a DIFFERENT branch", which is false of what is ignored today.
+#
+# Ignored rather than deleted: it is a working copy, and the next `git add -A`
+# would otherwise sweep it into the index (re-review, N-4). The consequence is
+# worth stating: the review and every annotation on it are invisible to the
+# repository, so durable records live in the spec's §12 and in
+# `gears/qa-platform/docs/FOOTPRINT-OUTSIDE-QA-PLATFORM.md` §4.2 instead.
+#
+# Whether `docs/Reviews/` should become a tracked directory is OPEN and belongs
+# to whoever owns this branch - the remediation deliberately did not take that
+# decision. Remove this line if it does become tracked.
 gears/qa-platform/docs/Reviews/qa-platform-review-findings.md

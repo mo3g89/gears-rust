@@ -154,6 +154,10 @@ aws-lc-rs = { workspace = true }
 # The wire encoding of the HMAC tag: `hex::encode`/`hex::decode` over the
 # 32-byte `HMAC_SHA256` output, so it can ride a URL query parameter as ASCII.
 hex = { workspace = true }
+# `gts_id!`'s upstream validation (`GtsIdPattern`) and `GTS_ID_PREFIX`, which
+# `toolkit-gts`'s macros delegate to. Same pairing qa-catalog's and
+# qa-environments' Cargo.toml carry.
+gts = { workspace = true }
 # Task 11: the eleven `infra/storage/entity/*.rs` entities. `sea-orm-migration`
 # re-exports the crate, but a `DeriveEntityModel` expansion names `::sea_orm`
 # directly, so the direct dependency is required rather than stylistic.
@@ -193,6 +197,10 @@ time = { workspace = true }
 # C's final review, since Cargo unifies features across dependency kinds when
 # building tests and a second line bought nothing but a second place to edit.
 tokio = { workspace = true }
+# Link-time GTS permission catalog (`src/gts/permissions.rs`): declares
+# AuthzPermissionV1 instances into the toolkit-gts inventory the
+# types-registry aggregates at boot.
+toolkit-gts = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
