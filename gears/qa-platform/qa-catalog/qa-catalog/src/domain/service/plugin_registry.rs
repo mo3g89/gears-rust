@@ -145,7 +145,7 @@ impl<P: ProductsRepository> ProductPluginPresence for QaProductRegistry<P> {
 }
 
 impl<P: ProductsRepository> QaProductRegistry<P> {
-    pub(crate) fn new(
+    pub fn new(
         db: Arc<DbProvider>,
         repo: Arc<P>,
         policy_enforcer: PolicyEnforcer,
@@ -180,7 +180,7 @@ impl<P: ProductsRepository> QaProductRegistry<P> {
     ///   lines below said the opposite, in the same function).
     /// - [`DomainError::Forbidden`] when policy denies the product read.
     #[instrument(skip(self, ctx), fields(product_id = %product_id))]
-    pub(crate) async fn plugin_for(
+    pub async fn plugin_for(
         &self,
         ctx: &SecurityContext,
         product_id: Uuid,
@@ -270,7 +270,7 @@ impl<P: ProductsRepository> QaProductRegistry<P> {
     ///   plugins" are different facts, and answering the first with the
     ///   second would tell an operator their plugins are gone.
     #[instrument(skip(self, ctx))]
-    pub(crate) async fn list_registered_plugins(
+    pub async fn list_registered_plugins(
         &self,
         ctx: &SecurityContext,
     ) -> Result<Vec<RegisteredProductPlugin>, DomainError> {

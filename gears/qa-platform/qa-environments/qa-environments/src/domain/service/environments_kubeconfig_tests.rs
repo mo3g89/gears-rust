@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use credstore_sdk::{CredStoreClientV1, SecretRef, SharingMode};
 use qa_environments_sdk::{CredentialMaterial, EnvironmentPatch, NewEnvironment};
+use toolkit_odata::ODataQuery;
 use uuid::Uuid;
 
 use crate::api::rest::dto::{CreateEnvironmentReq, EnvironmentDto, UpdateEnvironmentReq};
@@ -325,9 +326,10 @@ async fn supplying_both_a_reference_and_a_document_is_a_validation_error_naming_
     assert!(
         services
             .environments
-            .list_environments(&ctx(tenant))
+            .list_environments(&ctx(tenant), &ODataQuery::default())
             .await
             .unwrap()
+            .items
             .is_empty()
     );
 }
@@ -441,9 +443,10 @@ async fn a_failed_credstore_write_creates_no_environment() {
     assert!(
         services
             .environments
-            .list_environments(&ctx(tenant))
+            .list_environments(&ctx(tenant), &ODataQuery::default())
             .await
             .unwrap()
+            .items
             .is_empty(),
         "no row may exist when the secret could not be stored"
     );

@@ -84,7 +84,7 @@ use uuid::Uuid;
 ///
 /// **Task 15 (review finding #30) is one adapter taking that obligation up.**
 /// `infra::executor::argo::watch::handle_line` now truncates with
-/// `api::rest::sse::sanitize_line_for_archive` before a line ever reaches
+/// `domain::repos::sanitize_line_for_archive` before a line ever reaches
 /// `ExecutionEvent::Log`, so the argo adapter's own contribution to this
 /// buffer is bounded. This is not true of every adapter: `MockRunExecutor`
 /// does not truncate, and neither would the HTTP-push producer this
@@ -202,7 +202,7 @@ pub const MAX_SUBSCRIBERS_PER_RUN: usize = 16;
 /// **The prefix is a convention, not a guarantee**: published lines are the
 /// execution plane's bytes verbatim, so a runner printing this exact text is
 /// indistinguishable from a real gap. Same caveat as
-/// `api::rest::sse`'s truncation marker, and the same remedy if it ever
+/// `domain::repos::log_line`'s truncation marker, and the same remedy if it ever
 /// matters — a distinct event type rather than a magic string.
 ///
 /// **Explicit rather than silent, which is the requirement.** `tokio`'s

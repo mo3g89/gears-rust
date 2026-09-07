@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::api::rest::dto::{NewScheduleReq, ScheduleDto, UpdateScheduleNotificationsReq};
 use crate::api::rest::error::as_schedule_error;
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 
 /// `GET /qa/v1/schedules`
 ///
@@ -253,8 +253,8 @@ mod tests {
         }
     }
 
-    /// The body a client receives, as JSON, for the reason `api::rest::error`'s
-    /// own helper gives: `Problem` is the type that becomes the response, and a
+    /// The body a client receives, as JSON, for the reason `domain::error`'s
+    /// own test helper gives: `Problem` is the type that becomes the response, and a
     /// `Debug` rendering is a superset of the wire.
     fn wire(req: NewScheduleReq) -> (u16, String) {
         let error = decode_payload(req).expect_err("this payload must be refused");
@@ -395,7 +395,7 @@ mod tests {
                 name: "nightly".to_owned(),
             }),
             (404, |id| DomainError::ScheduleNotFound { id }),
-            (500, |_| DomainError::Database("driver text".to_owned())),
+            (500, |_| DomainError::database("driver text")),
         ];
 
         for (expected_status, make) in cases {
@@ -435,7 +435,7 @@ mod tests {
     /// this gear is written to close.
     ///
     /// Asserted on the whole `cf.qa.runs.run.v1~` token, not on `"run "` with a
-    /// trailing space — which is how `api::rest::error`'s own
+    /// trailing space — which is how `domain::error`'s own
     /// `forbidden_is_403_and_says_nothing_about_what_was_denied` missed this for
     /// the whole of Phase B. The run's gts id has no trailing space, so that
     /// test's oracle list could never have matched it.

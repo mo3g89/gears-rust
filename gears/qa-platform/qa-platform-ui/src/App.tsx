@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { ThemeProvider } from './components/theme-provider';
 import { ConfirmProvider } from './components/ui/confirm-dialog';
@@ -28,39 +28,7 @@ import { NotificationsLayoutPage } from './pages/notifications/NotificationsLayo
 import { NotificationsEmailPage } from './pages/notifications/NotificationsEmailPage';
 import { NotificationsSlackPage } from './pages/notifications/NotificationsSlackPage';
 import { AuthProvider, AuthCallbackPage, LoginPage, RequireAuth } from './auth';
-import { ApiError } from './api/client';
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      refetchOnWindowFocus: false,
-      /**
-       * One retry for a transient failure, and **none for a 401**.
-       *
-       * A 401 is a statement about the session, not about this request, so
-       * retrying it cannot succeed — it only doubles the request volume of a
-       * broken session. Measured on this stack before this rule and
-       * `RequireAuth` existed, by counting an unauthenticated headless browser's
-       * requests on `/runs`: **20 `/qa/v1` requests in 25 seconds** on an
-       * unseeded deployment and **34 in 25 seconds** once `smoke.sh` had seeded
-       * it — every one a 401, with no end condition, because `refetchInterval`
-       * keeps polling through errors and `retry: 1` doubled each cycle. The
-       * gateway's rate limiter answered 429 with a twelve-hour `retry_after` to
-       * *every* client on the host as a result.
-       *
-       * `RequireAuth` is the structural half of the fix (an unauthenticated app
-       * mounts no queries at all) and `@/auth/tokenState` handles a token that
-       * dies mid-session; this is the cheap third guard for anything that gets
-       * past both.
-       */
-      retry: (failureCount, error) => {
-        if (error instanceof ApiError && error.status === 401) return false;
-        return failureCount < 1;
-      },
-      staleTime: 30000, // 30 seconds
-    },
-  },
-});
+import { queryClient } from './api/queryClient';
 
 /** `/platforms` -> `/environments` (D5's route rename), kept reachable so a
  *  bookmarked or shared link still lands.

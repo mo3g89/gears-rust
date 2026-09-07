@@ -348,38 +348,92 @@ pub struct NodeCounts {
     pub ready_worker: u32,
 }
 
+/// The verdict of one cluster-health read: the four a successful read can
+/// reach, plus [`Self::Unreachable`] for a read that failed.
+///
+/// # Why this is an enum and no longer a `String`
+///
+/// [`ClusterHealthView::status`] carried these five words as free text, with
+/// the value space written out in a doc comment (review finding #12). The
+/// spellings are capitalised, unlike every other status vocabulary in this
+/// subsystem — `qa_runs_sdk::RunState`'s lowercase set and
+/// `qa_product_sdk::HealthState`'s — and that difference is preserved by
+/// [`Self::as_str`], which is the sole encoder. `cluster_status_tests` pins
+/// all five spellings; do not "normalise" them.
+///
+/// `"Unreachable"` is this SDK's own name for a failed read. The gear's
+/// internal `ClusterStatus` domain type deliberately had no such variant,
+/// because unreachable is the absence of a reading rather than a property of
+/// one that succeeded — that type is deleted now, and this whole view is
+/// unpopulated (see [`NodeSummary`]'s header, re-review N-7).
+///
+/// # Why `Unreachable` carries no message
+///
+/// [`ClusterHealthView::status_message`] is populated only for this variant,
+/// and an `Unreachable { message: String }` variant would make that half of
+/// the invariant unbreakable. It is a plain unit variant anyway, for two
+/// reasons. It would hold only *half*: `nodes` and `counts` must also be empty
+/// for an unreachable read (D-CH-3), and a data-carrying variant cannot say
+/// so, which would leave the pair split between a type and a doc comment
+/// rather than moving it. And nothing populates [`ClusterHealthView`] today,
+/// so the shape a future producer must satisfy is better chosen alongside that
+/// producer than guessed at here — this change is a retype of a documented
+/// closed set, deliberately not a redesign of a struct with no callers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClusterStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+    Warning,
+    /// The read itself failed. [`ClusterHealthView::status_message`] says why,
+    /// and `nodes`/`counts` are empty.
+    Unreachable,
+}
+
+impl ClusterStatus {
+    /// The documented spelling, and the sole encoder — capitalised, unlike
+    /// `qa_runs_sdk::RunState::as_str`'s lowercase set.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "Healthy",
+            Self::Degraded => "Degraded",
+            Self::Unhealthy => "Unhealthy",
+            Self::Warning => "Warning",
+            Self::Unreachable => "Unreachable",
+        }
+    }
+}
+
 /// One environment's cluster-health reading, as of [`Self::checked_at`].
 ///
 /// # Why this is one optional field on [`Environment`], not several
 ///
 /// `Environment::cluster` being `None` means "no cycle has reached this
-/// environment"; `Some(_)` here, even with `status == "Unreachable"`, means one
-/// has. A set of flat nullable fields (`cluster_status: Option<String>` and
-/// so on, each independently `None`) cannot represent that distinction: both
-/// "never checked" and "checked, unreachable, nothing to show" would read as
-/// all-`None`. One optional struct keeps the three states — never checked,
-/// checked-and-failed, checked-and-read — distinguishable at the type level.
+/// environment"; `Some(_)` here, even with [`ClusterStatus::Unreachable`],
+/// means one has. A set of flat nullable fields (`cluster_status:
+/// Option<String>` and so on, each independently `None`) cannot represent that
+/// distinction: both "never checked" and "checked, unreachable, nothing to
+/// show" would read as all-`None`. One optional struct keeps the three states
+/// — never checked, checked-and-failed, checked-and-read — distinguishable at
+/// the type level.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClusterHealthView {
-    /// `"Healthy"`, `"Degraded"`, `"Unhealthy"`, `"Warning"` for a successful
-    /// read, or `"Unreachable"` for a read that failed. `"Unreachable"` is
-    /// this SDK's own name for that outcome. The gear's internal
-    /// `ClusterStatus` domain type deliberately had no such variant, because
-    /// unreachable is the absence of a reading rather than a property of one
-    /// that succeeded — that type is deleted now, and this whole view is
-    /// unpopulated (see [`NodeSummary`]'s header, re-review N-7).
-    pub status: String,
-    /// Populated only when `status == "Unreachable"`; `None` for every other
-    /// status, which the UI composes from `status` and `counts` instead.
-    /// Always text already classified by the observer, never a formatted
-    /// `kube::Error`.
+    /// The read's verdict. A closed set since Task 20 — see [`ClusterStatus`],
+    /// which also records why `Unreachable` does not carry
+    /// [`Self::status_message`].
+    pub status: ClusterStatus,
+    /// Populated only when [`Self::status`] is [`ClusterStatus::Unreachable`];
+    /// `None` for every other status, which the UI composes from `status` and
+    /// `counts` instead. Always text already classified by the observer, never
+    /// a formatted `kube::Error`.
     pub status_message: Option<String>,
-    /// Empty when `status == "Unreachable"` (D-CH-3): a failed read has
-    /// nothing to report on.
+    /// Empty when [`Self::status`] is [`ClusterStatus::Unreachable`] (D-CH-3):
+    /// a failed read has nothing to report on.
     pub nodes: Vec<NodeSummary>,
-    /// `None` means the namespace count was not read (an `Unreachable`
-    /// status, or a read that could not list namespaces) — not that the
-    /// cluster has zero namespaces.
+    /// `None` means the namespace count was not read (an
+    /// [`ClusterStatus::Unreachable`] status, or a read that could not list
+    /// namespaces) — not that the cluster has zero namespaces.
     pub namespace_count: Option<u32>,
     /// Derived once, server-side, from `nodes`. Never re-derive this from a
     /// UI — that would risk a second implementation disagreeing with this
@@ -670,4 +724,60 @@ pub enum AcquireOutcome {
     Acquired,
     /// The environment is occupied in a conflicting mode; the caller should queue.
     Busy { current: LeaseState },
+}
+
+#[cfg(test)]
+mod cluster_status_tests {
+    use super::{ClusterHealthView, ClusterStatus, NodeCounts};
+    use time::OffsetDateTime;
+
+    /// **The five spellings this field has always carried.**
+    ///
+    /// [`ClusterHealthView::status`] was a `String` whose own doc listed the
+    /// value space in prose — `"Healthy"`, `"Degraded"`, `"Unhealthy"`,
+    /// `"Warning"` for a successful read and `"Unreachable"` for a failed one
+    /// (review finding #12). They are capitalised, unlike every other status
+    /// vocabulary in this subsystem (`qa-runs`' states, `HealthState`), and
+    /// this test is what keeps a well-meaning lowercase "fix" from landing.
+    #[test]
+    fn every_cluster_status_keeps_its_documented_spelling() {
+        assert_eq!(ClusterStatus::Healthy.as_str(), "Healthy");
+        assert_eq!(ClusterStatus::Degraded.as_str(), "Degraded");
+        assert_eq!(ClusterStatus::Unhealthy.as_str(), "Unhealthy");
+        assert_eq!(ClusterStatus::Warning.as_str(), "Warning");
+        assert_eq!(ClusterStatus::Unreachable.as_str(), "Unreachable");
+    }
+
+    /// The half a `String` could not give: a value outside the closed set is
+    /// unrepresentable, so no producer can invent one.
+    ///
+    /// There is no wire boundary to assert here — nothing populates
+    /// [`ClusterHealthView`] (see its header) and no DTO publishes it — so the
+    /// guarantee this task buys the other two findings, "an unknown wire value
+    /// is a decode error", is bought here at compile time instead: `status`
+    /// cannot hold a string at all.
+    #[test]
+    fn a_cluster_health_view_carries_the_enum_not_a_string() {
+        let view = ClusterHealthView {
+            status: ClusterStatus::Unreachable,
+            status_message: Some("connection refused".to_owned()),
+            nodes: vec![],
+            namespace_count: None,
+            counts: NodeCounts {
+                total: 0,
+                ready: 0,
+                control_plane: 0,
+                ready_control_plane: 0,
+                worker: 0,
+                ready_worker: 0,
+            },
+            checked_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        assert_eq!(view.status, ClusterStatus::Unreachable);
+        assert_eq!(view.status.as_str(), "Unreachable");
+        assert!(
+            view.nodes.is_empty() && view.counts.total == 0,
+            "D-CH-3: an Unreachable read reports no nodes"
+        );
+    }
 }

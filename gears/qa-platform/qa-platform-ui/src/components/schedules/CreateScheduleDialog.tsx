@@ -48,7 +48,7 @@ const CRON_PRESETS: Array<{ label: string; expr: string }> = [
 ];
 
 // Generate a numeric schedule ID for a plan
-function generateScheduleId(planId: string, existingSchedules: any[]): string {
+function generateScheduleId(planId: string, existingSchedules: ScheduleInfo[]): string {
   const planSchedules = existingSchedules.filter((s) => s.plan_id === planId);
   const existingIds = planSchedules
     .map((s) => {
@@ -147,6 +147,10 @@ export function CreateScheduleDialog({
       setExcludeTags(parseTags(editSchedule.exclude_tags));
       setExclusivity(exclusivityFromValue(editSchedule.exclusive));
     }
+    // Keyed on `editSchedule?.name` (identity), not the whole object: the parent may hand
+    // in a new `editSchedule` reference with the same underlying schedule on every render
+    // (e.g. after a query refetch), and depending on the full object would re-run this and
+    // stomp whatever the user has typed while the dialog is still open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, editSchedule?.name]);
 
@@ -263,7 +267,6 @@ export function CreateScheduleDialog({
       if (repoDefaultBranch?.trim()) return repoDefaultBranch.trim();
       return pickDefaultBranch(branchList);
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, repoDefaultBranch, branchList, selectedEnvironmentInfo?.default_branch, initialBranch]);
 
   const effectiveTestFile = testFile ?? editSchedule?.test_file ?? undefined;

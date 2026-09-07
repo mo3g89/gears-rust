@@ -131,7 +131,7 @@ use crate::domain::error::DomainError;
 use crate::domain::notify::render::{self, RunCompletedRenderContext, ScheduledRunRenderContext};
 use crate::domain::notify::routing::{self, Event, NotificationKind};
 use crate::domain::ports::{
-    MailClient, MailMessage, RunsReader, SendOutcome, SlackClient, SlackMessage,
+    MailClient, MailMessage, RunsReader, SendOutcome, SlackBlock, SlackClient, SlackMessage,
     validate_credstore_ref,
 };
 use crate::domain::repos::{NewLogEntry, NotifyRepository};
@@ -206,7 +206,10 @@ pub struct ScheduledRunPreview {
     pub event_label: String,
     pub rendered_message: String,
     pub fallback_text: String,
-    pub blocks: Vec<serde_json::Value>,
+    /// The layout, in this gear's vocabulary; `api::rest::dto` encodes it into
+    /// Block Kit for the response, with the same encoder the Slack adapter
+    /// uses (review finding #17).
+    pub blocks: Vec<SlackBlock>,
 }
 
 /// The [`DomainError::Validation`] a token outside
@@ -732,14 +735,17 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                 if config.email_enabled && email_capable(&config) {
                     let outcome = self
                         .mail
-                        .send(&MailMessage {
-                            smtp_host: config.email_smtp_host.clone(),
-                            smtp_port: config.email_smtp_port,
-                            from: config.email_from.clone(),
-                            recipients: config.email_recipients.clone(),
-                            subject: "VHP test notification".to_owned(),
-                            body: GENERIC_TEST_MESSAGE.to_owned(),
-                        })
+                        .send(
+                            ctx,
+                            &MailMessage {
+                                smtp_host: config.email_smtp_host.clone(),
+                                smtp_port: config.email_smtp_port,
+                                from: config.email_from.clone(),
+                                recipients: config.email_recipients.clone(),
+                                subject: "VHP test notification".to_owned(),
+                                body: GENERIC_TEST_MESSAGE.to_owned(),
+                            },
+                        )
                         .await?;
                     if outcome == SendOutcome::UnsupportedEgress {
                         return Err(DomainError::UnsupportedEgress {
@@ -1281,14 +1287,17 @@ impl RunCompletedChannel {
             } => {
                 service
                     .mail
-                    .send(&MailMessage {
-                        smtp_host: smtp_host.clone(),
-                        smtp_port: *smtp_port,
-                        from: from.clone(),
-                        recipients: recipients.clone(),
-                        subject: rendered.email_subject.clone(),
-                        body: rendered.text.clone(),
-                    })
+                    .send(
+                        ctx,
+                        &MailMessage {
+                            smtp_host: smtp_host.clone(),
+                            smtp_port: *smtp_port,
+                            from: from.clone(),
+                            recipients: recipients.clone(),
+                            subject: rendered.email_subject.clone(),
+                            body: rendered.text.clone(),
+                        },
+                    )
                     .await
             }
         }

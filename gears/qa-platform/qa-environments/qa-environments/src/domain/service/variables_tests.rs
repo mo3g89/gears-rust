@@ -61,20 +61,22 @@ impl MockVariablesRepository {
 
 #[async_trait]
 impl VariablesRepository for MockVariablesRepository {
-    async fn list_pipeline<C: DBRunner>(
+    async fn list_pipeline_page<C: DBRunner>(
         &self,
         _runner: &C,
         _scope: &AccessScope,
-    ) -> Result<Vec<Variable>, DomainError> {
+        _query: &toolkit_odata::ODataQuery,
+    ) -> Result<toolkit_odata::Page<Variable>, DomainError> {
         unimplemented!("not exercised by the upsert-scope unit tests")
     }
 
-    async fn list_for_environment<C: DBRunner>(
+    async fn list_for_environment_page<C: DBRunner>(
         &self,
         _runner: &C,
         _scope: &AccessScope,
         _environment_id: Uuid,
-    ) -> Result<Vec<Variable>, DomainError> {
+        _query: &toolkit_odata::ODataQuery,
+    ) -> Result<toolkit_odata::Page<Variable>, DomainError> {
         unimplemented!("not exercised by the upsert-scope unit tests")
     }
 

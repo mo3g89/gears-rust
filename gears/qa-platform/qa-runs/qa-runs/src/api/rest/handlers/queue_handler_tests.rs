@@ -6,7 +6,7 @@
 //! # The one property this exists for
 //!
 //! **A queue endpoint attributes its refusals to the queue entry.** That is not
-//! checked by anything else and cannot be: `api::rest::error`'s `match` is
+//! checked by anything else and cannot be: `domain::error`'s `match` is
 //! exhaustive over `DomainError` *variants*, so the compiler guarantees every
 //! variant has a status - and says nothing at all about which of the gear's
 //! three resource types an *endpoint* should be naming. The same defect was

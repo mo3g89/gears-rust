@@ -52,7 +52,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use authz_resolver_sdk::PolicyEnforcer;
-use qa_catalog_sdk::{Plan, SOURCE_REPO, TestFileMeta, TestRepository, UniverseTest};
+use qa_catalog_sdk::{Exclusivity, Plan, SOURCE_REPO, TestFileMeta, TestRepository, UniverseTest};
 use toolkit_macros::domain_model;
 use toolkit_security::SecurityContext;
 use tracing::{debug, instrument, warn};
@@ -259,7 +259,7 @@ impl<R: TestReposRepository> PlansService<R> {
                 path: file.clone(),
                 title: parsed.title,
                 tags: parsed.tags,
-                exclusive: parsed.exclusive,
+                exclusive: Exclusivity::from_option_bool(parsed.exclusive),
                 bugs: parsed.bugs,
             });
         }
@@ -636,7 +636,7 @@ fn to_sdk_plan(
         timeout_seconds: Some(parsed.timeout_seconds),
         tags: parsed.tags,
         validation: parsed.validation,
-        exclusive: parsed.exclusive,
+        exclusive: Exclusivity::from_option_bool(parsed.exclusive),
     }
 }
 

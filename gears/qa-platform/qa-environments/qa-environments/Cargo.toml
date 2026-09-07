@@ -89,6 +89,11 @@ sea-orm-migration = { workspace = true }
 toolkit = { workspace = true }
 toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
 toolkit-db-macros = { workspace = true }
+# `Page`/`PageInfo` on the paginated collection reads, and the `FilterField`
+# allow-list `infra::storage::odata` implements. `with-utoipa` because the
+# routes register `Page<EnvironmentDto>` as an OpenAPI component -- same
+# feature qa-runs and qa-insights enable, for the same reason.
+toolkit-odata = { workspace = true, features = ["with-utoipa"] }
 toolkit-security = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
 toolkit-macros = { workspace = true }

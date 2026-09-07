@@ -27,7 +27,8 @@
 //! [`super::qa_runs`]'s table and nothing else. `PermissionDenied` and
 //! `Unauthenticated` are decisions about the **subject** and become
 //! [`DomainError::Forbidden`]; everything else becomes
-//! [`DomainError::Internal`], which `api::rest::error` renders as an opaque 500.
+//! [`DomainError::Internal`], which `domain::error`'s boundary mapping renders
+//! as an opaque 500.
 //!
 //! **There is no `NotFound` arm, and that omission is the contract rather than a
 //! gap.** [`CatalogReader::list_universe`]'s `# Errors` section says it: *"There
@@ -192,7 +193,7 @@ mod tests {
 
     /// Anything else is internal, and the message names the gear so a log line is
     /// attributable. Opaque to a client — `DomainError::Internal` maps to the
-    /// canonical internal detail in `api::rest::error`.
+    /// canonical internal detail in `domain::error`.
     #[test]
     fn any_other_failure_is_internal_and_names_the_gear() {
         let boom = CanonicalError::internal("upstream exploded").create();

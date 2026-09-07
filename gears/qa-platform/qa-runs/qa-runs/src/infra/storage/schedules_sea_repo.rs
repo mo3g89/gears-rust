@@ -1286,7 +1286,7 @@ mod tests {
             .claim_tick(&conn, &scope(tenant), tenant, token, now(), "qa-runs-0")
             .await;
         assert!(
-            matches!(outcome, Err(DomainError::Database(_))),
+            matches!(outcome, Err(DomainError::Database { .. })),
             "a foreign-key violation is not a lost claim race and must not be reported \
              as one - `Ok(None)` here would silently skip a fire and log nothing; \
              got {outcome:?}"

@@ -6,21 +6,28 @@ use axum::http::Uri;
 use uuid::Uuid;
 
 use toolkit::api::canonical_prelude::*;
+use toolkit::api::odata::OData;
 use toolkit_security::SecurityContext;
 
 use crate::api::rest::dto::{CreateEnvironmentReq, EnvironmentDto, LeaseDto, UpdateEnvironmentReq};
 use crate::gear::ConcreteAppServices;
 
-/// List all target environments visible to the caller.
-#[tracing::instrument(skip(svc, ctx))]
+/// `GET /qa/v1/environments`
+///
+/// One page of the target environments visible to the caller, by name.
+///
+/// The `OData` query is handed to the service untouched; the service resolves
+/// the caller's `AccessScope` from the policy enforcer **first** and the
+/// repository composes the two. A `$filter` cannot widen what this returns.
+/// (Same shape and same reason as `qa-runs`' `list_runs`.)
+#[tracing::instrument(skip(svc, ctx, query))]
 pub async fn list_environments(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteAppServices>>,
-) -> ApiResult<Json<Vec<EnvironmentDto>>> {
-    let environments = svc.environments.list_environments(&ctx).await?;
-    Ok(Json(
-        environments.into_iter().map(EnvironmentDto::from).collect(),
-    ))
+    OData(query): OData,
+) -> ApiResult<JsonPage<EnvironmentDto>> {
+    let page = svc.environments.list_environments(&ctx, &query).await?;
+    Ok(Json(page.map_items(EnvironmentDto::from)))
 }
 
 /// Get a single target environment by ID.
@@ -252,13 +259,6 @@ mod tests {
         assert_eq!(err.status_code(), 404);
     }
 
-    /// `observe_environment` persists (`record_observation`) and makes an
-    /// outbound call to the environment's own cluster, exactly the shape
-    /// `update_environment`/`delete_environment` gate on their own mutating
-    /// actions -- so it must authorize with `UPDATE`, not `GET`. A principal
-    /// granted only `GET` on an environment must not be able to drive a
-    /// live-cluster round-trip and a database write through this endpoint.
-    /// Found by review; this test is what stops it silently regressing.
     /// Build a `NewEnvironment` attached to `product`, optionally as its default.
     fn environment_for_product(name: &str, product: Uuid, is_default: bool) -> NewEnvironment {
         NewEnvironment {
@@ -355,6 +355,13 @@ mod tests {
         );
     }
 
+    /// `observe_environment` persists (`record_observation`) and makes an
+    /// outbound call to the environment's own cluster, exactly the shape
+    /// `update_environment`/`delete_environment` gate on their own mutating
+    /// actions -- so it must authorize with `UPDATE`, not `GET`. A principal
+    /// granted only `GET` on an environment must not be able to drive a
+    /// live-cluster round-trip and a database write through this endpoint.
+    /// Found by review; this test is what stops it silently regressing.
     #[tokio::test]
     async fn refresh_environment_authorizes_with_update_not_get() {
         let tenant = Uuid::new_v4();

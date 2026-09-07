@@ -41,9 +41,9 @@ mod environments;
 mod leases;
 mod variables;
 
-pub(crate) use environments::EnvironmentsService;
-pub(crate) use leases::LeasesService;
-pub(crate) use variables::VariablesService;
+pub use environments::EnvironmentsService;
+pub use leases::LeasesService;
+pub use variables::VariablesService;
 
 #[cfg(test)]
 mod test_support;
@@ -73,6 +73,12 @@ mod observation_projection_tests;
 #[cfg(test)]
 mod variables_tests;
 
+/// What `GET /qa/v1/variables` -- and therefore what a run -- actually
+/// receives. Both properties are about how `list_for_env` *composes* two paged
+/// reads, so neither is expressible at the repository level.
+#[cfg(test)]
+mod variables_paging_tests;
+
 #[cfg(test)]
 mod tests_tenant_scoping;
 
@@ -80,10 +86,10 @@ mod tests_tenant_scoping;
 mod unscoped_read_guard_tests;
 
 /// `DB` provider alias (mirrors users-info).
-pub(crate) type DbProvider = DBProvider<DbError>;
+pub type DbProvider = DBProvider<DbError>;
 
 /// Authorization resource types and their PEP-supported properties.
-pub(crate) mod resources {
+pub mod resources {
     use super::ResourceType;
     use toolkit_security::pep_properties;
 
@@ -113,7 +119,7 @@ pub(crate) mod resources {
     );
 }
 
-pub(crate) mod actions {
+pub mod actions {
     pub const GET: &str = "get";
     pub const LIST: &str = "list";
     pub const CREATE: &str = "create";
@@ -131,7 +137,7 @@ pub(crate) mod actions {
 // do NOT touch database objects - they call service methods with business
 // parameters only.
 #[domain_model]
-pub(crate) struct AppServices<P, V, L>
+pub struct AppServices<P, V, L>
 where
     P: EnvironmentsRepository,
     V: VariablesRepository,

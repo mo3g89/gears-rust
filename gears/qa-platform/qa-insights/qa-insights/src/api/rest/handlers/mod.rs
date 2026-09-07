@@ -4,7 +4,7 @@
 //! [`crate::gear::ConcreteAppServices`] and converts the result to a DTO. **No
 //! business logic, no database access, no PEP call, and no status-code
 //! decision**: the first three live in `crate::domain::service`, and the fourth
-//! lives in [`crate::api::rest::error`], reached by `?` through
+//! lives in [`crate::domain::error`], reached by `?` through
 //! `From<DomainError> for CanonicalError` for every handler except
 //! [`saved_views`]'s four, which route through
 //! `crate::api::rest::error::as_saved_view_error` instead — that function's own

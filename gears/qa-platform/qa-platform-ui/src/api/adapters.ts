@@ -20,7 +20,6 @@ import type {
   AnalyticsOverview,
   AnalyticsSavedView,
   AnalyticsSavedViewPayload,
-  AnalyticsScope,
   BuildTestDetailItem,
   CreateCustomPlanForm,
   CreateEnvironmentForm,
@@ -217,7 +216,7 @@ function clampLimit(limit: number): number {
 }
 
 /**
- * The query string for `GET /qa/v1/test-results` behind `useTestRecentResults`.
+ * The query string for `GET /qa/v1/test-results`.
  *
  * Two things about the bound, both load-bearing:
  *
@@ -228,9 +227,7 @@ function clampLimit(limit: number): number {
  *  - `limit` itself is **undeclared in `/openapi.json`** (X2 — it is declared only on
  *    `/qa/v1/queue`). It does work, driven live, but because it is undeclared it is
  *    **not policed by `make ui-contract`**: regenerating the wire types will never tell
- *    us if it goes away. That is why the caller slices client-side as well
- *    (`sliceRecentResults`) — under X8 an ignored parameter is indistinguishable from an
- *    honoured one at 200, and the slice is the only thing that makes the bound real.
+ *    us if it goes away.
  *
  * `$filter` on this route allows only `id, run_id, test_file, test_name,
  * run_finished_at`, so the file is the one axis legacy's `?file=` maps onto. There is no
@@ -243,12 +240,6 @@ export function recentResultsQuery(args: { file: string; limit: number }): strin
   params.set('$filter', odataEq('test_file', args.file));
   params.set('limit', String(clampLimit(args.limit)));
   return params.toString();
-}
-
-/** The client-side half of `recentResultsQuery`'s bound — see the note there on why the
- *  `limit` parameter alone is not enough. */
-export function sliceRecentResults<T>(rows: T[], limit: number): T[] {
-  return rows.slice(0, clampLimit(limit));
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +609,10 @@ export function parseRunLogSse(body: string): string {
  * `state` is passed through **unchanged**, including `cancelled` with two `l`s: X4 records
  * that the queue row's spelling differs from the run's one-`l` `canceled` deliberately,
  * and legacy's own `RunQueueEntry.state` union already used the two-`l` form. Normalising
- * them together would be inventing a single vocabulary the gears do not have.
+ * them together would be inventing a single vocabulary the gears do not have. It no longer
+ * needs an `as` cast (Task 20): `QueueEntryDto.state` is a schema-level enum, and
+ * `RunQueueEntry['state']` is aliased onto it, so the assignment type-checks on its own and
+ * a gear-side change to the seven names fails `tsc` here rather than passing through a cast.
  *
  * `target_id` is a **documented substitution**, in the sense of §7.10. `QueueEntryDto`
  * has no target of any kind, and `target_id` is the queued row's primary label at
@@ -636,7 +630,7 @@ export function queueEntryFromDto(dto: QueueEntryDtoWithEnvironmentId): RunQueue
     target_id: dto.run_id,
     source: dto.source,
     exclusive: dto.exclusive,
-    state: dto.state as RunQueueEntry['state'],
+    state: dto.state,
     workflow_name: dto.run_id,
     error: dto.error ?? null,
     enqueued_at: dto.enqueued_at,
@@ -1826,6 +1820,12 @@ function analyticsListItemFromDto(dto: AnalyticsListItemDtoWithEnvironment): Ana
  *    is null — an unresolved environment is still identifiable, and blanking it would
  *    silently merge every unnamed environment into one bar.
  *
+ * `scope` no longer needs an `as AnalyticsScope` cast (Task 20 fix round): the gear
+ * publishes the echoed scope as a two-value schema enum, and `AnalyticsScope` is aliased
+ * onto it, so a gear-side change to the pair fails `tsc` here instead of passing through
+ * a cast. `group_by` still needs its cast — `AnalyticsOverviewDto.group_by` is still a
+ * `String` on the wire.
+ *
  * §9 is about the *values* on this shape, not the shape: every execution-scoped counter
  * is 0 by construction in this deployment, and the decision recorded there is a banner in
  * `pages/AnalyticsPage.tsx` (Task 11's), not a number invented here.
@@ -1838,7 +1838,7 @@ export function analyticsOverviewFromDto(
     product_id: dto.product_id,
     product_key: '',
     version: dto.version,
-    scope: dto.scope as AnalyticsScope,
+    scope: dto.scope,
     // The DTO echoes back the *path* it was given (X6); the components hand this straight
     // back into `plan_id`-shaped props, so the caller's own opaque id is preserved when
     // there is one.
@@ -1891,12 +1891,18 @@ export function analyticsOverviewFromDto(
  *  opaque `plan_id` (X6). `query_json` is passed through untouched — the gear never
  *  inspects it, so a legacy `plan_id` buried inside one is **not** reconciled with the new
  *  vocabulary (row 73), which is a real and reported limitation rather than something to
- *  rewrite blindly. */
+ *  rewrite blindly.
+ *
+ *  `scope` no longer needs an `as AnalyticsScope` cast (Task 20): the gear publishes it as
+ *  a two-value schema enum (`SavedViewScopeDto`), so `"all" | "plan"` is what the generated
+ *  type already says. It is a *different* schema from `AnalyticsScopeDto`, which is what
+ *  `AnalyticsScope` is aliased onto — same value space, separate contracts — and the two
+ *  assign into each other because they are structurally identical. */
 export function savedViewFromDto(dto: S['SavedViewDto']): AnalyticsSavedView {
   return {
     id: dto.id,
     owner_id: dto.owner_id,
-    scope: dto.scope as AnalyticsScope,
+    scope: dto.scope,
     plan_id: dto.repo_id && dto.plan_path ? encodePlanId(dto.repo_id, dto.plan_path) : null,
     name: dto.name,
     query_json: (dto.query_json ?? {}) as Record<string, unknown>,

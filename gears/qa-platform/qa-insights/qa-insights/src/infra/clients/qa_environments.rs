@@ -18,18 +18,25 @@
 //!    latency a function of plan count."* Here it would be a function of how many
 //!    distinct environments the window's rows ran on — a number this gear does not
 //!    control and cannot bound, since it comes out of `qa_test_results`.
-//! 2. **`list_environments` is unbounded and that is *safe here*, unlike for runs.**
-//!    `QaRunsClientV1::list_runs`' `limit` is **mandatory**, and its own doc says
-//!    why: *"`qa_runs` grows strictly faster than the queue and never drains, so
-//!    an unbounded inter-gear call would materialize every run ever executed"*
-//!    (`qa-runs-sdk/src/client.rs:42-46`). Environments are the opposite kind of
-//!    table: operator-provisioned infrastructure, one row per system under test,
-//!    written only by `create_environment`. It has no paging and no limit
-//!    (`qa-environments/src/domain/repos/environments_repo.rs`' `list`, and the
-//!    service method at `domain/service/environments.rs:230-247`, which passes the
-//!    compiled scope and nothing else) — because there is nothing for it to
-//!    bound. So the "one read of everything" arm is a read of tens of rows, and
-//!    the comparison is one round trip against N.
+//! 2. **`list_environments` returns everything and that is *safe here*, unlike
+//!    for runs.** `QaRunsClientV1::list_runs`' `limit` is **mandatory**, and its
+//!    own doc says why: *"`qa_runs` grows strictly faster than the queue and
+//!    never drains, so an unbounded inter-gear call would materialize every run
+//!    ever executed"* (`qa-runs-sdk/src/client.rs:42-46`). Environments are the
+//!    opposite kind of table: operator-provisioned infrastructure, one row per
+//!    system under test, written only by `create_environment`. So the "one read
+//!    of everything" arm is a read of tens of rows, and the comparison is one
+//!    round trip against N.
+//!
+//!    **Amended 2026-09-07 (review finding #55).** The underlying read used to
+//!    be literally unbounded — `find().secure().scope_with(scope).all()`. It is
+//!    now paginated (`EnvironmentsRepository::list_page`, `PAGE_LIMITS
+//!    { default: 200, max: 500 }`), and the SDK method drains the pages
+//!    (`qa-environments/src/domain/local_client/client.rs`) precisely so that
+//!    this port's contract is unchanged: each round trip is bounded, the
+//!    aggregate is still every environment, and the paragraph below about a cap
+//!    silently unlabelling a bar is why it was written as a drain rather than a
+//!    single first page.
 //! 3. **`get_environment` forces a `NotFound` to be swallowed.** The port's contract
 //!    makes an unresolvable id *absent from the map*, not an error — so a
 //!    per-id implementation would have to catch `NotFound` and continue, which is

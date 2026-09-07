@@ -24,7 +24,7 @@ use crate::api::rest::dto::{
 use crate::api::rest::error::RunResourceError;
 use crate::api::rest::sse::{KEEP_ALIVE_INTERVAL, MAX_STREAM_DURATION, log_event};
 use crate::domain::state_machine::is_terminal;
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 use crate::infra::logs::{MAX_SUBSCRIBERS_PER_RUN, RunLogBroadcaster};
 
 /// The gear's configured ceilings, layered alongside the services so a handler
@@ -492,8 +492,9 @@ mod tests {
 
     /// **The sanitizer is applied**, not merely available.
     ///
-    /// `api::rest::sse` pins `sanitize_line` as a function thoroughly; nothing
-    /// pinned that the boundary calls it. Keeping the `log_event` call and
+    /// `domain::repos::log_line` pins `sanitize_line` as a function thoroughly
+    /// (its tests were in `api::rest::sse` until Task 21 and moved with it);
+    /// nothing pinned that the boundary calls it. Keeping the `log_event` call and
     /// overwriting its result with the raw line - the mutation this catches -
     /// left the whole suite and clippy green while putting unbounded
     /// execution-plane bytes on the wire.

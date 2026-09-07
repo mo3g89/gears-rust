@@ -29,7 +29,14 @@ vi.mock('./client', () => ({
 }));
 
 import { apiGet } from './client';
-import { useAnalyticsOverview, useAnalyticsBuildTests } from './hooks';
+import { queryClient as sharedQueryClient } from './queryClient';
+import {
+  queryKeys,
+  useAnalyticsOverview,
+  useAnalyticsBuildTests,
+  useEnvironmentDetails,
+  usePipelineVariables,
+} from './hooks';
 import type { AnalyticsOverviewQuery, AnalyticsBuildTestsQuery } from './types';
 
 const mockedApiGet = vi.mocked(apiGet);
@@ -70,6 +77,11 @@ const FULL_BUILD_TESTS_QUERY: AnalyticsBuildTestsQuery = {
 };
 
 beforeEach(() => {
+  // `fetchEnvironmentDtos` caches in the app's SHARED client (it is not a hook
+  // and has no provider to read one from), so unlike `makeWrapper`'s per-test
+  // client that cache outlives a test. Cleared here so one test's environments
+  // cannot answer the next one's request.
+  sharedQueryClient.clear();
   mockedApiGet.mockReset();
   // `useAnalyticsOverview`'s adapter wants an object it can pick fields off of;
   // `useAnalyticsBuildTests`'s calls `.map` straight on the response, so it needs an
@@ -148,6 +160,145 @@ describe('useAnalyticsBuildTests', () => {
       wrapper: makeWrapper(),
     });
 
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(mockedApiGet).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('fetchEnvironmentDtos (the environment name index)', () => {
+  /** `GET /qa/v1/environments` as it answers since review finding #55: a page. */
+  const ENVIRONMENTS_PAGE = {
+    items: [
+      { id: 'env-uuid-1', name: 'alpha' },
+      { id: 'env-uuid-2', name: 'beta' },
+    ],
+    page_info: { limit: 200, next_cursor: null, prev_cursor: null },
+  };
+
+  function mockEnvironments() {
+    mockedApiGet.mockImplementation(async (path: string) =>
+      path === '/environments' ? (ENVIRONMENTS_PAGE as never) : ({ id: 'env-uuid-1', name: 'alpha' } as never)
+    );
+  }
+
+  /** How many times `/environments` itself was requested. */
+  function environmentListCalls() {
+    return mockedApiGet.mock.calls.filter(([path]) => path === '/environments').length;
+  }
+
+  it('reads the page shape rather than a bare array, so a name still resolves to an id', async () => {
+    mockEnvironments();
+    const { result } = renderHook(() => useEnvironmentDetails('alpha'), { wrapper: makeWrapper() });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(mockedApiGet.mock.calls.map(([path]) => path)).toContain('/environments/env-uuid-1');
+  });
+
+  it('does not repeat the fetch within the stale window -- the regression finding #55 measured', async () => {
+    // `useRun(name, 5000)` reaches this through `fetchRunDetails` every 5 s per
+    // open Run Detail page, and `useDashboard` every 15 s. Two consumers here
+    // stand in for two polls: before the cache, each was its own request for the
+    // whole fleet's state.
+    mockEnvironments();
+
+    const first = renderHook(() => useEnvironmentDetails('alpha'), { wrapper: makeWrapper() });
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true));
+
+    const second = renderHook(() => useEnvironmentDetails('beta'), { wrapper: makeWrapper() });
+    await waitFor(() => expect(second.result.current.isSuccess).toBe(true));
+
+    expect(environmentListCalls()).toBe(1);
+  });
+
+  it('does fetch again once an environment mutation has invalidated it', async () => {
+    // Every environment mutation calls
+    // `invalidateQueries({ queryKey: queryKeys.environments })`, and
+    // `queryKeys.environmentDtos` is a child of that key, so the prefix match
+    // drops this cache too. That is what keeps a rename or a create from being
+    // hidden behind the staleTime -- assert the prefix key, not the exact one.
+    mockEnvironments();
+
+    const first = renderHook(() => useEnvironmentDetails('alpha'), { wrapper: makeWrapper() });
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true));
+    expect(environmentListCalls()).toBe(1);
+
+    await sharedQueryClient.invalidateQueries({ queryKey: queryKeys.environments });
+
+    const second = renderHook(() => useEnvironmentDetails('beta'), { wrapper: makeWrapper() });
+    await waitFor(() => expect(second.result.current.isSuccess).toBe(true));
+
+    expect(environmentListCalls()).toBe(2);
+  });
+});
+
+describe('fetchVariableDtos (the Settings -> Variables editor)', () => {
+  /**
+   * Two pages of pipeline variables, the way the gear serves them without an
+   * `environment_id`: a single table, so `next_cursor` is real.
+   *
+   * Task 24 review finding 3: the first version of `fetchVariableDtos`
+   * discarded that cursor, so the editor rendered a first page as if it were
+   * the whole variable set. `variableWritePlan` derives deletes only from the
+   * `previous` array it is handed, so nothing was destroyed by it -- but the
+   * operator was editing a list that claimed to be the set and was not.
+   */
+  function mockTwoPagesOfVariables() {
+    mockedApiGet.mockImplementation(async (path: string) => {
+      if (path === '/variables') {
+        return {
+          items: [{ id: 'v1', name: 'ALPHA', value: 'a', environment_id: null }],
+          page_info: { limit: 200, next_cursor: 'page-2-token', prev_cursor: null },
+        } as never;
+      }
+      if (path.startsWith('/variables?cursor=')) {
+        return {
+          items: [{ id: 'v2', name: 'BETA', value: 'b', environment_id: null }],
+          page_info: { limit: 200, next_cursor: null, prev_cursor: null },
+        } as never;
+      }
+      throw new Error(`unexpected apiGet(${path})`);
+    });
+  }
+
+  it('follows next_cursor, so the editor sees the whole set rather than the first page', async () => {
+    mockTwoPagesOfVariables();
+
+    const { result } = renderHook(() => usePipelineVariables(), { wrapper: makeWrapper() });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.variables?.map((row) => row.name)).toEqual(['ALPHA', 'BETA']);
+    expect(mockedApiGet).toHaveBeenCalledTimes(2);
+  });
+
+  it('sends the cursor as a bare `cursor` parameter, which is what the gear extractor reads', async () => {
+    // Not `$skiptoken`: `ODataParams` renames only `$filter`/`$orderby`/`$select`
+    // and takes `limit` and `cursor` bare. A wrong spelling here is not an error
+    // -- it is an ignored parameter and an infinite first page.
+    mockTwoPagesOfVariables();
+
+    const { result } = renderHook(() => usePipelineVariables(), { wrapper: makeWrapper() });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(mockedApiGet.mock.calls.map(([path]) => path)).toEqual([
+      '/variables',
+      '/variables?cursor=page-2-token',
+    ]);
+  });
+
+  it('stops after one request when the gear returns no cursor, which is the union case', async () => {
+    // With `environment_id` the response is the union of two tables and the gear
+    // returns `next_cursor: null` -- and refuses a `cursor` sent alongside it.
+    // So this path must not invent a second request.
+    mockedApiGet.mockImplementation(async () =>
+      ({
+        items: [{ id: 'v1', name: 'ALPHA', value: 'a', environment_id: null }],
+        page_info: { limit: 500, next_cursor: null, prev_cursor: null },
+      }) as never
+    );
+
+    const { result } = renderHook(() => usePipelineVariables(), { wrapper: makeWrapper() });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
     expect(mockedApiGet).toHaveBeenCalledTimes(1);

@@ -50,6 +50,15 @@ pub trait RunnerSecretWriter: Send + Sync {
 /// **An error, not a silent success.** A deployment that believes it is
 /// writing runner `Secret`s and is not would fail at `FailedMount` with
 /// nothing in the log to explain it; this way the reason is on every cycle.
+#[cfg_attr(
+    feature = "runner-secret",
+    allow(
+        dead_code,
+        reason = "`gear.rs` constructs this only in a build without `runner-secret`; with \
+                  the feature on, the tests below and `test_support` are its only callers. \
+                  See `domain::ports`' own note on the re-export (review finding #38)"
+    )
+)]
 pub struct NoopRunnerSecretWriter;
 
 #[async_trait]

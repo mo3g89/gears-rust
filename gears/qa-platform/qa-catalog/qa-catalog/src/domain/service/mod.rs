@@ -64,21 +64,22 @@ mod plugin_registry;
 mod products;
 mod repos;
 mod ssh_keys;
-// Public (unlike its siblings): the multi-branch integration suite in
-// `tests/multi_branch.rs` drives the real engine through the same two-tier
-// locks the service uses.
-pub mod sync_cache;
+// Private, like its siblings. It was `pub mod` so that
+// `tests/multi_branch.rs` could name `domain::service::sync_cache`; review
+// finding #38 made `domain` itself `pub(crate)`, so that path stopped working
+// and the test now reaches the type through `qa_catalog::SyncCache` (see
+// `lib.rs`). Nothing outside this module names the module any more -- only the
+// `pub use` below.
+mod sync_cache;
 mod validation;
 
-pub(crate) use bundles::BundlesService;
-pub(crate) use custom_plans::CustomPlansService;
-pub(crate) use plans::PlansService;
-pub(crate) use plugin_registry::{
-    ProductPluginPresence, QaProductRegistry, RegisteredProductPlugin,
-};
-pub(crate) use products::ProductsService;
-pub(crate) use repos::ReposService;
-pub(crate) use ssh_keys::SshKeysService;
+pub use bundles::BundlesService;
+pub use custom_plans::CustomPlansService;
+pub use plans::PlansService;
+pub use plugin_registry::{ProductPluginPresence, QaProductRegistry, RegisteredProductPlugin};
+pub use products::ProductsService;
+pub use repos::ReposService;
+pub use ssh_keys::SshKeysService;
 pub use sync_cache::SyncCache;
 
 #[cfg(test)]
@@ -116,10 +117,10 @@ mod unscoped_read_guard_tests;
 /// calls (which return `DomainError`) as-is, and any `Err` rolls the
 /// transaction back while preserving the domain variant (e.g.
 /// `BranchCacheConflict`) instead of flattening it to a database error.
-pub(crate) type DbProvider = DBProvider<DomainError>;
+pub type DbProvider = DBProvider<DomainError>;
 
 /// Authorization resource types and their PEP-supported properties.
-pub(crate) mod resources {
+pub mod resources {
     use super::ResourceType;
     use toolkit_security::pep_properties;
 
@@ -128,10 +129,8 @@ pub(crate) mod resources {
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
-    pub const PLAN: ResourceType = ResourceType::from_static(
-        "qa.plan",
-        &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
-    );
+    pub const PLAN: ResourceType =
+        ResourceType::from_static("qa.plan", &[pep_properties::OWNER_TENANT_ID]);
 
     pub const CUSTOM_PLAN: ResourceType = ResourceType::from_static(
         "qa.custom_plan",
@@ -154,7 +153,7 @@ pub(crate) mod resources {
     );
 }
 
-pub(crate) mod actions {
+pub mod actions {
     pub const GET: &str = "get";
     pub const LIST: &str = "list";
     pub const CREATE: &str = "create";
@@ -171,7 +170,7 @@ pub(crate) mod actions {
 // do NOT touch database objects - they call service methods with business
 // parameters only.
 #[domain_model]
-pub(crate) struct AppServices<R, C, P, K, B>
+pub struct AppServices<R, C, P, K, B>
 where
     R: TestReposRepository,
     C: CustomPlansRepository,
@@ -197,7 +196,7 @@ where
 
 /// Everything `AppServices::new` needs beyond the repositories: shared
 /// infrastructure handles plus the typed config values the services enforce.
-pub(crate) struct ServiceDeps {
+pub struct ServiceDeps {
     pub(crate) db: Arc<DbProvider>,
     pub(crate) authz: Arc<dyn AuthZResolverClient>,
     pub(crate) credstore: Arc<dyn CredStoreClientV1>,
@@ -283,5 +282,27 @@ where
             ),
             plugin_registry,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resources;
+    use toolkit_security::pep_properties;
+
+    /// **A declared PEP property that no call site supplies is a constraint
+    /// nothing can satisfy.**
+    ///
+    /// `qa.plan` declared `RESOURCE_ID` while every `resources::PLAN` call passes
+    /// `None` -- plans are addressed by (repo, branch, path), not by a row id, so
+    /// there is no id to supply. `qa.jira_config` already dropped its for the same
+    /// reason. Review finding #27.
+    #[test]
+    fn qa_plan_declares_only_the_properties_its_call_sites_supply() {
+        assert_eq!(
+            resources::PLAN.supported_properties(),
+            &[pep_properties::OWNER_TENANT_ID],
+            "qa.plan has no row id to constrain on"
+        );
     }
 }

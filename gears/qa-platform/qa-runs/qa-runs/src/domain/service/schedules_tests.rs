@@ -34,7 +34,7 @@ use crate::domain::service::admission::tests::fakes::{PLATFORM_A, REPO};
 use crate::domain::service::test_support::{
     Asked, Fleet, OTHER_TENANT, OWNER_TENANT, QueueingAdmitter, SchedulerAuthZ, ctx,
 };
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 use crate::infra::storage::OrmSchedulesRepository;
 use crate::infra::storage::test_db::scope;
 

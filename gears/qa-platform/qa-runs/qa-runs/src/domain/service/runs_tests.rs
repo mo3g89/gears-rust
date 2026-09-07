@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use qa_catalog_sdk::TestFileMeta;
 use qa_environments_sdk::{LeaseMode, LeaseState, QaEnvironmentsClientV1};
 use qa_runs_sdk::{
-    ExclusiveTier, QueueState, RunKind, RunParameter, RunSource, RunState, RunTarget,
+    ExclusiveTier, Exclusivity, QueueState, RunKind, RunParameter, RunSource, RunState, RunTarget,
 };
 use time::OffsetDateTime;
 use time::macros::datetime;
@@ -393,7 +393,7 @@ async fn a_run_recorded_parallel_is_re_resolved_not_pinned_parallel() {
         title: None,
         tags: Vec::new(),
         // Marked destructive since the original run.
-        exclusive: Some(true),
+        exclusive: Exclusivity::Exclusive,
         bugs: Vec::new(),
     });
     let h = Builder::new()
@@ -1296,12 +1296,13 @@ async fn the_container_wires_ingest_and_the_operator_actions_to_the_same_halves(
 #[test]
 fn replay_inherits_exclusivity_upward_only() {
     let exclusive = replay(&stored(RunState::Succeeded, true)).unwrap();
-    assert_eq!(exclusive.exclusive, Some(true));
+    assert_eq!(exclusive.exclusive, Exclusivity::Exclusive);
 
     let parallel = replay(&stored(RunState::Succeeded, false)).unwrap();
     assert_eq!(
-        parallel.exclusive, None,
-        "`None` means inherit; `Some(false)` would pin the launch tier and suppress a \
+        parallel.exclusive,
+        Exclusivity::Inherit,
+        "`Inherit` means inherit; `Shared` would pin the launch tier and suppress a \
          TEST_META declaration added since"
     );
 }

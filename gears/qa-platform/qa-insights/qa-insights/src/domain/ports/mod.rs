@@ -98,7 +98,7 @@ pub use jira_client::{
 pub use mail_client::{MailClient, MailMessage};
 pub use runs_launcher::RunsLauncher;
 pub use runs_reader::RunsReader;
-pub use slack_client::{SlackClient, SlackMessage};
+pub use slack_client::{SlackBlock, SlackClient, SlackMessage};
 
 /// What one egress attempt settled on — shared by [`SlackClient::send`] and
 /// [`MailClient::send`] rather than declared per port, since the two ports'

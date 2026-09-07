@@ -102,9 +102,9 @@ pub(in crate::domain::service) mod fakes {
     };
     use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
     use qa_catalog_sdk::{
-        BundleRequest, CustomPlan, CustomPlanEntry, NewCustomPlan, NewTestRepository, Plan,
-        Product, QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle, TestFileMeta,
-        TestRepository, TestRepositoryUpdate, UniverseTest,
+        BundleRequest, CustomPlan, CustomPlanEntry, Exclusivity, NewCustomPlan, NewTestRepository,
+        Plan, Product, QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle,
+        TestFileMeta, TestRepository, TestRepositoryUpdate, UniverseTest,
     };
     use qa_environments_sdk::{
         AcquireOutcome, Environment, EnvironmentPatch, LeaseMode, LeaseState, NewEnvironment,
@@ -1128,8 +1128,8 @@ pub(in crate::domain::service) mod fakes {
         ) -> Result<bool, DomainError> {
             assert_scope_is_for(scope, "qa.run", "set_execution_ref");
             if *self.fail_execution_ref.lock().unwrap() {
-                return Err(DomainError::Database(
-                    "the execution reference could not be written".to_owned(),
+                return Err(DomainError::database(
+                    "the execution reference could not be written",
                 ));
             }
             let mut rows = self.rows.lock().unwrap();
@@ -2796,7 +2796,7 @@ pub(in crate::domain::service) mod fakes {
                 timeout_seconds: Some(300),
                 tags: Vec::new(),
                 validation: false,
-                exclusive: None,
+                exclusive: Exclusivity::Inherit,
             };
             Ok(vec![
                 plan("smoke", self.test_files.lock().unwrap().clone()),
@@ -2821,7 +2821,7 @@ pub(in crate::domain::service) mod fakes {
                 timeout_seconds: Some(300),
                 tags: Vec::new(),
                 validation: false,
-                exclusive: None,
+                exclusive: Exclusivity::Inherit,
             })
         }
 
@@ -3794,7 +3794,7 @@ async fn a_failed_insert_releases_the_lease_it_took() {
             run.clone(),
         )])))
         .queue(Arc::new(fakes::FakeQueue::failing_insert(
-            DomainError::Database("the row could not be written".to_owned()),
+            DomainError::database("the row could not be written"),
         )))
         .build()
         .await;
@@ -3804,7 +3804,7 @@ async fn a_failed_insert_releases_the_lease_it_took() {
         .admit_decision(&ctx(OWNER_TENANT), &run)
         .await
         .expect_err("the insert failed");
-    assert!(matches!(error, DomainError::Database(_)));
+    assert!(matches!(error, DomainError::Database { .. }));
     assert_eq!(
         fakes.environments.released(),
         vec![(PLATFORM_A, run.id)],

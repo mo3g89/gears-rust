@@ -202,7 +202,7 @@ impl From<sdk::Plan> for PlanDto {
             test_files: p.test_files,
             timeout_seconds: p.timeout_seconds,
             tags: p.tags,
-            exclusive: p.exclusive,
+            exclusive: p.exclusive.to_option_bool(),
         }
     }
 }
@@ -711,9 +711,29 @@ mod tests {
         assert_eq!(req.credential_ref, None);
     }
 
+    /// The wire boundary for `Plan::exclusive`: `sdk::Exclusivity` carries no
+    /// serde impl of its own (contract-purity rule; see that type's doc), so
+    /// `PlanDto::from` is where `null`/`true`/`false` actually gets produced.
+    /// This is one of the two named boundaries `Exclusivity`'s doc points at —
+    /// asserted here on the rendered JSON, not just on the Rust-level
+    /// `Option<bool>` field, so a `PlanDto::from` that stopped calling
+    /// `to_option_bool` would fail this test even if the field happened to
+    /// carry the right value some other way.
     #[test]
     fn plan_dto_preserves_exclusive_tri_state() {
-        for exclusive in [None, Some(true), Some(false)] {
+        for (exclusive, wire_option, wire_json) in [
+            (sdk::Exclusivity::Inherit, None, serde_json::json!(null)),
+            (
+                sdk::Exclusivity::Exclusive,
+                Some(true),
+                serde_json::json!(true),
+            ),
+            (
+                sdk::Exclusivity::Shared,
+                Some(false),
+                serde_json::json!(false),
+            ),
+        ] {
             let plan = sdk::Plan {
                 repo_id: Uuid::new_v4(),
                 product_id: Uuid::new_v4(),
@@ -729,9 +749,16 @@ mod tests {
                 exclusive,
             };
             let dto = PlanDto::from(plan.clone());
-            assert_eq!(dto.exclusive, exclusive, "tri-state must survive");
+            assert_eq!(dto.exclusive, wire_option, "tri-state must survive");
             assert_eq!(dto.repo_id, plan.repo_id);
             assert_eq!(dto.test_files, plan.test_files);
+
+            let body = serde_json::to_value(&dto).unwrap();
+            assert_eq!(
+                body["exclusive"], wire_json,
+                "the rendered JSON must be null/true/false, unchanged from the \
+                 Option<bool> this type replaced"
+            );
         }
     }
 

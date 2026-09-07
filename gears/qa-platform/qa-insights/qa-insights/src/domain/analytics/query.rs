@@ -22,9 +22,9 @@
 //! existing split rather than an omission: [`DomainError::Validation`] is mapped
 //! to `invalid_argument` — HTTP **400**, with a field violation naming the
 //! parameter — by the single `From<DomainError> for CanonicalError` in
-//! [`crate::api::rest::error`], and `a_refused_window_is_400_invalid_argument`
-//! there pins that arm. So the rule lives here where a test can reach it without
-//! a router, and the mapping lives there where it is stated once for the whole
+//! [`crate::domain::error`], and `a_refused_window_is_400_invalid_argument` in
+//! `api::rest::error`'s tests pins that arm. So the rule lives here where a test
+//! can reach it without a router, and the mapping is stated once for the whole
 //! gear. [`super::super::service::reconcile`]'s rebuild window is the precedent:
 //! same variant, same arm, and until this module it was the *only* raiser — a
 //! claim that arm's own comment made and this module falsifies.

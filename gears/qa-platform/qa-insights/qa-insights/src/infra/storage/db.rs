@@ -13,8 +13,6 @@
 //! nothing in this crate retries a contended transaction. A copy would be a
 //! function with no call site.
 
-use std::fmt::Display;
-
 use toolkit_db::odata::sea_orm_filter::LimitCfg;
 use toolkit_odata::Error as ODataError;
 
@@ -91,7 +89,7 @@ pub(crate) const PAGE_LIMITS: LimitCfg = LimitCfg {
 /// reading error rates.
 ///
 /// `Db` is the one that is genuinely not the caller's — a driver failure — and it
-/// is redacted by the mapping in [`crate::api::rest::error`], so it does not leak.
+/// is redacted by the mapping in [`crate::domain::error`], so it does not leak.
 ///
 /// # Only five of these fifteen variants can reach here, and the doc used to
 /// # claim one that cannot
@@ -147,7 +145,12 @@ pub(crate) fn odata_err(error: &ODataError) -> DomainError {
             field: odata_field_of(error).to_owned(),
             message: error.to_string(),
         },
-        ODataError::Db(text) => DomainError::Database(text.clone()),
+        // No source to keep: `toolkit_odata` has already flattened its own
+        // driver error to a `String` by the time it reaches here (review
+        // finding #25 — `DomainError::database` is the sourceless
+        // constructor, and this is one of the two places that is the honest
+        // answer rather than a shortcut).
+        ODataError::Db(text) => DomainError::database(text.clone()),
         ODataError::ParsingUnavailable(what) => DomainError::Internal((*what).to_owned()),
     }
 }
@@ -175,16 +178,25 @@ fn odata_field_of(error: &ODataError) -> &'static str {
     }
 }
 
-/// Convert any displayable storage error into [`DomainError::Database`].
+/// Convert a storage error into [`DomainError::Database`], keeping the error
+/// itself as the `.source()`.
 ///
-/// Identical to the three siblings' `db.rs::db_err`, including the loss of the
-/// typed error: `Database` holds a `String`. **Moved here from
+/// Identical to the three siblings' `db.rs::db_err`. **Moved here from
 /// `infra::storage::mapper` by Task 17**, which is what that module's header and
 /// `infra::storage`'s both said should happen when this file came to exist — a
 /// conversion helper in the entity/SDK mapper was the placement of last resort,
 /// taken because founding a file for three lines was worse.
-pub(crate) fn db_err(e: impl Display) -> DomainError {
-    DomainError::Database(e.to_string())
+///
+/// The bound used to be `impl Display` and the body `e.to_string()`, which
+/// dropped the error at the one boundary almost every storage failure in this
+/// gear crosses — review finding #25 is about `From<toolkit_db::DbError>`, but
+/// fixing only that would have left this helper flattening `sea_orm::DbErr`
+/// (SQLSTATE and constraint name included) to a bare message.
+pub(crate) fn db_err(e: impl std::error::Error + Send + Sync + 'static) -> DomainError {
+    DomainError::Database {
+        message: e.to_string(),
+        source: Some(Box::new(e)),
+    }
 }
 
 #[cfg(test)]
@@ -245,7 +257,7 @@ mod tests {
 
         assert!(matches!(
             odata_err(&ODataError::Db("connection reset".to_owned())),
-            DomainError::Database(_)
+            DomainError::Database { .. }
         ));
         assert!(matches!(
             odata_err(&ODataError::ParsingUnavailable("built without odata")),
@@ -253,14 +265,22 @@ mod tests {
         ));
     }
 
-    /// [`db_err`] is a `Database`, whatever it was handed. Trivial, and here
-    /// because the function moved files in this commit and a move is exactly when
-    /// a three-line function acquires a typo.
+    /// [`db_err`] is a `Database` carrying the driver's text — and, since
+    /// review finding #25, the driver error itself. The second assertion is the
+    /// one with content: this helper is the boundary almost every storage
+    /// failure in this gear crosses, and it used to flatten the error to a
+    /// message there.
     #[test]
-    fn any_storage_error_becomes_a_database_error() {
-        assert!(matches!(
-            db_err("unique violation on idx_qa_saved_views_name"),
-            DomainError::Database(text) if text.contains("unique violation")
+    fn any_storage_error_becomes_a_database_error_that_keeps_its_source() {
+        let error = db_err(sea_orm::DbErr::Custom(
+            "unique violation on idx_qa_saved_views_name".to_owned(),
         ));
+
+        assert!(matches!(
+            error,
+            DomainError::Database { ref message, .. } if message.contains("unique violation")
+        ));
+        let source = std::error::Error::source(&error).expect("the DbErr is the source");
+        assert!(source.is::<sea_orm::DbErr>(), "{source}");
     }
 }
