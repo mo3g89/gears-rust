@@ -19,9 +19,11 @@ use toolkit_security::{AccessScope, pep_properties};
 use uuid::Uuid;
 
 use super::ProductPluginPresence;
-use super::actions;
 use super::products::ProductsService;
-use super::test_support::{ctx, permissive_response, test_db_provider};
+use super::test_support::{
+    SelectiveGrantAuthZ, ctx, enforced_pair, permissive_response, test_db_provider,
+};
+use super::{actions, resources};
 use crate::domain::error::DomainError;
 use crate::domain::repos::ProductsRepository;
 
@@ -260,12 +262,22 @@ async fn build_service(
 
 async fn build_service_with_presence(
     repo: Arc<MockProductsRepository>,
-    authz: Arc<RecordingAuthZ>,
+    authz: Arc<dyn AuthZResolverClient>,
     presence: Arc<ScriptedPresence>,
 ) -> ProductsService<MockProductsRepository> {
     let enforcer = PolicyEnforcer::new(authz);
     let db = test_db_provider().await;
     ProductsService::new(db, repo, enforcer, presence)
+}
+
+/// [`build_service`] with a caller-supplied `AuthZ` double in place of
+/// [`RecordingAuthZ`] — for the test whose subject is the *decisions* the PDP
+/// returns rather than the requests the service made.
+async fn build_service_with_authz(
+    repo: Arc<MockProductsRepository>,
+    authz: Arc<dyn AuthZResolverClient>,
+) -> ProductsService<MockProductsRepository> {
+    build_service_with_presence(repo, authz, ScriptedPresence::answering(true)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -667,5 +679,73 @@ async fn a_product_from_another_tenant_is_not_readable() {
     assert!(
         matches!(err, DomainError::NotFound { id } if id == their_product),
         "another tenant's product must be absent, not forbidden or readable; got {err:?}"
+    );
+}
+
+/// **An action the caller has no grant for is denied.**
+///
+/// Listed by the review as mandatory and missing, and blocked on finding #1
+/// for a precise reason: with no catalog there was no enumeration of grantable
+/// pairs, so there was no way to grant exactly *one* of them — and "denied
+/// without a grant" could not be told from "denied always".
+///
+/// # What this proves that `pdp_deny_blocks_create` does not
+///
+/// `tests_tenant_scoping::pdp_deny_blocks_create` builds its services with
+/// `DenyAllAuthZ`, a double that refuses every pair. It proves a PDP refusal
+/// reaches the caller as [`DomainError::Forbidden`] — and it would pass
+/// unchanged against a gear that denied every request unconditionally, or one
+/// whose permission catalog was empty, because nothing in it is ever
+/// authorized. Here **one principal, one tenant, one service** holds a grant
+/// for `(qa.product, update)` and no grant for `(qa.product, delete)`: the
+/// update succeeds and the delete is refused, so the refusal is attributable
+/// to the missing grant rather than to the caller, the tenant, or the fixture.
+/// The positive half is the load-bearing one — without it the test passes
+/// against a fixture that denies everything, which is exactly the shape of
+/// denial test the review found insufficient.
+///
+/// Both pairs are resolved out of [`super::authz_surface::ENFORCED`] through
+/// [`enforced_pair`], which panics on a pair this gear does not enforce. So
+/// the denied pair is one the same principal *could* have been granted, and
+/// the test is anchored to the permission catalog rather than to two
+/// hand-typed strings: `gts::permissions_tests::the_catalog_matches_the_enforced_surface`
+/// pins that list to the `AuthzPermissionV1` instances qa-catalog declares, in
+/// both directions. Review finding #1.
+#[tokio::test]
+async fn an_action_without_a_grant_is_denied() {
+    let tenant_id = Uuid::new_v4();
+    let product_id = Uuid::new_v4();
+    let repo = Arc::new(MockProductsRepository::with_product_in_tenant(
+        product(product_id),
+        tenant_id,
+    ));
+
+    let granted = enforced_pair(resources::PRODUCT_NAME, actions::UPDATE);
+    let ungranted = enforced_pair(resources::PRODUCT_NAME, actions::DELETE);
+    let svc = build_service_with_authz(
+        Arc::clone(&repo),
+        Arc::new(SelectiveGrantAuthZ::granting(granted.0, granted.1)),
+    )
+    .await;
+
+    // ONE context, reused: `ctx` mints a fresh subject id per call, and both
+    // halves have to be the same principal for the denial below to be about
+    // the grant.
+    let caller = ctx(tenant_id);
+
+    svc.update_product(&caller, product_id, update(None, None))
+        .await
+        .unwrap_or_else(|e| panic!("the granted pair {granted:?} must be authorized: {e:?}"));
+
+    let err = svc.delete_product(&caller, product_id).await.unwrap_err();
+    assert!(
+        matches!(err, DomainError::Forbidden),
+        "{ungranted:?} was never granted to this principal, so it must be Forbidden; \
+         `Ok` would mean one grant covered every action and `NotFound` would mean the \
+         row was invisible rather than the action unauthorized. Got {err:?}"
+    );
+    assert!(
+        repo.stored().is_some(),
+        "a denied delete must not remove the row"
     );
 }

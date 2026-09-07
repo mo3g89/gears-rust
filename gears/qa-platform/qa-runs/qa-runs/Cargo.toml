@@ -183,6 +183,14 @@ toolkit-macros = { workspace = true }
 # (`infra::storage::odata`). `with-utoipa` is what gives `Page<T>` a schema, so
 # a paginated response can be registered with `json_response_with_schema`.
 toolkit-odata = { workspace = true, features = ["with-utoipa"] }
+# Link-time GTS permission catalog (`src/gts/permissions.rs`): declares
+# AuthzPermissionV1 instances into the toolkit-gts inventory the
+# types-registry aggregates at boot.
+toolkit-gts = { workspace = true }
+# `gts_id!`'s upstream validation (`GtsIdPattern`) and `GTS_ID_PREFIX`, which
+# `toolkit-gts`'s macros delegate to. Same pairing qa-catalog's,
+# qa-environments' and qa-insights' Cargo.toml carry.
+gts = { workspace = true }
 
 # The real-Postgres integration tier's container bring-up
 # (`infra::storage::test_db::pg_db`).

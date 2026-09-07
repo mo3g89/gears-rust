@@ -5,8 +5,8 @@ Code session opened at `/home/serhii/Jelastic/projects/fabric/gears-rust`.
 Everything else in this file is context that prompt refers to.
 
 Written 2026-09-06, after the core plan closed. Updated 2026-09-07: the **quality
-plan is complete** (see "What remains"). Delete this file when the two plans that
-still remain are finished.
+plan and the permission catalog are both complete** (see "What remains"). Delete
+this file when the observability plan — the last one — is finished.
 
 ---
 
@@ -66,15 +66,15 @@ is the part that must outlive it.
 
 ---
 
-## What remains: 23 tasks across three plans
+## What remains: 6 tasks in one plan
 
 | Plan | Tasks | Phases | Findings |
 |---|---|---|---|
 | ~~`2026-09-05-review-remediation-quality.md`~~ **DONE 2026-09-07** | 19–29 | 5, 6, 9 | #10 #11 #12 #14 #15 #16 #17 #25 #27 #34 #35 #37 #38 #39 #41 #42 #43 #44 #45 #46 #53 #54 #55, and #5 |
-| `2026-09-05-qa-permission-catalog.md` | 30–35 | 7 | #1 |
+| ~~`2026-09-05-qa-permission-catalog.md`~~ **DONE 2026-09-07** | 30–35 | 7 | #1 |
 | `2026-09-05-qa-observability.md` | 36–41 | 8 | #4 |
 
-**Quality is done.** Remaining order: permission catalog → observability.
+**Quality and the permission catalog are done.** Only observability remains.
 
 ### What the quality plan left behind
 
@@ -129,6 +129,60 @@ interleave with `as_saved_view_error`/`as_notification_error`. Permitted directi
 recorded in `domain/error.rs`'s header, but the two gears now differ.
 
 ---
+
+### What the permission catalog left behind
+
+Phase 7 closed 2026-09-07 in 11 commits (`032790b1f`..`251f3fe4b`). **All gates green
+at the final commit:** `fmt` · `clippy` · `gts-docs` 839/0/0 · `test-no-macros` **11773**
+(368 skipped) · `test-qa-runs-pg` 935 · `test-qa-insights-pg` 766 · `test-qa-catalog-git`
+309 · `test-qa-platform-features` 277 · `helm-tests`.
+
+**What shipped:** `domain/service/authz_surface.rs` per gear holding `ENFORCED`, the
+measured `(resource_type, action)` pairs that gear's PEP enforces — **71 pairs over 17
+resource types** (25/13/15/18) — with a source-scanning gate; and `src/gts/permissions.rs`
+per gear declaring one `AuthzPermissionV1` instance per pair under
+`cf.qa.<gear>.<pep_entity>_<action>.v1`, pinned to `ENFORCED` in **both directions**.
+Plus one selective-grant denial test in qa-catalog, and 17 assertions pinning each
+`ResourceType` descriptor to its `*_NAME` const.
+
+**Five things a later session should not have to rediscover:**
+
+1. **The spec's surface table was wrong in two ways.** `qa.jira` is not a resource type
+   (only `qa.jira_config`, `qa.jira_bug`), so it is 17 resource types, not 18. And the
+   plan's `ENFORCED` snippet could not compile: `ResourceType::name()` is not a `const fn`,
+   which is why every gear now carries `*_NAME: &str` consts — the pattern qa-insights had
+   already established and documented.
+2. **The 71 permissions are catalogued but no custom RBAC role can target them.** QA's PEP
+   resource strings are plain (`qa.plan`), not GTS type ids, so no stub type-schema can be
+   registered for them and `AuthzPermissionV1.resource_type`'s documented contract (a GTS
+   expression) is also breached. Renaming the strings is precluded — policies are written
+   against them. **This is the phase's central residual and it is recorded in the spec's
+   §12**, with its two ways forward and the limit that the RBAC validator is not in this
+   repo. It is the same decision as authoring the grants, and belongs with the same owner.
+3. **`make gts-docs` was red from `a1767401f` until this phase.** `qa-platform-ui/tsconfig.json`
+   carries Vite's JSONC comments; fixed with `--exclude "**/tsconfig*.json"` in the target,
+   recorded in FOOTPRINT §4.1. No prior session's "gates green" list included `gts-docs`.
+4. **`gears/qa-platform/docs/Reviews/qa-platform-review-findings.md` is git-ignored**
+   (`.gitignore`, near the qa-platform block). It is this subsystem's own 393-line,
+   55-finding review — the document this whole remediation answers — and it exists on one
+   machine only. Its comment used to call it "a review of a DIFFERENT branch", which was
+   false; corrected. **Whether `docs/Reviews/` should become tracked is open and unresolved.**
+5. **Line-number citations drifted four times in this phase**, and `file_citations_tests`
+   says outright it never validates them. Phase 7's eight now **cite the item by name**
+   instead. Note the correction to that reasoning: `doc_citations_tests` does *not* enforce
+   the name form either (it scans `qa-runs/src/**` only, tokens with ≥4 underscores). The
+   name form is not enforced — it simply does not rot. Ten pre-existing qa-insights
+   citations still point ~150 lines off; they were already wrong before this branch.
+
+**Deferred, none blocking:** the scanner's same-function forwarded-action shape can add a
+spurious pair *silently* (the helper-caller shape panics) — live in `variables::upsert`,
+harmless there because another call site enforces the pair independently; the narrowing is a
+named follow-up in spec §12. `SelectiveGrantAuthZ` exists only in qa-catalog, so the other
+three gears still cannot express "holds grants, just not this one". Nine ledger minors, all
+judged safe to leave by the final review.
+
+**No grants shipped, by design** — `deploy/realm/keycloak/realm-qa-platform.json` declares
+no roles at all. Phase 7 hands off to whoever owns that realm.
 
 **Original suggested order (superseded):** quality → permission catalog → observability. The spec
 (§12) says phases 1–6 are the correctness core and that 7 and 8 are each a
