@@ -216,7 +216,7 @@ function clampLimit(limit: number): number {
 }
 
 /**
- * The query string for `GET /qa/v1/test-results` behind `useTestRecentResults`.
+ * The query string for `GET /qa/v1/test-results`.
  *
  * Two things about the bound, both load-bearing:
  *
@@ -227,9 +227,7 @@ function clampLimit(limit: number): number {
  *  - `limit` itself is **undeclared in `/openapi.json`** (X2 — it is declared only on
  *    `/qa/v1/queue`). It does work, driven live, but because it is undeclared it is
  *    **not policed by `make ui-contract`**: regenerating the wire types will never tell
- *    us if it goes away. That is why the caller slices client-side as well
- *    (`sliceRecentResults`) — under X8 an ignored parameter is indistinguishable from an
- *    honoured one at 200, and the slice is the only thing that makes the bound real.
+ *    us if it goes away.
  *
  * `$filter` on this route allows only `id, run_id, test_file, test_name,
  * run_finished_at`, so the file is the one axis legacy's `?file=` maps onto. There is no
@@ -242,12 +240,6 @@ export function recentResultsQuery(args: { file: string; limit: number }): strin
   params.set('$filter', odataEq('test_file', args.file));
   params.set('limit', String(clampLimit(args.limit)));
   return params.toString();
-}
-
-/** The client-side half of `recentResultsQuery`'s bound — see the note there on why the
- *  `limit` parameter alone is not enough. */
-export function sliceRecentResults<T>(rows: T[], limit: number): T[] {
-  return rows.slice(0, clampLimit(limit));
 }
 
 // ---------------------------------------------------------------------------

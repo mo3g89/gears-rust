@@ -259,13 +259,6 @@ mod tests {
         assert_eq!(err.status_code(), 404);
     }
 
-    /// `observe_environment` persists (`record_observation`) and makes an
-    /// outbound call to the environment's own cluster, exactly the shape
-    /// `update_environment`/`delete_environment` gate on their own mutating
-    /// actions -- so it must authorize with `UPDATE`, not `GET`. A principal
-    /// granted only `GET` on an environment must not be able to drive a
-    /// live-cluster round-trip and a database write through this endpoint.
-    /// Found by review; this test is what stops it silently regressing.
     /// Build a `NewEnvironment` attached to `product`, optionally as its default.
     fn environment_for_product(name: &str, product: Uuid, is_default: bool) -> NewEnvironment {
         NewEnvironment {
@@ -362,6 +355,13 @@ mod tests {
         );
     }
 
+    /// `observe_environment` persists (`record_observation`) and makes an
+    /// outbound call to the environment's own cluster, exactly the shape
+    /// `update_environment`/`delete_environment` gate on their own mutating
+    /// actions -- so it must authorize with `UPDATE`, not `GET`. A principal
+    /// granted only `GET` on an environment must not be able to drive a
+    /// live-cluster round-trip and a database write through this endpoint.
+    /// Found by review; this test is what stops it silently regressing.
     #[tokio::test]
     async fn refresh_environment_authorizes_with_update_not_get() {
         let tenant = Uuid::new_v4();

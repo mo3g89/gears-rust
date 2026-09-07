@@ -72,7 +72,6 @@ import {
   productFromDto,
   productReqFromForm,
   queueEntryFromDto,
-  recentResultsQuery,
   repoFromDto,
   repoReqFromForm,
   runDetailsFromDto,
@@ -82,13 +81,11 @@ import {
   scheduleFromDto,
   scheduleNotificationsReq,
   scheduleReqFromForm,
-  sliceRecentResults,
   sshKeyFromDto,
   sshKeyReqFromForm,
   testAnalyticsFromDto,
   testFilesFromPlan,
   testHistoryFromDto,
-  testRunResultFromDto,
   updateEnvironmentReqFromForm,
   unwrapPage,
   variableWritePlan,
@@ -98,7 +95,6 @@ import {
   type RunDtoWithEnvironmentId,
   type ScheduleDtoWithEnvironmentId,
   type QueueEntryDtoWithEnvironmentId,
-  type TestResultDtoWithEnvironmentId,
   type DashboardStatsDtoWithEnvironmentIds,
   type PlanTestAnalyticsDtoWithEnvironment,
   type AnalyticsOverviewDtoWithEnvironmentGroup,
@@ -108,7 +104,6 @@ import {
 import {
   TestPlanInfo,
   WorkflowRun,
-  TestRunResult,
   RunDetails,
   ScheduleInfo,
   CreateScheduleForm,
@@ -758,28 +753,6 @@ export function useCollectCases() {
       const suffix = trimmed ? `?branch=${encodeURIComponent(trimmed)}` : '';
       return apiPost<S['CollectTriggerOutcomeDto']>(`/analytics/collect${suffix}`);
     },
-  });
-}
-
-/**
- * Recent results for one test file.
- *
- * The bound is `limit`, not `$top` — see `recentResultsQuery` for the driven evidence and
- * for why the results are **also** sliced client-side. "Recent" is weaker here than the
- * name suggests: `/qa/v1/test-results` has no chronological `$orderby` (`run_finished_at`
- * is filterable but not sortable, because it is null mid-run and a null sort key
- * truncates pagination), so the default order is `id` descending — *stable but
- * arbitrary*. Row 7 records that; no adapter can fix it.
- */
-export function useTestRecentResults(file: string, limit = 10, refetchInterval?: number) {
-  return useQuery({
-    queryKey: ['test-recent-results', file, limit],
-    queryFn: async (): Promise<TestRunResult[]> => {
-      const page = await apiGet<Page<TestResultDtoWithEnvironmentId>>(`/test-results?${recentResultsQuery({ file, limit })}`);
-      return sliceRecentResults(unwrapPage(page), limit).map(testRunResultFromDto);
-    },
-    enabled: !!file,
-    refetchInterval,
   });
 }
 
