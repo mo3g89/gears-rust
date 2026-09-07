@@ -72,7 +72,7 @@ async fn environment_created_in_tenant_a_invisible_to_tenant_b() {
         .list_environments(&ctx(tenant_b), &ODataQuery::default())
         .await
         .unwrap()
-            .items;
+        .items;
     assert!(
         list_b.is_empty(),
         "tenant B must not see tenant A's environment"
@@ -83,7 +83,7 @@ async fn environment_created_in_tenant_a_invisible_to_tenant_b() {
         .list_environments(&ctx(tenant_a), &ODataQuery::default())
         .await
         .unwrap()
-            .items;
+        .items;
     assert_eq!(list_a.len(), 1);
     assert_eq!(list_a[0].id, created.id);
 }
@@ -113,7 +113,7 @@ async fn variables_scoped_by_tenant() {
         .list_for_env(&ctx(tenant_b), None, &ODataQuery::default())
         .await
         .unwrap()
-            .items;
+        .items;
     assert!(
         vars_b.is_empty(),
         "tenant B must not see tenant A's variable"
@@ -124,7 +124,7 @@ async fn variables_scoped_by_tenant() {
         .list_for_env(&ctx(tenant_a), None, &ODataQuery::default())
         .await
         .unwrap()
-            .items;
+        .items;
     assert_eq!(vars_a.len(), 1);
     assert_eq!(vars_a[0].name, "GLOBAL_VAR");
 }
@@ -410,7 +410,7 @@ async fn list_for_env_caps_at_max_variables() {
         .list_for_env(&ctx(tenant_a), None, &ODataQuery::default())
         .await
         .unwrap()
-            .items;
+        .items;
     assert_eq!(
         vars.len(),
         2,

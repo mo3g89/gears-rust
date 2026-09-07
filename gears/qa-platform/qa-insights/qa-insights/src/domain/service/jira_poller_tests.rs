@@ -886,8 +886,8 @@ async fn a_pass_does_not_touch_another_tenants_open_bug() {
 /// launch is evidence that election stopped one of them and not that the
 /// loser's fixture was quietly incapable.
 #[cfg(feature = "integration")]
-async fn two_pollers_over_one_database() -> (crate::infra::storage::test_db::PgHarness, Fixture, Fixture)
-{
+async fn two_pollers_over_one_database()
+-> (crate::infra::storage::test_db::PgHarness, Fixture, Fixture) {
     use crate::infra::leader::claim_row::ClaimRowElector;
     use crate::infra::storage::test_db::{pg_db, pg_second_pool};
     use std::time::Duration;

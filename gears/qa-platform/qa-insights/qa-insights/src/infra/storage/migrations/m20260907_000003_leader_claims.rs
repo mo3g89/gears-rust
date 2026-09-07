@@ -184,7 +184,10 @@ mod tests {
         };
         conn.execute(Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
-            row("11111111-1111-1111-1111-111111111111", "aaaaaaaa-0000-0000-0000-000000000001"),
+            row(
+                "11111111-1111-1111-1111-111111111111",
+                "aaaaaaaa-0000-0000-0000-000000000001",
+            ),
         ))
         .await
         .expect("the first claim on a free role must be accepted");
@@ -215,8 +218,14 @@ mod tests {
     async fn two_roles_hold_two_independent_slots() {
         let conn = migrated_db().await;
         for (id, role) in [
-            ("11111111-1111-1111-1111-111111111111", "qa-insights-jira-poller"),
-            ("22222222-2222-2222-2222-222222222222", "qa-insights-reconciler"),
+            (
+                "11111111-1111-1111-1111-111111111111",
+                "qa-insights-jira-poller",
+            ),
+            (
+                "22222222-2222-2222-2222-222222222222",
+                "qa-insights-reconciler",
+            ),
         ] {
             conn.execute(Statement::from_string(
                 sea_orm::DatabaseBackend::Sqlite,
@@ -346,7 +355,14 @@ mod tests {
         let sqlite = columns(SQLITE_UP);
         assert_eq!(
             sqlite,
-            vec!["id", "tenant_id", "role", "holder", "claimed_at", "expires_at"],
+            vec![
+                "id",
+                "tenant_id",
+                "role",
+                "holder",
+                "claimed_at",
+                "expires_at"
+            ],
             "the extractor must actually be seeing the column list"
         );
         assert_eq!(sqlite, columns(super::POSTGRES_UP));

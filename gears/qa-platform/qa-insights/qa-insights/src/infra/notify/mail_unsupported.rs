@@ -104,7 +104,11 @@ mod tests {
     #[tokio::test]
     async fn every_message_reports_unsupported_egress() {
         let client = UnsupportedMailClient;
-        for subject in ["first notification", "second notification", "third notification"] {
+        for subject in [
+            "first notification",
+            "second notification",
+            "third notification",
+        ] {
             let outcome = client
                 .send(
                     &ctx(),

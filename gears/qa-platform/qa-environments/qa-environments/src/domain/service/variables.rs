@@ -223,10 +223,7 @@ impl<V: VariablesRepository, P: EnvironmentsRepository> VariablesService<V, P> {
                 );
             }
 
-            let remaining = page
-                .page_info
-                .limit
-                .saturating_sub(page.items.len() as u64);
+            let remaining = page.page_info.limit.saturating_sub(page.items.len() as u64);
 
             // A pipeline half that already filled the union leaves no room, and
             // asking for a limit of 0 would be clamped back up to 1 by

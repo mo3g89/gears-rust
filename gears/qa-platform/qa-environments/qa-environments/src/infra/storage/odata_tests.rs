@@ -212,11 +212,7 @@ async fn a_filter_cannot_widen_the_page_past_the_scope() {
 
     // `name eq 'env-0000'` matches one row in each tenant. The caller sees one.
     let query = equals("name", "env-0000");
-    let page = f
-        .repo
-        .list_page(&f.conn(), &f.scope, &query)
-        .await
-        .unwrap();
+    let page = f.repo.list_page(&f.conn(), &f.scope, &query).await.unwrap();
     assert_eq!(page.items.len(), 1, "a $filter must not widen the scope");
     assert_eq!(page.items[0].name, "env-0000");
 

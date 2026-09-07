@@ -914,7 +914,7 @@ async fn a_create_that_stores_no_required_secret_is_refused() {
                 .list_environments(&ctx(Uuid::new_v4()), &ODataQuery::default())
                 .await
                 .unwrap()
-                    .items
+                .items
                 .is_empty(),
             "{label}: no environment may have been created"
         );

@@ -1030,10 +1030,9 @@ mod tests {
             }
         };
 
-        let term = tokio::time::timeout(
-            Duration::from_secs(10),
-            async { tokio::join!(holder.hold_and_run(ROLE_JIRA_POLLER, &never, &work), steal).0 },
-        )
+        let term = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(holder.hold_and_run(ROLE_JIRA_POLLER, &never, &work), steal).0
+        })
         .await
         .expect(
             "hold_and_run must return once the claim is stolen; hanging here means the \

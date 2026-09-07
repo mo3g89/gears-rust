@@ -68,8 +68,7 @@ impl MockProductsRepository {
     /// in memory. An unconstrained ("allow all") scope admits everything,
     /// matching a real PDP decision with no row-level filtering.
     fn scope_admits(scope: &AccessScope, tenant_id: Uuid) -> bool {
-        scope.is_unconstrained()
-            || scope.contains_uuid(pep_properties::OWNER_TENANT_ID, tenant_id)
+        scope.is_unconstrained() || scope.contains_uuid(pep_properties::OWNER_TENANT_ID, tenant_id)
     }
 }
 

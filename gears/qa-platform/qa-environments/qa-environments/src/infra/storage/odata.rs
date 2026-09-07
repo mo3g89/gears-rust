@@ -48,8 +48,7 @@ use crate::infra::storage::entity::environment::{
     Column as EnvironmentColumn, Entity as EnvironmentEntity, Model as EnvironmentModel,
 };
 use crate::infra::storage::entity::environment_variable::{
-    Column as EnvironmentVarColumn, Entity as EnvironmentVarEntity,
-    Model as EnvironmentVarModel,
+    Column as EnvironmentVarColumn, Entity as EnvironmentVarEntity, Model as EnvironmentVarModel,
 };
 use crate::infra::storage::entity::pipeline_variable::{
     Column as PipelineVarColumn, Entity as PipelineVarEntity, Model as PipelineVarModel,
