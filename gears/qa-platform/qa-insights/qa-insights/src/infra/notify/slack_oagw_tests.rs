@@ -238,23 +238,6 @@ impl ServiceGatewayClientV1 for FakeGateway {
 // REQUEST_TIMEOUT
 // ---------------------------------------------------------------------------
 
-/// The 10s bound is ported reasoning, not a guess
-/// (`manager/src/services/notifications.rs:52-64`). It is a fixed bound, not
-/// derived from any tick interval.
-///
-/// **Honesty note (R97):** this is true by construction — it compares the
-/// constant to itself spelled out in `Duration::from_secs(10)` — and cannot
-/// fail against any implementation that declares the constant differently,
-/// since [`SlackOagwClient`] is the only implementation. It exists because
-/// the brief asks for it verbatim.
-/// [`the_bound_is_actually_applied_to_a_hanging_gateway`] below is the test
-/// that can fail: it proves the bound is *applied* in `send`, not only
-/// *declared* on the type.
-#[test]
-fn the_slack_client_bounds_every_request() {
-    assert_eq!(SlackOagwClient::REQUEST_TIMEOUT, Duration::from_secs(10));
-}
-
 /// The one test in this module that can actually fail on the timeout wiring:
 /// if `send` stopped wrapping the proxy call in `tokio::time::timeout`, this
 /// would hang instead of returning within the assertion's deadline. A

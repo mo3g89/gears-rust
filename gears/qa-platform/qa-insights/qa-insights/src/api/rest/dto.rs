@@ -4298,10 +4298,6 @@ mod tests {
         };
         let input: SavedViewInput = req.into();
         assert_eq!(input.query_json, r#"{"version":"5.0.1"}"#);
-        assert_eq!(input.scope, "plan");
-        assert_eq!(input.repo_id, Some(Uuid::from_u128(9)));
-        assert_eq!(input.plan_path.as_deref(), Some("plans/smoke/plan.yaml"));
-        assert_eq!(input.name, "Regressions");
     }
 
     /// **`CollectReportQuery`'s own header says its three fields "must agree

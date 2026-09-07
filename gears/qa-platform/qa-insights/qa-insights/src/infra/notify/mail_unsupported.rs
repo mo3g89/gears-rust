@@ -95,14 +95,26 @@ mod tests {
         assert_eq!(outcome, SendOutcome::UnsupportedEgress);
     }
 
-    /// The port's contract is per-message, not per-adapter-instance: two
-    /// different messages both get the same honest answer rather than the
-    /// first "using up" some hidden one-shot state.
+    /// The port's contract is per-message, not per-adapter-instance: three
+    /// *different* messages each get the same honest answer rather than the
+    /// first "using up" some hidden one-shot state. Distinct subjects, not
+    /// three calls with `message()`'s fixture repeated verbatim -- a fixed
+    /// adapter could theoretically special-case one payload and this test
+    /// would not notice.
     #[tokio::test]
     async fn every_message_reports_unsupported_egress() {
         let client = UnsupportedMailClient;
-        for _ in 0..3 {
-            let outcome = client.send(&ctx(), &message()).await.expect("never errors");
+        for subject in ["first notification", "second notification", "third notification"] {
+            let outcome = client
+                .send(
+                    &ctx(),
+                    &MailMessage {
+                        subject: subject.to_owned(),
+                        ..message()
+                    },
+                )
+                .await
+                .expect("never errors");
             assert_eq!(outcome, SendOutcome::UnsupportedEgress);
         }
     }
