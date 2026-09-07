@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use authz_resolver_sdk::PolicyEnforcer;
 use qa_insights_sdk::{JiraConfig, JiraPollerConfig, NewJiraBug};
 use time::OffsetDateTime;
+use tokio_util::sync::CancellationToken;
 use toolkit_db::DBProvider;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
@@ -39,6 +40,7 @@ use crate::domain::service::test_support::{
     DEFAULT_BRANCH, FakeCatalog, FakePlatforms, TenantScopedAuthZ, UNIVERSE_TEST_PLAN_PATH,
     UNIVERSE_TEST_REPO_ID, ctx,
 };
+use crate::infra::leader::{LeaderElector, LeaderWorkFn, NoopLeaderElector, work_fn};
 use crate::infra::storage::jira_sea_repo::OrmJiraRepository;
 use crate::infra::storage::results_sea_repo::OrmResultsRepository;
 use crate::infra::storage::test_db::{inmem_db, scope};
@@ -59,6 +61,41 @@ const JIRA_KEY: &str = "V-1";
 // The JIRA double: a scripted status category, nothing else
 // ---------------------------------------------------------------------------
 
+/// A rendezvous point for two replicas polling the same database.
+///
+/// **Task 26's, and it is what makes
+/// [`two_concurrent_pollers_produce_one_rerun`] a guard rather than a coin
+/// flip.** The double-launch that finding #5 is about needs both replicas to
+/// have read `open_bugs` *before* either writes `resolve_bug`; if the first
+/// replica gets all the way to its resolve write first, the second sees no open
+/// bug and does not launch. That is the "race, not a lock" `crate::gear`'s
+/// `jira_poller_ticker` doc describes, and it means the unguarded code
+/// sometimes produces one launch and sometimes two — measured, both outcomes
+/// observed on this fixture before this type existed.
+///
+/// [`Self::arrive`] holds each caller until its peer arrives, or until the
+/// timeout, so the interleaving happens every run. The timeout is what lets it
+/// work in the fixed direction too: with an elector, the loser never arrives,
+/// and the winner must not wait forever for it.
+struct Rendezvous {
+    arrived: std::sync::atomic::AtomicUsize,
+    expected: usize,
+    timeout: std::time::Duration,
+}
+
+impl Rendezvous {
+    async fn arrive(&self) {
+        use std::sync::atomic::Ordering;
+        self.arrived.fetch_add(1, Ordering::SeqCst);
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        while self.arrived.load(Ordering::SeqCst) < self.expected
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+}
+
 /// A [`JiraClient`] double that answers one scripted status category to every
 /// `check_status` call and records the keys it was asked about.
 ///
@@ -69,6 +106,12 @@ const JIRA_KEY: &str = "V-1";
 struct FakeJiraStatus {
     category: StatusCategory,
     asked: Mutex<Vec<String>>,
+    /// `None` for every fixture but the two-replica one — see [`Rendezvous`].
+    ///
+    /// It hangs off *this* double because `check_status` is the first thing a
+    /// pass does after `open_bugs` and the last thing it does before
+    /// `resolve_bug`: parking here is exactly the window the race needs open.
+    rendezvous: Option<Arc<Rendezvous>>,
 }
 
 #[async_trait]
@@ -88,6 +131,9 @@ impl JiraClient for FakeJiraStatus {
         _config: &JiraConfig,
         jira_key: &str,
     ) -> Result<StatusCategory, DomainError> {
+        if let Some(rendezvous) = &self.rendezvous {
+            rendezvous.arrive().await;
+        }
         self.asked.lock().unwrap().push(jira_key.to_owned());
         Ok(self.category.clone())
     }
@@ -197,7 +243,10 @@ impl RunsLauncher for FakeLauncher {
 // ---------------------------------------------------------------------------
 
 struct Fixture {
-    service: JiraPollerService<OrmJiraRepository, OrmResultsRepository>,
+    /// `Arc` rather than a plain value since Task 26: [`Fixture::work`] hands
+    /// the service to a `LeaderWorkFn`, which is `'static`. Every existing
+    /// `f.service.poll_once(...)` call site reads the same through `Deref`.
+    service: Arc<JiraPollerService<OrmJiraRepository, OrmResultsRepository>>,
     jira_service: Arc<JiraService<OrmJiraRepository, OrmResultsRepository>>,
     jira_client: Arc<FakeJiraStatus>,
     ctx: SecurityContext,
@@ -209,6 +258,24 @@ struct Fixture {
     /// other fixture in this file, which files its bug with no platform at
     /// all — legacy's own `platform: None` branch.
     platform_id: Uuid,
+    /// The elector this fixture's replica contends under.
+    ///
+    /// **Task 26's, and the only field here that is not a collaborator of the
+    /// service.** Every test above this one drives `poll_once` directly and
+    /// ignores it; `two_concurrent_pollers_produce_one_rerun` is the one that
+    /// goes through `run_role`, because leadership is the thing it measures.
+    /// [`build_with_authz`] leaves it a
+    /// [`NoopLeaderElector`](crate::infra::leader::NoopLeaderElector), which is
+    /// what `crate::gear` gives the *other* two tickers.
+    #[cfg_attr(
+        not(feature = "integration"),
+        expect(
+            dead_code,
+            reason = "read only by two_concurrent_pollers_produce_one_rerun, which needs a \
+                      shared Postgres and is therefore integration-gated"
+        )
+    )]
+    elector: Arc<dyn LeaderElector>,
 }
 
 fn stored_jira_config() -> JiraConfigInput {
@@ -249,9 +316,37 @@ async fn build_with_authz(
     authz: Arc<dyn authz_resolver_sdk::AuthZResolverClient>,
 ) -> Fixture {
     let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
+    build_on(
+        db,
+        Arc::new(NoopLeaderElector),
+        None,
+        category,
+        configured,
+        authz,
+    )
+    .await
+}
+
+/// [`build_with_authz`] with the database and the elector as parameters.
+///
+/// **Task 26's, and the only reason it exists is that a leadership test needs
+/// two fixtures over *one* database.** Every other builder in this file makes
+/// its own in-memory `SQLite`, which is right for them and useless here: two
+/// pollers with a database each both win trivially and the test proves
+/// nothing. Splitting the constructor rather than parameterising the existing
+/// one keeps that argument at the one call site that needs it.
+async fn build_on(
+    db: Arc<DBProvider<DomainError>>,
+    elector: Arc<dyn LeaderElector>,
+    rendezvous: Option<Arc<Rendezvous>>,
+    category: &str,
+    configured: bool,
+    authz: Arc<dyn authz_resolver_sdk::AuthZResolverClient>,
+) -> Fixture {
     let jira_client = Arc::new(FakeJiraStatus {
         category: StatusCategory::new(category),
         asked: Mutex::new(Vec::new()),
+        rendezvous,
     });
     let jira_service = Arc::new(JiraService::new(
         Arc::clone(&db),
@@ -263,12 +358,12 @@ async fn build_with_authz(
     let catalog = Arc::new(FakeCatalog::default());
     let platforms = Arc::new(FakePlatforms::default());
     let launcher = Arc::new(FakeLauncher::default());
-    let service = JiraPollerService::new(
+    let service = Arc::new(JiraPollerService::new(
         Arc::clone(&jira_service),
         Arc::clone(&catalog) as Arc<dyn CatalogReader>,
         Arc::clone(&platforms) as Arc<dyn EnvironmentReader>,
         Arc::clone(&launcher) as Arc<dyn RunsLauncher>,
-    );
+    ));
     let ctx = ctx(TENANT);
 
     if configured {
@@ -290,6 +385,7 @@ async fn build_with_authz(
         platforms,
         db,
         platform_id: Uuid::nil(),
+        elector,
     }
 }
 
@@ -467,6 +563,41 @@ impl Fixture {
         self.file_bug(test_name, Some(OLD_VERSION), Some(self.platform_id))
             .await;
         self.record_build(NEW_VERSION, Some(branch)).await;
+    }
+
+    /// One poll pass, wrapped as the work a [`LeaderElector`] runs, ending the
+    /// term by cancelling `stop`.
+    ///
+    /// **The cancellation is not decoration.** `ClaimRowElector::run_role`
+    /// loops until its token fires — it has to, or a replica that lost once
+    /// could never take over from a leader that died, which is the entire
+    /// point of the thing — so a term with no shutdown in it does not end. The
+    /// gear's real `jira_poller_ticker` is an infinite `tokio::time::interval`
+    /// loop that returns on exactly this token; a fixture's pass is one tick of
+    /// it, so it fires the same token when the tick is done. Handing both
+    /// replicas the *same* token is what makes "the winner finished, so we are
+    /// shutting down" reach the loser.
+    #[cfg_attr(
+        not(feature = "integration"),
+        expect(
+            dead_code,
+            reason = "called only by two_concurrent_pollers_produce_one_rerun, which needs a \
+                      shared Postgres and is therefore integration-gated"
+        )
+    )]
+    fn work(&self, stop: CancellationToken) -> LeaderWorkFn {
+        let service = Arc::clone(&self.service);
+        let ctx = self.ctx.clone();
+        work_fn(move |_term| {
+            let service = Arc::clone(&service);
+            let ctx = ctx.clone();
+            let stop = stop.clone();
+            async move {
+                let outcome = service.poll_once(&ctx).await;
+                stop.cancel();
+                outcome.map_err(anyhow::Error::from)
+            }
+        })
     }
 }
 
@@ -714,5 +845,148 @@ async fn a_pass_does_not_touch_another_tenants_open_bug() {
     assert_eq!(
         foreign.status, "Open",
         "and the other tenant's bug must still be open - {foreign:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 26: leadership, on the tier that can falsify it
+// ---------------------------------------------------------------------------
+
+/// Two replicas of this gear over one database, each with its own connection
+/// pool and its own elector — as close to two pods as one process gets.
+///
+/// The container's own pool is one replica's and
+/// [`pg_second_pool`](crate::infra::storage::test_db::pg_second_pool) is the
+/// other's, so the two contend through the server rather than through a shared
+/// pool. Everything a rerun needs is staged on **both** fixtures: the rows
+/// (`qa_jira_config`, the bug, the build) are shared because the database is,
+/// and the three doubles (`FakeJiraStatus`, `FakeCatalog`, `FakePlatforms`)
+/// are per-fixture and are given the same answers. That symmetry is what makes
+/// the assertion mean something — either replica *could* launch, so a single
+/// launch is evidence that election stopped one of them and not that the
+/// loser's fixture was quietly incapable.
+#[cfg(feature = "integration")]
+async fn two_pollers_over_one_database() -> (crate::infra::storage::test_db::PgHarness, Fixture, Fixture)
+{
+    use crate::infra::leader::claim_row::ClaimRowElector;
+    use crate::infra::storage::test_db::{pg_db, pg_second_pool};
+    use std::time::Duration;
+
+    let harness = pg_db().await;
+    let first = Arc::new(DBProvider::<DomainError>::new(harness.db.clone()));
+    let second = Arc::new(DBProvider::<DomainError>::new(
+        pg_second_pool(&harness.url).await,
+    ));
+
+    // Test cadences, for the reason `claim_row`'s own suite gives: a 10ms
+    // retry so the loser's wait is observable inside a test. The TTL is long
+    // because nothing here is meant to expire.
+    let elector = |db: &Arc<DBProvider<DomainError>>| {
+        Arc::new(ClaimRowElector::with_timings(
+            Arc::clone(db),
+            Duration::from_secs(30),
+            Duration::from_secs(10),
+            Duration::from_millis(10),
+        )) as Arc<dyn LeaderElector>
+    };
+
+    // Both replicas share one rendezvous, so the pass that gets there first
+    // waits for its peer instead of racing ahead to `resolve_bug` — see
+    // [`Rendezvous`] for why the test is a coin flip without it. 500ms is the
+    // fixed case's whole cost: with an elector only one replica ever arrives,
+    // and it waits that out once.
+    let rendezvous = Arc::new(Rendezvous {
+        arrived: std::sync::atomic::AtomicUsize::new(0),
+        expected: 2,
+        timeout: Duration::from_millis(500),
+    });
+
+    let a = build_on(
+        Arc::clone(&first),
+        elector(&first),
+        Some(Arc::clone(&rendezvous)),
+        StatusCategory::DONE,
+        true,
+        Arc::new(TenantScopedAuthZ),
+    )
+    .await;
+    let b = build_on(
+        Arc::clone(&second),
+        elector(&second),
+        Some(Arc::clone(&rendezvous)),
+        StatusCategory::DONE,
+        true,
+        Arc::new(TenantScopedAuthZ),
+    )
+    .await;
+
+    // One bug, one newer build — written once, seen by both, because the
+    // database is the same one.
+    a.file_bug("T1", Some(OLD_VERSION), None).await;
+    a.record_build(NEW_VERSION, None).await;
+    // The catalog is a per-fixture double, so both replicas get the entry.
+    // Without this on `b`, `b` could never launch and the assertion below
+    // would pass against any elector at all.
+    for f in [&a, &b] {
+        f.catalog
+            .add_test_on_branch_only(DEFAULT_BRANCH, "tests/t1.py", "T1");
+    }
+
+    (harness, a, b)
+}
+
+/// **Two pollers, one rerun.**
+///
+/// The JIRA poller's effect is `RunsLauncher::launch_test` -- a new run, not an
+/// idempotent write -- so two replicas polling the same resolved bug launch it
+/// twice. The reconciler's "election is an optimisation" argument
+/// (`infra::leader`'s header) is correct and does not extend here: nothing
+/// downstream of `maybe_rerun` deduplicates.
+///
+/// `replicaCount: 1` is what prevents this today, and a chart value is not
+/// where a correctness property belongs. Review finding #5.
+///
+/// # Why this cannot live in the unit tier
+///
+/// It needs a **genuinely shared** database that two writers can be inside at
+/// once. This file's other tests run on in-memory `SQLite`, where a fixture's
+/// database is its own — two pollers there would each hold an uncontended
+/// claim and both would win, and the test would pass against an elector that
+/// did nothing. Pointing both at one `SQLite` file would fix the sharing and
+/// not the race: `inmem_db`'s `max_conns(1)` serialises every writer in this
+/// process, so the interleaving the claim row exists to survive cannot occur.
+/// This is the same argument `Cargo.toml`'s `integration` feature makes for
+/// the ingest races, applied to a different race.
+///
+/// # It ran red first
+///
+/// With `NoopLeaderElector` in place of `ClaimRowElector` — the elector the
+/// other two tickers still use — this test reports two launches, which is the
+/// defect finding #5 names.
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_pollers_produce_one_rerun() {
+    use crate::infra::leader::ROLE_JIRA_POLLER;
+
+    let (_harness, a, b) = two_pollers_over_one_database().await;
+    let stop = CancellationToken::new();
+
+    let (ra, rb) = tokio::join!(
+        a.elector
+            .run_role(ROLE_JIRA_POLLER, stop.clone(), a.work(stop.clone())),
+        b.elector
+            .run_role(ROLE_JIRA_POLLER, stop.clone(), b.work(stop.clone())),
+    );
+    ra.unwrap();
+    rb.unwrap();
+
+    assert_eq!(
+        a.launcher.launches() + b.launcher.launches(),
+        1,
+        "exactly one of the two pollers may rerun the bug"
+    );
+    assert!(
+        a.bug_is_resolved(JIRA_KEY).await,
+        "and the pass that won must still have done its work"
     );
 }

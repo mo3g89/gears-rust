@@ -104,7 +104,8 @@ use crate::infra::clients::{QaCatalogReader, QaEnvironmentsReader, QaRunsReader}
 use crate::infra::clock::SystemClock;
 use crate::infra::jira::OagwJiraClient;
 use crate::infra::leader::{
-    LeaderElector, ROLE_COLLECT, ROLE_JIRA_POLLER, ROLE_RECONCILER, elector, work_fn,
+    LeaderElector, ROLE_COLLECT, ROLE_JIRA_POLLER, ROLE_RECONCILER, elector, jira_poller_elector,
+    work_fn,
 };
 use crate::infra::notify::{SlackOagwClient, UnsupportedMailClient};
 use crate::infra::storage::collect_sea_repo::OrmCollectRepository;
@@ -169,9 +170,21 @@ struct QaInsightsRuntime {
     /// (this file's header), and the three tickers reach the database only
     /// through the services they already hold.
     services: Arc<ConcreteAppServices>,
-    /// Leader election for the three ticker roles. `infra::leader`'s header is
-    /// explicit that this buys an *optimisation* here and not mutual exclusion.
+    /// Leader election for the reconcile and collect tickers.
+    /// `infra::leader`'s header is explicit that this buys an *optimisation*
+    /// for those two and not mutual exclusion: both replay writes that
+    /// converge under concurrency.
     elector: Arc<dyn LeaderElector>,
+    /// Leader election for the JIRA poller, and the one place in this gear
+    /// where it is a **correctness requirement**.
+    ///
+    /// A separate field rather than a second use of [`Self::elector`] because
+    /// the two are different implementations, not one implementation two
+    /// tickers share: `infra::leader::ClaimRowElector` takes a row in
+    /// `qa_leader_claims`, where the other keeps `NoopLeaderElector`. Review
+    /// finding #5, and `infra::leader`'s "The JIRA poller is the exception"
+    /// for why the asymmetry is deliberate.
+    jira_poller_elector: Arc<dyn LeaderElector>,
     /// The reconcile sweep's resolved cadence.
     reconciler: Cadence,
     /// The JIRA poller's resolved cadence.
@@ -523,7 +536,10 @@ impl Gear for QaInsights {
             OrmJiraRepository,
             OrmNotifyRepository,
             ServiceDeps {
-                db,
+                // Cloned rather than moved: `jira_poller_elector` below takes
+                // the same handle, because the claim row it writes lives in
+                // this gear's own database.
+                db: Arc::clone(&db),
                 authz,
                 runs: Arc::clone(&qa_runs_reader) as Arc<dyn RunsReader>,
                 catalog: Arc::new(QaCatalogReader::new(qa_catalog)),
@@ -586,6 +602,10 @@ impl Gear for QaInsights {
             .set(Arc::new(QaInsightsRuntime {
                 services: Arc::clone(&services),
                 elector: elector(),
+                // The same `db` the services were built over — the claim row
+                // lives in this gear's own database, so there is nothing to
+                // configure and no second connection to hold.
+                jira_poller_elector: jira_poller_elector(Arc::clone(&db)),
                 reconciler: Cadence::reconciler(&cfg),
                 jira_poller: Cadence::jira_poller(&cfg),
                 collect: Cadence::collect(&cfg),
@@ -926,22 +946,26 @@ impl QaInsights {
     /// each launch a rerun — legacy's `poll_resolved_bugs` has no guard against
     /// that because legacy runs one manager.
     ///
-    /// What actually bounds the damage today is the *local resolve write*: once
+    /// What used to bound the damage was the *local resolve write*: once
     /// `resolve_bug` has run, the bug leaves `open_bugs` and the next pass does
-    /// not see it. That is a race, not a lock, and under the shipped
-    /// `NoopLeaderElector` — where every replica is the leader — it is live.
-    /// Stated rather than implied, because `infra::leader`'s blanket
-    /// "optimisation" sentence would otherwise read as covering this ticker too.
-    /// Closing it needs a claim row of the kind
-    /// `idx_qa_run_notifications_claim` gives the notification path, which no
-    /// task owns.
+    /// not see it. That is a race, not a lock, and under `NoopLeaderElector` —
+    /// where every replica is the leader — it was live. **Review finding #5
+    /// closed it**: this ticker runs under
+    /// [`ClaimRowElector`](crate::infra::leader::ClaimRowElector), which takes
+    /// the claim row this paragraph used to ask for — "of the kind
+    /// `idx_qa_run_notifications_claim` gives the notification path" — in
+    /// `qa_leader_claims`. The other two tickers keep `NoopLeaderElector`,
+    /// which is why `rt` carries two electors and this function reaches for
+    /// the second.
     fn jira_poller_ticker(
         rt: &Arc<QaInsightsRuntime>,
         tasks: &CancellationToken,
     ) -> Ticker<impl Future<Output = ()> + Send + 'static> {
         // One binding, for the reason `reconcile_ticker` gives.
         let role = ROLE_JIRA_POLLER;
-        let elector = Arc::clone(&rt.elector);
+        // `jira_poller_elector`, not `elector`: this is the one role whose
+        // leadership is a correctness requirement. See this function's doc.
+        let elector = Arc::clone(&rt.jira_poller_elector);
         let services = Arc::clone(&rt.services);
         let period = std::time::Duration::from_secs(rt.jira_poller.interval_seconds);
         let cancel = tasks.clone();
