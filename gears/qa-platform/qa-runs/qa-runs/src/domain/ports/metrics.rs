@@ -19,8 +19,10 @@
 //! * **Bridging existing types instead of duplicating them.** Each label enum
 //!   is derived from something this gear already decides —
 //!   [`DomainError::disclosable`], [`crate::domain::state_machine::is_terminal`],
-//!   [`Admission`] — through a `From` impl, so the metric layer holds no second
-//!   copy of a classification that would then have to be kept in agreement.
+//!   `service::launch`'s admission outcome — through a `From` impl, so the
+//!   metric layer holds no second copy of a classification that would then have
+//!   to be kept in agreement. Where the source type is crate-private, the impl
+//!   lives beside *it* rather than here: [`DispatchDecision`] says where.
 //! * **Cardinality discipline, which here is also a disclosure rule.** No label
 //!   accepts a free `&str`, and in particular **no label carries a tenant id**,
 //!   a run name, a branch or a repository URL. A metrics pipeline is a second
@@ -51,7 +53,6 @@ use qa_runs_sdk::RunState;
 use toolkit_macros::domain_model;
 
 use crate::domain::error::DomainError;
-use crate::domain::service::launch::Admission;
 use crate::domain::state_machine::is_terminal;
 
 // ════════════════════════════════════════════════════════════════════
@@ -125,11 +126,19 @@ impl From<&DomainError> for DispatchOutcome {
 
 /// `decision` label on [`crate::domain::metrics::QA_RUNS_DISPATCH_DECISION`].
 ///
-/// A projection of [`Admission`], which is the enum the launch path already
-/// decides — so a fourth admission outcome is a compile error in the `From`
-/// impl below rather than a silently unlabelled emission. The queue id
-/// [`Admission`] carries is deliberately dropped: it is per-run, and a per-run
-/// label is unbounded cardinality.
+/// A projection of `service::launch`'s `Admission`, which is the enum the
+/// launch path already decides — so a fourth admission outcome is a compile
+/// error in the projection rather than a silently unlabelled emission. The
+/// queue id that enum carries is deliberately dropped: it is per-run, and a
+/// per-run label is unbounded cardinality.
+///
+/// **The `From<&Admission>` impl lives in `service::launch`, next to the enum
+/// it projects, not here.** Two reasons beyond the dependency arrow: that
+/// module is `pub(crate)`, so an impl written here would attach a
+/// crate-private type to a public one — unusable and undocumentable outside
+/// the crate from the module that advertises it; and the "a fourth outcome is
+/// a compile error" guarantee only helps if it is where the author adding a
+/// variant is already looking.
 ///
 /// **Exclusivity tier is not a label here, and that is a decision.**
 /// [`qa_runs_sdk::ExclusiveTier`] is closed and four-valued, so it would be
@@ -141,9 +150,9 @@ impl From<&DomainError> for DispatchOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchDecision {
     /// A queue row was inserted `dispatching` and the launch path dispatches
-    /// inline. The run was never queued — see [`Admission::Dispatch`], which is
-    /// explicit that this outcome does not pass through
-    /// [`RunState::Queued`](qa_runs_sdk::RunState::Queued).
+    /// inline. The run was never queued — `service::launch`'s
+    /// `Admission::Dispatch` is explicit that this outcome does not pass
+    /// through [`RunState::Queued`](qa_runs_sdk::RunState::Queued).
     Inline,
     /// A queue row was inserted `queued`; the run waits for the tick.
     Queued,
@@ -162,16 +171,6 @@ impl DispatchDecision {
             Self::Inline => "inline",
             Self::Queued => "queued",
             Self::Unqueued => "unqueued",
-        }
-    }
-}
-
-impl From<&Admission> for DispatchDecision {
-    fn from(admission: &Admission) -> Self {
-        match admission {
-            Admission::Dispatch { .. } => Self::Inline,
-            Admission::Queued { .. } => Self::Queued,
-            Admission::Unqueued => Self::Unqueued,
         }
     }
 }
@@ -248,10 +247,9 @@ impl From<RunState> for IngestOutcome {
     /// anything else applied an observation to a live one.
     ///
     /// Derived from [`crate::domain::state_machine::is_terminal`] rather than
-    /// from a list of terminal states written here. That set has changed once
-    /// already — [`RunState::Expired`](qa_runs_sdk::RunState::Expired) was added
-    /// after the first draft of the state machine — and a copy of it in the
-    /// metric layer would have missed it silently.
+    /// from a list of terminal states written here. A copy of that set in the
+    /// metric layer would be a second definition of which states end a run,
+    /// and nothing would notice the day the two stopped agreeing.
     fn from(state: RunState) -> Self {
         if is_terminal(state) {
             Self::Completed

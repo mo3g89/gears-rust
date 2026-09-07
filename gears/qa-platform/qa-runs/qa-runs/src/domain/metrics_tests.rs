@@ -17,6 +17,7 @@ use crate::domain::ports::metrics::{
     DispatchDecision, DispatchMetrics, DispatchOutcome, IngestMetrics, IngestOutcome, NoopMetrics,
 };
 use crate::domain::service::launch::Admission;
+use crate::domain::state_machine::TERMINAL_STATES;
 
 /// **Every metric constant is the literal Prometheus series name.**
 ///
@@ -66,8 +67,10 @@ fn every_metric_is_namespaced_to_this_gear() {
 #[test]
 fn label_taxonomies_are_closed_sets() {
     // Each `as_str` is total over a closed enum; a value outside it is
-    // unconstructible. Round-tripping every variant is what proves the set is
-    // closed rather than merely narrow.
+    // unconstructible. What this body checks is that every enumerated variant
+    // renders to something -- the closedness itself is the type system's, and
+    // `no_label_value_collides_within_its_own_enum` is what checks the
+    // rendering is injective.
     for outcome in DispatchOutcome::ALL {
         assert!(!outcome.as_str().is_empty());
     }
@@ -105,9 +108,10 @@ fn each_duration_family_has_a_counter_of_the_same_stem() {
         let stem = duration
             .strip_suffix("_duration_seconds")
             .unwrap_or(duration);
+        let counter = format!("{stem}_total");
         assert!(
-            COUNTERS.iter().any(|c| c.starts_with(stem)),
-            "{duration} has no counter family sharing its stem {stem}"
+            COUNTERS.contains(&counter.as_str()),
+            "{duration} has no counter family named {counter}"
         );
     }
 }
@@ -165,17 +169,74 @@ fn a_refusal_and_an_internal_failure_are_told_apart_by_the_disclosure_rule() {
 
 /// **A terminal state completes an ingest pass; anything else applies one.**
 ///
-/// Derived from [`crate::domain::state_machine::is_terminal`] rather than from
-/// a list of terminal states written here. The set has changed once already --
-/// [`RunState::Expired`] was added after the first draft of the state machine
-/// -- and a copy of it in the metric layer would have missed that.
+/// The oracle is written out below rather than read from
+/// [`crate::domain::state_machine::is_terminal`], which is what the
+/// implementation derives from — a test that called the same function would
+/// assert only that the function equals itself.
+///
+/// [`expected_outcome`]'s match has no `_` arm, so a state added to
+/// [`RunState`] does not compile until somebody classifies it here. The
+/// cross-check against [`TERMINAL_STATES`] is what catches the other half: a
+/// state left out of [`EVERY_RUN_STATE`] entirely.
 #[test]
 fn a_terminal_state_completes_the_pass_and_a_live_one_applies_it() {
-    for state in crate::domain::state_machine::TERMINAL_STATES {
-        assert_eq!(IngestOutcome::from(state), IngestOutcome::Completed);
+    for state in EVERY_RUN_STATE {
+        assert_eq!(
+            IngestOutcome::from(state),
+            expected_outcome(state),
+            "{}",
+            state.as_str()
+        );
     }
-    for state in [RunState::Created, RunState::Queued, RunState::Running] {
-        assert_eq!(IngestOutcome::from(state), IngestOutcome::Applied);
+
+    let completed = EVERY_RUN_STATE
+        .into_iter()
+        .filter(|state| expected_outcome(*state) == IngestOutcome::Completed)
+        .count();
+    assert_eq!(
+        completed,
+        TERMINAL_STATES.len(),
+        "the state list has drifted from the state machine's terminal set"
+    );
+}
+
+/// Every state a run can be in.
+///
+/// Hand-maintained, and its own oracle in the way
+/// [`crate::domain::metrics::COUNTERS`] is — the compiler cannot enumerate an
+/// enum. What keeps it honest is the pair of checks in
+/// [`a_terminal_state_completes_the_pass_and_a_live_one_applies_it`]: a new
+/// state fails to compile in [`expected_outcome`], and a terminal state missing
+/// from this list fails the count.
+const EVERY_RUN_STATE: [RunState; 10] = [
+    RunState::Created,
+    RunState::Queued,
+    RunState::Dispatching,
+    RunState::Running,
+    RunState::Succeeded,
+    RunState::Failed,
+    RunState::Canceled,
+    RunState::TimedOut,
+    RunState::Expired,
+    RunState::Error,
+];
+
+/// Which outcome each state should produce, spelled out.
+///
+/// Exhaustive with no `_` arm on purpose — the same device
+/// [`DomainError::disclosable`] uses, and for the same reason: a state added
+/// later gets classified by whoever adds it rather than inheriting a default.
+fn expected_outcome(state: RunState) -> IngestOutcome {
+    match state {
+        RunState::Created | RunState::Queued | RunState::Dispatching | RunState::Running => {
+            IngestOutcome::Applied
+        }
+        RunState::Succeeded
+        | RunState::Failed
+        | RunState::Canceled
+        | RunState::TimedOut
+        | RunState::Expired
+        | RunState::Error => IngestOutcome::Completed,
     }
 }
 
@@ -199,8 +260,38 @@ fn every_admission_projects_to_its_own_decision_label() {
         DispatchDecision::from(&Admission::Unqueued),
         DispatchDecision::Unqueued
     );
-    let labels: BTreeSet<&str> = DispatchDecision::ALL.iter().map(|d| d.as_str()).collect();
-    assert_eq!(labels.len(), DispatchDecision::ALL.len());
+}
+
+/// **Within one enum, no two variants render to the same label value.**
+///
+/// The `ALL` arrays are hand-maintained (see [`COUNTERS`]'s own caveat), and so
+/// is every `as_str` match — a copy-pasted arm returning its neighbour's string
+/// compiles, passes every other test here, and silently sums two variants into
+/// one series. Swept over all three enums rather than one: this file is the
+/// template the other three gears copy, so a gap here propagates.
+#[test]
+fn no_label_value_collides_within_its_own_enum() {
+    fn distinct(values: &[&'static str], enum_name: &str) {
+        let seen: BTreeSet<&str> = values.iter().copied().collect();
+        assert_eq!(
+            seen.len(),
+            values.len(),
+            "{enum_name} renders two variants to the same label: {values:?}"
+        );
+    }
+
+    distinct(
+        &DispatchOutcome::ALL.map(DispatchOutcome::as_str),
+        "DispatchOutcome",
+    );
+    distinct(
+        &DispatchDecision::ALL.map(DispatchDecision::as_str),
+        "DispatchDecision",
+    );
+    distinct(
+        &IngestOutcome::ALL.map(IngestOutcome::as_str),
+        "IngestOutcome",
+    );
 }
 
 /// **Emitting with no adapter installed does nothing and cannot fail.**

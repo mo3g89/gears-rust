@@ -116,6 +116,7 @@ use crate::domain::error::DomainError;
 use crate::domain::exclusivity::{self, FileMeta, Resolution};
 use crate::domain::naming::{self, NameSources};
 use crate::domain::params;
+use crate::domain::ports::metrics::DispatchDecision;
 use crate::domain::repos::{NewRun, RunStatePatch, RunsRepository};
 use crate::domain::state_machine;
 use crate::domain::timeout::{resolve_timeout_seconds, saturating_i64};
@@ -243,6 +244,32 @@ pub enum Admission {
     /// `manager/src/services/run_dispatcher.rs:103-106`). Dispatch inline with
     /// no queue row at all.
     Unqueued,
+}
+
+/// The observability projection of this enum, for
+/// [`crate::domain::metrics::QA_RUNS_DISPATCH_DECISION`].
+///
+/// **Here rather than in `domain::ports::metrics`, where the label type
+/// lives.** Two reasons. This module is `pub(crate)`, so an impl written over
+/// there would hang a crate-private type off a public one from the module that
+/// advertises it — nothing outside this crate could name the impl or read it in
+/// the port's documentation. And the guarantee the projection carries is that
+/// **a fourth [`Admission`] outcome is a compile error**, which is only worth
+/// having where the author adding that outcome is already looking: this match
+/// has no `_` arm, so the variant cannot be added and silently emitted
+/// unlabelled.
+///
+/// The `queue_id` two variants carry is dropped rather than labelled: it is
+/// per-run, so it is unbounded cardinality, and
+/// [`DispatchDecision`] states the rule.
+impl From<&Admission> for DispatchDecision {
+    fn from(admission: &Admission) -> Self {
+        match admission {
+            Admission::Dispatch { .. } => Self::Inline,
+            Admission::Queued { .. } => Self::Queued,
+            Admission::Unqueued => Self::Unqueued,
+        }
+    }
 }
 
 /// Submit an admitted run to the execution plane, inline on the launch path.
