@@ -43,7 +43,7 @@
 //!    (`manager/src/routes/analytics.rs:618-623` for create,
 //!    `:675-680` for update; `format!("Failed to {create,update} saved view:
 //!    {}", e)`). This gear never lets driver text reach a caller
-//!    (`api::rest::error`'s own rule for `Database`/`Internal`/`CorruptState`)
+//!    (`domain::error`'s own rule for `Database`/`Internal`/`CorruptState`)
 //!    and maps a unique violation specifically to `409 SavedViewNameExists`
 //!    — narrower and more honest than legacy's catch-all, and, like item 5,
 //!    a pre-existing Task 12 decision this task is the first to expose at the

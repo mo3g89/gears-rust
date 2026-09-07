@@ -33,7 +33,7 @@
 use std::sync::Arc;
 
 use crate::domain::service::DbProvider;
-use qa_runs_sdk::{LaunchRequest, RunSource, RunState, RunTarget};
+use qa_runs_sdk::{Exclusivity, LaunchRequest, RunSource, RunState, RunTarget};
 use toolkit_db::DBProvider;
 use toolkit_odata::ODataQuery;
 use uuid::Uuid;
@@ -44,7 +44,7 @@ use super::{AppServices, LogArchive, QueueLimits, ServiceDeps};
 use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::RunExecutor;
 use crate::domain::repos::RunsRepository;
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 use crate::infra::executor::mock::MockRunExecutor;
 use crate::infra::logs::RunLogBroadcaster;
 use crate::infra::storage::test_db::{inmem_db, scope};
@@ -121,7 +121,7 @@ fn launch_against(platform: Option<Uuid>) -> LaunchRequest {
         include_tags: vec![],
         exclude_tags: vec![],
         parameters: vec![],
-        exclusive: None,
+        exclusive: Exclusivity::Inherit,
         timeout_seconds: None,
         source: RunSource::Manual,
         schedule_id: None,

@@ -83,7 +83,6 @@ export function RunTestDialog({ test, open, onOpenChange, trigger, initialBranch
       if (repoDefaultBranch?.trim()) return repoDefaultBranch.trim();
       return pickDefaultBranch(branchList);
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, repoDefaultBranch, branchList, selectedEnvironmentInfo?.default_branch, initialBranch]);
 
   // When opened with an initial environment (e.g. re-running a failed test on the

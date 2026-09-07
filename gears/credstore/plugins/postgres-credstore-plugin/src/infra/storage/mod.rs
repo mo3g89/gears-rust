@@ -17,3 +17,7 @@ pub mod repo;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod leak_tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod repo_tests;

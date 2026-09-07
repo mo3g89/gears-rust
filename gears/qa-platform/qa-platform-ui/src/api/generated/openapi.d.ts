@@ -730,7 +730,7 @@ export interface paths {
         };
         /**
          * List target environments
-         * @description Retrieve all target environments visible to the caller
+         * @description One page of the target environments visible to the caller, by name. Supports OData $filter, $orderby and cursor pagination; the page size defaults to 200 and is clamped to 500.
          */
         get: operations["qa_environments.list_environments"];
         put?: never;
@@ -1454,7 +1454,7 @@ export interface paths {
         };
         /**
          * List environment variables
-         * @description List global pipeline variables, plus an environment's variables when `environment_id` is given
+         * @description One page of the global pipeline variables, plus an environment's variables when `environment_id` is given. Supports OData $filter and $orderby; the page size defaults to 200 and is clamped to 500. Cursor pagination applies only when `environment_id` is absent -- with it the response is the union of two tables, which a single-table cursor cannot address, so the page is bounded (pipeline variables first) and `next_cursor` is null. Narrow with $filter.
          */
         get: operations["qa_environments.list_variables"];
         /**
@@ -1901,16 +1901,20 @@ export interface components {
             /** @description The request's `product_id`, trimmed. */
             product_id: string;
             quality_vectors: components["schemas"]["QualityVectorSummaryDto"];
-            /**
-             * @description `all` or `plan` — **normalized**, so a request that shouted its scope
-             *     gets it back in lower case.
-             */
-            scope: string;
+            /** @description `all` or `plan`, **normalized** — see [`AnalyticsScopeDto`]. */
+            scope: components["schemas"]["AnalyticsScopeDto"];
             summary: components["schemas"]["OverviewSummaryDto"];
             trend: components["schemas"]["TrendDataDto"];
             /** @description The request's `version`, trimmed. */
             version: string;
         };
+        /**
+         * @description Which executions an analytics overview is about: the whole universe, or one
+         *     plan. **Normalized** — a request that shouted its scope gets it back in
+         *     lower case.
+         * @enum {string}
+         */
+        AnalyticsScopeDto: "all" | "plan";
         AuthConfig: {
             config?: {
                 [key: string]: string;
@@ -3048,6 +3052,12 @@ export interface components {
              */
             tag: components["schemas"]["GroupSummaryDto"][];
         };
+        /**
+         * @description Which tier supplied a run's exclusivity decision. `plan.yaml` is the
+         *     plan-file tier, spelled as the file is named.
+         * @enum {string}
+         */
+        ExclusiveTierDto: "launch" | "plan.yaml" | "test_meta" | "default";
         GrpcMatch: {
             method: string;
             service: string;
@@ -3737,6 +3747,10 @@ export interface components {
             next_cursor?: string | null;
             prev_cursor?: string | null;
         };
+        Page_EnvironmentDto: {
+            items: components["schemas"]["EnvironmentDto"][];
+            page_info: components["schemas"]["PageInfo"];
+        };
         Page_GroupDto: {
             items: components["schemas"]["GroupDto"][];
             page_info: components["schemas"]["PageInfo"];
@@ -3763,6 +3777,10 @@ export interface components {
         };
         Page_TestResultDto: {
             items: components["schemas"]["TestResultDto"][];
+            page_info: components["schemas"]["PageInfo"];
+        };
+        Page_VariableDto: {
+            items: components["schemas"]["VariableDto"][];
             page_info: components["schemas"]["PageInfo"];
         };
         Page_TypeDto: {
@@ -4295,10 +4313,10 @@ export interface components {
             run_id: string;
             /** @description `plan`, `test`, or `custom_plan`. */
             run_kind: string;
-            /** @description `manual` or `scheduled`. */
-            source: string;
-            /** @description One of the seven frozen queue-state names. Note `cancelled`, two `l`s. */
-            state: string;
+            /** @description Who asked - see [`RunSourceDto`]. */
+            source: components["schemas"]["RunSourceDto"];
+            /** @description One of the seven frozen queue-state names - see [`QueueStateDto`]. */
+            state: components["schemas"]["QueueStateDto"];
             /**
              * Format: date-time
              * @description When the TTL sweep will expire this row. `null` unless `queued`, and
@@ -4306,6 +4324,13 @@ export interface components {
              */
             ttl_expires_at?: string | null;
         };
+        /**
+         * @description A queue row's state - the seven frozen names. Note `cancelled`, two `l`s;
+         *     a *run*'s equivalent state is spelled `canceled`, and the difference is
+         *     deliberate.
+         * @enum {string}
+         */
+        QueueStateDto: "queued" | "dispatching" | "running" | "done" | "failed" | "cancelled" | "expired";
         /**
          * @description The 202 body: a launch that was admitted but has not started.
          *
@@ -4514,8 +4539,8 @@ export interface components {
              */
             error?: string | null;
             exclude_tags: string[];
-            /** @description Which tier supplied it: `launch`, `plan.yaml`, `test_meta`, `default`. */
-            exclusive_tier: string;
+            /** @description Which tier supplied it - see [`ExclusiveTierDto`]. */
+            exclusive_tier: components["schemas"]["ExclusiveTierDto"];
             /** @description Opaque executor handle; `null` until dispatch succeeds. */
             execution_ref?: string | null;
             /** Format: date-time */
@@ -4561,16 +4586,15 @@ export interface components {
             result: components["schemas"]["RunResultDto"];
             /** Format: uuid */
             schedule_id?: string | null;
-            /** @description `manual` or `scheduled`. */
-            source: string;
+            /** @description Who asked - see [`RunSourceDto`]. */
+            source: components["schemas"]["RunSourceDto"];
             /** Format: date-time */
             started_at?: string | null;
             /**
-             * @description `sdk::RunState::as_str`'s spelling. Note `canceled`, one `l` - the queue
-             *     row's equivalent state is spelled `cancelled`, and the difference is
-             *     deliberate (see `sdk::RunState`).
+             * @description `sdk::RunState::as_str`'s spelling - a closed set on the wire since
+             *     Task 20, when this field stopped being a `String`.
              */
-            state: string;
+            state: components["schemas"]["RunStateDto"];
             target: components["schemas"]["RunTargetDto"];
             /** @description Branch actually resolved and executed against. */
             test_version?: string | null;
@@ -4609,6 +4633,21 @@ export interface components {
             skipped: number;
             total: number;
         };
+        /**
+         * @description Who asked for a run.
+         * @enum {string}
+         */
+        RunSourceDto: "manual" | "scheduled";
+        /**
+         * @description A run's lifecycle state. Note `canceled`, one `l` - a queue row's
+         *     equivalent state is spelled `cancelled`, and the difference is deliberate.
+         *
+         *     A client ported from the source system must **re-map, not merely re-case**:
+         *     `created`, `queued`, `dispatching`, `canceled`, `timed_out` and `expired`
+         *     have no equivalent there.
+         * @enum {string}
+         */
+        RunStateDto: "created" | "queued" | "dispatching" | "running" | "succeeded" | "failed" | "canceled" | "timed_out" | "expired" | "error";
         /**
          * @description What a launch targets, as a flat discriminated record.
          *
@@ -4738,10 +4777,16 @@ export interface components {
             query_json: unknown;
             /** Format: uuid */
             repo_id?: string | null;
-            scope: string;
+            /** @description `all` or `plan` — see [`SavedViewScopeDto`]. */
+            scope: components["schemas"]["SavedViewScopeDto"];
             /** Format: date-time */
             updated_at: string;
         };
+        /**
+         * @description What a saved view is scoped to: the whole universe, or one plan.
+         * @enum {string}
+         */
+        SavedViewScopeDto: "all" | "plan";
         /** @description A schedule as reported by the read endpoints. */
         ScheduleDto: {
             /**
@@ -8943,20 +8988,56 @@ export interface operations {
     };
     "qa_environments.list_environments": {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description OData v4 filter expression
+                 *     - id: eq|ne|in
+                 *     - name: eq|ne|contains|startswith|endswith|in
+                 *     - product_id: eq|ne|in
+                 *     - is_default: eq|ne
+                 *     - observed_version: eq|ne|contains|startswith|endswith|in
+                 *     - created_at: eq|ne|gt|ge|lt|le|in
+                 */
+                $filter?: string;
+                /**
+                 * @description OData v4 orderby expression
+                 *     - id asc
+                 *     - id desc
+                 *     - name asc
+                 *     - name desc
+                 *     - product_id asc
+                 *     - product_id desc
+                 *     - is_default asc
+                 *     - is_default desc
+                 *     - observed_version asc
+                 *     - observed_version desc
+                 *     - created_at asc
+                 *     - created_at desc
+                 */
+                $orderby?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description List of target environments */
+            /** @description One page of target environments */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["EnvironmentDto"][];
+                    "application/json": components["schemas"]["Page_EnvironmentDto"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Unauthorized */
@@ -12113,6 +12194,23 @@ export interface operations {
             query?: {
                 /** @description Optional environment UUID to also include that environment's variables */
                 environment_id?: string;
+                /**
+                 * @description OData v4 filter expression
+                 *     - id: eq|ne|in
+                 *     - name: eq|ne|contains|startswith|endswith|in
+                 *     - created_at: eq|ne|gt|ge|lt|le|in
+                 */
+                $filter?: string;
+                /**
+                 * @description OData v4 orderby expression
+                 *     - id asc
+                 *     - id desc
+                 *     - name asc
+                 *     - name desc
+                 *     - created_at asc
+                 *     - created_at desc
+                 */
+                $orderby?: string;
             };
             header?: never;
             path?: never;
@@ -12120,13 +12218,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description List of variables */
+            /** @description One page of variables */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["VariableDto"][];
+                    "application/json": components["schemas"]["Page_VariableDto"];
                 };
             };
             /** @description Bad Request */

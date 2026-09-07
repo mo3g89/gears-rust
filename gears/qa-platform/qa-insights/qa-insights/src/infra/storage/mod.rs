@@ -259,6 +259,36 @@ pub(crate) mod test_db {
         }
     }
 
+    /// A **second** pool onto a [`PgHarness`]'s database, for a test that needs
+    /// two independent clients of one server.
+    ///
+    /// [`pg_db`] already returns a pool, and two `Db` handles cloned from it
+    /// would share a connection pool — fine for most things and wrong for the
+    /// one property
+    /// `domain::service::jira_poller_tests::two_concurrent_pollers_produce_one_rerun`
+    /// measures, which is what two *replicas* do to one database. Two pools is
+    /// as close to two processes as a single-process test gets: separate
+    /// connections, separate transactions, and nothing shared but the server.
+    ///
+    /// No migrations: [`pg_db`] has already run them against this database, and
+    /// running them twice is what the runner's own bookkeeping is there to
+    /// prevent, not something to rely on.
+    #[cfg(feature = "integration")]
+    pub async fn pg_second_pool(url: &str) -> toolkit_db::Db {
+        use toolkit_db::{ConnectOpts, connect_db};
+
+        connect_db(
+            url,
+            ConnectOpts {
+                max_conns: Some(8),
+                min_conns: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("failed to open a second pool onto the postgres container")
+    }
+
     #[cfg(feature = "integration")]
     async fn wait_for_tcp(port: u16) {
         use std::time::Duration;

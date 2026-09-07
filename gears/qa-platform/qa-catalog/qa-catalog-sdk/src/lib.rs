@@ -10,7 +10,7 @@ mod plugin_resolver;
 pub use client::QaCatalogClientV1;
 pub use errors::QaCatalogError;
 pub use models::{
-    BundleRequest, CustomPlan, CustomPlanEntry, ExclusiveFlag, NewCustomPlan, NewCustomPlanEntry,
+    BundleRequest, CustomPlan, CustomPlanEntry, Exclusivity, NewCustomPlan, NewCustomPlanEntry,
     NewProduct, NewTestRepository, Plan, Product, ProductUpdate, SOURCE_REPO, SshKey, SyncRequest,
     TestBundle, TestFileMeta, TestRepository, TestRepositoryUpdate, UniverseTest,
 };

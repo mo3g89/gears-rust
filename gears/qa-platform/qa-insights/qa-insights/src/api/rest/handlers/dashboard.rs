@@ -16,7 +16,7 @@
 //! The scope is derived by
 //! [`DashboardService`](crate::domain::service::dashboard::DashboardService)
 //! immediately before the reads, and `?` resolves the error through
-//! [`crate::api::rest::error`].
+//! [`crate::domain::error`]'s boundary mapping.
 
 use std::sync::Arc;
 

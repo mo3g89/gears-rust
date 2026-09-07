@@ -25,7 +25,7 @@ pub struct QaProductPluginResolverLocalClient<P: ProductsRepository> {
 }
 
 impl<P: ProductsRepository> QaProductPluginResolverLocalClient<P> {
-    pub(crate) fn new(registry: Arc<QaProductRegistry<P>>) -> Self {
+    pub fn new(registry: Arc<QaProductRegistry<P>>) -> Self {
         Self { registry }
     }
 }

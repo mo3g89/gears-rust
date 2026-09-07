@@ -257,8 +257,8 @@ impl JiraRepository for FailingUpsertJiraRepository {
         _tenant_id: Uuid,
         _bug: NewJiraBug,
     ) -> Result<JiraBug, DomainError> {
-        Err(DomainError::Database(
-            "simulated local registration failure".to_owned(),
+        Err(DomainError::database(
+            "simulated local registration failure",
         ))
     }
 

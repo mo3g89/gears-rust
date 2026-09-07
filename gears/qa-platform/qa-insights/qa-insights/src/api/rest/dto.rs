@@ -41,7 +41,7 @@
 use qa_insights_sdk::{
     CoverageBuild, CoverageSummary, DailyStatusPoint, DashboardRun, DashboardStats, FailedTestCard,
     FlakyTestCard, JiraBug, JiraConfig, JiraPollerConfig, NotificationConfig, NotificationLogEntry,
-    QualityVectorPassRate, RunTestTrendPoint, SavedView, ScheduledRunSlackTemplate,
+    QualityVectorPassRate, RunTestTrendPoint, SavedView, SavedViewScope, ScheduledRunSlackTemplate,
     ScheduledRunSlackTemplates, TestCaseResultRecord, TestResultRecord,
 };
 use std::collections::HashMap;
@@ -1716,9 +1716,8 @@ pub struct AnalyticsOverviewDto {
     pub product_id: String,
     /// The request's `version`, trimmed.
     pub version: String,
-    /// `all` or `plan` — **normalized**, so a request that shouted its scope
-    /// gets it back in lower case.
-    pub scope: String,
+    /// `all` or `plan`, **normalized** — see [`AnalyticsScopeDto`].
+    pub scope: AnalyticsScopeDto,
     /// Normalized: trimmed, and `null` when blank. Carried through an `all`
     /// scope, where it is never read.
     pub plan_id: Option<String>,
@@ -1746,7 +1745,7 @@ impl From<AnalyticsOverview> for AnalyticsOverviewDto {
         Self {
             product_id: overview.product_id,
             version: overview.version,
-            scope: scope_to_str(overview.scope).to_owned(),
+            scope: overview.scope.into(),
             plan_id: overview.plan_id,
             branch: overview.branch,
             group_by: group_to_str(overview.group_by).to_owned(),
@@ -1884,15 +1883,60 @@ fn iso_date(day: Date) -> String {
     day.to_string()
 }
 
-/// `Scope` in legacy's wire spelling — `scope_to_str` (`analytics.rs:2088-2093`).
-///
-/// A rendering and not a rule, so it lives here rather than on the enum: the
-/// domain distinguishes the two variants, and `"all"`/`"plan"` is what the
-/// query string and the response happen to call them.
-const fn scope_to_str(scope: Scope) -> &'static str {
-    match scope {
-        Scope::All => "all",
-        Scope::Plan => "plan",
+/// Which executions an analytics overview is about: the whole universe, or one
+/// plan. **Normalized** — a request that shouted its scope gets it back in
+/// lower case.
+//
+// Mirrors `domain::analytics::query::Scope`, the same way `SavedViewScopeDto`
+// mirrors `qa_insights_sdk::SavedViewScope`; see that type for why a mirror is
+// needed at all (`#[api_dto]` needs serde and utoipa, and neither the SDK nor
+// the domain layer carries them).
+//
+// # It replaces `scope_to_str`
+//
+// This was `const fn scope_to_str(Scope) -> &'static str`, legacy's
+// `scope_to_str` (`analytics.rs:2088-2093`), whose output landed in a
+// `AnalyticsOverviewDto::scope: String`. The two spellings are unchanged and
+// this type's `#[serde(rename_all = "snake_case")]` is now their sole encoder -
+// one encoder, at the boundary, rather than a rendering function beside a
+// `String` field. `the_echoed_scope_and_grouping_use_legacys_spelling` asserts
+// the rendered JSON, and
+// `routes::tests::the_published_schema_declares_closed_enums_for_both_scopes`
+// asserts the published schema.
+//
+// # Why the *request* side is still a `String`, unlike this
+//
+// `AnalyticsOverviewQuery`, `AnalyticsBuildTestsQuery` and
+// `AnalyticsExportQuery` keep `scope: String`: `domain::analytics::query::
+// parse_scope` accepts the value trimmed and case-insensitively and answers
+// anything else with legacy's verbatim 400, so a serde enum there would refuse
+// `ALL`, which is accepted today - a wire change. No such argument can apply to
+// an encoder, which is why this response field is typed and those are not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum AnalyticsScopeDto {
+    All,
+    Plan,
+}
+
+impl From<Scope> for AnalyticsScopeDto {
+    fn from(scope: Scope) -> Self {
+        match scope {
+            Scope::All => Self::All,
+            Scope::Plan => Self::Plan,
+        }
+    }
+}
+
+impl From<AnalyticsScopeDto> for Scope {
+    /// The direction that closes the mirror: a variant added *here* and not to
+    /// the domain enum is a compile error too, so the two sets stay in
+    /// bijection.
+    fn from(scope: AnalyticsScopeDto) -> Self {
+        match scope {
+            AnalyticsScopeDto::All => Self::All,
+            AnalyticsScopeDto::Plan => Self::Plan,
+        }
     }
 }
 
@@ -1900,7 +1944,7 @@ const fn scope_to_str(scope: Scope) -> &'static str {
 /// arm: `group_to_str` (`analytics.rs:2095-2102`) renders it `"platform"`,
 /// and this renders `"environment"`, a deliberate divergence rather than
 /// parity (the `TargetPlatform` -> `Environment` rename). The other three
-/// arms are still legacy's spelling, for [`scope_to_str`]'s reason.
+/// arms are still legacy's spelling, for [`AnalyticsScopeDto`]'s reason.
 const fn group_to_str(group: GroupBy) -> &'static str {
     match group {
         GroupBy::None => "none",
@@ -2142,6 +2186,72 @@ impl From<NewSavedViewReq> for SavedViewInput {
     }
 }
 
+/// What a saved view is scoped to: the whole universe, or one plan.
+//
+// Mirrors `qa_insights_sdk::SavedViewScope`. Everything below is why rather
+// than what a caller needs, and is kept off the doc comment so it stays out of
+// the published schema description.
+//
+// # Why this is a mirror and not the SDK type
+//
+// `#[api_dto]` adds `serde` and `utoipa::ToSchema`, and every type nested in a
+// DTO needs both. `qa-insights-sdk` carries neither by the repo-wide
+// contract-purity rule its own crate docs state (an SDK model has no wire form
+// and no `OpenAPI` dependency), so the wire vocabulary lives here, at the
+// boundary - the same shape `qa-catalog`'s `FieldKindDto` and `qa-runs`'
+// `RunStateDto` take for the same reason.
+//
+// # What it buys, over the `String` it replaces
+//
+// `SavedViewDto::scope` was a `String` filled from `SavedViewScope::as_str`
+// while the closed enum sat beside it (review finding #35). Now the published
+// `OpenAPI` schema is a two-value `enum`, so the generated TypeScript narrows
+// to `"all" | "plan"` and an unknown value is a decode error rather than
+// something a consumer must defend against. `From` and its reverse both match
+// exhaustively with no wildcard arm, so neither side can gain a variant
+// without a compile error.
+//
+// # Why only the *response* side is typed
+//
+// `NewSavedViewReq::scope`, `SavedViewsListQuery::scope` and the three
+// analytics query strings (`AnalyticsOverviewQuery`,
+// `AnalyticsBuildTestsQuery`, `AnalyticsExportQuery`) stay `String`
+// **deliberately**. They are inbound, and their contract is not this closed
+// set: `domain::service::saved_views::parse_scope` and
+// `domain::analytics::query::parse_scope` accept the value *trimmed and
+// case-insensitively*, and answer anything else with legacy's verbatim 400,
+// `"scope must be 'all' or 'plan'"`. A `serde` enum there would refuse `ALL`,
+// which is accepted today, and would answer with the deserializer's own message
+// and shape instead - a wire change, which this task is explicitly not. The
+// unknown-value rejection those fields need already exists, one layer in, and
+// it is the better one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum SavedViewScopeDto {
+    All,
+    Plan,
+}
+
+impl From<SavedViewScope> for SavedViewScopeDto {
+    fn from(scope: SavedViewScope) -> Self {
+        match scope {
+            SavedViewScope::All => Self::All,
+            SavedViewScope::Plan => Self::Plan,
+        }
+    }
+}
+
+impl From<SavedViewScopeDto> for SavedViewScope {
+    /// The direction that closes the mirror: a variant added *here* and not to
+    /// the SDK is a compile error too, so the two sets stay in bijection.
+    fn from(scope: SavedViewScopeDto) -> Self {
+        match scope {
+            SavedViewScopeDto::All => Self::All,
+            SavedViewScopeDto::Plan => Self::Plan,
+        }
+    }
+}
+
 /// A stored saved view — legacy's `AnalyticsSavedView`
 /// (`manager/src/routes/analytics.rs:77-86`), with the same `plan_id` split
 /// and `owner_id` still a caller-visible field: it is the caller's own id in
@@ -2153,7 +2263,8 @@ impl From<NewSavedViewReq> for SavedViewInput {
 pub struct SavedViewDto {
     pub id: Uuid,
     pub owner_id: Uuid,
-    pub scope: String,
+    /// `all` or `plan` — see [`SavedViewScopeDto`].
+    pub scope: SavedViewScopeDto,
     pub repo_id: Option<Uuid>,
     pub plan_path: Option<String>,
     pub name: String,
@@ -2187,7 +2298,7 @@ impl TryFrom<SavedView> for SavedViewDto {
         Ok(Self {
             id: view.id,
             owner_id: view.owner_id,
-            scope: view.scope.as_str().to_owned(),
+            scope: view.scope.into(),
             repo_id: view.repo_id,
             plan_path: view.plan_path,
             name: view.name,
@@ -2766,8 +2877,13 @@ pub struct NotificationPreviewDto {
     pub event_label: String,
     pub rendered_message: String,
     pub fallback_text: String,
-    /// Slack Block Kit blocks, opaque JSON — the same shape
-    /// `domain::notify::render::RenderedScheduledRunMessage::blocks` carries.
+    /// Slack Block Kit blocks: literally the `blocks` array the tenant's
+    /// Slack would receive, so this endpoint's contract is Slack's wire
+    /// format rather than this gear's own. Encoded from
+    /// `domain::ports::SlackBlock` by `infra::notify::block_kit`, the one
+    /// encoder the outbound adapter uses too — which is what makes "the
+    /// preview shows what gets sent" true by construction (review finding
+    /// #17).
     pub blocks: Vec<serde_json::Value>,
 }
 
@@ -2778,7 +2894,7 @@ impl From<crate::domain::service::notify::ScheduledRunPreview> for NotificationP
             event_label: preview.event_label,
             rendered_message: preview.rendered_message,
             fallback_text: preview.fallback_text,
-            blocks: preview.blocks,
+            blocks: crate::infra::notify::block_kit::encode_blocks(&preview.blocks),
         }
     }
 }
@@ -2805,14 +2921,14 @@ mod tests {
 
     use super::{
         AnalyticsBuildTestsQuery, AnalyticsOverview, AnalyticsOverviewDto, AnalyticsOverviewQuery,
-        AnalyticsPlanQuery, BuildTestDetailDto, BuildTestsQuery, CollectReportQuery,
-        CoverageBuildDto, DailyStatusPointDto, DashboardRunDto, DashboardStatsDto,
-        FailedTestCardDto, FlakyTestCardDto, GroupBy, HashMap, JiraBug, JiraBugDto,
-        JiraBugFilingDto, JiraConfig, JiraPollerConfigDto, JiraSettingsDto, NewSavedViewReq,
-        NotificationConfigDto, NotificationLogEntryDto, NotificationPreviewDto,
+        AnalyticsPlanQuery, AnalyticsScopeDto, BuildTestDetailDto, BuildTestsQuery,
+        CollectReportQuery, CoverageBuildDto, DailyStatusPointDto, DashboardRunDto,
+        DashboardStatsDto, FailedTestCardDto, FlakyTestCardDto, GroupBy, HashMap, JiraBug,
+        JiraBugDto, JiraBugFilingDto, JiraConfig, JiraPollerConfigDto, JiraSettingsDto,
+        NewSavedViewReq, NotificationConfigDto, NotificationLogEntryDto, NotificationPreviewDto,
         PlanBuildDistributionDto, PlanTestHistoryDto, RebuildOutcomeDto, RebuildReq, SavedViewDto,
-        ScheduledRunSlackTemplateDto, ScheduledRunSlackTemplatesDto, Scope, TestCaseResultDto,
-        TestResultDto, plan_test_analytics_list_dto,
+        SavedViewScopeDto, ScheduledRunSlackTemplateDto, ScheduledRunSlackTemplatesDto, Scope,
+        TestCaseResultDto, TestResultDto, plan_test_analytics_list_dto,
     };
     use crate::domain::analytics::PlanRef;
     use crate::domain::analytics::aggregates::{
@@ -3708,9 +3824,61 @@ mod tests {
         overview.group_by = GroupBy::Component;
 
         let dto = AnalyticsOverviewDto::from(overview);
+        let json = serde_json::to_value(&dto).expect("the DTO serialises");
 
-        assert_eq!(dto.scope, "plan");
+        // Asserted through `serde_json` rather than off the struct field (Task
+        // 20 fix round): `scope` is [`AnalyticsScopeDto`] now, and the rendered
+        // JSON is what the echo is for.
+        assert_eq!(json["scope"], "plan");
         assert_eq!(dto.group_by, "component");
+    }
+
+    /// **Both analytics scopes render the spelling `scope_to_str` rendered.**
+    ///
+    /// [`AnalyticsOverviewDto::scope`] was a `String` filled by a private
+    /// `const fn scope_to_str(Scope)` while the domain's closed [`Scope`] sat
+    /// on the other side of the conversion. It is now [`AnalyticsScopeDto`],
+    /// which is the sole encoder; `scope_to_str` is gone. Legacy's spellings
+    /// (`analytics.rs:2088-2093`) are unchanged.
+    #[test]
+    fn every_analytics_scope_serialises_to_legacys_spelling() {
+        assert_eq!(
+            serde_json::to_value(AnalyticsScopeDto::from(Scope::All))
+                .expect("a scope must serialize"),
+            serde_json::json!("all")
+        );
+        assert_eq!(
+            serde_json::to_value(AnalyticsScopeDto::from(Scope::Plan))
+                .expect("a scope must serialize"),
+            serde_json::json!("plan")
+        );
+        for scope in [Scope::All, Scope::Plan] {
+            assert_eq!(
+                Scope::from(AnalyticsScopeDto::from(scope)),
+                scope,
+                "the mirror must round-trip, so neither side can drift"
+            );
+        }
+    }
+
+    /// The half the `String` could not give: an unknown scope is a decode
+    /// error rather than a value the UI has to defend against.
+    ///
+    /// **This is the echo, not the request.** The three analytics *query*
+    /// strings stay `String` on purpose — `domain::analytics::query::
+    /// parse_scope` accepts them trimmed and case-insensitively, so a serde
+    /// enum there would refuse `ALL`, which is accepted today. No such
+    /// argument applies to this field, which is an encoder.
+    #[test]
+    fn an_unknown_analytics_scope_is_rejected() {
+        assert!(
+            serde_json::from_value::<AnalyticsScopeDto>(serde_json::json!("everything")).is_err(),
+            "an invented scope must not decode"
+        );
+        assert!(
+            serde_json::from_value::<AnalyticsScopeDto>(serde_json::json!("All")).is_err(),
+            "the Rust variant name is not the wire spelling and must not decode either"
+        );
     }
 
     /// **Every field of the list item carries its own source field.**
@@ -4037,10 +4205,61 @@ mod tests {
     /// `scope` renders as legacy's own wire spelling (`"all"`/`"plan"`), not
     /// as the Rust variant name — `SavedViewScope::as_str`'s own doc records
     /// that the two are not the same string.
+    ///
+    /// Asserted through `serde_json` rather than off the struct field (Task
+    /// 20): the field is [`SavedViewScopeDto`] now, so `dto.scope == "all"`
+    /// no longer even type-checks, and the rendered JSON is what the finding
+    /// was ever about.
     #[test]
     fn a_saved_views_scope_renders_as_the_wire_spelling() {
         let dto = SavedViewDto::try_from(saved_view("{}")).unwrap();
-        assert_eq!(dto.scope, "all");
+        let json = serde_json::to_value(&dto).expect("the DTO serialises");
+        assert_eq!(json["scope"], "all");
+    }
+
+    /// **Every `SavedViewScope` renders the spelling it always rendered.**
+    ///
+    /// `SavedViewDto::scope` was a `String` filled from
+    /// `SavedViewScope::as_str` while the closed enum sat beside it (review
+    /// finding #35). It is now [`SavedViewScopeDto`], a closed mirror whose
+    /// spellings are asserted against `as_str` itself, so the SDK stays the
+    /// single source of truth and this test cannot drift from it.
+    #[test]
+    fn every_saved_view_scope_serialises_to_its_sdk_spelling() {
+        for scope in [SavedViewScope::All, SavedViewScope::Plan] {
+            let rendered = serde_json::to_value(SavedViewScopeDto::from(scope))
+                .expect("a scope must serialize");
+            assert_eq!(
+                rendered,
+                serde_json::Value::String(scope.as_str().to_owned()),
+                "the wire spelling must stay SavedViewScope::as_str's, for {scope:?}"
+            );
+            assert_eq!(
+                SavedViewScope::from(SavedViewScopeDto::from(scope)),
+                scope,
+                "the mirror must round-trip, so neither side can drift"
+            );
+        }
+    }
+
+    /// The half the `String` could not give: an unknown scope is a decode
+    /// error rather than a value the UI has to defend against.
+    ///
+    /// **This is the response side only.** The *request* side
+    /// ([`NewSavedViewReq::scope`], [`SavedViewsListQuery::scope`] and the
+    /// three analytics query strings) stays a `String` on purpose — see
+    /// [`SavedViewScopeDto`]'s own doc — and already rejects an unknown value,
+    /// with legacy's verbatim 400.
+    #[test]
+    fn an_unknown_saved_view_scope_is_rejected() {
+        assert!(
+            serde_json::from_value::<SavedViewScopeDto>(serde_json::json!("everything")).is_err(),
+            "an invented scope must not decode"
+        );
+        assert!(
+            serde_json::from_value::<SavedViewScopeDto>(serde_json::json!("All")).is_err(),
+            "the Rust variant name is not the wire spelling and must not decode either"
+        );
     }
 
     /// **Stored corruption is a `CorruptState`, not a panic.** Nothing in this
@@ -4068,6 +4287,16 @@ mod tests {
     /// quoting it, which would be the double-encoding
     /// [`a_saved_views_query_json_renders_as_an_object_not_a_nested_string`]
     /// exists to keep off the *response* side too.
+    ///
+    /// The four field asserts below are **not** review finding #46's
+    /// constructor echoes, even though they look like it: the compact-JSON
+    /// assert covers exactly one field (`query_json`), while `impl
+    /// From<NewSavedViewReq> for SavedViewInput` moves five, and `scope` and
+    /// `name` are both plain `String`s — nothing but this assert stops a
+    /// transposition (`scope: req.name, name: req.scope`) from compiling and
+    /// shipping. This is also the only test that exercises that `From` impl
+    /// at all; `saved_views_tests.rs`'s `view()` helper builds
+    /// `SavedViewInput` directly and never goes through it.
     #[test]
     fn a_new_saved_view_req_serialises_query_json_to_compact_text() {
         let req = NewSavedViewReq {
@@ -4468,13 +4697,21 @@ mod tests {
             event_label: "Failed".to_owned(),
             rendered_message: "the rendered body".to_owned(),
             fallback_text: "the fallback text".to_owned(),
-            blocks: vec![serde_json::json!({"type": "section"})],
+            blocks: vec![crate::domain::ports::SlackBlock::Section {
+                text: "the block text".to_owned(),
+            }],
         });
 
         assert_eq!(dto.event, "failed");
         assert_eq!(dto.event_label, "Failed");
         assert_eq!(dto.rendered_message, "the rendered body");
         assert_eq!(dto.fallback_text, "the fallback text");
-        assert_eq!(dto.blocks, vec![serde_json::json!({"type": "section"})]);
+        assert_eq!(
+            dto.blocks,
+            vec![serde_json::json!({
+                "type": "section",
+                "text": { "type": "mrkdwn", "text": "the block text" }
+            })]
+        );
     }
 }

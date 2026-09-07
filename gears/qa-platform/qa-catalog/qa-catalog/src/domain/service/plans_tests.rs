@@ -19,6 +19,13 @@ use crate::domain::parsing::plan_yaml::DEFAULT_TIMEOUT_SECONDS;
 const VALID_PLAN_A: &str = "name: smoke\ntests:\n  - tests/test_a.py\n";
 const VALID_PLAN_B: &str =
     "name: upgrade\ntags: [e2e]\nexclusive: true\ntests:\n  - tests/test_b.py\n";
+/// An explicit `exclusive: false` plan: distinct from `VALID_PLAN_A`'s absent
+/// key. A conversion that only checked `Some(true)` and defaulted everything
+/// else to `Inherit` would pass with `VALID_PLAN_A` and `VALID_PLAN_B` alone —
+/// this is what `list_plans_parses_fixtures_and_skips_invalid` needs to catch
+/// that collapse at `to_sdk_plan`, the boundary that reads a stored
+/// `plan.yaml`.
+const VALID_PLAN_C: &str = "name: parallel\nexclusive: false\ntests:\n  - tests/test_c.py\n";
 const BROKEN_PLAN: &str = "name: broken\ntests: {not-a-list: true\n";
 /// A test file the on-disk derivation must keep (it carries a `TEST_META` block).
 const META: &str = "TEST_META = {'title': 'T'}\n\ndef test_x():\n    pass\n";
@@ -107,10 +114,11 @@ async fn list_plans_parses_fixtures_and_skips_invalid() {
     let repo_id = Uuid::new_v4();
     let (tmp, repos, workdir) = synced_fixture(repo_id);
 
-    // 2 valid + 1 broken in the file-based `plans/` layout → 2 plans; the
+    // 3 valid + 1 broken in the file-based `plans/` layout → 3 plans; the
     // broken one is skipped without hiding the rest.
     write(&workdir, "plans/smoke.yaml", VALID_PLAN_A);
     write(&workdir, "plans/upgrade.yaml", VALID_PLAN_B);
+    write(&workdir, "plans/parallel.yaml", VALID_PLAN_C);
     write(&workdir, "plans/broken.yaml", BROKEN_PLAN);
 
     let svc = build_service(repos, tmp.path().to_path_buf()).await;
@@ -120,22 +128,30 @@ async fn list_plans_parses_fixtures_and_skips_invalid() {
         .unwrap();
     plans.sort_by(|a, b| a.path.cmp(&b.path));
 
-    assert_eq!(plans.len(), 2, "the broken plan must be skipped, not fatal");
-    assert_eq!(plans[0].path, "plans/smoke.yaml");
-    assert_eq!(plans[0].name, "smoke");
-    assert_eq!(plans[0].repo_id, repo_id);
-    assert_eq!(plans[0].branch, "main");
+    assert_eq!(plans.len(), 3, "the broken plan must be skipped, not fatal");
+    assert_eq!(plans[0].path, "plans/parallel.yaml");
     assert_eq!(
-        plans[0].exclusive, None,
-        "absent exclusive stays None (inherit)"
+        plans[0].exclusive,
+        qa_catalog_sdk::Exclusivity::Shared,
+        "an on-disk `exclusive: false` must arrive as Shared, not collapse to Inherit \
+         the way a conversion checking only `Some(true)` would"
+    );
+    assert_eq!(plans[1].path, "plans/smoke.yaml");
+    assert_eq!(plans[1].name, "smoke");
+    assert_eq!(plans[1].repo_id, repo_id);
+    assert_eq!(plans[1].branch, "main");
+    assert_eq!(
+        plans[1].exclusive,
+        qa_catalog_sdk::Exclusivity::Inherit,
+        "absent exclusive stays Inherit"
     );
     assert!(
-        !plans[0].validation,
+        !plans[1].validation,
         "a plan with neither the bool nor a `validation` tag is not a validation run"
     );
-    assert_eq!(plans[1].path, "plans/upgrade.yaml");
-    assert_eq!(plans[1].exclusive, Some(true));
-    assert_eq!(plans[1].tags, vec!["e2e".to_owned()]);
+    assert_eq!(plans[2].path, "plans/upgrade.yaml");
+    assert_eq!(plans[2].exclusive, qa_catalog_sdk::Exclusivity::Exclusive);
+    assert_eq!(plans[2].tags, vec!["e2e".to_owned()]);
 }
 
 #[tokio::test]
@@ -751,28 +767,46 @@ async fn get_test_meta_attaches_paths() {
         "tests/test_plain.py",
         "def test_plain():\n    pass\n",
     );
+    // Distinct from `test_plain.py`'s absent key: an explicit `False`. A
+    // conversion that only checked for `True` and defaulted everything else
+    // to `Inherit` would pass with the other two files alone — this is what
+    // catches that collapse at the `ParsedTestMeta` -> `TestFileMeta` boundary
+    // in `PlansService::get_test_meta`.
+    write(
+        &workdir,
+        "tests/test_parallel.py",
+        "TEST_META = {\n    'exclusive': False,\n}\n",
+    );
 
     let svc = build_service(repos, tmp.path().to_path_buf()).await;
     let files = vec![
         "tests/test_exclusive.py".to_owned(),
         "tests/test_plain.py".to_owned(),
+        "tests/test_parallel.py".to_owned(),
     ];
     let metas = svc
         .get_test_meta(&ctx(tenant_id), repo_id, "main", &files)
         .await
         .unwrap();
 
-    assert_eq!(metas.len(), 2);
+    assert_eq!(metas.len(), 3);
     assert_eq!(
         metas[0].path, "tests/test_exclusive.py",
         "meta order must follow the requested file order"
     );
     assert_eq!(metas[0].title.as_deref(), Some("Exclusive test"));
     assert_eq!(metas[0].tags, vec!["ha".to_owned()]);
-    assert_eq!(metas[0].exclusive, Some(true));
+    assert_eq!(metas[0].exclusive, qa_catalog_sdk::Exclusivity::Exclusive);
     assert_eq!(metas[0].bugs, vec!["VHP-123".to_owned()]);
     assert_eq!(metas[1].path, "tests/test_plain.py");
-    assert_eq!(metas[1].exclusive, None);
+    assert_eq!(metas[1].exclusive, qa_catalog_sdk::Exclusivity::Inherit);
+    assert_eq!(metas[2].path, "tests/test_parallel.py");
+    assert_eq!(
+        metas[2].exclusive,
+        qa_catalog_sdk::Exclusivity::Shared,
+        "an on-disk TEST_META `\"exclusive\": False` must arrive as Shared, not collapse \
+         to Inherit the way a conversion checking only for True would"
+    );
 }
 
 #[tokio::test]

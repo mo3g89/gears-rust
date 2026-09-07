@@ -69,6 +69,38 @@
 //! `reconcile_tests::a_rebuild_leaves_rows_outside_its_window_untouched`
 //! and `..::a_rebuild_over_an_empty_window_deletes_nothing` — the second is the
 //! one a range-truncating implementation could not pass.
+//!
+//! # The JIRA poller is the exception, and misreading that is review finding #5
+//!
+//! **Everything above is about the reconciler and holds for
+//! [`ROLE_COLLECT`] too. It does not extend to [`ROLE_JIRA_POLLER`], and this
+//! paragraph exists because it was read as though it did.**
+//!
+//! The argument above turns entirely on the *shape of the write*: two sweeps
+//! converge because `upsert_run_results` is delete-then-insert per run and
+//! `WatermarkRepository::advance` never moves a mark backwards. The poller's
+//! effect is not a write of that shape. It is
+//! [`RunsLauncher::launch_test`](crate::domain::ports::RunsLauncher::launch_test) —
+//! a **new run**, through qa-runs' normal admission path — and nothing
+//! downstream of `JiraPollerService::maybe_rerun` deduplicates one. Two
+//! replicas polling the same resolved bug launch it twice, costing a platform
+//! slot and a second set of results for a build that has already been tested.
+//! `crate::gear`'s `jira_poller_ticker` has said so at its own doc since Task
+//! 40; what it named as the missing fix — "a claim row of the kind
+//! `idx_qa_run_notifications_claim` gives the notification path" — is now
+//! [`ClaimRowElector`], and `qa_leader_claims` is that row.
+//!
+//! What had been holding the property up until then was `replicaCount: 1` in
+//! `deploy/helm/qa-platform/values.yaml`, which is not where a correctness
+//! property belongs: a future scale-out would break it silently, in a chart,
+//! with nothing in this crate going red. Pinning the replica count with a
+//! chart assertion was considered and rejected for that reason.
+//!
+//! So the three roles are deliberately not symmetric. [`ROLE_JIRA_POLLER`]
+//! runs under [`ClaimRowElector`]; [`ROLE_RECONCILER`] and [`ROLE_COLLECT`]
+//! keep [`NoopLeaderElector`], because for them the sections above are still
+//! the whole truth and a claim row would buy a round trip per tick to prevent
+//! nothing. Review finding #5.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -76,6 +108,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
+
+pub mod claim_row;
+
+pub use claim_row::ClaimRowElector;
 
 /// Boxed async work that receives a [`CancellationToken`].
 ///
@@ -119,11 +155,16 @@ pub trait LeaderElector: Send + Sync + std::fmt::Debug {
 
 /// Single-process elector: runs the work immediately, with no coordination.
 ///
-/// This is the only implementation this gear ships, so **every deployment of
-/// qa-insights behaves as though it were the leader**. For this gear that is a
-/// safe default rather than a compromise — see the module header on why
-/// election is an optimisation here — and the seam exists so a real elector can
-/// be dropped in without touching `serve`.
+/// **Every deployment of qa-insights behaves as though it were the leader for
+/// the role this serves**, which for [`ROLE_RECONCILER`] and [`ROLE_COLLECT`]
+/// is a safe default rather than a compromise — see the module header on why
+/// election is an optimisation for those two.
+///
+/// It was the *only* implementation this gear shipped until review finding #5,
+/// and that sentence used to stand here without qualification. It no longer
+/// does: [`ClaimRowElector`] serves [`ROLE_JIRA_POLLER`], whose effect is a
+/// launch rather than a converging write. The module header's "The JIRA poller
+/// is the exception" carries the difference.
 #[derive(Debug)]
 pub struct NoopLeaderElector;
 
@@ -177,13 +218,28 @@ pub const ROLE_JIRA_POLLER: &str = "qa-insights-jira-poller";
 /// hourly cycle on N replicas, not a ported name.
 pub const ROLE_COLLECT: &str = "qa-insights-collect";
 
-/// The elector this deployment uses.
+/// The elector [`ROLE_RECONCILER`] and [`ROLE_COLLECT`] use.
 ///
 /// One function rather than a `Default` impl, so the choice has a place to grow
 /// a feature gate without every call site changing.
+///
+/// **Not [`ROLE_JIRA_POLLER`]'s** — that role gets
+/// [`jira_poller_elector`], and the module header's "The JIRA poller is the
+/// exception" says why the three roles are deliberately not symmetric.
 #[must_use]
 pub fn elector() -> Arc<dyn LeaderElector> {
     Arc::new(NoopLeaderElector)
+}
+
+/// The elector [`ROLE_JIRA_POLLER`] uses.
+///
+/// A second function rather than a parameter on [`elector`], so that a call
+/// site cannot pick the wrong one by passing the wrong role: the two are named
+/// for what they serve. It takes the database because a claim row lives in one
+/// — that is the whole difference between the two.
+#[must_use]
+pub fn jira_poller_elector(db: Arc<crate::domain::service::DbProvider>) -> Arc<dyn LeaderElector> {
+    Arc::new(ClaimRowElector::new(db))
 }
 
 #[cfg(test)]

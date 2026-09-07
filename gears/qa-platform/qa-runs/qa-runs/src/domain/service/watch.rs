@@ -28,23 +28,36 @@
 //! **Corrected 2026-08-15, after review, and the correction is not a
 //! softening.** This paragraph's evidence sentence read *"no production module
 //! under `domain/` has a `use crate::infra`, and that is the rule being kept"*.
-//! Both halves are false. `domain/local_client/client.rs` has
+//! Both halves were false. `domain/local_client/client.rs` had
 //! `use crate::infra::ConcreteAppServices;` and is a production module —
 //! `domain/mod.rs` declares it `pub mod local_client;` with no `cfg` — and
 //! `domain/mod.rs` states no layering rule at all. The sentence was written to
 //! support a decision already made, which is the shape this project keeps
 //! producing, and it was found by two reviewers independently.
 //!
+//! **Task 21 closed that one importer and the sentence is still false**, which
+//! is why this section stays. Review finding #39 moved `ConcreteAppServices`
+//! from `infra/mod.rs` to the composition root, so `local_client` now names
+//! `crate::gear` rather than `crate::infra` — but
+//! `domain::service::serialized_db` imports
+//! `infra::storage::db::is_retryable_contention`, is equally a production
+//! module, and was never part of that finding. Grepped rather than assumed, on
+//! the same day the alias moved: fixing the one importer a review named does
+//! not establish the rule the original sentence claimed.
+//!
 //! **What is actually in the tree**, in place of the rule that was invented:
 //!
 //! * [`super::LogFanout`]'s doc states the rule this module obeys — *"no domain
 //!   signature may name an infrastructure type"* — which is about signatures.
-//! * `infra::ConcreteAppServices`' own doc states the stronger direction —
-//!   *"the domain layer could not hold it … which is the dependency direction
-//!   this crate's layering forbids"* — and `domain::local_client` contradicts
-//!   that sentence by holding exactly that alias. Whether `local_client` is a
-//!   sanctioned exception is not recorded anywhere I could find; it is named
-//!   here so the next reader does not have to rediscover it.
+//! * [`crate::gear::ConcreteAppServices`]' own doc states the stronger
+//!   direction — *"the domain layer could not hold it … which is the
+//!   dependency direction this crate's layering forbids"* — and it is still
+//!   exactly true of the alias's *declaration*, which is why the alias is now
+//!   declared in the composition root and merely named by one domain module
+//!   that is itself a composition-root adapter.
+//! * `crate::no_api_in_domain_tests` pins the *other* direction structurally —
+//!   no `domain` module may import `api` — and deliberately says nothing about
+//!   `infra`, because `serialized_db` above would fail it on day one.
 //!
 //! So the placement rests on the argument above it — the construction point —
 //! and not on a layering rule this crate uniformly keeps, because it does not.

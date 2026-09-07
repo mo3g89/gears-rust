@@ -1,7 +1,19 @@
-//! Turns a routed notification into the message that actually gets sent:
-//! Slack Block Kit for [`Event::ScheduledRun`](super::routing::Event), plain
-//! text and an email body for
+//! Turns a routed notification into the message that actually gets sent: a
+//! sectioned Slack layout for [`Event::ScheduledRun`](super::routing::Event),
+//! plain text and an email body for
 //! [`Event::RunCompleted`](super::routing::Event) — Task 37.
+//!
+//! # Block Kit is not this module's format any more — review finding #17
+//!
+//! [`render_blocks`] used to build Slack's Block Kit JSON
+//! (`serde_json::Value`s) here and hand it to the outbound adapter untouched,
+//! which put Slack's wire format in the domain. It now returns
+//! [`SlackBlock`]s and `infra::notify::block_kit` encodes them. The
+//! `section`/`context` prose below therefore describes what each section
+//! *becomes at the adapter*, which is unchanged: the encoded payload is
+//! byte-for-byte what it was, pinned by
+//! `infra::notify::slack_oagw`'s
+//! `the_rendered_scheduled_run_payload_is_the_golden_block_kit_body`.
 //!
 //! Pure: no client, no repository, no `async`, matching `routing`'s own
 //! purity (this module's sibling). [`routing::route`](super::routing::route)
@@ -25,8 +37,9 @@
 //! way `header`/`summary`/`results`/`footer` are (`scheduled_run_template_status_icon`,
 //! `notifications.rs:1397-1407`). Each of the five sections becomes at most
 //! one Slack block ([`render_blocks`]): `header`/`summary`/`results`/`body`
-//! each a `section` block if non-empty after rendering and trimming, `footer`
-//! a `context` block. An empty (post-trim) section contributes no block at
+//! each a [`SlackBlock::Section`] if non-empty after rendering and trimming
+//! (a `section` block once encoded), `footer` a [`SlackBlock::Context`] (a
+//! `context` block). An empty (post-trim) section contributes no block at
 //! all — a tenant can render a status with as few as zero blocks, and legacy
 //! carries no floor, so this module doesn't invent one either.
 //!
@@ -126,6 +139,8 @@
 
 use qa_insights_sdk::{NotificationConfig, ScheduledRunSlackTemplate};
 
+use crate::domain::ports::SlackBlock;
+
 /// A status count fold over a list of result status strings. Ported from
 /// legacy's `ResultCounts` (`notifications.rs:23-29`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -201,7 +216,10 @@ pub struct RenderedScheduledRunMessage {
     /// `notifications.rs:874`), and this port preserves that exactly.
     pub rendered_message: String,
     pub fallback_text: String,
-    pub blocks: Vec<serde_json::Value>,
+    /// The five sections that survived rendering, as [`SlackBlock`]s. Block
+    /// Kit is the adapter's wire format, not this module's — review finding
+    /// #17, argued in full on [`SlackBlock`]'s own doc.
+    pub blocks: Vec<SlackBlock>,
 }
 
 struct RenderedSections {
@@ -680,38 +698,31 @@ fn build_replacements(
 }
 
 /// Ported from `render_scheduled_run_slack_blocks` (`notifications.rs:906-947`).
-fn render_blocks(sections: &RenderedSections) -> Vec<serde_json::Value> {
+///
+/// The order, the emptiness test (`trim().is_empty()`, so a section of only
+/// whitespace contributes nothing) and the section/context split are all
+/// legacy's. What changed in review finding #17 is only the *type*: this used
+/// to build Block Kit JSON here, in the domain, and hand it to the adapter
+/// untouched. `infra::notify::block_kit` now does that last step.
+fn render_blocks(sections: &RenderedSections) -> Vec<SlackBlock> {
     let mut blocks = Vec::new();
 
-    if !sections.header.trim().is_empty() {
-        blocks.push(serde_json::json!({
-            "type": "section",
-            "text": { "type": "mrkdwn", "text": sections.header }
-        }));
-    }
-    if !sections.summary.trim().is_empty() {
-        blocks.push(serde_json::json!({
-            "type": "section",
-            "text": { "type": "mrkdwn", "text": sections.summary }
-        }));
-    }
-    if !sections.results.trim().is_empty() {
-        blocks.push(serde_json::json!({
-            "type": "section",
-            "text": { "type": "mrkdwn", "text": sections.results }
-        }));
-    }
-    if !sections.body.trim().is_empty() {
-        blocks.push(serde_json::json!({
-            "type": "section",
-            "text": { "type": "mrkdwn", "text": sections.body }
-        }));
+    for section in [
+        &sections.header,
+        &sections.summary,
+        &sections.results,
+        &sections.body,
+    ] {
+        if !section.trim().is_empty() {
+            blocks.push(SlackBlock::Section {
+                text: section.clone(),
+            });
+        }
     }
     if !sections.footer.trim().is_empty() {
-        blocks.push(serde_json::json!({
-            "type": "context",
-            "elements": [{ "type": "mrkdwn", "text": sections.footer }],
-        }));
+        blocks.push(SlackBlock::Context {
+            text: sections.footer.clone(),
+        });
     }
 
     blocks

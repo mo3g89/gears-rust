@@ -33,6 +33,10 @@
 import { useMemo } from 'react';
 import { useQuery, useQueries, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { apiGet, apiGetBlob, apiPost, apiDelete, apiPut, apiPatch } from './client';
+// Aliased: several hooks below declare a local `queryClient` from
+// `useQueryClient()`, and shadowing a module import reads as a bug even where
+// it is legal. The shared client is the one `App.tsx` provides.
+import { queryClient as sharedQueryClient } from './queryClient';
 import { useSelectedProduct } from '@/lib/selectedProduct';
 import type { components } from './generated/openapi';
 import {
@@ -68,7 +72,6 @@ import {
   productFromDto,
   productReqFromForm,
   queueEntryFromDto,
-  recentResultsQuery,
   repoFromDto,
   repoReqFromForm,
   runDetailsFromDto,
@@ -78,13 +81,11 @@ import {
   scheduleFromDto,
   scheduleNotificationsReq,
   scheduleReqFromForm,
-  sliceRecentResults,
   sshKeyFromDto,
   sshKeyReqFromForm,
   testAnalyticsFromDto,
   testFilesFromPlan,
   testHistoryFromDto,
-  testRunResultFromDto,
   updateEnvironmentReqFromForm,
   unwrapPage,
   variableWritePlan,
@@ -94,7 +95,6 @@ import {
   type RunDtoWithEnvironmentId,
   type ScheduleDtoWithEnvironmentId,
   type QueueEntryDtoWithEnvironmentId,
-  type TestResultDtoWithEnvironmentId,
   type DashboardStatsDtoWithEnvironmentIds,
   type PlanTestAnalyticsDtoWithEnvironment,
   type AnalyticsOverviewDtoWithEnvironmentGroup,
@@ -104,7 +104,6 @@ import {
 import {
   TestPlanInfo,
   WorkflowRun,
-  TestRunResult,
   RunDetails,
   ScheduleInfo,
   CreateScheduleForm,
@@ -189,6 +188,10 @@ export const queryKeys = {
   customPlans: ['customPlans'] as const,
   customPlan: (id: string) => ['customPlans', id] as const,
   environments: ['environments'] as const,
+  /** A child of `environments`, so every existing environment invalidation is a
+   *  prefix match that drops the cached DTO list too. See
+   *  `fetchEnvironmentDtos`. */
+  environmentDtos: ['environments', 'dtos'] as const,
   environmentDetails: (name: string) => ['environments', name, 'details'] as const,
   products: ['products'] as const,
   product: (id: string) => ['products', id] as const,
@@ -222,12 +225,129 @@ async function fetchRepos(): Promise<S['TestRepositoryDto'][]> {
   return apiGet<S['TestRepositoryDto'][]>('/test-repos');
 }
 
+/**
+ * How long a fetched environment list stays fresh.
+ *
+ * Environment *names* — the only thing every caller below wants from this list —
+ * change when an operator renames one, which is not a 5-second event. 60 s is
+ * deliberately longer than `useRun`'s 5 s poll and `useDashboard`'s 15 s, so a
+ * page that polls does not re-pull the fleet on every tick.
+ */
+const ENVIRONMENT_DTOS_STALE_MS = 60_000;
+
+/**
+ * Every environment the caller can see, **cached**.
+ *
+ * # Why this one is cached when the block above says these helpers are not
+ *
+ * The header's rule stands for the *name-resolving* helpers: a mutation that
+ * resolves a name against a stale list writes to the wrong row. It did not
+ * stand for this fetch, and the cost was measured: `fetchEnvironmentDtos` was a
+ * bare `apiGet('/environments')` outside any query cache, reached through
+ * `environmentNameIndex` and `resolveEnvironmentId` from inside
+ * `fetchRunDetails` — which `useRun(name, 5000)` polls **every 5 seconds per
+ * open Run Detail page**, and `useDashboard` every 15 s. Each `EnvironmentDto`
+ * carries its whole nested observation, so at the 100 environments
+ * `cpt-cf-qa-nfr-scale` sizes for, that was the entire fleet's state re-sent per
+ * poll, per open tab.
+ *
+ * Correctness is kept by two things rather than by re-fetching every time:
+ *
+ * 1. **The key is a child of `queryKeys.environments`**, so every existing
+ *    `invalidateQueries({ queryKey: queryKeys.environments })` — which
+ *    `useCreateEnvironment`, `useUpdateEnvironment`, `useRenameEnvironment`,
+ *    `useDeleteEnvironment` and `useRefreshEnvironment` all already call — is a
+ *    prefix match that drops this too. No mutation needed a change.
+ * 2. **`resolveEnvironmentId` re-fetches on a miss** (see its own doc), which
+ *    covers the one case a stale list gets wrong: an environment created
+ *    outside this tab.
+ *
+ * The response is a `Page`, not an array, since review finding #55 bounded
+ * `GET /qa/v1/environments`. `page_info.next_cursor` is deliberately not
+ * followed here: the page limit is 200 and the collection's own NFR ceiling is
+ * 100, so a second page means a deployment that has outgrown its own sizing —
+ * at which point the fix is a filtered read, not a drain loop in a name index.
+ */
 async function fetchEnvironmentDtos(): Promise<S['EnvironmentDto'][]> {
-  return apiGet<S['EnvironmentDto'][]>('/environments');
+  return sharedQueryClient.fetchQuery({
+    queryKey: queryKeys.environmentDtos,
+    queryFn: async () => (await apiGet<S['Page_EnvironmentDto']>('/environments')).items,
+    staleTime: ENVIRONMENT_DTOS_STALE_MS,
+  });
 }
 
 async function fetchProductDtos(): Promise<S['ProductDto'][]> {
   return apiGet<S['ProductDto'][]>('/products');
+}
+
+/**
+ * A drain loop's ceiling — this loop's own, and the only one there is.
+ *
+ * **Corrected 2026-09-07, final review finding 3.** This said "200 rows a page
+ * against the gear's `max_variables` cap of 500 means three requests at the very
+ * most". `max_variables` is not a cap on the collection: it truncates a single
+ * response, and on the `/variables` form this loop actually pages — no
+ * `environment_id`, so an ordinary cursor page of `PAGE_LIMITS.default` = 200 —
+ * 200 rows never reach a `max_variables` of 500, so the gear never truncates and
+ * never stops handing back a cursor. A tenant with 5,000 pipeline variables gets
+ * 25 pages from the gear and 10 from this loop.
+ *
+ * So 10 x 200 = 2,000 rows is a ceiling this file chooses, not one it inherits,
+ * and going over it silently returns a partial list. It is set where it is
+ * because the Settings → Variables editor is a human-scale screen: a tenant past
+ * 2,000 variables has a problem no page size fixes. Raise it here if that stops
+ * being true — there is nothing on the gear side to raise with it.
+ */
+const MAX_VARIABLE_PAGES = 10;
+
+/**
+ * Pipeline variables, plus one environment's when `environmentId` is given —
+ * **all of them**, following the cursor.
+ *
+ * `GET /qa/v1/variables` became a `Page` with review finding #55; the two halves
+ * of its union used to be unbounded reads. Not cached: unlike the environment
+ * name index this is read once per settings screen rather than per poll, and
+ * `saveVariables` re-reads it precisely to diff against what is *currently*
+ * stored.
+ *
+ * # Why the cursor is followed here and not on `/environments`
+ *
+ * **Corrected 2026-09-07, Task 24 review finding 3.** The first version of this
+ * function discarded `page_info.next_cursor`, on the reasoning that the union
+ * case never returns one. That is true of the union case and false of the other
+ * one: without `environment_id` the response is a single table and the cursor is
+ * real, so `usePipelineVariables` rendered the Settings → Variables screen as if
+ * a 200-row first page were the whole set. `variableWritePlan` derives its
+ * deletes only from the `previous` array it is handed (`adapters.ts`), so
+ * nothing was destroyed by this — but the operator was editing a list that
+ * claimed to be the variable set and was not.
+ *
+ * `fetchEnvironmentDtos` still does not drain, and the asymmetry is deliberate:
+ * that one is a *name index* consulted on a 5-second poll, where a second page
+ * means a deployment past its own NFR ceiling and the fix is a filtered read.
+ * This one is the actual content of an editor.
+ *
+ * The union case still terminates on the first iteration, because the gear
+ * returns no cursor for it (`VariablesService::list_for_env`) — and refuses a
+ * `cursor` sent together with `environment_id` outright, which is why this
+ * appends the token only to a request that has no `environment_id`.
+ */
+async function fetchVariableDtos(environmentId?: string | null): Promise<S['VariableDto'][]> {
+  const scope = environmentId ? `?environment_id=${encodeURIComponent(environmentId)}` : '';
+  const rows: S['VariableDto'][] = [];
+  let cursor: string | null | undefined;
+
+  for (let page = 0; page < MAX_VARIABLE_PAGES; page += 1) {
+    // `cursor` is a bare query parameter on this gear's OData extractor, not
+    // `$skiptoken`. It is only ever appended to the no-environment_id form: the
+    // gear answers 400 for the pair, and would be right to.
+    const suffix = cursor ? `${scope ? '&' : '?'}cursor=${encodeURIComponent(cursor)}` : '';
+    const body = await apiGet<S['Page_VariableDto']>(`/variables${scope}${suffix}`);
+    rows.push(...body.items);
+    cursor = body.page_info.next_cursor;
+    if (!cursor) return rows;
+  }
+  return rows;
 }
 
 /** uuid -> display name, for the several places legacy drew a platform *name* and the
@@ -245,12 +365,22 @@ async function environmentNameIndex(): Promise<Map<string, string>> {
  * where this is a sentence.
  */
 async function resolveEnvironmentId(name: string): Promise<string> {
-  const environments = await fetchEnvironmentDtos();
-  const match = environments.find((environment) => environment.name === name);
-  if (!match) {
+  const match = (await fetchEnvironmentDtos()).find((environment) => environment.name === name);
+  if (match) return match.id;
+
+  // A miss is the one case `fetchEnvironmentDtos`' cache can get wrong: an
+  // environment created in another tab (or by another operator) is absent from a
+  // list fetched before it existed, and every caller here is about to use the
+  // result as a path segment. So a miss invalidates and asks again *once* before
+  // giving up — a rename cannot land here (the id survives a rename, so the old
+  // name still resolves to the right row) and a genuinely unknown name pays one
+  // extra request on its way to the same error.
+  await sharedQueryClient.invalidateQueries({ queryKey: queryKeys.environmentDtos });
+  const fresh = (await fetchEnvironmentDtos()).find((environment) => environment.name === name);
+  if (!fresh) {
     throw new Error(`No environment named "${name}" exists in this deployment.`);
   }
-  return match.id;
+  return fresh.id;
 }
 
 /** A run id as the gears spell it. Used to tell an id from a name — see `resolveRunId`. */
@@ -636,28 +766,6 @@ export function useCollectCases() {
       const suffix = trimmed ? `?branch=${encodeURIComponent(trimmed)}` : '';
       return apiPost<S['CollectTriggerOutcomeDto']>(`/analytics/collect${suffix}`);
     },
-  });
-}
-
-/**
- * Recent results for one test file.
- *
- * The bound is `limit`, not `$top` — see `recentResultsQuery` for the driven evidence and
- * for why the results are **also** sliced client-side. "Recent" is weaker here than the
- * name suggests: `/qa/v1/test-results` has no chronological `$orderby` (`run_finished_at`
- * is filterable but not sortable, because it is null mid-run and a null sort key
- * truncates pagination), so the default order is `id` descending — *stable but
- * arbitrary*. Row 7 records that; no adapter can fix it.
- */
-export function useTestRecentResults(file: string, limit = 10, refetchInterval?: number) {
-  return useQuery({
-    queryKey: ['test-recent-results', file, limit],
-    queryFn: async (): Promise<TestRunResult[]> => {
-      const page = await apiGet<Page<TestResultDtoWithEnvironmentId>>(`/test-results?${recentResultsQuery({ file, limit })}`);
-      return sliceRecentResults(unwrapPage(page), limit).map(testRunResultFromDto);
-    },
-    enabled: !!file,
-    refetchInterval,
   });
 }
 
@@ -2137,7 +2245,7 @@ export function usePipelineVariables() {
   return useQuery({
     queryKey: queryKeys.pipelineVariables,
     queryFn: async (): Promise<PipelineVariablesConfig> => ({
-      variables: partitionEnvironmentVariables(await apiGet<S['VariableDto'][]>('/variables'), null),
+      variables: partitionEnvironmentVariables(await fetchVariableDtos(), null),
     }),
   });
 }
@@ -2157,8 +2265,7 @@ export function usePipelineVariables() {
  */
 function saveVariables(environmentId: string | null) {
   return async (data: PipelineVariablesConfig): Promise<void> => {
-    const query = environmentId ? `?environment_id=${encodeURIComponent(environmentId)}` : '';
-    const current = await apiGet<S['VariableDto'][]>(`/variables${query}`);
+    const current = await fetchVariableDtos(environmentId);
     const scoped = current.filter((row) => (environmentId ? row.environment_id === environmentId : !row.environment_id));
     const plan = variableWritePlan(scoped, data.variables ?? [], environmentId);
     for (const upsert of plan.upserts) {
@@ -2197,9 +2304,7 @@ export function useEnvironmentVariables(environmentName: string) {
     queryKey: ['environments', environmentName, 'variables'] as const,
     queryFn: async (): Promise<PipelineVariablesConfig> => {
       const environmentId = await resolveEnvironmentId(environmentName);
-      const rows = await apiGet<S['VariableDto'][]>(
-        `/variables?environment_id=${encodeURIComponent(environmentId)}`
-      );
+      const rows = await fetchVariableDtos(environmentId);
       return { variables: partitionEnvironmentVariables(rows, environmentId) };
     },
     enabled: !!environmentName,
@@ -2213,9 +2318,7 @@ export function useUpdateEnvironmentVariables(environmentName: string) {
     mutationFn: async (data: PipelineVariablesConfig): Promise<PipelineVariablesConfig> => {
       const environmentId = await resolveEnvironmentId(environmentName);
       await saveVariables(environmentId)(data);
-      const rows = await apiGet<S['VariableDto'][]>(
-        `/variables?environment_id=${encodeURIComponent(environmentId)}`
-      );
+      const rows = await fetchVariableDtos(environmentId);
       return { variables: partitionEnvironmentVariables(rows, environmentId) };
     },
     onSuccess: () => {

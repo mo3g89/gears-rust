@@ -302,6 +302,231 @@ impl TryFrom<RunTargetDto> for sdk::RunTarget {
 }
 
 // ===========================================================================
+// Closed wire vocabularies
+// ===========================================================================
+
+// Nothing below is a second vocabulary. Each mirror names exactly the variants
+// of one `qa_runs_sdk` enum and renders exactly the spelling that enum's
+// `as_str` renders; the SDK stays the single source of truth for both.
+
+/// A run's lifecycle state. Note `canceled`, one `l` - a queue row's
+/// equivalent state is spelled `cancelled`, and the difference is deliberate.
+///
+/// A client ported from the source system must **re-map, not merely re-case**:
+/// `created`, `queued`, `dispatching`, `canceled`, `timed_out` and `expired`
+/// have no equivalent there.
+//
+// Mirrors `sdk::RunState`, and everything below is why rather than what a
+// caller needs - kept off the doc comment so it stays out of the published
+// schema description, which is what `routes::tests::
+// the_legacy_field_traps_do_not_appear_in_the_published_schema` was written
+// about.
+//
+// # Why this is a mirror and not the SDK type
+//
+// `#[api_dto]` adds `serde` and `utoipa::ToSchema`, and every type nested in a
+// DTO needs both. `qa-runs-sdk` carries neither by a repo-wide contract-purity
+// rule this module's own header restates (an SDK model has no wire form and no
+// `OpenAPI` dependency), so the wire vocabulary lives here, at the boundary,
+// exactly as `qa-catalog`'s `FieldKindDto`/`FieldRoleDto` do for
+// `qa-product-sdk`.
+//
+// # What the mirror buys, over the `String` it replaces
+//
+// `RunDto::state` was a `String` filled from `RunState::as_str`, so any string
+// compiled and reached a UI that switches on the value (review finding #34).
+// Now: an unknown value cannot be produced, an unknown value is a decode error
+// rather than an accepted one, and the published `OpenAPI` schema is a closed
+// `enum` - so a generated TypeScript `switch` missing a case fails `tsc`
+// instead of falling through at runtime.
+//
+// # Why `api_dto(request, response)` on a response-only type
+//
+// The `response` half is what these are for. The `request` half adds
+// `Deserialize`, which is what makes "an unknown value is a decode error"
+// a property a test can actually assert (`an_unknown_run_state_is_rejected`
+// and its three siblings) rather than a claim about a generated client - and
+// it costs nothing: the published schema is the same either way.
+//
+// # Why it cannot drift from the SDK
+//
+// `From<sdk::RunState>` and its reverse both match exhaustively with no
+// wildcard arm, so a variant added on either side is a compile error rather
+// than a runtime surprise; and `every_run_state_serialises_to_its_sdk_spelling`
+// asserts the rendered JSON against `RunState::as_str` itself rather than
+// against a copied literal. `routes::tests::
+// the_published_schema_declares_closed_enums_for_the_run_vocabularies` pins the
+// published schema, which no Rust-level test can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum RunStateDto {
+    Created,
+    Queued,
+    Dispatching,
+    Running,
+    Succeeded,
+    Failed,
+    /// One `l`, unlike the queue row's `cancelled`.
+    Canceled,
+    TimedOut,
+    Expired,
+    Error,
+}
+
+impl From<sdk::RunState> for RunStateDto {
+    fn from(state: sdk::RunState) -> Self {
+        match state {
+            sdk::RunState::Created => Self::Created,
+            sdk::RunState::Queued => Self::Queued,
+            sdk::RunState::Dispatching => Self::Dispatching,
+            sdk::RunState::Running => Self::Running,
+            sdk::RunState::Succeeded => Self::Succeeded,
+            sdk::RunState::Failed => Self::Failed,
+            sdk::RunState::Canceled => Self::Canceled,
+            sdk::RunState::TimedOut => Self::TimedOut,
+            sdk::RunState::Expired => Self::Expired,
+            sdk::RunState::Error => Self::Error,
+        }
+    }
+}
+
+impl From<RunStateDto> for sdk::RunState {
+    /// The direction that closes the mirror: a variant added *here* and not to
+    /// the SDK is a compile error too, so the two sets stay in bijection.
+    fn from(state: RunStateDto) -> Self {
+        match state {
+            RunStateDto::Created => Self::Created,
+            RunStateDto::Queued => Self::Queued,
+            RunStateDto::Dispatching => Self::Dispatching,
+            RunStateDto::Running => Self::Running,
+            RunStateDto::Succeeded => Self::Succeeded,
+            RunStateDto::Failed => Self::Failed,
+            RunStateDto::Canceled => Self::Canceled,
+            RunStateDto::TimedOut => Self::TimedOut,
+            RunStateDto::Expired => Self::Expired,
+            RunStateDto::Error => Self::Error,
+        }
+    }
+}
+
+/// Which tier supplied a run's exclusivity decision. `plan.yaml` is the
+/// plan-file tier, spelled as the file is named.
+//
+// Mirrors `sdk::ExclusiveTier`; see `RunStateDto` for why this is a mirror.
+//
+// `Plan` is the one spelling in this module that
+// `#[serde(rename_all = "snake_case")]` would get wrong on its own -
+// `ExclusiveTier::as_str` has always returned the file name, so the rename
+// below is what keeps the wire unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum ExclusiveTierDto {
+    Launch,
+    #[serde(rename = "plan.yaml")]
+    Plan,
+    TestMeta,
+    Default,
+}
+
+impl From<sdk::ExclusiveTier> for ExclusiveTierDto {
+    fn from(tier: sdk::ExclusiveTier) -> Self {
+        match tier {
+            sdk::ExclusiveTier::Launch => Self::Launch,
+            sdk::ExclusiveTier::Plan => Self::Plan,
+            sdk::ExclusiveTier::TestMeta => Self::TestMeta,
+            sdk::ExclusiveTier::Default => Self::Default,
+        }
+    }
+}
+
+impl From<ExclusiveTierDto> for sdk::ExclusiveTier {
+    fn from(tier: ExclusiveTierDto) -> Self {
+        match tier {
+            ExclusiveTierDto::Launch => Self::Launch,
+            ExclusiveTierDto::Plan => Self::Plan,
+            ExclusiveTierDto::TestMeta => Self::TestMeta,
+            ExclusiveTierDto::Default => Self::Default,
+        }
+    }
+}
+
+/// Who asked for a run.
+//
+// Mirrors `sdk::RunSource`; see `RunStateDto` for why this is a mirror.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum RunSourceDto {
+    Manual,
+    Scheduled,
+}
+
+impl From<sdk::RunSource> for RunSourceDto {
+    fn from(source: sdk::RunSource) -> Self {
+        match source {
+            sdk::RunSource::Manual => Self::Manual,
+            sdk::RunSource::Scheduled => Self::Scheduled,
+        }
+    }
+}
+
+impl From<RunSourceDto> for sdk::RunSource {
+    fn from(source: RunSourceDto) -> Self {
+        match source {
+            RunSourceDto::Manual => Self::Manual,
+            RunSourceDto::Scheduled => Self::Scheduled,
+        }
+    }
+}
+
+/// A queue row's state - the seven frozen names. Note `cancelled`, two `l`s;
+/// a *run*'s equivalent state is spelled `canceled`, and the difference is
+/// deliberate.
+//
+// Mirrors `sdk::QueueState`; see `RunStateDto` for why this is a mirror.
+// `sdk::QueueState`'s own doc says the two cancel spellings are frozen by
+// guide line 95; do not "fix" either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum QueueStateDto {
+    Queued,
+    Dispatching,
+    Running,
+    Done,
+    Failed,
+    /// Two `l`s, unlike a run's `canceled`.
+    Cancelled,
+    Expired,
+}
+
+impl From<sdk::QueueState> for QueueStateDto {
+    fn from(state: sdk::QueueState) -> Self {
+        match state {
+            sdk::QueueState::Queued => Self::Queued,
+            sdk::QueueState::Dispatching => Self::Dispatching,
+            sdk::QueueState::Running => Self::Running,
+            sdk::QueueState::Done => Self::Done,
+            sdk::QueueState::Failed => Self::Failed,
+            sdk::QueueState::Cancelled => Self::Cancelled,
+            sdk::QueueState::Expired => Self::Expired,
+        }
+    }
+}
+
+impl From<QueueStateDto> for sdk::QueueState {
+    fn from(state: QueueStateDto) -> Self {
+        match state {
+            QueueStateDto::Queued => Self::Queued,
+            QueueStateDto::Dispatching => Self::Dispatching,
+            QueueStateDto::Running => Self::Running,
+            QueueStateDto::Done => Self::Done,
+            QueueStateDto::Failed => Self::Failed,
+            QueueStateDto::Cancelled => Self::Cancelled,
+            QueueStateDto::Expired => Self::Expired,
+        }
+    }
+}
+
+// ===========================================================================
 // Run responses
 // ===========================================================================
 
@@ -338,21 +563,20 @@ pub struct RunDto {
     /// Environment application version snapshotted at launch, not re-derived.
     pub app_version: Option<String>,
     pub app_build: Option<String>,
-    /// `sdk::RunState::as_str`'s spelling. Note `canceled`, one `l` - the queue
-    /// row's equivalent state is spelled `cancelled`, and the difference is
-    /// deliberate (see `sdk::RunState`).
-    pub state: String,
+    /// `sdk::RunState::as_str`'s spelling - a closed set on the wire since
+    /// Task 20, when this field stopped being a `String`.
+    pub state: RunStateDto,
     /// The exclusivity decision that was actually made - **not** the launch's
     /// request, which is a tri-state.
     pub resolved_exclusive: bool,
-    /// Which tier supplied it: `launch`, `plan.yaml`, `test_meta`, `default`.
-    pub exclusive_tier: String,
+    /// Which tier supplied it - see [`ExclusiveTierDto`].
+    pub exclusive_tier: ExclusiveTierDto,
     pub is_validation: bool,
     pub parameters: Vec<RunParameterDto>,
     pub include_tags: Vec<String>,
     pub exclude_tags: Vec<String>,
-    /// `manual` or `scheduled`.
-    pub source: String,
+    /// Who asked - see [`RunSourceDto`].
+    pub source: RunSourceDto,
     pub schedule_id: Option<Uuid>,
     pub bundle_ids: Vec<Uuid>,
     /// Opaque executor handle; `null` until dispatch succeeds.
@@ -409,14 +633,14 @@ impl From<sdk::Run> for RunDto {
             test_version: r.test_version,
             app_version: r.app_version,
             app_build: r.app_build,
-            state: r.state.as_str().to_owned(),
+            state: r.state.into(),
             resolved_exclusive: r.resolved_exclusive,
-            exclusive_tier: r.exclusive_tier.as_str().to_owned(),
+            exclusive_tier: r.exclusive_tier.into(),
             is_validation: r.is_validation,
             parameters: r.parameters.into_iter().map(Into::into).collect(),
             include_tags: r.include_tags,
             exclude_tags: r.exclude_tags,
-            source: r.source.as_str().to_owned(),
+            source: r.source.into(),
             schedule_id: r.schedule_id,
             bundle_ids: r.bundle_ids,
             execution_ref: r.execution_ref,
@@ -552,11 +776,11 @@ pub struct QueueEntryDto {
     pub environment_id: Uuid,
     /// `plan`, `test`, or `custom_plan`.
     pub run_kind: String,
-    /// `manual` or `scheduled`.
-    pub source: String,
+    /// Who asked - see [`RunSourceDto`].
+    pub source: RunSourceDto,
     pub exclusive: bool,
-    /// One of the seven frozen queue-state names. Note `cancelled`, two `l`s.
-    pub state: String,
+    /// One of the seven frozen queue-state names - see [`QueueStateDto`].
+    pub state: QueueStateDto,
     pub error: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub enqueued_at: OffsetDateTime,
@@ -586,9 +810,9 @@ impl From<sdk::QueueEntry> for QueueEntryDto {
             run_id: q.run_id,
             environment_id: q.platform_id,
             run_kind: q.run_kind.as_str().to_owned(),
-            source: q.source.as_str().to_owned(),
+            source: q.source.into(),
             exclusive: q.exclusive,
-            state: q.state.as_str().to_owned(),
+            state: q.state.into(),
             error: q.error,
             enqueued_at: q.enqueued_at,
             dispatched_at: q.dispatched_at,
@@ -801,7 +1025,7 @@ impl LaunchRunReq {
             include_tags: self.include_tags,
             exclude_tags: self.exclude_tags,
             parameters: self.parameters.into_iter().map(Into::into).collect(),
-            exclusive: self.exclusive,
+            exclusive: sdk::Exclusivity::from_option_bool(self.exclusive),
             timeout_seconds: self.timeout_seconds,
             // Not caller-supplied - see the type's doc.
             source: sdk::RunSource::Manual,
@@ -1422,10 +1646,11 @@ impl From<String> for RunLogLineDto {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundaryLimits, LaunchRunReq, MAX_BRANCH_LEN, MAX_SCHEDULE_NAME_LEN, MAX_TARGET_PATH_LEN,
-        NewScheduleReq, OffsetDateTime, QUEUE_LIMIT_DEFAULT, QUEUE_LIMIT_MAX, QUEUE_LIMIT_MIN,
-        QueueEntryDto, QueueQuery, RunDetailDto, RunDto, RunTargetDto, ScheduleDto,
-        exclusive_choice_from_wire, exclusive_choice_to_wire, sdk,
+        BoundaryLimits, ExclusiveTierDto, LaunchRunReq, MAX_BRANCH_LEN, MAX_SCHEDULE_NAME_LEN,
+        MAX_TARGET_PATH_LEN, NewScheduleReq, OffsetDateTime, QUEUE_LIMIT_DEFAULT, QUEUE_LIMIT_MAX,
+        QUEUE_LIMIT_MIN, QueueEntryDto, QueueQuery, QueueStateDto, RunDetailDto, RunDto,
+        RunSourceDto, RunStateDto, RunTargetDto, ScheduleDto, exclusive_choice_from_wire,
+        exclusive_choice_to_wire, sdk,
     };
     use crate::domain::error::DomainError;
     use crate::domain::timeout::{MAX_LAUNCH_TIMEOUT_SECONDS, MIN_LAUNCH_TIMEOUT_SECONDS};
@@ -1829,13 +2054,69 @@ mod tests {
         assert_eq!(request.schedule_id, None);
     }
 
-    /// Absent `exclusive` must stay `None`, not become `Some(false)`: `false`
+    /// Absent `exclusive` must stay `Inherit`, not become `Shared`: `Shared`
     /// is the launch tier asserting parallel, which outranks a `plan.yaml` or
     /// `TEST_META` declaration and would run a destructive test beside another.
     #[test]
     fn an_absent_exclusive_stays_inherit_rather_than_becoming_parallel() {
         let request = request().into_domain(limits()).unwrap();
-        assert_eq!(request.exclusive, None);
+        assert_eq!(request.exclusive, sdk::Exclusivity::Inherit);
+    }
+
+    /// The inbound wire boundary for `LaunchRequest::exclusive`:
+    /// `sdk::Exclusivity` carries no serde impl of its own — this crate's
+    /// contract-purity rule is exactly what makes that type's doc name this
+    /// DTO as one of the boundaries the guarantee is pinned at, by test,
+    /// rather than by the type. `LaunchRunReq::exclusive` stays a plain
+    /// `Option<bool>` and `into_domain`'s `Exclusivity::from_option_bool`
+    /// call is what actually reads `null`/absent/`true`/`false` off the wire.
+    ///
+    /// **Inbound only, and deliberately so.** `LaunchRunReq` is a request DTO
+    /// (`#[api_dto(request)]`) — no HTTP client here ever serializes a
+    /// `LaunchRequest` back out, so there is no outbound direction to cover.
+    ///
+    /// Driven from JSON literals, not struct literals, so this pins the wire
+    /// shape and not a proxy for it (the same reason
+    /// `the_launch_request_deserialises_environment_id_from_the_wire` is
+    /// JSON-driven). Absent is asserted separately from explicit `null`
+    /// because they are two different wire shapes that must read identically
+    /// — this module's header explains why `serde_with`'s absence makes that
+    /// automatic rather than incidental for this one field.
+    #[test]
+    fn the_exclusive_tri_state_survives_every_inbound_wire_shape() {
+        fn body_with(exclusive: Option<serde_json::Value>) -> serde_json::Value {
+            let mut body = serde_json::json!({
+                "target": {
+                    "kind": "plan",
+                    "repo_id": Uuid::from_u128(0xA1),
+                    "path": "suites/smoke/plan.yaml",
+                },
+            });
+            if let Some(exclusive) = exclusive {
+                body["exclusive"] = exclusive;
+            }
+            body
+        }
+
+        for (wire, expected) in [
+            (
+                body_with(Some(serde_json::json!(null))),
+                sdk::Exclusivity::Inherit,
+            ),
+            (
+                body_with(Some(serde_json::json!(true))),
+                sdk::Exclusivity::Exclusive,
+            ),
+            (
+                body_with(Some(serde_json::json!(false))),
+                sdk::Exclusivity::Shared,
+            ),
+            (body_with(None), sdk::Exclusivity::Inherit),
+        ] {
+            let req: LaunchRunReq = serde_json::from_value(wire).expect("must deserialize");
+            let request = req.into_domain(limits()).unwrap();
+            assert_eq!(request.exclusive, expected);
+        }
     }
 
     // -- legacy field trap (ruling G-4) -------------------------------------
@@ -2598,5 +2879,228 @@ mod tests {
             .effective_limit(),
             50
         );
+    }
+
+    // -- SDK enums on the wire (Task 20, review findings #34/#35) -----------
+
+    /// **Every `sdk::RunState` renders the spelling it always rendered.**
+    ///
+    /// `RunDto::state` was a `String` filled from `RunState::as_str`, so a
+    /// typo'd or invented state compiled and reached a UI that switches on the
+    /// value. It is now [`RunStateDto`], a closed mirror. The spellings are
+    /// **`as_str`'s**, not the Rust variant names - lowercase, `timed_out` with
+    /// an underscore, and `canceled` with one `l` (the queue row's equivalent
+    /// is `cancelled`, deliberately - see `sdk::QueueState`). This asserts the
+    /// rendered JSON against `as_str` itself, so the SDK stays the single
+    /// source of truth for the spelling and this test cannot drift from it.
+    ///
+    /// The list is closed by [`RunStateDto::from`]: it matches `sdk::RunState`
+    /// exhaustively, so a new SDK variant is a compile error there, and the
+    /// reverse `From` closes the other direction.
+    #[test]
+    fn every_run_state_serialises_to_its_sdk_spelling() {
+        for state in [
+            sdk::RunState::Created,
+            sdk::RunState::Queued,
+            sdk::RunState::Dispatching,
+            sdk::RunState::Running,
+            sdk::RunState::Succeeded,
+            sdk::RunState::Failed,
+            sdk::RunState::Canceled,
+            sdk::RunState::TimedOut,
+            sdk::RunState::Expired,
+            sdk::RunState::Error,
+        ] {
+            let rendered =
+                serde_json::to_value(RunStateDto::from(state)).expect("a run state must serialize");
+            assert_eq!(
+                rendered,
+                serde_json::Value::String(state.as_str().to_owned()),
+                "the wire spelling must stay RunState::as_str's, for {state:?}"
+            );
+            assert_eq!(
+                sdk::RunState::from(RunStateDto::from(state)),
+                state,
+                "the mirror must round-trip, so neither side can drift"
+            );
+        }
+    }
+
+    /// The half the `String` could not give: an unknown state is a decode
+    /// error, not a value every consumer has to defend against.
+    #[test]
+    fn an_unknown_run_state_is_rejected() {
+        assert!(
+            serde_json::from_value::<RunStateDto>(serde_json::json!("halfway")).is_err(),
+            "an invented state must not decode"
+        );
+        assert!(
+            serde_json::from_value::<RunStateDto>(serde_json::json!("Succeeded")).is_err(),
+            "the Rust variant name is not the wire spelling and must not decode either"
+        );
+    }
+
+    /// **`ExclusiveTier::Plan` is `plan.yaml` on the wire, not `plan`.**
+    ///
+    /// The one spelling in this task that `#[serde(rename_all = "snake_case")]`
+    /// gets wrong on its own: `as_str` has always returned the file name, and
+    /// an operator reading a run's `exclusive_tier` sees which of the four
+    /// tiers decided it.
+    #[test]
+    fn every_exclusive_tier_serialises_to_its_sdk_spelling() {
+        for tier in [
+            sdk::ExclusiveTier::Launch,
+            sdk::ExclusiveTier::Plan,
+            sdk::ExclusiveTier::TestMeta,
+            sdk::ExclusiveTier::Default,
+        ] {
+            let rendered = serde_json::to_value(ExclusiveTierDto::from(tier))
+                .expect("an exclusive tier must serialize");
+            assert_eq!(
+                rendered,
+                serde_json::Value::String(tier.as_str().to_owned()),
+                "the wire spelling must stay ExclusiveTier::as_str's, for {tier:?}"
+            );
+            assert_eq!(sdk::ExclusiveTier::from(ExclusiveTierDto::from(tier)), tier);
+        }
+        assert_eq!(
+            serde_json::to_value(ExclusiveTierDto::from(sdk::ExclusiveTier::Plan))
+                .expect("a tier must serialize"),
+            serde_json::json!("plan.yaml"),
+            "spelled out, because snake_case alone would have said `plan`"
+        );
+    }
+
+    #[test]
+    fn an_unknown_exclusive_tier_is_rejected() {
+        assert!(
+            serde_json::from_value::<ExclusiveTierDto>(serde_json::json!("plan")).is_err(),
+            "`plan` is not the tier spelling - `plan.yaml` is"
+        );
+        assert!(
+            serde_json::from_value::<ExclusiveTierDto>(serde_json::json!("guesswork")).is_err()
+        );
+    }
+
+    #[test]
+    fn every_run_source_serialises_to_its_sdk_spelling() {
+        for source in [sdk::RunSource::Manual, sdk::RunSource::Scheduled] {
+            let rendered =
+                serde_json::to_value(RunSourceDto::from(source)).expect("a source must serialize");
+            assert_eq!(
+                rendered,
+                serde_json::Value::String(source.as_str().to_owned()),
+                "the wire spelling must stay RunSource::as_str's, for {source:?}"
+            );
+            assert_eq!(sdk::RunSource::from(RunSourceDto::from(source)), source);
+        }
+    }
+
+    #[test]
+    fn an_unknown_run_source_is_rejected() {
+        assert!(serde_json::from_value::<RunSourceDto>(serde_json::json!("cron")).is_err());
+    }
+
+    /// **The queue's seven frozen names, `cancelled` with two `l`s.**
+    ///
+    /// The run state's is `canceled` with one. Both are pinned here and in
+    /// [`every_run_state_serialises_to_its_sdk_spelling`] precisely because
+    /// they differ, and `sdk::QueueState`'s doc says not to "fix" either.
+    #[test]
+    fn every_queue_state_serialises_to_its_sdk_spelling() {
+        for state in [
+            sdk::QueueState::Queued,
+            sdk::QueueState::Dispatching,
+            sdk::QueueState::Running,
+            sdk::QueueState::Done,
+            sdk::QueueState::Failed,
+            sdk::QueueState::Cancelled,
+            sdk::QueueState::Expired,
+        ] {
+            let rendered = serde_json::to_value(QueueStateDto::from(state))
+                .expect("a queue state must serialize");
+            assert_eq!(
+                rendered,
+                serde_json::Value::String(state.as_str().to_owned()),
+                "the wire spelling must stay QueueState::as_str's, for {state:?}"
+            );
+            assert_eq!(sdk::QueueState::from(QueueStateDto::from(state)), state);
+        }
+        assert_eq!(
+            serde_json::to_value(QueueStateDto::from(sdk::QueueState::Cancelled))
+                .expect("a queue state must serialize"),
+            serde_json::json!("cancelled"),
+            "two `l`s on a queue row"
+        );
+        assert!(
+            serde_json::from_value::<QueueStateDto>(serde_json::json!("canceled")).is_err(),
+            "the run state's one-`l` spelling is not a queue state"
+        );
+    }
+
+    #[test]
+    fn an_unknown_queue_state_is_rejected() {
+        assert!(serde_json::from_value::<QueueStateDto>(serde_json::json!("paused")).is_err());
+    }
+
+    /// **The two response DTOs still render exactly the strings they rendered
+    /// before the retype.** This is the whole-object check that the field-level
+    /// ones above cannot make: a `#[serde(rename)]` or a dropped `.into()` at a
+    /// construction site would still leave every enum test green.
+    #[test]
+    fn the_run_and_queue_dtos_render_unchanged_wire_strings() {
+        let run = RunDto::from(sdk::Run {
+            id: Uuid::from_u128(0x61),
+            name: "smoke-3".to_owned(),
+            target: sdk::RunTarget::CustomPlan {
+                id: Uuid::from_u128(0x62),
+            },
+            platform_id: None,
+            test_version: None,
+            app_version: None,
+            app_build: None,
+            state: sdk::RunState::TimedOut,
+            resolved_exclusive: true,
+            exclusive_tier: sdk::ExclusiveTier::Plan,
+            is_validation: false,
+            parameters: vec![],
+            include_tags: vec![],
+            exclude_tags: vec![],
+            source: sdk::RunSource::Scheduled,
+            schedule_id: None,
+            bundle_ids: vec![],
+            execution_ref: None,
+            log_storage_ref: None,
+            timeout_at: None,
+            started_at: None,
+            finished_at: None,
+            error: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        });
+        let body = serde_json::to_value(&run).expect("a run must serialize");
+        assert_eq!(body["state"], "timed_out");
+        assert_eq!(body["exclusive_tier"], "plan.yaml");
+        assert_eq!(body["source"], "scheduled");
+
+        let entry = QueueEntryDto::from(sdk::QueueEntry {
+            id: Uuid::from_u128(0x71),
+            run_id: Uuid::from_u128(0x72),
+            platform_id: Uuid::from_u128(0x73),
+            run_kind: sdk::RunKind::Plan,
+            source: sdk::RunSource::Scheduled,
+            exclusive: false,
+            state: sdk::QueueState::Cancelled,
+            error: None,
+            enqueued_at: OffsetDateTime::UNIX_EPOCH,
+            dispatched_at: None,
+            finished_at: None,
+            queue_position: None,
+            ttl_expires_at: None,
+            blocked_by: None,
+        });
+        let body = serde_json::to_value(&entry).expect("a queue entry must serialize");
+        assert_eq!(body["state"], "cancelled");
+        assert_eq!(body["source"], "scheduled");
     }
 }

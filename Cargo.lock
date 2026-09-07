@@ -10168,6 +10168,7 @@ dependencies = [
  "cf-gears-toolkit-db",
  "cf-gears-toolkit-db-macros",
  "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-odata",
  "cf-gears-toolkit-security",
  "http",
  "hyper-util",
@@ -10371,6 +10372,7 @@ dependencies = [
  "async-trait",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-security",
+ "qa-catalog-sdk",
  "time",
  "uuid",
 ]

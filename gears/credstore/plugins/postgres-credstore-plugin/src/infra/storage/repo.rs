@@ -19,7 +19,9 @@ use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::DBProvider;
-use toolkit_db::secure::{SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureUpdateExt};
+use toolkit_db::secure::{
+    DBRunner, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureUpdateExt,
+};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -30,6 +32,12 @@ use super::error::StoreError;
 pub type ValueDbProvider = DBProvider<StoreError>;
 
 /// Repository over `credstore_plugin_values`.
+///
+/// `Clone` is cheap (an `Arc` bump): [`Service`](crate::domain::Service) needs
+/// an owned handle it can move into a `'static`-bound transaction closure,
+/// since every method here now takes an explicit runner instead of holding
+/// one implicitly.
+#[derive(Clone)]
 pub struct ValueRepo {
     db: Arc<ValueDbProvider>,
 }
@@ -54,23 +62,38 @@ impl ValueRepo {
         Self { db }
     }
 
+    /// Clone of the provider this repo was constructed with.
+    ///
+    /// Every method below now takes an explicit `runner: &C where C: DBRunner`
+    /// instead of reaching for a connection or a transaction internally
+    /// (review finding #14, `TOOLKIT-DB-001`) — that was exactly what stopped
+    /// a caller from composing two of them into one transaction. A caller
+    /// that has no runner of its own yet (this crate's [`Service`](crate::domain::Service))
+    /// gets one from here, once, at construction time — the same way every
+    /// other service in this workspace holds its own `DBProvider` alongside a
+    /// stateless repository.
+    #[must_use]
+    pub fn provider(&self) -> Arc<ValueDbProvider> {
+        Arc::clone(&self.db)
+    }
+
     /// Read the stored bytes for one key, or `None` if no row exists.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if the connection or the scoped query fails.
-    pub async fn find(
+    /// Returns [`StoreError`] if the scoped query fails.
+    pub async fn find<C: DBRunner>(
         &self,
+        runner: &C,
         tenant_id: &TenantId,
         key: &SecretRef,
         owner_id: Option<&OwnerId>,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let conn = self.db.conn()?;
         let row = entity::Entity::find()
             .secure()
             .scope_with(&AccessScope::for_tenant(tenant_id.0))
             .filter(key_filter(key, owner_id))
-            .one(&conn)
+            .one(runner)
             .await?;
         Ok(row.map(|m| m.secret_value))
     }
@@ -81,21 +104,29 @@ impl ValueRepo {
     /// `HashMap::insert`: write preconditions and CAS live in the credstore
     /// *gear* (`WritePrecondition`), never in a plugin.
     ///
-    /// `UPDATE`-then-`INSERT` inside one transaction rather than `INSERT ...
-    /// ON CONFLICT`: `ON CONFLICT` must infer a unique index from the target
-    /// column list, and a **partial** index is only inferable when the
-    /// statement repeats its `WHERE` predicate — which `SeaORM`'s `OnConflict`
-    /// builder cannot emit.
+    /// `UPDATE`-then-`INSERT` rather than `INSERT ... ON CONFLICT`: `ON
+    /// CONFLICT` must infer a unique index from the target column list, and a
+    /// **partial** index is only inferable when the statement repeats its
+    /// `WHERE` predicate — which `SeaORM`'s `OnConflict` builder cannot emit.
+    ///
+    /// The two statements run against whatever `runner` the caller supplies,
+    /// so whether they are atomic with each other is the caller's call: pass
+    /// a `DbTx` (e.g. from `DBProvider::transaction`) for that, same as any
+    /// other multi-statement sequence in this subsystem. A bare `DbConn`
+    /// still leaves the pair safe against silent duplication -- the partial
+    /// unique indexes turn a concurrent first-write race into an error
+    /// instead of a second row.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if the transaction, the update or the insert
-    /// fails. Two concurrent first-writes of the same key can make one of them
-    /// lose the insert race and surface a unique-violation here; the gear's
-    /// write saga retries, and the partial unique indexes are what turn that
-    /// race into an error instead of a silent duplicate row.
-    pub async fn upsert(
+    /// Returns [`StoreError`] if the update or the insert fails. Two
+    /// concurrent first-writes of the same key can make one of them lose the
+    /// insert race and surface a unique-violation here; the gear's write saga
+    /// retries, and the partial unique indexes are what turn that race into
+    /// an error instead of a silent duplicate row.
+    pub async fn upsert<C: DBRunner>(
         &self,
+        runner: &C,
         tenant_id: &TenantId,
         key: &SecretRef,
         owner_id: Option<&OwnerId>,
@@ -107,26 +138,20 @@ impl ValueRepo {
         let owner = owner_id.map(|o| o.0);
         let reference = key.as_ref().to_owned();
         let bytes = value.to_vec();
+        let now = OffsetDateTime::now_utc();
 
-        self.db
-            .transaction(move |tx| {
-                Box::pin(async move {
-                    let now = OffsetDateTime::now_utc();
-                    let updated = entity::Entity::update_many()
-                        .col_expr(entity::Column::SecretValue, Expr::value(bytes.clone()))
-                        .col_expr(entity::Column::UpdatedAt, Expr::value(now))
-                        .filter(filter)
-                        .secure()
-                        .scope_with(&scope)
-                        .exec(tx)
-                        .await?;
-                    if updated.rows_affected == 0 {
-                        insert_row(tx, &scope, tenant, owner, reference, bytes, now).await?;
-                    }
-                    Ok(())
-                })
-            })
-            .await
+        let updated = entity::Entity::update_many()
+            .col_expr(entity::Column::SecretValue, Expr::value(bytes.clone()))
+            .col_expr(entity::Column::UpdatedAt, Expr::value(now))
+            .filter(filter)
+            .secure()
+            .scope_with(&scope)
+            .exec(runner)
+            .await?;
+        if updated.rows_affected == 0 {
+            insert_row(runner, &scope, tenant, owner, reference, bytes, now).await?;
+        }
+        Ok(())
     }
 
     /// Insert the value for one key **only if no row exists yet**.
@@ -136,12 +161,17 @@ impl ValueRepo {
     /// every boot, this backend must not clobber a value a client rotated at
     /// runtime just because the same reference still appears in the YAML.
     ///
+    /// The probe and the insert run against whatever `runner` the caller
+    /// supplies -- pass a `DbTx` if the absence check and the insert must be
+    /// atomic against a concurrent writer; [`Service::seed`](crate::domain::Service::seed)
+    /// does exactly that, one transaction per seed.
+    ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if the transaction, the probe or the insert
-    /// fails.
-    pub async fn insert_if_absent(
+    /// Returns [`StoreError`] if the probe or the insert fails.
+    pub async fn insert_if_absent<C: DBRunner>(
         &self,
+        runner: &C,
         tenant_id: &TenantId,
         key: &SecretRef,
         owner_id: Option<&OwnerId>,
@@ -154,24 +184,18 @@ impl ValueRepo {
         let reference = key.as_ref().to_owned();
         let bytes = value.to_vec();
 
-        self.db
-            .transaction(move |tx| {
-                Box::pin(async move {
-                    let existing = entity::Entity::find()
-                        .secure()
-                        .scope_with(&scope)
-                        .filter(filter)
-                        .one(tx)
-                        .await?;
-                    if existing.is_some() {
-                        return Ok(false);
-                    }
-                    let now = OffsetDateTime::now_utc();
-                    insert_row(tx, &scope, tenant, owner, reference, bytes, now).await?;
-                    Ok(true)
-                })
-            })
-            .await
+        let existing = entity::Entity::find()
+            .secure()
+            .scope_with(&scope)
+            .filter(filter)
+            .one(runner)
+            .await?;
+        if existing.is_some() {
+            return Ok(false);
+        }
+        let now = OffsetDateTime::now_utc();
+        insert_row(runner, &scope, tenant, owner, reference, bytes, now).await?;
+        Ok(true)
     }
 
     /// Delete the row for one key. A miss is a no-op — the gear treats a
@@ -179,19 +203,19 @@ impl ValueRepo {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] if the connection or the scoped delete fails.
-    pub async fn delete(
+    /// Returns [`StoreError`] if the scoped delete fails.
+    pub async fn delete<C: DBRunner>(
         &self,
+        runner: &C,
         tenant_id: &TenantId,
         key: &SecretRef,
         owner_id: Option<&OwnerId>,
     ) -> Result<(), StoreError> {
-        let conn = self.db.conn()?;
         entity::Entity::delete_many()
             .filter(key_filter(key, owner_id))
             .secure()
             .scope_with(&AccessScope::for_tenant(tenant_id.0))
-            .exec(&conn)
+            .exec(runner)
             .await?;
         Ok(())
     }
@@ -202,8 +226,8 @@ impl ValueRepo {
 /// `scope_unchecked`: an `INSERT` has no existing row for the scope clamp to
 /// filter on — the same reasoning the credstore gear's `insert_provisioning`
 /// records. The tenant written is the one the SPI was called with.
-async fn insert_row(
-    tx: &toolkit_db::secure::DbTx<'_>,
+async fn insert_row<C: DBRunner>(
+    runner: &C,
     scope: &AccessScope,
     tenant_id: Uuid,
     owner_id: Option<Uuid>,
@@ -223,7 +247,7 @@ async fn insert_row(
     entity::Entity::insert(am)
         .secure()
         .scope_unchecked(scope)?
-        .exec(tx)
+        .exec(runner)
         .await?;
     Ok(())
 }

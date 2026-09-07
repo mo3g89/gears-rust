@@ -4,8 +4,9 @@ Paste the **Prompt to start the new session** section below into a fresh Claude
 Code session opened at `/home/serhii/Jelastic/projects/fabric/gears-rust`.
 Everything else in this file is context that prompt refers to.
 
-Written 2026-09-06, after the core plan closed. Delete this file when the three
-companion plans are finished.
+Written 2026-09-06, after the core plan closed. Updated 2026-09-07: the **quality
+plan is complete** (see "What remains"). Delete this file when the two plans that
+still remain are finished.
 
 ---
 
@@ -69,11 +70,67 @@ is the part that must outlive it.
 
 | Plan | Tasks | Phases | Findings |
 |---|---|---|---|
-| `2026-09-05-review-remediation-quality.md` | 19–29 | 5, 6, 9 | #10 #11 #12 #14 #15 #16 #17 #25 #27 #34 #35 #37 #38 #39 #41 #42 #43 #44 #45 #46 #53 #54 #55, and #5 |
+| ~~`2026-09-05-review-remediation-quality.md`~~ **DONE 2026-09-07** | 19–29 | 5, 6, 9 | #10 #11 #12 #14 #15 #16 #17 #25 #27 #34 #35 #37 #38 #39 #41 #42 #43 #44 #45 #46 #53 #54 #55, and #5 |
 | `2026-09-05-qa-permission-catalog.md` | 30–35 | 7 | #1 |
 | `2026-09-05-qa-observability.md` | 36–41 | 8 | #4 |
 
-**Suggested order: quality → permission catalog → observability.** The spec
+**Quality is done.** Remaining order: permission catalog → observability.
+
+### What the quality plan left behind
+
+All nine gates were green at its final commit (`fmt`, `clippy`, `test-no-macros` 11734,
+`test-qa-runs-pg` 927, `test-qa-insights-pg` 758, `test-qa-catalog-git` 299,
+`test-qa-platform-features` 268, `helm-tests` 6/6, `ui-lint`/`ui-test` 237/`ui-build`).
+`make ui-lint` now exists and runs — it never had before.
+
+**Three follow-ups that need scheduling, not just noting:**
+
+1. **#38's remainder in `qa-insights` and `qa-runs`.** `pub(crate)` on `domain`/`infra`
+   landed in qa-catalog and qa-environments and was reverted in the other two, because
+   the compiler surfaced 46 and 16 groups of code only their own `#[cfg(test)]` modules
+   reach. Closing it means 62 delete-or-wire decisions plus ~186 mechanical
+   `pub(crate)` → `pub` edits (`clippy::redundant_pub_crate` is denied repo-wide); land
+   the mechanical half as its own commit first. The live exposure is that
+   `qa_insights::infra::storage::entity::*` and `qa_runs::infra::storage::entity::*`
+   stay nameable — the schema-pinning risk #38 was raised about — in the two gears with
+   the most entities. Both `lib.rs` files carry the measurement in code.
+2. **An unwired test tier.** `gears/credstore/plugins/postgres-credstore-plugin/tests/restart_survival_pg.rs`
+   needs `CREDSTORE_PG_TEST_DSN` and is named in neither the `Makefile` nor any
+   workflow, so it silently self-skips under `make test` and `make ci`. Same shape as
+   the gaps Phase 1 existed to close, but in `gears/credstore/`. **Schedule this one
+   first** — it is the only deferral that weakens a phase already marked closed, and
+   the fix is to mirror an existing `test-*-pg` target.
+3. **A cross-table cursor for `/qa/v1/variables`** in the `environment_id` case, where
+   the body is a union of two tables and `CursorV1` has no segment discriminator. The
+   union is bounded and a `cursor` sent with `environment_id` is now a 400 raised before
+   any DB or PDP work, so the dangerous shape is closed; what remains is a capability.
+
+**Three wrong line numbers, parked with their correct values** — introduced by the
+final fix wave's doc sweep, inert to behaviour, and caught by no gate because
+`file_citations_tests` validates paths only and `doc_citations_tests` identifiers only:
+
+- `qa-insights/.../api/rest/handlers/saved_views_handler_tests.rs:23` cites
+  `domain/error.rs:531` for `SavedViewResourceError` — 531 is the **test_result**
+  `gts_id`. Correct: **538/539**.
+- `qa-insights/.../api/rest/handlers/settings_handler_tests.rs:14,45` cite `:536` for
+  `NotificationResourceError` — 536 is inside the previous type's doc comment.
+  Correct: **543/544**.
+- `qa-insights/.../infra/clients/qa_runs.rs:342` cites qa-runs `domain/error.rs:597`,
+  the `struct` line; the `gts_id!` it describes is at **596**.
+
+**Two residuals disclosed in code, both deliberate:** the JIRA poller's claim row is a
+claim row and not a fencing token, so a failover window remains in which a dispossessed
+holder can finish one tenant's `poll_once`; and `after_a_failed_renewal`'s TTL-elapsed
+arm is unexecuted for want of a fault-injecting DB seam this gear does not have.
+
+**One asymmetry worth a tidy-up:** qa-runs moved its canonical-mapping tests with the
+code into `domain/error.rs`; qa-insights left its in `api/rest/error.rs` because they
+interleave with `as_saved_view_error`/`as_notification_error`. Permitted direction,
+recorded in `domain/error.rs`'s header, but the two gears now differ.
+
+---
+
+**Original suggested order (superseded):** quality → permission catalog → observability. The spec
 (§12) says phases 1–6 are the correctness core and that 7 and 8 are each a
 subsystem's worth of work that can be scheduled independently once 1–6 land.
 Task 25 (`qa.plan` drops its unused `RESOURCE_ID`) has an explicit ordering

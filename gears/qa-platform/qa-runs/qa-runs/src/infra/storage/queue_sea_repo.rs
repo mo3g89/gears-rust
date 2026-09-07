@@ -809,7 +809,7 @@ mod tests {
                             .cancel_queued(tx, &scope(tenant), row.id, "operator")
                             .await?
                     );
-                    Err(DomainError::Database("the connection dropped".to_owned()))
+                    Err(DomainError::database("the connection dropped"))
                 })
             })
             .await;

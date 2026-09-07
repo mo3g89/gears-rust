@@ -34,7 +34,7 @@ export interface TestPlan {
    * `timeout_seconds` and `exclusive` ARE on `PlanDto`, but both are nullable there. */
   timeout_seconds?: number;
   node_selector?: Record<string, string>;
-  tolerations?: any[];
+  tolerations?: unknown[];
   validation?: boolean;
   /** Plan-level exclusivity from plan.yaml. null/undefined = inherit from tests. */
   exclusive?: boolean | null;
@@ -747,10 +747,24 @@ export interface TestHistory {
   results: TestHistoryEntry[];
 }
 
-/** UI-only: the gear's `scope`/`group_by` query parameters are plain `string` on the wire
- *  (`AnalyticsOverviewDto.scope`/`.group_by`), not a schema-level enum, so there is no
- *  generated type to alias onto — this is the literal union client code narrows requests to. */
-export type AnalyticsScope = 'all' | 'plan';
+/** Generated (Task 20): `AnalyticsOverviewDto.scope` publishes `"all" | "plan"` as a
+ *  schema-level enum now, so this is aliased onto it rather than re-declared by hand, and
+ *  `analyticsOverviewFromDto` assigns the echo without a cast.
+ *
+ *  It is used for the *request* parameters too (`AnalyticsOverviewQuery`,
+ *  `AnalyticsBuildTestsQuery`, `AnalyticsSavedViewPayload`), which are still plain `string`
+ *  on the wire: the gear accepts those trimmed and case-insensitively
+ *  (`domain::analytics::query::parse_scope`), which no schema enum describes, so this alias
+ *  narrows what the client *sends* to a subset of what the server accepts. That is the safe
+ *  direction. `AnalyticsGroupBy` below has no generated counterpart at all —
+ *  `AnalyticsOverviewDto.group_by` is still a `String` — and stays hand-written.
+ *
+ *  The saved-view scope (`SavedViewDto.scope`, `S['SavedViewScopeDto']`) is a **separate**
+ *  schema with the same value space: it mirrors `qa_insights_sdk::SavedViewScope` where this
+ *  mirrors `domain::analytics::query::Scope`. `savedViewFromDto` assigns one into the other
+ *  without a cast because they are structurally identical, and they are kept apart because
+ *  they are not the same contract. */
+export type AnalyticsScope = S['AnalyticsScopeDto'];
 export type AnalyticsGroupBy = 'none' | 'component' | 'tag' | 'environment';
 
 /** UI-only: a client-side query-parameter builder, not a response body — OpenAPI does not
@@ -998,7 +1012,13 @@ export interface RunQueueEntry {
   target_id: string;
   source: string;
   exclusive: boolean;
-  state: 'queued' | 'dispatching' | 'running' | 'done' | 'failed' | 'cancelled' | 'expired';
+  /** Generated (Task 20): `QueueEntryDto.state` publishes the seven frozen queue-state
+   *  names as a schema-level enum now, so this is aliased onto it rather than re-typed by
+   *  hand. The union was previously copied here literally and reached through an `as`
+   *  cast in `queueEntryFromDto`; the alias is what makes a gear-side change to the set
+   *  a `tsc` failure here instead of a silent divergence. Note `cancelled`, two `l`s —
+   *  the *run* state's spelling is `canceled` and X4 records that as deliberate. */
+  state: S['QueueStateDto'];
   workflow_name: string | null;
   error: string | null;
   enqueued_at: string;

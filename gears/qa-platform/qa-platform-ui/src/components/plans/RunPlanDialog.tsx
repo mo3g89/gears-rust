@@ -84,7 +84,6 @@ export function RunPlanDialog({ plan, open, onOpenChange, trigger, initialBranch
       const branches = Array.isArray(branchList) ? branchList : [];
       return branches[0] ?? '';
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, repoDefaultBranch, branchList, selectedEnvironmentInfo?.default_branch, initialBranch]);
 
   const resetDialogState = () => {

@@ -1308,11 +1308,17 @@ mod tests {
     ///   needed. `event-broker-sdk` owned the table's shape; the gear owns the
     ///   DDL because the migration has already run on deployed databases and
     ///   cannot be edited out from under them (see that file's header).
+    /// * `qa_leader_claims` — `m20260907_000003_leader_claims`: the JIRA
+    ///   poller's single-holder claim row, and the one place in this gear
+    ///   where leadership is a correctness requirement rather than an
+    ///   optimisation. `crate::infra::leader`'s header says which of the
+    ///   three roles it covers and why the other two do not need it.
     ///
     /// A migration that adds a table adds a line here. That is deliberate
     /// friction: the alternative is filtering the inventory down to a prefix,
     /// which would stop these tests noticing a table nobody meant to create.
-    const TABLES_OWNED_BY_LATER_MIGRATIONS: [&str; 1] = ["evbk_consumer_offsets"];
+    const TABLES_OWNED_BY_LATER_MIGRATIONS: [&str; 2] =
+        ["evbk_consumer_offsets", "qa_leader_claims"];
 
     /// The eleven tables, in the order `up()` declares them.
     const TABLES: [&str; 11] = [

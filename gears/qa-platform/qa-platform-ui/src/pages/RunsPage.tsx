@@ -82,7 +82,7 @@ export function RunsPage() {
   const allRuns: WorkflowRun[] = useMemo(() => {
     if (Array.isArray(response)) return response;
     if (response && typeof response === 'object' && 'runs' in response) {
-      return (response as any).runs || [];
+      return (response as { runs?: WorkflowRun[] }).runs || [];
     }
     return [];
   }, [response]);
@@ -194,6 +194,7 @@ export function RunsPage() {
             // zero-match: `compileFql` does not validate field names against `fqlFields`
             // at all, so an unhandled case would fall to this switch's own `default:`
             // (`undefined`) regardless of what the autocomplete advertises.
+            // falls through
             case 'platform':
               return run.platform || '';
             case 'version':

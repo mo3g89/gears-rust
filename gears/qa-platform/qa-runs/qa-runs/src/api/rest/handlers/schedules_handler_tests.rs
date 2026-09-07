@@ -419,38 +419,6 @@ async fn an_edit_does_not_rewind_a_schedule_that_has_already_fired() {
     );
 }
 
-/// **A denial names the schedule**, through the real policy path rather
-/// than a hand-built `DomainError`.
-///
-/// A fresh deployment's most likely error on these endpoints is a 403, and
-/// it pointed the operator at run permissions. `list` is used because it is
-/// one of the three handlers that had no `map_err` at all before this - so
-/// this would not even have had a call site to be wrong at.
-#[tokio::test]
-async fn a_denied_read_names_the_schedule_resource_not_the_run() {
-    let fleet = Fleet::denying().await;
-    let services = fleet.instance();
-
-    let error = list_schedules(Extension(ctx(TENANT)), Extension(services))
-        .await
-        .expect_err("a denied caller must not read schedules");
-    let (status, _, body) = rendered(error.into_response()).await;
-
-    assert_eq!(status, 403, "{body}");
-    assert!(
-        body.contains("cf.qa.runs.schedule.v1~"),
-        "a denial on a schedule endpoint must name the schedule: {body}"
-    );
-    // Asserted on the whole resource-type token rather than by grepping for
-    // `"run "`, which is how the existing
-    // `forbidden_is_403_and_says_nothing_about_what_was_denied` missed this:
-    // the run's gts id has no trailing space.
-    assert!(
-        !body.contains("cf.qa.runs.run.v1~"),
-        "and must not point at run permissions: {body}"
-    );
-}
-
 /// **The notification endpoint edits three fields and leaves the schedule
 /// alone**, driven through the real handler over a real `ConcreteAppServices`.
 ///

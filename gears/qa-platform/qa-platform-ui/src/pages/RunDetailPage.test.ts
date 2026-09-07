@@ -17,6 +17,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { queryClient as sharedQueryClient } from '@/api/queryClient';
 
 vi.mock('@/api/client', () => ({
   apiGet: vi.fn(),
@@ -94,7 +95,8 @@ function mockApiFor(detail: unknown) {
       return { items: [], total: 0, total_pages: 1 } as never;
     }
     if (path === '/environments') {
-      return [] as never;
+      // A page since review finding #55, empty here.
+      return { items: [], page_info: { limit: 200, next_cursor: null, prev_cursor: null } } as never;
     }
     throw new Error(`unexpected apiGet(${path}) in this test`);
   });
@@ -120,6 +122,12 @@ function renderPage() {
 }
 
 beforeEach(() => {
+  // `fetchEnvironmentDtos` caches the environment name index in the app's SHARED
+  // query client (`api/queryClient.ts`) rather than in this file's per-test one,
+  // because it is a plain function with no provider to read a client from. That
+  // cache outlives a test, so it is cleared here -- without this, one test's
+  // environments answer the next test's lookup.
+  sharedQueryClient.clear();
   (globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource;
   mockedApiGet.mockReset();
 });

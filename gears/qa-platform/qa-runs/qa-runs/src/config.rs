@@ -279,7 +279,7 @@ pub struct QaRunsConfig {
     /// **It bounds a line count, not bytes.** `RunLogBroadcaster`'s own doc
     /// carries the measurement: at this capacity the resident buffer is
     /// `log_buffer_lines x` the longest line the executor emits, and the byte
-    /// cap belongs to the read side - `api::rest::sse::MAX_LINE_BYTES`.
+    /// cap belongs to the read side - `domain::repos::MAX_LINE_BYTES`.
     ///
     /// The default is [`DEFAULT_LOG_CHANNEL_CAPACITY`] itself rather than a
     /// second number. **Deviation from the plan, which specified 1024**, and the

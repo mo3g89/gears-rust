@@ -1220,7 +1220,7 @@ mod tests {
             )
             .await
             .expect_err("a caller scoped to one tenant cannot write another's settings");
-        assert!(matches!(err, DomainError::Database(_)), "{err:?}");
+        assert!(matches!(err, DomainError::Database { .. }), "{err:?}");
         assert_eq!(
             OrmJiraRepository
                 .get_poller_config(&conn, &scope(theirs), theirs)

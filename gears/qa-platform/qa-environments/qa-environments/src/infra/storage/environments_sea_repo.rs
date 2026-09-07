@@ -15,10 +15,12 @@ use qa_product_sdk::observation::{
 use sea_orm::sea_query::{Expr, Func};
 use sea_orm::{ActiveValue, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
+use toolkit_db::odata::sea_orm_filter::paginate_odata;
 use toolkit_db::secure::{
     DBRunner, SecureDeleteExt, SecureEntityExt, SecureUpdateExt, secure_insert,
     secure_update_with_scope,
 };
+use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::AccessScope;
 use tracing::warn;
 use uuid::Uuid;
@@ -26,11 +28,14 @@ use uuid::Uuid;
 use crate::domain::error::DomainError;
 use crate::domain::observation_write::ObservationWrite;
 use crate::domain::repos::{EnvironmentsRepository, PersistedCredentials};
-use crate::infra::storage::db::db_err;
+use crate::infra::storage::db::{PAGE_LIMITS, db_err, odata_err};
 use crate::infra::storage::entity::environment::{
     self, ActiveModel as EnvironmentAM, Column as EnvironmentColumn, Entity as EnvironmentEntity,
 };
 use crate::infra::storage::mapper::{credentials_to_json, environment_to_sdk};
+use crate::infra::storage::odata::{
+    EnvironmentFilterField, EnvironmentODataMapper, NAME_TIEBREAKER,
+};
 
 /// ORM-based implementation of the `EnvironmentsRepository` trait.
 #[derive(Clone, Default)]
@@ -54,18 +59,34 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         Ok(found.map(environment_to_sdk))
     }
 
-    async fn list<C: DBRunner>(
+    async fn list_page<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
-    ) -> Result<Vec<Environment>, DomainError> {
-        let rows = EnvironmentEntity::find()
-            .secure()
-            .scope_with(scope)
-            .all(runner)
-            .await
-            .map_err(db_err)?;
-        Ok(rows.into_iter().map(environment_to_sdk).collect())
+        query: &ODataQuery,
+    ) -> Result<Page<Environment>, DomainError> {
+        // `.secure().scope_with(scope)` before `paginate_odata`, and not
+        // optionally: that function's first parameter is
+        // `SecureSelect<E, Scoped>`, so an unscoped select does not type-check
+        // and the caller's `$filter` is applied on top of the tenant predicate
+        // rather than in place of it.
+        let scoped = EnvironmentEntity::find().secure().scope_with(scope);
+
+        paginate_odata::<EnvironmentFilterField, EnvironmentODataMapper, _, _, _, _>(
+            scoped,
+            runner,
+            query,
+            // `name` ascending, not `created_at` descending as qa-runs uses:
+            // `idx_qa_environments_tenant_name (tenant_id, name)` makes this an
+            // exact index prefix once the scope has pinned the tenant, and
+            // `name` is unique per tenant so a single-key cursor is total. See
+            // `infra::storage::odata`'s header.
+            NAME_TIEBREAKER,
+            PAGE_LIMITS,
+            environment_to_sdk,
+        )
+        .await
+        .map_err(|error| odata_err(&error))
     }
 
     async fn list_all_with_tenant<C: DBRunner>(
@@ -73,6 +94,34 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         runner: &C,
         scope: &AccessScope,
     ) -> Result<Vec<(Environment, Uuid)>, DomainError> {
+        // **Unbounded by design, and the one read on this trait that is.**
+        //
+        // Review finding #55 is about a client-facing collection read with no
+        // page; `list_page` three declarations above is where it is closed, and
+        // that method's doc says so. This is the deliberate exception, recorded
+        // here rather than left as an unremarked `.all()` that reads like the
+        // defect the finding named:
+        //
+        // * **No client can ask for it.** It is not reachable from any route.
+        //   The sole caller is the background observation ticker's per-cycle
+        //   sweep (`EnvironmentsService::run_observation_cycle`), which is this
+        //   gear's own maintenance duty; a request cannot reach it, so there is
+        //   no page size for a caller to omit and no query to widen.
+        // * **The caller needs every row.** The sweep exists to observe each
+        //   environment once per cycle. Paging it would mean either a cursor
+        //   held across ticks -- with rows created or deleted between them
+        //   silently skipped or re-observed -- or a cap, which would leave
+        //   environments past it never observed at all. Completeness is the
+        //   whole contract, the same argument `local_client`'s `drain_pages`
+        //   makes for the SDK reads.
+        // * **It is still scoped.** `allow_all` is a value of `AccessScope`,
+        //   not a bypass: the read goes through `.secure().scope_with(scope)`
+        //   like every other one here, and the tenant travels back with each
+        //   row so the sweep can mint a tenant-bound context per environment.
+        //   The trait's own doc carries that reasoning at length.
+        //
+        // The bound that does exist is deployment scale: `cpt-cf-qa-nfr-scale`'s
+        // first number is 100 platforms, which is the size of this sweep.
         let rows = EnvironmentEntity::find()
             .secure()
             .scope_with(scope)

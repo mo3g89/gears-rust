@@ -3,6 +3,13 @@
 pub mod cron;
 pub mod elevated;
 pub mod error;
+/// Resource attribution for the refusals the exhaustive
+/// `DomainError -> CanonicalError` mapping cannot type by itself.
+///
+/// A domain module rather than part of `api::rest::error`, because
+/// `local_client` -- an in-process call that never touches HTTP -- needs it
+/// and must not import the transport layer. `api::rest::error` re-exports it.
+pub mod error_attribution;
 pub mod exclusivity;
 pub mod local_client;
 pub mod naming;

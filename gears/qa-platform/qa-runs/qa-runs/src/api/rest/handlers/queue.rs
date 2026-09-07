@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::api::rest::dto::{QueueEntryDto, QueueQuery, StartedRunDto};
 use crate::api::rest::error::as_queue_error;
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 
 // Every handler here wraps its service call in [`as_queue_error`] rather than
 // using a bare `?`. The reason is one this module cannot see on its own: the

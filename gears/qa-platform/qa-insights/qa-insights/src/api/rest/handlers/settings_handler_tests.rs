@@ -1,7 +1,7 @@
 //! The notification-config handlers driven over real services, for the one
 //! property nothing else checks: **a refusal names `qa.notification_config`**.
 //!
-//! `api::rest::error`'s match is exhaustive over `DomainError` *variants*, so
+//! `domain::error`'s match is exhaustive over `DomainError` *variants*, so
 //! the compiler guarantees every variant has a status and says nothing about
 //! which resource type an endpoint attributes a refusal to. A 403 is the most
 //! likely error on a fresh deployment — a policy engine not yet taught
@@ -11,7 +11,7 @@
 //! # The rendered id is `notification`, not `notification_config`
 //!
 //! `NotificationResourceError`'s own declaration
-//! (`api/rest/error.rs:117`) is `cf.qa.insights.notification.v1~` — the PEP
+//! (`domain/error.rs:536`) is `cf.qa.insights.notification.v1~` — the PEP
 //! resource type this gear's PDP calls are made against is
 //! `qa.notification_config` (`domain::service::resources::NOTIFICATION_CONFIG`),
 //! but the REST error id drops the `_config`. Every other resource in this
@@ -42,7 +42,7 @@ const TENANT: Uuid = Uuid::from_u128(0x0E01_0000_0000_0001);
 /// The resource type the notification endpoints must attribute a refusal to.
 ///
 /// Confirmed against `NotificationResourceError`'s own declaration at
-/// `api/rest/error.rs:117` — **not** `cf.qa.insights.notification_config.v1~`,
+/// `domain/error.rs:536` — **not** `cf.qa.insights.notification_config.v1~`,
 /// which this module's own header explains.
 const NOTIFICATION_GTS: &str = "cf.qa.insights.notification.v1~";
 

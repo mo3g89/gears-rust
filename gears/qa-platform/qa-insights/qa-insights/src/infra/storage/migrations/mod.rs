@@ -2,6 +2,7 @@ use sea_orm_migration::prelude::*;
 
 mod m20260818_000001_initial;
 mod m20260818_000002_offset_store;
+mod m20260907_000003_leader_claims;
 
 pub struct Migrator;
 
@@ -23,6 +24,12 @@ impl MigratorTrait for Migrator {
             // table is inert and no code reads or writes it. Kept because it
             // has already run on deployed databases; see that file's header.
             Box::new(m20260818_000002_offset_store::Migration),
+            // `qa_leader_claims` — the JIRA poller's mutual exclusion. Only
+            // that one role uses it: the reconciler's and the collect
+            // cycle's writes converge under concurrency and the poller's
+            // launch does not. See that file's header, and
+            // `crate::infra::leader`'s.
+            Box::new(m20260907_000003_leader_claims::Migration),
         ]
     }
 }

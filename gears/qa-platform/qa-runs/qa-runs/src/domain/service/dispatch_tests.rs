@@ -429,14 +429,14 @@ async fn a_tag_filter_selects_the_files_a_plan_run_executes() {
             path: "tests/a.py".to_owned(),
             title: None,
             tags: vec!["smoke".to_owned()],
-            exclusive: None,
+            exclusive: qa_catalog_sdk::Exclusivity::Inherit,
             bugs: Vec::new(),
         },
         qa_catalog_sdk::TestFileMeta {
             path: "tests/b.py".to_owned(),
             title: None,
             tags: vec!["destructive".to_owned()],
-            exclusive: None,
+            exclusive: qa_catalog_sdk::Exclusivity::Inherit,
             bugs: Vec::new(),
         },
     ]);

@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
-use qa_catalog::domain::ports::repo_sync::RepoSyncPort;
-use qa_catalog::infra::git::GixSyncEngine;
-use qa_catalog::infra::git::layout::{branch_workdir, host_dir};
+// `domain` and `infra` are `pub(crate)` (review finding #38); everything this
+// test needs is re-exported at the crate root, named there one item at a time.
+use qa_catalog::{GixSyncEngine, RepoSyncPort, branch_workdir, host_dir};
 
 /// Build a local fixture repo with two branches holding different content.
 /// Returns the repo path. Uses the `git` CLI (already required by the
@@ -214,9 +214,7 @@ async fn concurrent_syncs_of_different_branches_do_not_corrupt_each_other() {
 
     // Serialize through the same two-tier lock the service uses; without the
     // repo tier these concurrent fetches race on the shared object store.
-    let cache = std::sync::Arc::new(qa_catalog::domain::service::SyncCache::new(
-        std::time::Duration::ZERO,
-    ));
+    let cache = std::sync::Arc::new(qa_catalog::SyncCache::new(std::time::Duration::ZERO));
 
     let mut handles = Vec::new();
     for branch in ["main", "release/5.0", "main", "release/5.0"] {

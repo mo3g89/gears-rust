@@ -27,4 +27,4 @@ pub mod service;
 /// feature-gated any more. That keeps it — and its tests — in a default
 /// `cargo test` run, so the ADR-0001 property that this gear's domain is
 /// testable with no Kubernetes in the tree still covers it.
-pub(crate) mod system_actor;
+pub mod system_actor;

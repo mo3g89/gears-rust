@@ -104,11 +104,12 @@ impl EnvironmentsRepository for MockEnvironmentsRepository {
         Ok(self.environment.as_ref().filter(|p| p.id == id).cloned())
     }
 
-    async fn list<C: DBRunner>(
+    async fn list_page<C: DBRunner>(
         &self,
         _runner: &C,
         _scope: &AccessScope,
-    ) -> Result<Vec<Environment>, DomainError> {
+        _query: &toolkit_odata::ODataQuery,
+    ) -> Result<toolkit_odata::Page<Environment>, DomainError> {
         unimplemented!("not exercised by the service-layer unit tests")
     }
 

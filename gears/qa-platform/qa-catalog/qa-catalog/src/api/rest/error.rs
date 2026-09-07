@@ -171,7 +171,7 @@ impl From<DomainError> for CanonicalError {
                 CanonicalError::internal("An internal storage error occurred").create()
             }
 
-            DomainError::Database(_) => {
+            DomainError::Database { .. } => {
                 tracing::error!(error = ?e, "Database error occurred");
                 CanonicalError::internal("An internal database error occurred").create()
             }
@@ -374,7 +374,7 @@ mod tests {
         let cases: Vec<DomainError> = vec![
             DomainError::CredStore("vault sealed at 10.0.0.5".to_owned()),
             DomainError::Storage("/var/bundles: disk full".to_owned()),
-            DomainError::Database("connection reset by peer".to_owned()),
+            DomainError::database("connection reset by peer"),
             DomainError::Internal("index out of bounds".to_owned()),
         ];
         for e in cases {

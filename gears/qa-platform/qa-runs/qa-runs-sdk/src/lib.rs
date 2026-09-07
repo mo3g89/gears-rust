@@ -10,6 +10,14 @@ mod client;
 mod errors;
 mod models;
 
+/// `qa-catalog-sdk`'s three-state exclusivity type, re-exported so
+/// `LaunchRequest::exclusive` and a caller naming its own field's type do not
+/// need a second dependency to do it — the same one-way pattern
+/// `qa-environments-sdk` uses for `qa-product-sdk`'s
+/// `ObservedAttrs`/`HealthState`. One-way: `qa-catalog-sdk` knows nothing
+/// about this crate.
+pub use qa_catalog_sdk::Exclusivity;
+
 pub use client::QaRunsClientV1;
 pub use errors::QaRunsError;
 pub use models::{
