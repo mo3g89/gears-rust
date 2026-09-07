@@ -295,18 +295,25 @@ mod tests {
         }
     }
 
-    /// **The saved-view schema declares the closed value set, not `string`.**
+    /// **Both scope schemas declare the closed value set, not `string`.**
     ///
     /// This is the half of Task 20 the Rust type system cannot check for
-    /// itself. Retyping `SavedViewDto::scope` from `String` to
-    /// `dto::SavedViewScopeDto` is what stops this gear inventing a scope; the
-    /// generated TypeScript narrowing to `"all" | "plan"` — so a `switch`
-    /// missing a case fails `tsc` — depends entirely on the component schema
-    /// being an `enum` and being reachable from the response body. A mirror
-    /// enum that never got registered would leave the document saying `string`
-    /// while every `dto.rs` test stayed green.
+    /// itself. Retyping `SavedViewDto::scope` and `AnalyticsOverviewDto::scope`
+    /// from `String` to `dto::SavedViewScopeDto`/`dto::AnalyticsScopeDto` is
+    /// what stops this gear inventing a scope; the generated TypeScript
+    /// narrowing to `"all" | "plan"` — so a `switch` missing a case fails
+    /// `tsc` — depends entirely on the component schema being an `enum` and
+    /// being reachable from the response body. A mirror enum that never got
+    /// registered would leave the document saying `string` while every
+    /// `dto.rs` test stayed green.
+    ///
+    /// **They are two schemas and not one on purpose**: `SavedViewScopeDto`
+    /// mirrors `qa_insights_sdk::SavedViewScope` and `AnalyticsScopeDto`
+    /// mirrors `domain::analytics::query::Scope`. The two happen to share a
+    /// value space; they are not the same contract, and the UI keeps them
+    /// apart too.
     #[test]
-    fn the_published_schema_declares_a_closed_enum_for_the_saved_view_scope() {
+    fn the_published_schema_declares_closed_enums_for_both_scopes() {
         let openapi = OpenApiRegistryImpl::new();
         let _router = register_operations(Router::new(), &openapi);
         let doc = openapi
@@ -314,27 +321,32 @@ mod tests {
             .expect("the OpenAPI document must build");
         let rendered = serde_json::to_value(&doc).expect("the document must serialize");
 
-        let schema = &rendered["components"]["schemas"]["SavedViewScopeDto"];
-        let published: Vec<&str> = schema["enum"]
-            .as_array()
-            .unwrap_or_else(|| {
-                panic!("SavedViewScopeDto must publish an `enum`, not a bare string: {schema}")
-            })
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .collect();
-        assert_eq!(
-            published,
-            vec!["all", "plan"],
-            "the spellings are SavedViewScope::as_str's, not the Rust variant names"
-        );
+        for (schema_name, owner) in [
+            ("SavedViewScopeDto", "SavedViewDto"),
+            ("AnalyticsScopeDto", "AnalyticsOverviewDto"),
+        ] {
+            let schema = &rendered["components"]["schemas"][schema_name];
+            let published: Vec<&str> = schema["enum"]
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!("{schema_name} must publish an `enum`, not a bare string: {schema}")
+                })
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            assert_eq!(
+                published,
+                vec!["all", "plan"],
+                "{schema_name} must publish legacy's spellings, not the Rust variant names"
+            );
 
-        let property = &rendered["components"]["schemas"]["SavedViewDto"]["properties"]["scope"];
-        assert_eq!(
-            property["$ref"],
-            serde_json::Value::String("#/components/schemas/SavedViewScopeDto".to_owned()),
-            "SavedViewDto.scope must reference the enum, not inline a string: {property}"
-        );
+            let property = &rendered["components"]["schemas"][owner]["properties"]["scope"];
+            assert_eq!(
+                property["$ref"],
+                serde_json::Value::String(format!("#/components/schemas/{schema_name}")),
+                "{owner}.scope must reference {schema_name}, not inline a string: {property}"
+            );
+        }
     }
 
     /// **The published `$orderby` list is wider than the accepted one, and the

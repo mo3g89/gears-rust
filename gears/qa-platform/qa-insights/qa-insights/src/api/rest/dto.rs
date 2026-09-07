@@ -1716,9 +1716,8 @@ pub struct AnalyticsOverviewDto {
     pub product_id: String,
     /// The request's `version`, trimmed.
     pub version: String,
-    /// `all` or `plan` — **normalized**, so a request that shouted its scope
-    /// gets it back in lower case.
-    pub scope: String,
+    /// `all` or `plan`, **normalized** — see [`AnalyticsScopeDto`].
+    pub scope: AnalyticsScopeDto,
     /// Normalized: trimmed, and `null` when blank. Carried through an `all`
     /// scope, where it is never read.
     pub plan_id: Option<String>,
@@ -1746,7 +1745,7 @@ impl From<AnalyticsOverview> for AnalyticsOverviewDto {
         Self {
             product_id: overview.product_id,
             version: overview.version,
-            scope: scope_to_str(overview.scope).to_owned(),
+            scope: overview.scope.into(),
             plan_id: overview.plan_id,
             branch: overview.branch,
             group_by: group_to_str(overview.group_by).to_owned(),
@@ -1884,15 +1883,60 @@ fn iso_date(day: Date) -> String {
     day.to_string()
 }
 
-/// `Scope` in legacy's wire spelling — `scope_to_str` (`analytics.rs:2088-2093`).
-///
-/// A rendering and not a rule, so it lives here rather than on the enum: the
-/// domain distinguishes the two variants, and `"all"`/`"plan"` is what the
-/// query string and the response happen to call them.
-const fn scope_to_str(scope: Scope) -> &'static str {
-    match scope {
-        Scope::All => "all",
-        Scope::Plan => "plan",
+/// Which executions an analytics overview is about: the whole universe, or one
+/// plan. **Normalized** — a request that shouted its scope gets it back in
+/// lower case.
+//
+// Mirrors `domain::analytics::query::Scope`, the same way `SavedViewScopeDto`
+// mirrors `qa_insights_sdk::SavedViewScope`; see that type for why a mirror is
+// needed at all (`#[api_dto]` needs serde and utoipa, and neither the SDK nor
+// the domain layer carries them).
+//
+// # It replaces `scope_to_str`
+//
+// This was `const fn scope_to_str(Scope) -> &'static str`, legacy's
+// `scope_to_str` (`analytics.rs:2088-2093`), whose output landed in a
+// `AnalyticsOverviewDto::scope: String`. The two spellings are unchanged and
+// this type's `#[serde(rename_all = "snake_case")]` is now their sole encoder -
+// one encoder, at the boundary, rather than a rendering function beside a
+// `String` field. `the_echoed_scope_and_grouping_use_legacys_spelling` asserts
+// the rendered JSON, and
+// `routes::tests::the_published_schema_declares_closed_enums_for_both_scopes`
+// asserts the published schema.
+//
+// # Why the *request* side is still a `String`, unlike this
+//
+// `AnalyticsOverviewQuery`, `AnalyticsBuildTestsQuery` and
+// `AnalyticsExportQuery` keep `scope: String`: `domain::analytics::query::
+// parse_scope` accepts the value trimmed and case-insensitively and answers
+// anything else with legacy's verbatim 400, so a serde enum there would refuse
+// `ALL`, which is accepted today - a wire change. No such argument can apply to
+// an encoder, which is why this response field is typed and those are not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum AnalyticsScopeDto {
+    All,
+    Plan,
+}
+
+impl From<Scope> for AnalyticsScopeDto {
+    fn from(scope: Scope) -> Self {
+        match scope {
+            Scope::All => Self::All,
+            Scope::Plan => Self::Plan,
+        }
+    }
+}
+
+impl From<AnalyticsScopeDto> for Scope {
+    /// The direction that closes the mirror: a variant added *here* and not to
+    /// the domain enum is a compile error too, so the two sets stay in
+    /// bijection.
+    fn from(scope: AnalyticsScopeDto) -> Self {
+        match scope {
+            AnalyticsScopeDto::All => Self::All,
+            AnalyticsScopeDto::Plan => Self::Plan,
+        }
     }
 }
 
@@ -1900,7 +1944,7 @@ const fn scope_to_str(scope: Scope) -> &'static str {
 /// arm: `group_to_str` (`analytics.rs:2095-2102`) renders it `"platform"`,
 /// and this renders `"environment"`, a deliberate divergence rather than
 /// parity (the `TargetPlatform` -> `Environment` rename). The other three
-/// arms are still legacy's spelling, for [`scope_to_str`]'s reason.
+/// arms are still legacy's spelling, for [`AnalyticsScopeDto`]'s reason.
 const fn group_to_str(group: GroupBy) -> &'static str {
     match group {
         GroupBy::None => "none",
@@ -2872,11 +2916,11 @@ mod tests {
 
     use super::{
         AnalyticsBuildTestsQuery, AnalyticsOverview, AnalyticsOverviewDto, AnalyticsOverviewQuery,
-        AnalyticsPlanQuery, BuildTestDetailDto, BuildTestsQuery, CollectReportQuery,
-        CoverageBuildDto, DailyStatusPointDto, DashboardRunDto, DashboardStatsDto,
-        FailedTestCardDto, FlakyTestCardDto, GroupBy, HashMap, JiraBug, JiraBugDto,
-        JiraBugFilingDto, JiraConfig, JiraPollerConfigDto, JiraSettingsDto, NewSavedViewReq,
-        NotificationConfigDto, NotificationLogEntryDto, NotificationPreviewDto,
+        AnalyticsPlanQuery, AnalyticsScopeDto, BuildTestDetailDto, BuildTestsQuery,
+        CollectReportQuery, CoverageBuildDto, DailyStatusPointDto, DashboardRunDto,
+        DashboardStatsDto, FailedTestCardDto, FlakyTestCardDto, GroupBy, HashMap, JiraBug,
+        JiraBugDto, JiraBugFilingDto, JiraConfig, JiraPollerConfigDto, JiraSettingsDto,
+        NewSavedViewReq, NotificationConfigDto, NotificationLogEntryDto, NotificationPreviewDto,
         PlanBuildDistributionDto, PlanTestHistoryDto, RebuildOutcomeDto, RebuildReq, SavedViewDto,
         SavedViewScopeDto, ScheduledRunSlackTemplateDto, ScheduledRunSlackTemplatesDto, Scope,
         TestCaseResultDto, TestResultDto, plan_test_analytics_list_dto,
@@ -3775,9 +3819,61 @@ mod tests {
         overview.group_by = GroupBy::Component;
 
         let dto = AnalyticsOverviewDto::from(overview);
+        let json = serde_json::to_value(&dto).expect("the DTO serialises");
 
-        assert_eq!(dto.scope, "plan");
+        // Asserted through `serde_json` rather than off the struct field (Task
+        // 20 fix round): `scope` is [`AnalyticsScopeDto`] now, and the rendered
+        // JSON is what the echo is for.
+        assert_eq!(json["scope"], "plan");
         assert_eq!(dto.group_by, "component");
+    }
+
+    /// **Both analytics scopes render the spelling `scope_to_str` rendered.**
+    ///
+    /// [`AnalyticsOverviewDto::scope`] was a `String` filled by a private
+    /// `const fn scope_to_str(Scope)` while the domain's closed [`Scope`] sat
+    /// on the other side of the conversion. It is now [`AnalyticsScopeDto`],
+    /// which is the sole encoder; `scope_to_str` is gone. Legacy's spellings
+    /// (`analytics.rs:2088-2093`) are unchanged.
+    #[test]
+    fn every_analytics_scope_serialises_to_legacys_spelling() {
+        assert_eq!(
+            serde_json::to_value(AnalyticsScopeDto::from(Scope::All))
+                .expect("a scope must serialize"),
+            serde_json::json!("all")
+        );
+        assert_eq!(
+            serde_json::to_value(AnalyticsScopeDto::from(Scope::Plan))
+                .expect("a scope must serialize"),
+            serde_json::json!("plan")
+        );
+        for scope in [Scope::All, Scope::Plan] {
+            assert_eq!(
+                Scope::from(AnalyticsScopeDto::from(scope)),
+                scope,
+                "the mirror must round-trip, so neither side can drift"
+            );
+        }
+    }
+
+    /// The half the `String` could not give: an unknown scope is a decode
+    /// error rather than a value the UI has to defend against.
+    ///
+    /// **This is the echo, not the request.** The three analytics *query*
+    /// strings stay `String` on purpose — `domain::analytics::query::
+    /// parse_scope` accepts them trimmed and case-insensitively, so a serde
+    /// enum there would refuse `ALL`, which is accepted today. No such
+    /// argument applies to this field, which is an encoder.
+    #[test]
+    fn an_unknown_analytics_scope_is_rejected() {
+        assert!(
+            serde_json::from_value::<AnalyticsScopeDto>(serde_json::json!("everything")).is_err(),
+            "an invented scope must not decode"
+        );
+        assert!(
+            serde_json::from_value::<AnalyticsScopeDto>(serde_json::json!("All")).is_err(),
+            "the Rust variant name is not the wire spelling and must not decode either"
+        );
     }
 
     /// **Every field of the list item carries its own source field.**

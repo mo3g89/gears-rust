@@ -1901,16 +1901,20 @@ export interface components {
             /** @description The request's `product_id`, trimmed. */
             product_id: string;
             quality_vectors: components["schemas"]["QualityVectorSummaryDto"];
-            /**
-             * @description `all` or `plan` — **normalized**, so a request that shouted its scope
-             *     gets it back in lower case.
-             */
-            scope: string;
+            /** @description `all` or `plan`, **normalized** — see [`AnalyticsScopeDto`]. */
+            scope: components["schemas"]["AnalyticsScopeDto"];
             summary: components["schemas"]["OverviewSummaryDto"];
             trend: components["schemas"]["TrendDataDto"];
             /** @description The request's `version`, trimmed. */
             version: string;
         };
+        /**
+         * @description Which executions an analytics overview is about: the whole universe, or one
+         *     plan. **Normalized** — a request that shouted its scope gets it back in
+         *     lower case.
+         * @enum {string}
+         */
+        AnalyticsScopeDto: "all" | "plan";
         AuthConfig: {
             config?: {
                 [key: string]: string;
@@ -4622,6 +4626,21 @@ export interface components {
             total: number;
         };
         /**
+         * @description Who asked for a run.
+         * @enum {string}
+         */
+        RunSourceDto: "manual" | "scheduled";
+        /**
+         * @description A run's lifecycle state. Note `canceled`, one `l` - a queue row's
+         *     equivalent state is spelled `cancelled`, and the difference is deliberate.
+         *
+         *     A client ported from the source system must **re-map, not merely re-case**:
+         *     `created`, `queued`, `dispatching`, `canceled`, `timed_out` and `expired`
+         *     have no equivalent there.
+         * @enum {string}
+         */
+        RunStateDto: "created" | "queued" | "dispatching" | "running" | "succeeded" | "failed" | "canceled" | "timed_out" | "expired" | "error";
+        /**
          * @description What a launch targets, as a flat discriminated record.
          *
          *     A flat struct with a `kind` tag rather than a serde-tagged enum, mirroring
@@ -4637,21 +4656,6 @@ export interface components {
          *     `repo_id` said it "must be absent for `custom_plan`" while the impl - and the
          *     test that pins it - accept and ignore it. Say what the server does.
          */
-        /**
-         * @description Who asked for a run.
-         * @enum {string}
-         */
-        RunSourceDto: "manual" | "scheduled";
-        /**
-         * @description A run's lifecycle state. Note `canceled`, one `l` - a queue row's
-         *     equivalent state is spelled `cancelled`, and the difference is deliberate.
-         *
-         *     A client ported from the source system must **re-map, not merely re-case**:
-         *     `created`, `queued`, `dispatching`, `canceled`, `timed_out` and `expired`
-         *     have no equivalent there.
-         * @enum {string}
-         */
-        RunStateDto: "created" | "queued" | "dispatching" | "running" | "succeeded" | "failed" | "canceled" | "timed_out" | "expired" | "error";
         RunTargetDto: {
             /**
              * @description Where a `collect` run's runner posts its per-file case counts, becoming

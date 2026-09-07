@@ -747,17 +747,24 @@ export interface TestHistory {
   results: TestHistoryEntry[];
 }
 
-/** UI-only: the analytics `scope`/`group_by` query parameters are plain `string` on the
- *  wire (`AnalyticsOverviewDto.scope`/`.group_by`), not a schema-level enum, so there is no
- *  generated type to alias onto — this is the literal union client code narrows requests to.
+/** Generated (Task 20): `AnalyticsOverviewDto.scope` publishes `"all" | "plan"` as a
+ *  schema-level enum now, so this is aliased onto it rather than re-declared by hand, and
+ *  `analyticsOverviewFromDto` assigns the echo without a cast.
  *
- *  **The saved-view scope is a different field and now *is* generated** (Task 20):
- *  `SavedViewDto.scope` publishes `"all" | "plan"` as a schema-level enum, and
- *  `savedViewFromDto` assigns it here without a cast. The two are kept as separate types
- *  because they are separate wire contracts: the analytics query parameters accept their
- *  value trimmed and case-insensitively (`domain::analytics::query::parse_scope`), which a
- *  schema enum would not describe. */
-export type AnalyticsScope = 'all' | 'plan';
+ *  It is used for the *request* parameters too (`AnalyticsOverviewQuery`,
+ *  `AnalyticsBuildTestsQuery`, `AnalyticsSavedViewPayload`), which are still plain `string`
+ *  on the wire: the gear accepts those trimmed and case-insensitively
+ *  (`domain::analytics::query::parse_scope`), which no schema enum describes, so this alias
+ *  narrows what the client *sends* to a subset of what the server accepts. That is the safe
+ *  direction. `AnalyticsGroupBy` below has no generated counterpart at all —
+ *  `AnalyticsOverviewDto.group_by` is still a `String` — and stays hand-written.
+ *
+ *  The saved-view scope (`SavedViewDto.scope`, `S['SavedViewScopeDto']`) is a **separate**
+ *  schema with the same value space: it mirrors `qa_insights_sdk::SavedViewScope` where this
+ *  mirrors `domain::analytics::query::Scope`. `savedViewFromDto` assigns one into the other
+ *  without a cast because they are structurally identical, and they are kept apart because
+ *  they are not the same contract. */
+export type AnalyticsScope = S['AnalyticsScopeDto'];
 export type AnalyticsGroupBy = 'none' | 'component' | 'tag' | 'environment';
 
 /** UI-only: a client-side query-parameter builder, not a response body — OpenAPI does not

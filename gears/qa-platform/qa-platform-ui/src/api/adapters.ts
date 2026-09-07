@@ -20,7 +20,6 @@ import type {
   AnalyticsOverview,
   AnalyticsSavedView,
   AnalyticsSavedViewPayload,
-  AnalyticsScope,
   BuildTestDetailItem,
   CreateCustomPlanForm,
   CreateEnvironmentForm,
@@ -1829,6 +1828,12 @@ function analyticsListItemFromDto(dto: AnalyticsListItemDtoWithEnvironment): Ana
  *    is null — an unresolved environment is still identifiable, and blanking it would
  *    silently merge every unnamed environment into one bar.
  *
+ * `scope` no longer needs an `as AnalyticsScope` cast (Task 20 fix round): the gear
+ * publishes the echoed scope as a two-value schema enum, and `AnalyticsScope` is aliased
+ * onto it, so a gear-side change to the pair fails `tsc` here instead of passing through
+ * a cast. `group_by` still needs its cast — `AnalyticsOverviewDto.group_by` is still a
+ * `String` on the wire.
+ *
  * §9 is about the *values* on this shape, not the shape: every execution-scoped counter
  * is 0 by construction in this deployment, and the decision recorded there is a banner in
  * `pages/AnalyticsPage.tsx` (Task 11's), not a number invented here.
@@ -1841,7 +1846,7 @@ export function analyticsOverviewFromDto(
     product_id: dto.product_id,
     product_key: '',
     version: dto.version,
-    scope: dto.scope as AnalyticsScope,
+    scope: dto.scope,
     // The DTO echoes back the *path* it was given (X6); the components hand this straight
     // back into `plan_id`-shaped props, so the caller's own opaque id is preserved when
     // there is one.
@@ -1897,7 +1902,10 @@ export function analyticsOverviewFromDto(
  *  rewrite blindly.
  *
  *  `scope` no longer needs an `as AnalyticsScope` cast (Task 20): the gear publishes it as
- *  a two-value schema enum, so `"all" | "plan"` is what the generated type already says. */
+ *  a two-value schema enum (`SavedViewScopeDto`), so `"all" | "plan"` is what the generated
+ *  type already says. It is a *different* schema from `AnalyticsScopeDto`, which is what
+ *  `AnalyticsScope` is aliased onto — same value space, separate contracts — and the two
+ *  assign into each other because they are structurally identical. */
 export function savedViewFromDto(dto: S['SavedViewDto']): AnalyticsSavedView {
   return {
     id: dto.id,
