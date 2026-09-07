@@ -20,7 +20,9 @@ use time::Duration as TimeDuration;
 use uuid::Uuid;
 
 use super::*;
-use crate::domain::metrics::{QA_RUNS_DISPATCH, QA_RUNS_DISPATCH_DURATION};
+use crate::domain::metrics::{
+    QA_RUNS_DISPATCH, QA_RUNS_DISPATCH_DURATION, QA_RUNS_QUEUE_WAIT, QA_RUNS_QUEUE_WAIT_DURATION,
+};
 use crate::domain::ports::run_executor::MountSpec;
 use crate::domain::service::admission::tests::fakes::{
     self, Builder, FakeCatalog, FakeEnvironments, FakeQueue, FakeRuns, PLATFORM_A, PLATFORM_B,
@@ -3430,6 +3432,10 @@ impl crate::domain::ports::metrics::DispatchMetrics for PanickingMeter {
     fn dispatch_decision(&self, _decision: crate::domain::ports::metrics::DispatchDecision) {
         panic!("a metrics adapter must never be able to fail the path it measures");
     }
+
+    fn queue_wait(&self, _waited: std::time::Duration) {
+        panic!("a metrics adapter must never be able to fail the path it measures");
+    }
 }
 
 /// **A dispatch pass emits exactly one counter increment and one duration.**
@@ -3588,8 +3594,9 @@ async fn a_broken_metrics_adapter_does_not_fail_the_pass() {
 /// pass against a tick that did nothing at all; running the *same* fixture
 /// twice, once through the real adapter and once through `NoopMetrics`, and
 /// requiring the two reports to be equal is what makes "measuring the path did
-/// not change it" the thing under test. `TickReport` is `PartialEq` precisely
-/// so a whole cycle's outcome can be compared this way.
+/// not change it" the thing under test. `TickReport` already derived
+/// `PartialEq` before this task, which is what makes a whole-report comparison
+/// available here.
 #[tokio::test]
 async fn a_tick_with_no_pipeline_configured_behaves_exactly_as_an_unmetered_one() {
     async fn tick_with(
@@ -3630,5 +3637,170 @@ async fn a_tick_with_no_pipeline_configured_behaves_exactly_as_an_unmetered_one(
         metered, unmetered,
         "installing the production adapter with no pipeline behind it must change \
          nothing about what the tick does"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry: the queue wait
+// ---------------------------------------------------------------------------
+
+/// **A queued run that the tick drains reports how long it waited.**
+///
+/// The family that goes at `cpt-cf-qa-nfr-dispatch-latency`, which the tick's
+/// own duration cannot: the fixture enqueues the row an hour ago, so a metric
+/// that measured anything about *this* tick would report milliseconds. The
+/// assertion is on the bucket the value landed in, because that is what a p95
+/// query reads — an assertion on the count alone would pass against a wait of
+/// zero.
+#[tokio::test]
+async fn a_drained_run_reports_the_time_it_waited_in_the_queue() {
+    let waiting = row_aged(
+        ROW_1,
+        OWNER_TENANT,
+        RUN_1,
+        PLATFORM_A,
+        false,
+        QueueState::Queued,
+        3_600,
+    );
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(
+            OWNER_TENANT,
+            run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Queued),
+        )])))
+        .queue(Arc::new(FakeQueue::with(vec![waiting])))
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(report.claimed, 1, "premise: the tick must drain the row");
+    let series = probe.collect();
+    assert_eq!(
+        series.counter(QA_RUNS_QUEUE_WAIT),
+        1,
+        "one queued run reached an execution request"
+    );
+    assert_eq!(
+        series.histogram_bucket_of(QA_RUNS_QUEUE_WAIT_DURATION, 3_600.0),
+        Some(1),
+        "an hour in the queue must be recorded as an hour, not as the duration of \
+         the tick that drained it"
+    );
+}
+
+/// **A run that never queued contributes nothing to the queue-wait family.**
+///
+/// The population matters as much as the measurement: the NFR is stated over
+/// *queued* runs, and a tick that drains nothing must leave the histogram
+/// empty rather than recording a zero. A zero-valued observation is
+/// indistinguishable in a quantile query from a real wait of zero, so it would
+/// silently drag the p95 down.
+#[tokio::test]
+async fn a_tick_that_drains_nothing_records_no_queue_wait() {
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new().metrics(probe.adapter()).build().await;
+
+    fakes.dispatch.run_tick().await;
+
+    let series = probe.collect();
+    assert_eq!(series.counter(QA_RUNS_QUEUE_WAIT), 0);
+    assert_eq!(series.histogram_count(QA_RUNS_QUEUE_WAIT_DURATION), 0);
+    assert_eq!(
+        series.counter(QA_RUNS_DISPATCH),
+        1,
+        "premise: the cycle itself was still counted, so this is the queue-wait \
+         family being empty rather than the adapter being uninstalled"
+    );
+}
+
+/// **A claimed row whose dispatch fails records no wait.**
+///
+/// It never reached an execution request, which is the end point the series is
+/// defined by; folding its time-to-failure in would mix two distributions.
+#[tokio::test]
+async fn a_row_that_fails_to_dispatch_records_no_queue_wait() {
+    let executor = Arc::new(crate::infra::executor::mock::MockRunExecutor::new());
+    executor.fail_start("the execution plane refuses");
+    let waiting = row_aged(
+        ROW_1,
+        OWNER_TENANT,
+        RUN_1,
+        PLATFORM_A,
+        false,
+        QueueState::Queued,
+        3_600,
+    );
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(
+            OWNER_TENANT,
+            run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Queued),
+        )])))
+        .queue(Arc::new(FakeQueue::with(vec![waiting])))
+        .executor(Arc::clone(&executor) as Arc<dyn crate::domain::ports::run_executor::RunExecutor>)
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(report.claimed, 1, "premise: the row was claimed");
+    assert_eq!(
+        probe.collect().counter(QA_RUNS_QUEUE_WAIT),
+        0,
+        "a run that never started never waited *for a start*"
+    );
+}
+
+/// **A persistently broken adapter is called once, not once per cycle.**
+///
+/// Catching the panic is only half the guarantee. The default panic hook writes
+/// to stderr *before* control returns to `domain::service`'s `emit`, so an
+/// adapter that panics every time — a poisoned instrument lock is the realistic
+/// shape — produces one line per emission, which on the ingest path is one line
+/// per log line. That is exactly the "never logs per-emission" failure the
+/// observability constraints name, arriving when the process can least absorb
+/// it.
+///
+/// So `emit` latches off after the first caught panic, and this counts the
+/// calls to prove it: two ticks, one call. Without the latch the count is two,
+/// and it would keep pace with the tick rate forever.
+#[tokio::test]
+async fn a_persistently_panicking_adapter_is_called_once_and_then_never_again() {
+    /// Counts its calls, then panics.
+    struct CountingPanickingMeter(std::sync::atomic::AtomicUsize);
+
+    impl crate::domain::ports::metrics::DispatchMetrics for CountingPanickingMeter {
+        fn dispatch_pass(
+            &self,
+            _outcome: crate::domain::ports::metrics::DispatchOutcome,
+            _duration: std::time::Duration,
+        ) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            panic!("this adapter is broken for the rest of the process");
+        }
+
+        fn dispatch_decision(&self, _decision: crate::domain::ports::metrics::DispatchDecision) {}
+        fn queue_wait(&self, _waited: std::time::Duration) {}
+    }
+
+    let meter = Arc::new(CountingPanickingMeter(std::sync::atomic::AtomicUsize::new(
+        0,
+    )));
+    let fakes = Builder::new()
+        .metrics(Arc::clone(&meter) as Arc<dyn crate::domain::ports::metrics::DispatchMetrics>)
+        .build()
+        .await;
+
+    fakes.dispatch.run_tick().await;
+    fakes.dispatch.run_tick().await;
+
+    assert_eq!(
+        meter.0.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the second cycle must not reach an adapter that has already panicked"
     );
 }

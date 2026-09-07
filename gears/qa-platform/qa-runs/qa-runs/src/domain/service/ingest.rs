@@ -114,6 +114,7 @@
 //!   remain is reported `Succeeded`.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use authz_resolver_sdk::PolicyEnforcer;
@@ -639,6 +640,9 @@ pub struct IngestService<R, Q> {
     policy_enforcer: PolicyEnforcer,
     /// See [`IngestDeps::metrics`].
     metrics: Arc<dyn IngestMetrics>,
+    /// This service's emission latch — see `super::emit`. Per service rather
+    /// than global, so a broken ingest adapter cannot silence the dispatcher.
+    metrics_silenced: AtomicBool,
 }
 
 impl<R, Q> IngestService<R, Q>
@@ -656,6 +660,7 @@ where
             archive: deps.archive,
             policy_enforcer: deps.policy_enforcer,
             metrics: deps.metrics,
+            metrics_silenced: AtomicBool::new(false),
         }
     }
 
@@ -814,6 +819,13 @@ where
         run_id: Uuid,
         event: ExecutionEvent,
     ) -> Result<(), DomainError> {
+        // `Started` is inert by design — the arm below returns `Ok` without
+        // reading or writing anything (see the module header). Counting it
+        // would put a no-op in the `applied` series and a near-zero sample in
+        // the histogram whose p95 is the point, so the measured population is
+        // the three events that do work. Decided before the move, because the
+        // event is consumed by the call.
+        let measured = !matches!(event, ExecutionEvent::Started);
         let started = Instant::now();
         let landed = self.apply_event(ctx, run_id, event).await;
         // One observation is one measured pass, and this is the boundary the
@@ -823,11 +835,15 @@ where
         //
         // Guarded rather than called directly; see `super::emit`. It matters
         // more here than on the dispatcher, because this path runs per log line.
-        let outcome = match &landed {
-            Ok(outcome) => *outcome,
-            Err(error) => IngestOutcome::from(error),
-        };
-        emit(|| self.metrics.ingest_batch(outcome, started.elapsed()));
+        if measured {
+            let outcome = match &landed {
+                Ok(outcome) => *outcome,
+                Err(error) => IngestOutcome::from(error),
+            };
+            emit(&self.metrics_silenced, || {
+                self.metrics.ingest_batch(outcome, started.elapsed());
+            });
+        }
         landed.map(|_| ())
     }
 
@@ -846,7 +862,9 @@ where
         event: ExecutionEvent,
     ) -> Result<IngestOutcome, DomainError> {
         match event {
-            // Deliberately inert — see the module header.
+            // Deliberately inert — see the module header. The value is never
+            // emitted: [`Self::apply`] excludes this arm from the measured
+            // population, and its comment says why.
             ExecutionEvent::Started => Ok(IngestOutcome::Applied),
             ExecutionEvent::Log { node, line } => self
                 .fan_out_log(ctx, run_id, &node, &line)

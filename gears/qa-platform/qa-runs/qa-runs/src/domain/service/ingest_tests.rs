@@ -2168,3 +2168,41 @@ async fn a_broken_metrics_adapter_does_not_fail_an_ingest_pass() {
         "a broken metrics adapter must not change what ingest does"
     );
 }
+
+/// **The inert `Started` event is not counted as an observation.**
+///
+/// `apply`'s `Started` arm returns `Ok` without reading or writing anything —
+/// the module header calls it deliberately inert. Counting it would put a no-op
+/// in the `applied` series, inflating the rate an operator reads as ingest
+/// throughput, and would feed the duration histogram a near-zero sample whose
+/// only effect is to drag down the p95 the family exists to report.
+///
+/// The pairing is what makes this a gate rather than an assertion that nothing
+/// happened: the same harness then applies a log line and must record exactly
+/// one observation, so a green result cannot come from an uninstalled adapter.
+#[tokio::test]
+async fn the_inert_started_event_is_not_counted_as_an_observation() {
+    let probe = MetricsProbe::new();
+    let h = metered_harness(&probe).await;
+
+    h.ingest
+        .apply(&owner(), RUN, ExecutionEvent::Started)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        probe.collect().counter(QA_RUNS_INGEST),
+        0,
+        "an event that reads nothing and writes nothing is not an observation"
+    );
+
+    h.ingest_log_line("repo-a", "hello").await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter(QA_RUNS_INGEST),
+        1,
+        "premise: the adapter is installed and the next event was counted"
+    );
+    assert_eq!(series.histogram_count(QA_RUNS_INGEST_DURATION), 1);
+}

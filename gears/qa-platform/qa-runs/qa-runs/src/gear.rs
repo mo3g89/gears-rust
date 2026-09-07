@@ -1449,9 +1449,10 @@ mod tests {
     /// The two defects this guards are opposite and both silent. Wrapping the
     /// construction in a "metrics enabled" branch would leave the gear with a
     /// pipeline configured and nothing emitting into it; passing the adapter to
-    /// one field and not the other would leave one of the two NFR paths dark
-    /// while the dashboard for the other looked healthy. Neither is a compile
-    /// error — both `ServiceDeps` fields are `Option`, so omitting one is legal.
+    /// one field and not the other would leave one of the two measured paths
+    /// dark while the dashboard for the other looked healthy. Neither is a
+    /// compile error — both `ServiceDeps` fields are `Option`, so omitting one
+    /// is legal.
     ///
     /// A source scan for the reason its two siblings above are: `init` needs a
     /// database, a `ClientHub` and four resolved cross-gear clients before it
@@ -1468,6 +1469,16 @@ mod tests {
     /// that a service driven through one behaves identically to one holding
     /// `NoopMetrics` is
     /// `dispatch::tests::a_tick_with_no_pipeline_configured_behaves_exactly_as_an_unmetered_one`.
+    ///
+    /// The no-branch half reads **code only**, with comments stripped first:
+    /// `init` legitimately explains in prose why it does not consult that
+    /// config key, and a scan of the raw text would flag its own justification
+    /// the moment somebody wrote one. `no_api_in_domain_tests` documents the
+    /// same trap and strips comments for the same reason.
+    ///
+    /// Every message below is one unbroken string. A `\`-continued literal
+    /// collapses to a run of spaces once rustfmt has re-indented it, which is
+    /// how the first version of this test read on failure.
     #[test]
     fn init_installs_one_metrics_adapter_into_both_ports() {
         let body = init_source();
@@ -1478,15 +1489,20 @@ mod tests {
         );
         assert!(
             body.contains("dispatch_metrics: Some("),
-            "premise: the dispatcher's port must be wired, or the queue-latency              NFR is unobservable in production while every test still passes: {body}"
+            "premise: the dispatcher port must be wired, or nothing measures the dispatch path in production while every test still passes: {body}"
         );
         assert!(
             body.contains("ingest_metrics: Some("),
-            "premise: the ingest port must be wired, or the result-latency NFR              is unobservable in production: {body}"
+            "premise: the ingest port must be wired, or nothing measures the ingest path in production: {body}"
         );
+        let code: String = body
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            !body.contains("metrics.enabled"),
-            "init must not branch on whether a pipeline is configured: an              uninstalled provider already makes every instrument a no-op, and a              branch here is a second, weaker copy of that rule: {body}"
+            !code.contains("metrics.enabled"),
+            "init must not branch on whether a pipeline is configured: an uninstalled provider already makes every instrument a no-op, and a branch here would be a second, weaker copy of that rule: {code}"
         );
     }
 

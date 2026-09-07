@@ -57,6 +57,7 @@
 //! parameters only.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::pep::ResourceType;
@@ -345,10 +346,53 @@ pub(in crate::domain::service) use serialized_db::SerializedDb;
 /// unsound: the state a panicking emission may have left inconsistent is that
 /// implementation's own instrument state, and nothing in this crate ever reads
 /// it back. A metric this gear cannot record is a metric this gear drops.
-pub(in crate::domain::service) fn emit(record: impl FnOnce()) {
-    drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-        record,
-    )));
+///
+/// # It latches off, and that is the half the guard alone does not give
+///
+/// Catching is not enough on its own. A *persistently* broken adapter — a
+/// poisoned instrument lock is the realistic shape — panics on **every** call,
+/// and the default panic hook writes a line to stderr each time before control
+/// returns here. On the ingest path that is one line per log line, which is
+/// precisely the "never logs per-emission" failure the observability
+/// constraints name, arriving exactly when the process can least absorb it.
+///
+/// So the first caught panic latches `silenced`, and every later emission
+/// through that latch returns without calling anything. Deliberately permanent:
+/// an emission that panicked once has no claim on being retried, the
+/// alternatives (a rate limit, a backoff) are state and policy on a path whose
+/// whole contract is that it changes nothing, and a metric that stops is a
+/// visibly flat series — a better failure than a log flood. Nothing resets it;
+/// a restart does.
+///
+/// **The latch is the caller's, not a global**, and each service owns one. A
+/// broken `ingest_batch` then silences ingest and leaves the dispatcher
+/// reporting, which is both the more useful production behaviour and what keeps
+/// the two `a_broken_metrics_adapter_..` tests from silencing every other
+/// metric test in the binary — a global would make them do exactly that under a
+/// threaded `cargo test`, where this crate's suites share a process.
+///
+/// # Precondition: this crate unwinds
+///
+/// `catch_unwind` catches nothing under `panic = "abort"`, where the first
+/// panicking emission would take the process instead. The workspace sets
+/// `panic = "unwind"` explicitly in `[profile.release]`, and the dev and test
+/// profiles inherit the same default, so the guard is live in every profile
+/// this gear is built under today. **Changing that setting silently disables
+/// everything documented above**: `dispatch_tests`'
+/// `a_broken_metrics_adapter_does_not_fail_the_pass` would abort rather than
+/// fail, so the suite would report it as a crashed binary rather than as a
+/// regression here.
+/// `Relaxed` on both accesses: the latch orders nothing and guards no data. The
+/// whole cost of the weakest ordering is that a racing thread may read `false`
+/// once more and produce one more panic, against paying for a fence on the two
+/// hottest paths in the gear.
+pub(in crate::domain::service) fn emit(silenced: &AtomicBool, record: impl FnOnce()) {
+    if silenced.load(Ordering::Relaxed) {
+        return;
+    }
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(record)).is_err() {
+        silenced.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Authorization resource types and their PEP-supported properties.
@@ -950,6 +994,12 @@ where
         let enforcer = PolicyEnforcer::new(deps.authz);
         let locks = admission::PlatformLocks::default();
 
+        // Resolved once, here, because two services take it: admission counts
+        // what it decided and dispatch counts its own cycles.
+        let dispatch_metrics: Arc<dyn crate::domain::ports::metrics::DispatchMetrics> = deps
+            .dispatch_metrics
+            .unwrap_or_else(|| Arc::new(crate::domain::ports::metrics::NoopMetrics));
+
         let admission = Arc::new(admission::AdmissionService::new(admission::AdmissionDeps {
             db: Arc::clone(&deps.db),
             runs: Arc::clone(&runs_repo),
@@ -959,6 +1009,12 @@ where
             locks: locks.clone(),
             limits: deps.limits,
             policy_enforcer: enforcer.clone(),
+            // **The same `Arc` the dispatch service gets**, not a second
+            // adapter: admission's decision counter and the dispatcher's cycle
+            // counter are two halves of one dispatch story, and two adapters
+            // over one meter would still work but would make "one adapter per
+            // process" untrue the first time somebody adds per-adapter state.
+            metrics: Arc::clone(&dispatch_metrics),
         }));
         // **Built before the dispatch service, and that ordering is the wiring.**
         // The watcher drains `RunExecutor::watch` into *this* ingest service and
@@ -1013,10 +1069,7 @@ where
             orphan_timeout_seconds: deps.orphan_timeout_seconds,
             policy_enforcer: enforcer.clone(),
             watcher,
-            metrics: deps.dispatch_metrics.unwrap_or_else(|| {
-                Arc::new(crate::domain::ports::metrics::NoopMetrics)
-                    as Arc<dyn crate::domain::ports::metrics::DispatchMetrics>
-            }),
+            metrics: dispatch_metrics,
         }));
 
         let admitter = deps

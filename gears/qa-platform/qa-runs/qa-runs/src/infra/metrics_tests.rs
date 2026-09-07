@@ -15,11 +15,11 @@
 
 use std::time::Duration;
 
-use super::build_default_adapter;
 use super::probe::MetricsProbe;
+use super::{DURATION_BUCKETS, SCOPE, build_default_adapter};
 use crate::domain::metrics::{
     COUNTERS, DURATIONS, QA_RUNS_DISPATCH, QA_RUNS_DISPATCH_DECISION, QA_RUNS_DISPATCH_DURATION,
-    QA_RUNS_INGEST, QA_RUNS_INGEST_DURATION,
+    QA_RUNS_INGEST, QA_RUNS_INGEST_DURATION, QA_RUNS_QUEUE_WAIT, QA_RUNS_QUEUE_WAIT_DURATION,
 };
 use crate::domain::ports::metrics::{
     DispatchDecision, DispatchMetrics, DispatchOutcome, IngestMetrics, IngestOutcome,
@@ -43,6 +43,7 @@ fn every_catalog_family_is_exported_under_its_catalog_name() {
     // therefore appears in the export at all.
     adapter.dispatch_pass(DispatchOutcome::Started, Duration::from_millis(1));
     adapter.dispatch_decision(DispatchDecision::Queued);
+    adapter.queue_wait(Duration::from_millis(1));
     adapter.ingest_batch(IngestOutcome::Applied, Duration::from_millis(1));
 
     let series = probe.collect();
@@ -54,6 +55,12 @@ fn every_catalog_family_is_exported_under_its_catalog_name() {
              were {exported:?}"
         );
     }
+    assert_eq!(
+        series.scopes(),
+        vec![SCOPE],
+        "every family must be reported under this gear's one instrumentation \
+         scope; two scopes means two meters were built"
+    );
 }
 
 /// **One `dispatch_pass` call drives both of its instruments, once each.**
@@ -150,17 +157,43 @@ fn every_label_value_reaches_the_exporter_on_its_own_series() {
     }
 }
 
-/// **The duration is recorded in seconds, and the buckets are the ones the NFR
-/// thresholds sit on.**
+/// **Every duration histogram is built with the declared boundaries.**
 ///
-/// Both halves are one property: a value in seconds against the `OTel` default
-/// boundaries — which are milliseconds in all but name — puts every pass this
-/// gear will ever do in the first bucket, and a p95 read off that histogram is
-/// the bucket edge rather than an estimate. Recording six seconds and asking
-/// which bucket it landed in falsifies both a millisecond conversion and the
-/// default boundaries at once.
+/// Read off the exported `bounds()`, not inferred from where a value landed.
+/// The first version of this test did the latter and **was not a gate**:
+/// `histogram_bucket_of` computes its index from the very bounds in force, so
+/// six seconds reports "the bucket containing six seconds" under the declared
+/// set and under the `OTel` defaults alike, and deleting `with_boundaries` left
+/// it green. Break-verified in the fix round by deleting both calls.
 #[test]
-fn a_duration_is_recorded_in_seconds_against_the_declared_buckets() {
+fn every_duration_histogram_carries_the_declared_boundaries() {
+    let probe = MetricsProbe::new();
+    let adapter = probe.adapter();
+
+    adapter.dispatch_pass(DispatchOutcome::Started, Duration::from_secs(6));
+    adapter.queue_wait(Duration::from_secs(6));
+    adapter.ingest_batch(IngestOutcome::Applied, Duration::from_secs(6));
+
+    let series = probe.collect();
+    for family in DURATIONS {
+        assert_eq!(
+            series.histogram_bounds(family).as_deref(),
+            Some(DURATION_BUCKETS),
+            "{family} must carry the declared second boundaries; the OTel defaults \
+             are milliseconds in all but name and would squeeze every value this \
+             gear records into one interval"
+        );
+    }
+}
+
+/// **The duration is recorded in seconds, not milliseconds.**
+///
+/// The other half of what the old single test claimed, kept separate because it
+/// is a different defect: `as_millis` instead of `as_secs_f64` would put a
+/// six-second pass in the overflow bucket above 60, and no assertion about the
+/// boundaries themselves would notice.
+#[test]
+fn a_duration_is_recorded_in_seconds() {
     let probe = MetricsProbe::new();
 
     probe
@@ -171,8 +204,35 @@ fn a_duration_is_recorded_in_seconds_against_the_declared_buckets() {
     assert_eq!(
         series.histogram_bucket_of(QA_RUNS_DISPATCH_DURATION, 6.0),
         Some(1),
-        "six seconds must land in the (5, 10] bucket: the NFR threshold is 10 s \
-         and an alert is written against that edge"
+        "six seconds recorded as seconds lands in the bucket that contains 6.0; \
+         recorded as 6000 it would land in the overflow bucket instead"
+    );
+    assert_eq!(
+        series.histogram_bucket_of(QA_RUNS_DISPATCH_DURATION, 6000.0),
+        Some(0),
+        "and nothing may be sitting in the overflow bucket"
+    );
+}
+
+/// **One `queue_wait` call drives its counter and its histogram, unlabelled.**
+///
+/// The family carries no attributes on purpose — see the adapter's
+/// implementation — so this also pins that no label crept in: a labelled data
+/// point would still be counted by `counter`, but `counter_with` over an empty
+/// label set would stop describing the whole family.
+#[test]
+fn one_queue_wait_drives_the_counter_and_its_histogram_together() {
+    let probe = MetricsProbe::new();
+
+    probe.adapter().queue_wait(Duration::from_secs(3));
+
+    let series = probe.collect();
+    assert_eq!(series.counter(QA_RUNS_QUEUE_WAIT), 1);
+    assert_eq!(series.histogram_count(QA_RUNS_QUEUE_WAIT_DURATION), 1);
+    assert_eq!(
+        series.histogram_bucket_of(QA_RUNS_QUEUE_WAIT_DURATION, 3.0),
+        Some(1),
+        "three seconds must land in the (2.5, 5] bucket"
     );
 }
 
@@ -194,5 +254,6 @@ fn the_default_adapter_emits_silently_with_no_pipeline_configured() {
 
     adapter.dispatch_pass(DispatchOutcome::Refused, Duration::from_millis(1));
     adapter.dispatch_decision(DispatchDecision::Unqueued);
+    adapter.queue_wait(Duration::from_millis(1));
     adapter.ingest_batch(IngestOutcome::Completed, Duration::from_millis(1));
 }

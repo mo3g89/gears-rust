@@ -262,6 +262,7 @@ impl QueueRepository for OrmQueueRepository {
             .map(|m| QueuedRow {
                 id: m.id,
                 exclusive: m.exclusive,
+                enqueued_at: m.enqueued_at,
             })
             .collect())
     }

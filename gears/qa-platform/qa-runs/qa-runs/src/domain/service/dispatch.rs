@@ -132,6 +132,7 @@
 //! [`TickReport::note_failure`].
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -413,6 +414,9 @@ pub struct DispatchService<R, Q> {
     watcher: Arc<dyn RunWatcher>,
     /// See [`DispatchDeps::metrics`].
     metrics: Arc<dyn DispatchMetrics>,
+    /// This service's emission latch — see `super::emit`. Per service rather
+    /// than global, so a broken dispatch adapter cannot silence ingest.
+    metrics_silenced: AtomicBool,
 }
 
 /// A queue row this tick claimed, with the run it is for.
@@ -431,6 +435,15 @@ struct ClaimedRow {
     queue_id: Uuid,
     run_id: Uuid,
     exclusive: bool,
+    /// When this row joined the queue, from the FIFO snapshot the claim was
+    /// planned against — what [`DispatchService::drain_platform`] measures the
+    /// queue wait from.
+    ///
+    /// `None` when the row was not in that snapshot, which is the same
+    /// fail-closed case `exclusive` handles a line above: no timestamp, no
+    /// observation. Silently dropping the sample is right here — a fabricated
+    /// one would be indistinguishable from a real wait in the histogram.
+    enqueued_at: Option<OffsetDateTime>,
 }
 
 /// What a successful submit produced.
@@ -595,6 +608,7 @@ where
             watch_scan_cursor: Mutex::new(None),
             watcher: deps.watcher,
             metrics: deps.metrics,
+            metrics_silenced: AtomicBool::new(false),
         }
     }
 
@@ -1103,11 +1117,19 @@ where
         let started = Instant::now();
         let (report, outcome) = self.tick_passes().await;
         // Guarded, not called directly: see `super::emit`. The clock is read
-        // once around the whole tick because the tick is the unit the NFR is
-        // stated over — a per-run emission inside `drain_platform` would time
-        // the submissions instead, and would multiply this family's sample
-        // count by the run count for no dashboard's benefit.
-        emit(|| self.metrics.dispatch_pass(outcome, started.elapsed()));
+        // once around the whole cycle because the cycle is what this family
+        // counts — a per-run emission here would time `dispatch_one`'s
+        // force-sync and bundle build instead, which is a different question
+        // and is not what a dispatcher's RED duration answers.
+        //
+        // **This is not `cpt-cf-qa-nfr-dispatch-latency`**, and no reading of
+        // it can be. That NFR bounds platform release -> execution request,
+        // which is dominated by the interval *between* cycles; a cycle's own
+        // wall-clock duration cannot contain the gap to the next one.
+        // `Self::record_queue_wait` is the family that goes at the NFR.
+        emit(&self.metrics_silenced, || {
+            self.metrics.dispatch_pass(outcome, started.elapsed());
+        });
         report
     }
 
@@ -2406,9 +2428,54 @@ where
                     %error,
                     "a claimed row failed to dispatch",
                 );
+            } else {
+                self.record_queue_wait(row);
             }
         }
         count
+    }
+
+    /// Report how long a queued run waited to reach an execution request.
+    ///
+    /// # Why this one is per run when `dispatch_pass` is per cycle
+    ///
+    /// Because the wait *is* a property of a run and has no other unit. The
+    /// cardinality objection that keeps `dispatch_pass` at the cycle boundary
+    /// does not apply: the family carries no label, so it is one series however
+    /// many runs pass through it, and what grows with the run count is the
+    /// sample count — which is the point of a histogram.
+    ///
+    /// # Emitted only on success, and only for rows that were really queued
+    ///
+    /// * **Only on success**, because the series measures the wait *to an
+    ///   execution request*. A row whose dispatch failed never made one, and
+    ///   folding its time-to-failure into the same histogram would mix two
+    ///   distributions — the failure is already counted by the WARN above and
+    ///   by the run's own retirement.
+    /// * **Only for drained rows.** This is reached from the tick's drain and
+    ///   nowhere else, so a launch that admission dispatched inline — which
+    ///   never enters the FIFO — and a platformless launch — which is never
+    ///   queued at all — contribute nothing. That is the wanted population:
+    ///   `cpt-cf-qa-nfr-dispatch-latency` is stated over *queued* runs.
+    ///
+    /// The instant is read here rather than passed in because this is the
+    /// moment after `dispatch_one` returned an accepted execution, which is the
+    /// end point the NFR names. What the measurement is, and where it diverges
+    /// from that NFR, is in
+    /// [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`]'s own doc.
+    fn record_queue_wait(&self, row: ClaimedRow) {
+        let Some(enqueued_at) = row.enqueued_at else {
+            return;
+        };
+        // A negative span means the row's stored instant is ahead of this
+        // clock — clock skew between writers, or a fixture. `try_into` refuses
+        // it, and the sample is dropped rather than clamped to zero: a zero
+        // would be a real-looking observation of something that did not happen.
+        let Ok(waited) = std::time::Duration::try_from(OffsetDateTime::now_utc() - enqueued_at)
+        else {
+            return;
+        };
+        emit(&self.metrics_silenced, || self.metrics.queue_wait(waited));
     }
 
     /// The critical section: decide, claim, and take the leases.
@@ -2483,12 +2550,13 @@ where
                 );
                 continue;
             };
-            // Fail closed if the row somehow left the FIFO snapshot: an exclusive
-            // lease is the most restrictive request.
-            let exclusive = fifo
-                .iter()
-                .find(|row| row.id == queue_id)
-                .is_none_or(|row| row.exclusive);
+            // One lookup, two readers. Fail closed if the row somehow left the
+            // FIFO snapshot: an exclusive lease is the most restrictive
+            // request, and an absent enqueue instant means no queue-wait sample
+            // rather than a guessed one.
+            let planned_row = fifo.iter().find(|row| row.id == queue_id);
+            let exclusive = planned_row.is_none_or(|row| row.exclusive);
+            let enqueued_at = planned_row.map(|row| row.enqueued_at);
             if self
                 .take_lease_for_claim(ctx, platform_id, run_id, exclusive, report)
                 .await
@@ -2497,6 +2565,7 @@ where
                     queue_id,
                     run_id,
                     exclusive,
+                    enqueued_at,
                 });
             } else {
                 self.requeue_claim(ctx, queue_id, report).await;

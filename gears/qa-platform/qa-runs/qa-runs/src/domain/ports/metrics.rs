@@ -60,7 +60,8 @@ use crate::domain::state_machine::is_terminal;
 // ════════════════════════════════════════════════════════════════════
 
 /// `outcome` label on [`crate::domain::metrics::QA_RUNS_DISPATCH`] and its
-/// duration histogram.
+/// duration histogram — **how one dispatcher cycle ended**, not how one
+/// submission ended.
 ///
 /// # Three values, and why the failure half is not a per-variant taxonomy
 ///
@@ -83,15 +84,20 @@ use crate::domain::state_machine::is_terminal;
 #[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
-    /// The submit succeeded and the run is running.
+    /// The cycle ran to the end and drained what it was allowed to drain —
+    /// **including a cycle that found nothing to do**, which is the healthy
+    /// steady state and the overwhelming majority of ticks. It does not mean
+    /// any particular run started; how many rows a cycle claimed is the
+    /// dispatcher's own report, and whether a queued run reached an execution
+    /// is [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT`].
     Started,
-    /// A rule refused the pass — an illegal transition, a full queue, the
-    /// concurrency cap, a denied policy decision. Recoverable by the caller,
-    /// and expected traffic rather than an incident.
+    /// A rule stopped the cycle — the concurrency cap, or a policy decision the
+    /// decision point denied. Expected traffic under a configured limit rather
+    /// than an incident, and deliberately not something an alert fires on.
     Refused,
-    /// The pass failed for a reason inside this gear or in a system it depends
-    /// on — the execution plane, the catalog, the environment gear, the
-    /// database. This is the series an alert fires on.
+    /// A pass this gear owns failed and stopped the cycle: the execution plane
+    /// could not be listed, the claim window could not be read, the queued
+    /// platforms could not be enumerated. This is the series an alert fires on.
     Failed,
 }
 
@@ -274,16 +280,36 @@ impl From<RunState> for IngestOutcome {
 /// construction. Dropping a sample is the correct response to an adapter that
 /// cannot record one. See this module's header.
 pub trait DispatchMetrics: Send + Sync + 'static {
-    /// One pass of the single submission path, with the wall-clock time it
-    /// took. Counts into [`crate::domain::metrics::QA_RUNS_DISPATCH`] and
-    /// observes into [`crate::domain::metrics::QA_RUNS_DISPATCH_DURATION`] —
-    /// one call, two instruments, so the rate and the quantile can never
-    /// disagree about how many passes there were.
+    /// One **dispatcher cycle** — `service::dispatch`'s tick — with how it
+    /// ended and the wall-clock time it took. Counts into
+    /// [`crate::domain::metrics::QA_RUNS_DISPATCH`] and observes into
+    /// [`crate::domain::metrics::QA_RUNS_DISPATCH_DURATION`] — one call, two
+    /// instruments, so the rate and the quantile can never disagree about how
+    /// many cycles there were.
+    ///
+    /// **Not one submission.** `dispatch_one` runs inside the cycle's drain
+    /// loop and is not measured here; measuring it would time the force-sync
+    /// and the bundle build rather than the dispatcher.
     fn dispatch_pass(&self, outcome: DispatchOutcome, duration: Duration);
 
     /// What admission decided for one launch. Counts into
     /// [`crate::domain::metrics::QA_RUNS_DISPATCH_DECISION`].
     fn dispatch_decision(&self, decision: DispatchDecision);
+
+    /// One queued run reaching an accepted execution request, with how long it
+    /// waited since it was enqueued. Counts into
+    /// [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT`] and observes into
+    /// [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`].
+    ///
+    /// **Per run, unlike the other two methods on this trait**, because the
+    /// wait is a property of a run and there is no other unit it could have.
+    /// Cardinality is unaffected: the family carries no label, so it is one
+    /// series however many runs pass through it.
+    ///
+    /// Read [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`]'s own doc
+    /// before writing an alert on it: it is an upper bound on the NFR's
+    /// quantity, not the quantity itself.
+    fn queue_wait(&self, waited: Duration);
 }
 
 /// The ingest path's telemetry — the second p95 NFR.
@@ -319,6 +345,7 @@ pub struct NoopMetrics;
 impl DispatchMetrics for NoopMetrics {
     fn dispatch_pass(&self, _outcome: DispatchOutcome, _duration: Duration) {}
     fn dispatch_decision(&self, _decision: DispatchDecision) {}
+    fn queue_wait(&self, _waited: Duration) {}
 }
 
 impl IngestMetrics for NoopMetrics {

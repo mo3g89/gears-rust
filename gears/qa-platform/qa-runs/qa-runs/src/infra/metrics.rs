@@ -72,7 +72,7 @@ use opentelemetry::metrics::{Counter, Histogram, Meter};
 
 use crate::domain::metrics::{
     QA_RUNS_DISPATCH, QA_RUNS_DISPATCH_DECISION, QA_RUNS_DISPATCH_DURATION, QA_RUNS_INGEST,
-    QA_RUNS_INGEST_DURATION,
+    QA_RUNS_INGEST_DURATION, QA_RUNS_QUEUE_WAIT, QA_RUNS_QUEUE_WAIT_DURATION,
 };
 use crate::domain::ports::metrics::{
     DispatchDecision, DispatchMetrics, DispatchOutcome, IngestMetrics, IngestOutcome,
@@ -88,22 +88,28 @@ const OUTCOME: &str = "outcome";
 /// questions — see [`crate::domain::metrics::QA_RUNS_DISPATCH_DECISION`].
 const DECISION: &str = "decision";
 
-/// Explicit second boundaries for both duration histograms.
+/// Explicit second boundaries for every duration histogram.
 ///
 /// Declared rather than left to the SDK default, and this is load-bearing. The
-/// `OTel` default boundaries are `[0, 5, 10, 25, 50, … 10000]`, which are
-/// milliseconds in all but name: against a value recorded in **seconds** every
-/// dispatch pass and every ingest pass this gear will ever do lands in the
-/// first bucket, and a p95 read off that histogram is not an estimate of
-/// anything — it is the bucket's upper edge. A quantile query is the entire
-/// reason these two families exist, so the buckets are part of the metric's
-/// definition, not a tuning knob.
+/// `OTel` defaults are `[0, 5, 10, 25, 50, … 10000]`, which are milliseconds in
+/// all but name: against a value recorded in **seconds**, a dispatcher cycle
+/// and an ingest pass both land in the second bucket, `(0, 5]`, and everything
+/// this gear does is squeezed into a single interval five seconds wide. A p95
+/// read off that is not an estimate of anything — it is that bucket's upper
+/// edge. A quantile query is the entire reason these families exist, so the
+/// boundaries are part of the metric's definition rather than a tuning knob.
 ///
-/// Both NFR thresholds are boundaries, deliberately: `DESIGN.md`'s
-/// `cpt-cf-qa-nfr-dispatch-latency` is 10 s and
-/// `cpt-cf-qa-nfr-result-latency` is 5 s, so an alert on either can be written
-/// against a bucket edge instead of interpolating across one. The low end goes
-/// down to 5 ms because the ingest path's common case is a single-row upsert.
+/// The low end goes down to 5 ms because the ingest path's common case is a
+/// single-row upsert; the high end runs to a minute because
+/// [`QA_RUNS_QUEUE_WAIT_DURATION`] is bounded by the run ahead in the queue and
+/// is expected to be minutes on a busy platform.
+///
+/// **10.0 and 5.0 are boundaries because the two NFR thresholds are those
+/// numbers**, so an alert can be written against a bucket edge rather than
+/// interpolated across one. That is a convenience of alert *arithmetic* and
+/// nothing more — whether either series actually measures its NFR is settled in
+/// [`QA_RUNS_QUEUE_WAIT_DURATION`]'s and [`QA_RUNS_DISPATCH_DURATION`]'s own
+/// docs, and for the dispatch duration the answer is no.
 const DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];
@@ -122,6 +128,8 @@ pub struct QaRunsMetricsMeter {
     dispatch: Counter<u64>,
     dispatch_decision: Counter<u64>,
     dispatch_duration: Histogram<f64>,
+    queue_wait: Counter<u64>,
+    queue_wait_duration: Histogram<f64>,
     ingest: Counter<u64>,
     ingest_duration: Histogram<f64>,
 }
@@ -152,6 +160,19 @@ impl QaRunsMetricsMeter {
                 .with_description("Wall-clock duration of one dispatcher tick, in seconds")
                 .with_boundaries(DURATION_BUCKETS.to_vec())
                 .build(),
+            queue_wait: meter
+                .u64_counter(QA_RUNS_QUEUE_WAIT)
+                .with_description("Queued runs taken from the queue to an execution request")
+                .build(),
+            queue_wait_duration: meter
+                .f64_histogram(QA_RUNS_QUEUE_WAIT_DURATION)
+                .with_description(
+                    "Seconds a queued run waited between being enqueued and its \
+                     execution being requested; an upper bound on the dispatch-latency \
+                     NFR, not the NFR itself",
+                )
+                .with_boundaries(DURATION_BUCKETS.to_vec())
+                .build(),
             ingest: meter
                 .u64_counter(QA_RUNS_INGEST)
                 .with_description(
@@ -179,6 +200,16 @@ impl DispatchMetrics for QaRunsMetricsMeter {
     fn dispatch_decision(&self, decision: DispatchDecision) {
         self.dispatch_decision
             .add(1, &[KeyValue::new(DECISION, decision.as_str())]);
+    }
+
+    fn queue_wait(&self, waited: Duration) {
+        // No attributes at all: the family is one series, and every dimension
+        // that would distinguish two waits — the platform, the tenant, the run
+        // — is per-run cardinality. Exclusivity was considered and left out for
+        // the reason `DispatchDecision`'s doc gives about widening a family's
+        // fixed label set after dashboards key on it.
+        self.queue_wait.add(1, &[]);
+        self.queue_wait_duration.record(waited.as_secs_f64(), &[]);
     }
 }
 
@@ -240,7 +271,11 @@ pub(crate) mod probe {
             let provider = SdkMeterProvider::builder()
                 .with_reader(PeriodicReader::builder(exporter.clone()).build())
                 .build();
-            let adapter = Arc::new(QaRunsMetricsMeter::new(&provider.meter("qa-runs")));
+            // The **same** scope constant `build_default_adapter` uses, not a
+            // second literal: one constant with two readers is what makes a
+            // change to it visible here rather than only in production.
+            let scope = opentelemetry::InstrumentationScope::builder(super::SCOPE).build();
+            let adapter = Arc::new(QaRunsMetricsMeter::new(&provider.meter_with_scope(scope)));
             Self {
                 provider,
                 exporter,
@@ -343,6 +378,33 @@ pub(crate) mod probe {
                 }
             }
             found
+        }
+
+        /// The bucket boundaries a histogram family was **built with**, as the
+        /// exporter reports them.
+        ///
+        /// Read directly rather than inferred from where a value landed:
+        /// `histogram_bucket_of` computes its index from these same bounds, so
+        /// it agrees with whatever set is in force and can never tell one set
+        /// from another. This is what makes the declared boundaries assertable.
+        pub fn histogram_bounds(&self, name: &str) -> Option<Vec<f64>> {
+            for metric in self.named(name) {
+                if let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data()
+                    && let Some(point) = histogram.data_points().next()
+                {
+                    return Some(point.bounds().collect());
+                }
+            }
+            None
+        }
+
+        /// Every instrumentation scope name this flush carried.
+        pub fn scopes(&self) -> Vec<&str> {
+            self.metrics
+                .iter()
+                .flat_map(ResourceMetrics::scope_metrics)
+                .map(|scope| scope.scope().name())
+                .collect()
         }
 
         /// Every exported metric under `name`, across scopes.

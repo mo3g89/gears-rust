@@ -259,6 +259,7 @@ impl Builder {
             locks: locks.clone(),
             limits: self.limits,
             policy_enforcer: enforcer.clone(),
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
         }));
         let launch = Arc::new(LaunchService::new(
             Arc::clone(&db),

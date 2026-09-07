@@ -1611,6 +1611,7 @@ pub(in crate::domain::service) mod fakes {
                 .map(|row| QueuedRow {
                     id: row.id,
                     exclusive: row.exclusive,
+                    enqueued_at: row.enqueued_at,
                 })
                 .collect())
         }
@@ -3212,6 +3213,9 @@ pub(in crate::domain::service) mod fakes {
                 .unwrap_or_else(|| Arc::new(SystemGrantingAuthZ) as Arc<dyn AuthZResolverClient>);
             let enforcer = PolicyEnforcer::new(authz);
             let locks = PlatformLocks::default();
+            let metrics: Arc<dyn DispatchMetrics> = self
+                .metrics
+                .unwrap_or_else(|| Arc::new(NoopMetrics) as Arc<dyn DispatchMetrics>);
 
             let admission = AdmissionService::new(AdmissionDeps {
                 db: Arc::clone(&db),
@@ -3222,6 +3226,11 @@ pub(in crate::domain::service) mod fakes {
                 locks: locks.clone(),
                 limits: self.limits,
                 policy_enforcer: enforcer.clone(),
+                // The same port the dispatch service below is given, which is
+                // what `AppServices::new` does — so a test that installs one
+                // sees admission's decisions and the tick's cycles in one
+                // exporter, as production does.
+                metrics: Arc::clone(&metrics),
             });
             let watcher = Arc::new(RecordingWatcher::new());
             let dispatch = DispatchService::new(DispatchDeps {
@@ -3239,9 +3248,7 @@ pub(in crate::domain::service) mod fakes {
                 orphan_timeout_seconds: self.orphan_timeout_seconds,
                 policy_enforcer: enforcer,
                 watcher: Arc::clone(&watcher) as Arc<dyn crate::domain::service::watch::RunWatcher>,
-                metrics: self
-                    .metrics
-                    .unwrap_or_else(|| Arc::new(NoopMetrics) as Arc<dyn DispatchMetrics>),
+                metrics,
             });
 
             Fakes {
@@ -4473,4 +4480,145 @@ async fn the_platform_lock_does_not_outlive_admit() {
     .await
     .expect("a second admission blocked while the first caller was submitting");
     assert!(second_admission.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry: what admission decided
+// ---------------------------------------------------------------------------
+
+/// Ids for the telemetry fixtures below, so a failure names something.
+const DECISION_INLINE: Uuid = Uuid::from_u128(0x0D01);
+const DECISION_QUEUED: Uuid = Uuid::from_u128(0x0D02);
+const DECISION_UNQUEUED: Uuid = Uuid::from_u128(0x0D03);
+
+/// **Every admission outcome is counted, each under its own decision label.**
+///
+/// Sweeps the three outcomes through the three code paths that produce them
+/// rather than asserting on one: a free platform admits `Dispatch`, a leased
+/// one admits `Queue`, and a platformless run is `Unqueued`. A call site that
+/// recorded a fixed label would satisfy any single-outcome test.
+///
+/// This is the family that answers *why* a queue is growing — every launch
+/// being queued is a different incident from dispatch being slow — and until
+/// this call site existed nothing emitted into it at all.
+#[tokio::test]
+async fn every_admission_outcome_reaches_the_decision_counter() {
+    let probe = crate::infra::metrics::probe::MetricsProbe::new();
+    let inline = run_fixture(DECISION_INLINE, Some(PLATFORM_A), false, RunState::Queued);
+    let queued = run_fixture(DECISION_QUEUED, Some(PLATFORM_B), false, RunState::Queued);
+    let unqueued = run_fixture(DECISION_UNQUEUED, None, false, RunState::Queued);
+    let fakes = fakes::Builder::new()
+        .runs(Arc::new(fakes::FakeRuns::with(vec![
+            (OWNER_TENANT, inline.clone()),
+            (OWNER_TENANT, queued.clone()),
+            (OWNER_TENANT, unqueued.clone()),
+        ])))
+        // `PLATFORM_B` is leased, so its admission must queue; `PLATFORM_A` is
+        // free, so its admission dispatches inline.
+        .environments(Arc::new(fakes::FakeEnvironments::holding(
+            PLATFORM_B,
+            LeaseState::HeldExclusive {
+                holder: Uuid::from_u128(0xBEEF),
+            },
+        )))
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    for run in [&inline, &queued, &unqueued] {
+        fakes
+            .admission
+            .admit(&ctx(OWNER_TENANT), run)
+            .await
+            .expect("each of the three admissions succeeds");
+    }
+
+    let series = probe.collect();
+    for label in ["inline", "queued", "unqueued"] {
+        assert_eq!(
+            series.counter_with(
+                crate::domain::metrics::QA_RUNS_DISPATCH_DECISION,
+                &[("decision", label)]
+            ),
+            1,
+            "no series was exported for decision {label}; the exported names were {:?}",
+            series.names()
+        );
+    }
+}
+
+/// **The bypass seam is an admission decision too.**
+///
+/// `Admitter::bypass` is how a collect run reaches an execution, and it is the
+/// one outcome that takes no lock, no lease and no queue row. Leaving it
+/// uncounted would make this counter disagree with the launch rate by exactly
+/// the collect traffic.
+#[tokio::test]
+async fn the_bypass_seam_counts_as_an_unqueued_decision() {
+    let probe = crate::infra::metrics::probe::MetricsProbe::new();
+    let fakes = fakes::Builder::new().metrics(probe.adapter()).build().await;
+
+    fakes
+        .admission
+        .bypass(&ctx(OWNER_TENANT))
+        .await
+        .expect("the bypass never fails");
+
+    assert_eq!(
+        probe.collect().counter_with(
+            crate::domain::metrics::QA_RUNS_DISPATCH_DECISION,
+            &[("decision", "unqueued")]
+        ),
+        1
+    );
+}
+
+/// **A refused admission is not a decision.**
+///
+/// A launch the queue-depth limit rejects writes no row and produces no
+/// `Admitted`, so it must not appear in this family: the counter's rate is
+/// "launches this gear admitted", and inflating it with 429s would make it
+/// disagree with the queue it is read beside.
+#[tokio::test]
+async fn a_refused_admission_records_no_decision() {
+    let probe = crate::infra::metrics::probe::MetricsProbe::new();
+    let run = run_fixture(DECISION_INLINE, Some(PLATFORM_A), false, RunState::Queued);
+    let fakes = fakes::Builder::new()
+        .runs(Arc::new(fakes::FakeRuns::with(vec![(
+            OWNER_TENANT,
+            run.clone(),
+        )])))
+        // One row already queued against a depth limit of one.
+        .queue(Arc::new(fakes::FakeQueue::with(vec![queued_row(
+            Uuid::from_u128(0x0DFF),
+            OWNER_TENANT,
+            DECISION_QUEUED,
+            PLATFORM_A,
+            false,
+            QueueState::Queued,
+        )])))
+        .limits(QueueLimits {
+            queue_max_depth: 1,
+            max_concurrent_runs: 0,
+            queue_ttl_seconds: 7200,
+        })
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let refused = fakes.admission.admit(&ctx(OWNER_TENANT), &run).await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(crate::domain::error::DomainError::QueueFull { .. })
+        ),
+        "premise: the fixture must actually be refused"
+    );
+    assert_eq!(
+        probe
+            .collect()
+            .counter(crate::domain::metrics::QA_RUNS_DISPATCH_DECISION),
+        0
+    );
 }
