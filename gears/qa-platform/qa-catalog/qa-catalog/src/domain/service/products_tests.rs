@@ -15,7 +15,7 @@ use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer
 use qa_catalog_sdk::{NewProduct, Product, ProductUpdate};
 use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
-use toolkit_security::AccessScope;
+use toolkit_security::{AccessScope, pep_properties};
 use uuid::Uuid;
 
 use super::ProductPluginPresence;
@@ -29,23 +29,47 @@ use crate::domain::repos::ProductsRepository;
 // Test doubles
 // ---------------------------------------------------------------------------
 
-/// `ProductsRepository` double: one configurable product, mutable so the
-/// update/delete tests can observe what the service persisted.
+/// `ProductsRepository` double: a set of rows, each tagged with the tenant
+/// that owns it, mutable so the update/delete tests can observe what the
+/// service persisted.
+///
+/// Filters `get`/`update`/`delete` on the requested `AccessScope` the way
+/// `SecureORM`'s `.secure().scope_with(scope)` filters a real query: a row
+/// whose owning tenant the scope does not admit is invisible, not merely
+/// "found but denied". Before this, every method here ignored `_scope`
+/// entirely, so a test claiming to check tenant isolation could only ever
+/// prove that a *different id* 404s -- review finding #41.
 #[derive(Default)]
 struct MockProductsRepository {
-    rows: Mutex<Option<Product>>,
+    rows: Mutex<Vec<(Product, Uuid)>>,
 }
 
 impl MockProductsRepository {
-    fn with_product(product: Product) -> Self {
+    /// A single row, owned by `tenant_id`.
+    fn with_product_in_tenant(product: Product, tenant_id: Uuid) -> Self {
         Self {
-            rows: Mutex::new(Some(product)),
+            rows: Mutex::new(vec![(product, tenant_id)]),
         }
     }
 
-    /// The stored row, as the service left it.
+    /// Add another row, owned by `tenant_id`, alongside whatever is already
+    /// stored.
+    fn insert_in_tenant(&self, product: Product, tenant_id: Uuid) {
+        self.rows.lock().unwrap().push((product, tenant_id));
+    }
+
+    /// The first stored row, as the service left it.
     fn stored(&self) -> Option<Product> {
-        self.rows.lock().unwrap().clone()
+        self.rows.lock().unwrap().first().map(|(p, _)| p.clone())
+    }
+
+    /// Whether `scope` admits `tenant_id` -- the same question
+    /// `.secure().scope_with(scope)` answers per-row in SQL, evaluated here
+    /// in memory. An unconstrained ("allow all") scope admits everything,
+    /// matching a real PDP decision with no row-level filtering.
+    fn scope_admits(scope: &AccessScope, tenant_id: Uuid) -> bool {
+        scope.is_unconstrained()
+            || scope.contains_uuid(pep_properties::OWNER_TENANT_ID, tenant_id)
     }
 }
 
@@ -54,16 +78,16 @@ impl ProductsRepository for MockProductsRepository {
     async fn get<C: DBRunner>(
         &self,
         _runner: &C,
-        _scope: &AccessScope,
+        scope: &AccessScope,
         id: Uuid,
     ) -> Result<Option<Product>, DomainError> {
         Ok(self
             .rows
             .lock()
             .unwrap()
-            .as_ref()
-            .filter(|p| p.id == id)
-            .cloned())
+            .iter()
+            .find(|(p, tenant_id)| p.id == id && Self::scope_admits(scope, *tenant_id))
+            .map(|(p, _)| p.clone()))
     }
 
     async fn list<C: DBRunner>(
@@ -87,12 +111,15 @@ impl ProductsRepository for MockProductsRepository {
     async fn update<C: DBRunner>(
         &self,
         _runner: &C,
-        _scope: &AccessScope,
+        scope: &AccessScope,
         id: Uuid,
         update: ProductUpdate,
     ) -> Result<Option<Product>, DomainError> {
         let mut guard = self.rows.lock().unwrap();
-        let Some(row) = guard.as_mut().filter(|p| p.id == id) else {
+        let Some((row, _)) = guard
+            .iter_mut()
+            .find(|(p, tenant_id)| p.id == id && Self::scope_admits(scope, *tenant_id))
+        else {
             return Ok(None);
         };
         row.name = update.name;
@@ -117,16 +144,13 @@ impl ProductsRepository for MockProductsRepository {
     async fn delete<C: DBRunner>(
         &self,
         _runner: &C,
-        _scope: &AccessScope,
+        scope: &AccessScope,
         id: Uuid,
     ) -> Result<bool, DomainError> {
         let mut guard = self.rows.lock().unwrap();
-        if guard.as_ref().is_some_and(|p| p.id == id) {
-            *guard = None;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        let before = guard.len();
+        guard.retain(|(p, tenant_id)| !(p.id == id && Self::scope_admits(scope, *tenant_id)));
+        Ok(guard.len() < before)
     }
 }
 
@@ -257,7 +281,10 @@ async fn update_product_replaces_fields_under_an_update_scope() {
     let tenant_id = Uuid::new_v4();
     let product_id = Uuid::new_v4();
 
-    let repo = Arc::new(MockProductsRepository::with_product(product(product_id)));
+    let repo = Arc::new(MockProductsRepository::with_product_in_tenant(
+        product(product_id),
+        tenant_id,
+    ));
     let authz = Arc::new(RecordingAuthZ::default());
     let svc = build_service(Arc::clone(&repo), Arc::clone(&authz)).await;
 
@@ -318,7 +345,10 @@ async fn update_product_rejects_a_bare_instance_segment_as_the_binding() {
     let tenant_id = Uuid::new_v4();
     let product_id = Uuid::new_v4();
 
-    let repo = Arc::new(MockProductsRepository::with_product(product(product_id)));
+    let repo = Arc::new(MockProductsRepository::with_product_in_tenant(
+        product(product_id),
+        tenant_id,
+    ));
     let authz = Arc::new(RecordingAuthZ::default());
     let svc = build_service(Arc::clone(&repo), authz).await;
 
@@ -346,7 +376,10 @@ async fn update_product_rejects_an_empty_name_and_404s_on_a_foreign_id() {
     let tenant_id = Uuid::new_v4();
     let product_id = Uuid::new_v4();
 
-    let repo = Arc::new(MockProductsRepository::with_product(product(product_id)));
+    let repo = Arc::new(MockProductsRepository::with_product_in_tenant(
+        product(product_id),
+        tenant_id,
+    ));
     let authz = Arc::new(RecordingAuthZ::default());
     let svc = build_service(Arc::clone(&repo), authz).await;
 
@@ -371,7 +404,11 @@ async fn update_product_rejects_an_empty_name_and_404s_on_a_foreign_id() {
         "a rejected update must not persist"
     );
 
+    // A row that EXISTS -- just under a different tenant -- so the 404 below
+    // is genuinely scope-driven rather than a coincidence of "id absent from
+    // the mock entirely".
     let foreign = Uuid::new_v4();
+    repo.insert_in_tenant(product(foreign), Uuid::new_v4());
     let err = svc
         .update_product(&ctx(tenant_id), foreign, update(None, None))
         .await
@@ -387,7 +424,10 @@ async fn delete_product_removes_the_row_and_404s_when_it_is_gone() {
     let tenant_id = Uuid::new_v4();
     let product_id = Uuid::new_v4();
 
-    let repo = Arc::new(MockProductsRepository::with_product(product(product_id)));
+    let repo = Arc::new(MockProductsRepository::with_product_in_tenant(
+        product(product_id),
+        tenant_id,
+    ));
     let authz = Arc::new(RecordingAuthZ::default());
     let svc = build_service(Arc::clone(&repo), Arc::clone(&authz)).await;
 
@@ -545,15 +585,19 @@ async fn the_presence_check_is_asked_about_the_id_verbatim() {
 /// `None` still reaches no check at all — it means "leave the binding alone".
 #[tokio::test]
 async fn a_rebind_must_resolve_but_an_absent_field_is_not_a_rebind() {
+    let tenant_id = Uuid::new_v4();
     let id = Uuid::new_v4();
-    let repo = Arc::new(MockProductsRepository::with_product(product(id)));
+    let repo = Arc::new(MockProductsRepository::with_product_in_tenant(
+        product(id),
+        tenant_id,
+    ));
     let authz = Arc::new(RecordingAuthZ::default());
     let presence = ScriptedPresence::answering(false);
     let svc = build_service_with_presence(Arc::clone(&repo), authz, Arc::clone(&presence)).await;
 
     let err = svc
         .update_product(
-            &ctx(Uuid::new_v4()),
+            &ctx(tenant_id),
             id,
             ProductUpdate {
                 name: "vhp".to_owned(),
@@ -573,7 +617,7 @@ async fn a_rebind_must_resolve_but_an_absent_field_is_not_a_rebind() {
     // The same update with the field absent must not consult presence at all.
     let before = presence.asked().len();
     svc.update_product(
-        &ctx(Uuid::new_v4()),
+        &ctx(tenant_id),
         id,
         ProductUpdate {
             name: "vhp".to_owned(),
@@ -591,5 +635,38 @@ async fn a_rebind_must_resolve_but_an_absent_field_is_not_a_rebind() {
         "`None` means leave the binding alone (ruling D-18), so there is nothing \
          to check -- consulting presence here would refuse every ordinary edit \
          made by the shipped UI, which cannot send the field"
+    );
+}
+
+/// **A valid id from another tenant is a 404, not a read.**
+///
+/// `MockProductsRepository` used to ignore `_scope` on every method, so a
+/// test claiming to check tenant isolation could only ever prove that a
+/// *different id* 404s -- an unrelated property. Here the id is real and the
+/// row exists; only the scope excludes it. `ProductsService` has no bare
+/// "get" (products are read via `list_products` or reached by their id
+/// through `update`/`delete`), so this goes through `update_product`, the
+/// same entry point `update_product_rejects_an_empty_name_and_404s_on_a_foreign_id`
+/// uses for its own 404 case -- the two together are what pin the id-absent
+/// and scope-absent cases apart. Review finding #41.
+#[tokio::test]
+async fn a_product_from_another_tenant_is_not_readable() {
+    let ours = Uuid::new_v4();
+    let theirs = Uuid::new_v4();
+    let their_product = Uuid::new_v4();
+    let repo = Arc::new(MockProductsRepository::with_product_in_tenant(
+        product(their_product),
+        theirs,
+    ));
+    let authz = Arc::new(RecordingAuthZ::default());
+    let svc = build_service(Arc::clone(&repo), authz).await;
+
+    let err = svc
+        .update_product(&ctx(ours), their_product, update(None, None))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::NotFound { id } if id == their_product),
+        "another tenant's product must be absent, not forbidden or readable; got {err:?}"
     );
 }
