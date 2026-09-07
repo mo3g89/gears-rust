@@ -747,9 +747,16 @@ export interface TestHistory {
   results: TestHistoryEntry[];
 }
 
-/** UI-only: the gear's `scope`/`group_by` query parameters are plain `string` on the wire
- *  (`AnalyticsOverviewDto.scope`/`.group_by`), not a schema-level enum, so there is no
- *  generated type to alias onto — this is the literal union client code narrows requests to. */
+/** UI-only: the analytics `scope`/`group_by` query parameters are plain `string` on the
+ *  wire (`AnalyticsOverviewDto.scope`/`.group_by`), not a schema-level enum, so there is no
+ *  generated type to alias onto — this is the literal union client code narrows requests to.
+ *
+ *  **The saved-view scope is a different field and now *is* generated** (Task 20):
+ *  `SavedViewDto.scope` publishes `"all" | "plan"` as a schema-level enum, and
+ *  `savedViewFromDto` assigns it here without a cast. The two are kept as separate types
+ *  because they are separate wire contracts: the analytics query parameters accept their
+ *  value trimmed and case-insensitively (`domain::analytics::query::parse_scope`), which a
+ *  schema enum would not describe. */
 export type AnalyticsScope = 'all' | 'plan';
 export type AnalyticsGroupBy = 'none' | 'component' | 'tag' | 'environment';
 
@@ -998,7 +1005,13 @@ export interface RunQueueEntry {
   target_id: string;
   source: string;
   exclusive: boolean;
-  state: 'queued' | 'dispatching' | 'running' | 'done' | 'failed' | 'cancelled' | 'expired';
+  /** Generated (Task 20): `QueueEntryDto.state` publishes the seven frozen queue-state
+   *  names as a schema-level enum now, so this is aliased onto it rather than re-typed by
+   *  hand. The union was previously copied here literally and reached through an `as`
+   *  cast in `queueEntryFromDto`; the alias is what makes a gear-side change to the set
+   *  a `tsc` failure here instead of a silent divergence. Note `cancelled`, two `l`s —
+   *  the *run* state's spelling is `canceled` and X4 records that as deliberate. */
+  state: S['QueueStateDto'];
   workflow_name: string | null;
   error: string | null;
   enqueued_at: string;

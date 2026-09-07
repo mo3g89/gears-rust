@@ -618,7 +618,10 @@ export function parseRunLogSse(body: string): string {
  * `state` is passed through **unchanged**, including `cancelled` with two `l`s: X4 records
  * that the queue row's spelling differs from the run's one-`l` `canceled` deliberately,
  * and legacy's own `RunQueueEntry.state` union already used the two-`l` form. Normalising
- * them together would be inventing a single vocabulary the gears do not have.
+ * them together would be inventing a single vocabulary the gears do not have. It no longer
+ * needs an `as` cast (Task 20): `QueueEntryDto.state` is a schema-level enum, and
+ * `RunQueueEntry['state']` is aliased onto it, so the assignment type-checks on its own and
+ * a gear-side change to the seven names fails `tsc` here rather than passing through a cast.
  *
  * `target_id` is a **documented substitution**, in the sense of §7.10. `QueueEntryDto`
  * has no target of any kind, and `target_id` is the queued row's primary label at
@@ -636,7 +639,7 @@ export function queueEntryFromDto(dto: QueueEntryDtoWithEnvironmentId): RunQueue
     target_id: dto.run_id,
     source: dto.source,
     exclusive: dto.exclusive,
-    state: dto.state as RunQueueEntry['state'],
+    state: dto.state,
     workflow_name: dto.run_id,
     error: dto.error ?? null,
     enqueued_at: dto.enqueued_at,
@@ -1891,12 +1894,15 @@ export function analyticsOverviewFromDto(
  *  opaque `plan_id` (X6). `query_json` is passed through untouched — the gear never
  *  inspects it, so a legacy `plan_id` buried inside one is **not** reconciled with the new
  *  vocabulary (row 73), which is a real and reported limitation rather than something to
- *  rewrite blindly. */
+ *  rewrite blindly.
+ *
+ *  `scope` no longer needs an `as AnalyticsScope` cast (Task 20): the gear publishes it as
+ *  a two-value schema enum, so `"all" | "plan"` is what the generated type already says. */
 export function savedViewFromDto(dto: S['SavedViewDto']): AnalyticsSavedView {
   return {
     id: dto.id,
     owner_id: dto.owner_id,
-    scope: dto.scope as AnalyticsScope,
+    scope: dto.scope,
     plan_id: dto.repo_id && dto.plan_path ? encodePlanId(dto.repo_id, dto.plan_path) : null,
     name: dto.name,
     query_json: (dto.query_json ?? {}) as Record<string, unknown>,

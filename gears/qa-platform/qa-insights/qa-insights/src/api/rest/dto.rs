@@ -41,7 +41,7 @@
 use qa_insights_sdk::{
     CoverageBuild, CoverageSummary, DailyStatusPoint, DashboardRun, DashboardStats, FailedTestCard,
     FlakyTestCard, JiraBug, JiraConfig, JiraPollerConfig, NotificationConfig, NotificationLogEntry,
-    QualityVectorPassRate, RunTestTrendPoint, SavedView, ScheduledRunSlackTemplate,
+    QualityVectorPassRate, RunTestTrendPoint, SavedView, SavedViewScope, ScheduledRunSlackTemplate,
     ScheduledRunSlackTemplates, TestCaseResultRecord, TestResultRecord,
 };
 use std::collections::HashMap;
@@ -2142,6 +2142,72 @@ impl From<NewSavedViewReq> for SavedViewInput {
     }
 }
 
+/// What a saved view is scoped to: the whole universe, or one plan.
+//
+// Mirrors `qa_insights_sdk::SavedViewScope`. Everything below is why rather
+// than what a caller needs, and is kept off the doc comment so it stays out of
+// the published schema description.
+//
+// # Why this is a mirror and not the SDK type
+//
+// `#[api_dto]` adds `serde` and `utoipa::ToSchema`, and every type nested in a
+// DTO needs both. `qa-insights-sdk` carries neither by the repo-wide
+// contract-purity rule its own crate docs state (an SDK model has no wire form
+// and no `OpenAPI` dependency), so the wire vocabulary lives here, at the
+// boundary - the same shape `qa-catalog`'s `FieldKindDto` and `qa-runs`'
+// `RunStateDto` take for the same reason.
+//
+// # What it buys, over the `String` it replaces
+//
+// `SavedViewDto::scope` was a `String` filled from `SavedViewScope::as_str`
+// while the closed enum sat beside it (review finding #35). Now the published
+// `OpenAPI` schema is a two-value `enum`, so the generated TypeScript narrows
+// to `"all" | "plan"` and an unknown value is a decode error rather than
+// something a consumer must defend against. `From` and its reverse both match
+// exhaustively with no wildcard arm, so neither side can gain a variant
+// without a compile error.
+//
+// # Why only the *response* side is typed
+//
+// `NewSavedViewReq::scope`, `SavedViewsListQuery::scope` and the three
+// analytics query strings (`AnalyticsOverviewQuery`,
+// `AnalyticsBuildTestsQuery`, `AnalyticsExportQuery`) stay `String`
+// **deliberately**. They are inbound, and their contract is not this closed
+// set: `domain::service::saved_views::parse_scope` and
+// `domain::analytics::query::parse_scope` accept the value *trimmed and
+// case-insensitively*, and answer anything else with legacy's verbatim 400,
+// `"scope must be 'all' or 'plan'"`. A `serde` enum there would refuse `ALL`,
+// which is accepted today, and would answer with the deserializer's own message
+// and shape instead - a wire change, which this task is explicitly not. The
+// unknown-value rejection those fields need already exists, one layer in, and
+// it is the better one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum SavedViewScopeDto {
+    All,
+    Plan,
+}
+
+impl From<SavedViewScope> for SavedViewScopeDto {
+    fn from(scope: SavedViewScope) -> Self {
+        match scope {
+            SavedViewScope::All => Self::All,
+            SavedViewScope::Plan => Self::Plan,
+        }
+    }
+}
+
+impl From<SavedViewScopeDto> for SavedViewScope {
+    /// The direction that closes the mirror: a variant added *here* and not to
+    /// the SDK is a compile error too, so the two sets stay in bijection.
+    fn from(scope: SavedViewScopeDto) -> Self {
+        match scope {
+            SavedViewScopeDto::All => Self::All,
+            SavedViewScopeDto::Plan => Self::Plan,
+        }
+    }
+}
+
 /// A stored saved view — legacy's `AnalyticsSavedView`
 /// (`manager/src/routes/analytics.rs:77-86`), with the same `plan_id` split
 /// and `owner_id` still a caller-visible field: it is the caller's own id in
@@ -2153,7 +2219,8 @@ impl From<NewSavedViewReq> for SavedViewInput {
 pub struct SavedViewDto {
     pub id: Uuid,
     pub owner_id: Uuid,
-    pub scope: String,
+    /// `all` or `plan` — see [`SavedViewScopeDto`].
+    pub scope: SavedViewScopeDto,
     pub repo_id: Option<Uuid>,
     pub plan_path: Option<String>,
     pub name: String,
@@ -2187,7 +2254,7 @@ impl TryFrom<SavedView> for SavedViewDto {
         Ok(Self {
             id: view.id,
             owner_id: view.owner_id,
-            scope: view.scope.as_str().to_owned(),
+            scope: view.scope.into(),
             repo_id: view.repo_id,
             plan_path: view.plan_path,
             name: view.name,
@@ -2811,8 +2878,8 @@ mod tests {
         JiraBugFilingDto, JiraConfig, JiraPollerConfigDto, JiraSettingsDto, NewSavedViewReq,
         NotificationConfigDto, NotificationLogEntryDto, NotificationPreviewDto,
         PlanBuildDistributionDto, PlanTestHistoryDto, RebuildOutcomeDto, RebuildReq, SavedViewDto,
-        ScheduledRunSlackTemplateDto, ScheduledRunSlackTemplatesDto, Scope, TestCaseResultDto,
-        TestResultDto, plan_test_analytics_list_dto,
+        SavedViewScopeDto, ScheduledRunSlackTemplateDto, ScheduledRunSlackTemplatesDto, Scope,
+        TestCaseResultDto, TestResultDto, plan_test_analytics_list_dto,
     };
     use crate::domain::analytics::PlanRef;
     use crate::domain::analytics::aggregates::{
@@ -4037,10 +4104,61 @@ mod tests {
     /// `scope` renders as legacy's own wire spelling (`"all"`/`"plan"`), not
     /// as the Rust variant name — `SavedViewScope::as_str`'s own doc records
     /// that the two are not the same string.
+    ///
+    /// Asserted through `serde_json` rather than off the struct field (Task
+    /// 20): the field is [`SavedViewScopeDto`] now, so `dto.scope == "all"`
+    /// no longer even type-checks, and the rendered JSON is what the finding
+    /// was ever about.
     #[test]
     fn a_saved_views_scope_renders_as_the_wire_spelling() {
         let dto = SavedViewDto::try_from(saved_view("{}")).unwrap();
-        assert_eq!(dto.scope, "all");
+        let json = serde_json::to_value(&dto).expect("the DTO serialises");
+        assert_eq!(json["scope"], "all");
+    }
+
+    /// **Every `SavedViewScope` renders the spelling it always rendered.**
+    ///
+    /// `SavedViewDto::scope` was a `String` filled from
+    /// `SavedViewScope::as_str` while the closed enum sat beside it (review
+    /// finding #35). It is now [`SavedViewScopeDto`], a closed mirror whose
+    /// spellings are asserted against `as_str` itself, so the SDK stays the
+    /// single source of truth and this test cannot drift from it.
+    #[test]
+    fn every_saved_view_scope_serialises_to_its_sdk_spelling() {
+        for scope in [SavedViewScope::All, SavedViewScope::Plan] {
+            let rendered = serde_json::to_value(SavedViewScopeDto::from(scope))
+                .expect("a scope must serialize");
+            assert_eq!(
+                rendered,
+                serde_json::Value::String(scope.as_str().to_owned()),
+                "the wire spelling must stay SavedViewScope::as_str's, for {scope:?}"
+            );
+            assert_eq!(
+                SavedViewScope::from(SavedViewScopeDto::from(scope)),
+                scope,
+                "the mirror must round-trip, so neither side can drift"
+            );
+        }
+    }
+
+    /// The half the `String` could not give: an unknown scope is a decode
+    /// error rather than a value the UI has to defend against.
+    ///
+    /// **This is the response side only.** The *request* side
+    /// ([`NewSavedViewReq::scope`], [`SavedViewsListQuery::scope`] and the
+    /// three analytics query strings) stays a `String` on purpose — see
+    /// [`SavedViewScopeDto`]'s own doc — and already rejects an unknown value,
+    /// with legacy's verbatim 400.
+    #[test]
+    fn an_unknown_saved_view_scope_is_rejected() {
+        assert!(
+            serde_json::from_value::<SavedViewScopeDto>(serde_json::json!("everything")).is_err(),
+            "an invented scope must not decode"
+        );
+        assert!(
+            serde_json::from_value::<SavedViewScopeDto>(serde_json::json!("All")).is_err(),
+            "the Rust variant name is not the wire spelling and must not decode either"
+        );
     }
 
     /// **Stored corruption is a `CorruptState`, not a panic.** Nothing in this

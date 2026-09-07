@@ -19,7 +19,7 @@ pub use qa_product_sdk::observation::{HealthState, ObservedAttrs};
 pub use client::QaEnvironmentsClientV1;
 pub use errors::QaEnvironmentsError;
 pub use models::{
-    AcquireOutcome, ClusterHealthView, CredentialMaterial, CredentialSubmission, Environment,
-    EnvironmentCredential, EnvironmentPatch, LeaseMode, LeaseState, NewEnvironment, NewVariable,
-    NodeCounts, NodeSummary, RESERVED_VARIABLE_NAMES, Variable,
+    AcquireOutcome, ClusterHealthView, ClusterStatus, CredentialMaterial, CredentialSubmission,
+    Environment, EnvironmentCredential, EnvironmentPatch, LeaseMode, LeaseState, NewEnvironment,
+    NewVariable, NodeCounts, NodeSummary, RESERVED_VARIABLE_NAMES, Variable,
 };

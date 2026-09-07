@@ -3048,6 +3048,12 @@ export interface components {
              */
             tag: components["schemas"]["GroupSummaryDto"][];
         };
+        /**
+         * @description Which tier supplied a run's exclusivity decision. `plan.yaml` is the
+         *     plan-file tier, spelled as the file is named.
+         * @enum {string}
+         */
+        ExclusiveTierDto: "launch" | "plan.yaml" | "test_meta" | "default";
         GrpcMatch: {
             method: string;
             service: string;
@@ -4295,10 +4301,10 @@ export interface components {
             run_id: string;
             /** @description `plan`, `test`, or `custom_plan`. */
             run_kind: string;
-            /** @description `manual` or `scheduled`. */
-            source: string;
-            /** @description One of the seven frozen queue-state names. Note `cancelled`, two `l`s. */
-            state: string;
+            /** @description Who asked - see [`RunSourceDto`]. */
+            source: components["schemas"]["RunSourceDto"];
+            /** @description One of the seven frozen queue-state names - see [`QueueStateDto`]. */
+            state: components["schemas"]["QueueStateDto"];
             /**
              * Format: date-time
              * @description When the TTL sweep will expire this row. `null` unless `queued`, and
@@ -4306,6 +4312,13 @@ export interface components {
              */
             ttl_expires_at?: string | null;
         };
+        /**
+         * @description A queue row's state - the seven frozen names. Note `cancelled`, two `l`s;
+         *     a *run*'s equivalent state is spelled `canceled`, and the difference is
+         *     deliberate.
+         * @enum {string}
+         */
+        QueueStateDto: "queued" | "dispatching" | "running" | "done" | "failed" | "cancelled" | "expired";
         /**
          * @description The 202 body: a launch that was admitted but has not started.
          *
@@ -4514,8 +4527,8 @@ export interface components {
              */
             error?: string | null;
             exclude_tags: string[];
-            /** @description Which tier supplied it: `launch`, `plan.yaml`, `test_meta`, `default`. */
-            exclusive_tier: string;
+            /** @description Which tier supplied it - see [`ExclusiveTierDto`]. */
+            exclusive_tier: components["schemas"]["ExclusiveTierDto"];
             /** @description Opaque executor handle; `null` until dispatch succeeds. */
             execution_ref?: string | null;
             /** Format: date-time */
@@ -4561,16 +4574,15 @@ export interface components {
             result: components["schemas"]["RunResultDto"];
             /** Format: uuid */
             schedule_id?: string | null;
-            /** @description `manual` or `scheduled`. */
-            source: string;
+            /** @description Who asked - see [`RunSourceDto`]. */
+            source: components["schemas"]["RunSourceDto"];
             /** Format: date-time */
             started_at?: string | null;
             /**
-             * @description `sdk::RunState::as_str`'s spelling. Note `canceled`, one `l` - the queue
-             *     row's equivalent state is spelled `cancelled`, and the difference is
-             *     deliberate (see `sdk::RunState`).
+             * @description `sdk::RunState::as_str`'s spelling - a closed set on the wire since
+             *     Task 20, when this field stopped being a `String`.
              */
-            state: string;
+            state: components["schemas"]["RunStateDto"];
             target: components["schemas"]["RunTargetDto"];
             /** @description Branch actually resolved and executed against. */
             test_version?: string | null;
@@ -4625,6 +4637,21 @@ export interface components {
          *     `repo_id` said it "must be absent for `custom_plan`" while the impl - and the
          *     test that pins it - accept and ignore it. Say what the server does.
          */
+        /**
+         * @description Who asked for a run.
+         * @enum {string}
+         */
+        RunSourceDto: "manual" | "scheduled";
+        /**
+         * @description A run's lifecycle state. Note `canceled`, one `l` - a queue row's
+         *     equivalent state is spelled `cancelled`, and the difference is deliberate.
+         *
+         *     A client ported from the source system must **re-map, not merely re-case**:
+         *     `created`, `queued`, `dispatching`, `canceled`, `timed_out` and `expired`
+         *     have no equivalent there.
+         * @enum {string}
+         */
+        RunStateDto: "created" | "queued" | "dispatching" | "running" | "succeeded" | "failed" | "canceled" | "timed_out" | "expired" | "error";
         RunTargetDto: {
             /**
              * @description Where a `collect` run's runner posts its per-file case counts, becoming
@@ -4738,10 +4765,16 @@ export interface components {
             query_json: unknown;
             /** Format: uuid */
             repo_id?: string | null;
-            scope: string;
+            /** @description `all` or `plan` — see [`SavedViewScopeDto`]. */
+            scope: components["schemas"]["SavedViewScopeDto"];
             /** Format: date-time */
             updated_at: string;
         };
+        /**
+         * @description What a saved view is scoped to: the whole universe, or one plan.
+         * @enum {string}
+         */
+        SavedViewScopeDto: "all" | "plan";
         /** @description A schedule as reported by the read endpoints. */
         ScheduleDto: {
             /**

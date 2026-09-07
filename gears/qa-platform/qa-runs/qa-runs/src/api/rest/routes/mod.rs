@@ -490,4 +490,94 @@ mod tests {
             );
         }
     }
+
+    /// **The published schema declares the closed value set, not `string`.**
+    ///
+    /// This is the half of Task 20 the Rust type system cannot check for
+    /// itself. Retyping `RunDto::state` from `String` to
+    /// `dto::RunStateDto` is what stops *this* gear inventing a state; the
+    /// generated TypeScript narrowing to a literal union - so a UI `switch`
+    /// missing a case fails `tsc` - depends entirely on the component
+    /// schema being an `enum` and being reachable from the response bodies.
+    /// A mirror enum that never got registered would leave the document
+    /// saying `string` while every Rust test above stayed green.
+    ///
+    /// The expected spellings are `qa_runs_sdk`'s `as_str` forms, asserted in
+    /// the SDK's own declaration order: `plan.yaml` (not `plan`), `canceled`
+    /// with one `l` on a run and `cancelled` with two on a queue row.
+    #[test]
+    fn the_published_schema_declares_closed_enums_for_the_run_vocabularies() {
+        let openapi = OpenApiRegistryImpl::new();
+        let _router = register_operations(Router::new(), &openapi);
+        let doc = openapi
+            .build_openapi(&OpenApiInfo::default())
+            .expect("the OpenAPI document must build");
+        let rendered = serde_json::to_value(&doc).expect("the document must serialize");
+
+        for (schema_name, expected) in [
+            (
+                "RunStateDto",
+                vec![
+                    "created",
+                    "queued",
+                    "dispatching",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "canceled",
+                    "timed_out",
+                    "expired",
+                    "error",
+                ],
+            ),
+            (
+                "ExclusiveTierDto",
+                vec!["launch", "plan.yaml", "test_meta", "default"],
+            ),
+            ("RunSourceDto", vec!["manual", "scheduled"]),
+            (
+                "QueueStateDto",
+                vec![
+                    "queued",
+                    "dispatching",
+                    "running",
+                    "done",
+                    "failed",
+                    "cancelled",
+                    "expired",
+                ],
+            ),
+        ] {
+            let schema = &rendered["components"]["schemas"][schema_name];
+            let published: Vec<&str> = schema["enum"]
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!("{schema_name} must publish an `enum`, not a bare string: {schema}")
+                })
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            assert_eq!(
+                published, expected,
+                "{schema_name} must publish exactly the SDK's as_str spellings"
+            );
+        }
+
+        // ... and the response bodies really point at them, rather than at a
+        // registered-but-unreferenced component.
+        for (owner, field, target) in [
+            ("RunDto", "state", "RunStateDto"),
+            ("RunDto", "exclusive_tier", "ExclusiveTierDto"),
+            ("RunDto", "source", "RunSourceDto"),
+            ("QueueEntryDto", "state", "QueueStateDto"),
+            ("QueueEntryDto", "source", "RunSourceDto"),
+        ] {
+            let property = &rendered["components"]["schemas"][owner]["properties"][field];
+            assert_eq!(
+                property["$ref"],
+                serde_json::Value::String(format!("#/components/schemas/{target}")),
+                "{owner}.{field} must reference {target}, not inline a string: {property}"
+            );
+        }
+    }
 }
