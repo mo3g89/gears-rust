@@ -69,24 +69,44 @@
 //!
 //! **The residual, stated rather than implied: this is a claim row, not a
 //! fencing token.** Between a renewal failing and the work observing the
-//! cancelled token, a pass already in flight keeps running, and another
-//! replica may by then hold the claim. The bound on that overlap is one
-//! iteration of whatever the work does between token checks — for
-//! `crate::gear`'s `jira_poller_ticker` that is one `jira_poll_pass`. Closing
-//! it needs a fence the *launch* checks, which means a token on
-//! `RunsLauncher::launch_test`, in another gear. What this elector removes is
-//! the steady-state duplication: two healthy replicas, both polling, forever.
+//! cancelled token, work already in flight keeps running, and another replica
+//! may by then hold the claim. The bound on that overlap is one iteration of
+//! whatever the work does between token checks, and for `crate::gear`'s
+//! `jira_poller_ticker` that is **one tenant's `poll_once`, not a whole
+//! pass**: `jira_poll_pass` tests the token at the top of its per-tenant loop,
+//! so a cancelled term stops at the next tenant boundary rather than at the
+//! next tick. Closing the remainder needs a fence the *launch* checks, which
+//! means a token on `RunsLauncher::launch_test`, in another gear. What this
+//! elector removes is the steady-state duplication: two healthy replicas, both
+//! polling, forever.
 //!
-//! # Why this is a fourth implementation and not a library
+//! `tests::a_stolen_claim_stops_the_term` is what holds that bound to
+//! something demonstrated rather than argued — it is the test that fails if
+//! `ClaimRowElector::end_term` ever stops firing, which would turn this
+//! bounded overlap into an unbounded one with nothing going red.
 //!
-//! `gears/bss/libs/coord` is a shared crate that already does this —
-//! `LeaseManager`, the same DB-clock arithmetic, a renewal task, a guard. It
-//! is not used here because it is a BSS-family library and reaching across
-//! families for it is a bigger decision than this fix owns; the same is true
-//! of `account-management`'s `am_leases`, which `coord` was itself ported
-//! from. Both are named here so that whoever consolidates them can find this
-//! one, exactly as [`super`]'s header names the four copies of
-//! [`LeaderElector`] itself.
+//! # Where this sits among the tree's other leases, counted rather than
+//! # gestured at
+//!
+//! Three numbers, because they are three different sets and conflating them is
+//! how a "fourth copy" note goes stale:
+//!
+//! * **Four copies of the [`LeaderElector`] trait** — qa-runs, chat-engine,
+//!   mini-chat and this gear. [`super`]'s header names them and this file does
+//!   not change that count.
+//! * **Three implementations of it that actually elect** — chat-engine's and
+//!   mini-chat's `K8sLeaseElector` (a Kubernetes `Lease`), and this one. The
+//!   other three impls in the tree are `NoopLeaderElector`s.
+//! * **Three DB-backed leases** — `account-management`'s `am_leases`,
+//!   `gears/bss/libs/coord` (a shared crate: `LeaseManager`, the same DB-clock
+//!   arithmetic, a renewal task, a guard), and this table. This is the first
+//!   that is *both* a DB-backed lease and a `LeaderElector`, which is why
+//!   reusing `coord` outright would still have left an adapter to write.
+//!
+//! `coord` is not used here for a second reason as well: it is a BSS-family
+//! library and reaching across families for it is a bigger decision than this
+//! fix owns. It and `am_leases` are named so that whoever consolidates them can
+//! find this one.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -168,8 +188,30 @@ mod entity {
         pub holder: Uuid,
         /// When the current holder took it. Written by the database's clock;
         /// see this module's header.
+        ///
+        /// # Nothing decodes this field, and a future reader of it breaks on
+        /// # `SQLite` only
+        ///
+        /// The declared type is what `SeaORM` *binds* with, and every write
+        /// here is a `col_expr` — `NOW()` on Postgres, `datetime('now')` on
+        /// `SQLite` — so the value that lands in the column is the database's
+        /// own spelling, never a `time::OffsetDateTime` serialisation. On
+        /// Postgres that is a native `TIMESTAMPTZ` and reads back fine. On
+        /// `SQLite` the column is `TEXT` holding `2026-09-07 12:00:00`, which
+        /// is **not** the RFC-3339 an `OffsetDateTime` decoder expects.
+        ///
+        /// So this is safe exactly as long as it stays true that no statement
+        /// reads the row: [`super::ClaimRowElector`]'s acquire, renew and
+        /// release are all blind conditional writes, and its tests assert
+        /// through those rather than by selecting. **A `find`, a `one()` or a
+        /// `RETURNING` added here would compile, pass on Postgres, and fail on
+        /// the unit tier** — which is the awkward direction, since the unit
+        /// tier is the one that runs on every `cargo test`. Whoever needs to
+        /// read this row should read it as text and parse it, or give the
+        /// column a `String` field.
         pub claimed_at: OffsetDateTime,
-        /// When the claim lapses unless renewed. Also the database's clock.
+        /// When the claim lapses unless renewed. Also the database's clock,
+        /// and [`Self::claimed_at`]'s decode warning applies here unchanged.
         pub expires_at: OffsetDateTime,
     }
 
@@ -606,6 +648,19 @@ impl LeaderElector for ClaimRowElector {
                 Ok(true) => {
                     info!(role, holder = %self.holder, "took the leader claim");
                     let outcome = self.hold_and_run(role, &cancel, &work).await;
+                    // Released **before** the shutdown check below, and that
+                    // order is deliberate: a rolling restart would otherwise
+                    // leave the role unheld for a whole TTL while the departing
+                    // replica returns. The consequence is that between this
+                    // line and the check, the claim is free — so a peer whose
+                    // retry lands in that window wins a term of its own. In
+                    // production that is the correct answer (the role *is*
+                    // free, and this replica is on its way out). In a test
+                    // where the shutdown is what ends the winner's term, it
+                    // means the loser can run a second pass; see
+                    // `domain::service::jira_poller_tests::
+                    // two_concurrent_pollers_produce_one_rerun`'s own note on
+                    // what still holds when it does.
                     self.release(role).await;
                     outcome?;
                     if cancel.is_cancelled() {
@@ -659,7 +714,10 @@ mod tests {
     use toolkit_db::secure::SecureUpdateExt;
     use toolkit_security::AccessScope;
 
-    use super::{CLAIM_TENANT, ClaimColumn, ClaimEntity, ClaimRowElector, Dialect, LeaderElector};
+    use super::{
+        CLAIM_TENANT, ClaimColumn, ClaimEntity, ClaimRowElector, Dialect, LeaderElector,
+        LeaderWorkFn,
+    };
     use crate::domain::service::DbProvider;
     use crate::infra::leader::{ROLE_JIRA_POLLER, work_fn};
     use crate::infra::storage::test_db::inmem_db;
@@ -892,6 +950,113 @@ mod tests {
             1,
             "exactly one of the two electors may run the work"
         );
+    }
+
+    /// **A stolen claim stops the term's work**, which is the property that
+    /// turns this module's stated residual into a bounded one.
+    ///
+    /// Everything else here tests `acquire`, `renew` and `release` — the
+    /// statements. This is the only test that drives
+    /// [`ClaimRowElector::hold_and_run`] and the heartbeat underneath it, and
+    /// it is the behaviour the task actually changed: `run_role` loops *for*
+    /// failover, so the moment a dispossessed holder stops noticing it has
+    /// been dispossessed, two replicas poll side by side forever and nothing
+    /// goes red. The module header's "one tenant's `poll_once`" bound is an
+    /// argument without this test and a demonstrated property with it.
+    ///
+    /// # Why it is deterministic rather than timing-dependent
+    ///
+    /// The steal **retries in a loop** instead of sleeping past a TTL and
+    /// hoping. The holder renews every 50ms against a 200ms claim, so a naive
+    /// "expire it, then take it" would race that heartbeat and hang whenever
+    /// the renewal landed in between; expiring and re-attempting until the
+    /// takeover succeeds cannot lose that race, only repeat it. The outer
+    /// timeout is the failure mode for a regression: a `hold_and_run` that
+    /// never cancels its term would otherwise hang this suite instead of
+    /// failing it.
+    ///
+    /// # What it does not cover
+    ///
+    /// [`ClaimRowElector::after_a_failed_renewal`](super::ClaimRowElector::after_a_failed_renewal)'s
+    /// TTL bound — the arm that
+    /// ends a term after a whole TTL of renewals *erroring* rather than
+    /// answering `false`. Reaching it needs a database that fails on demand,
+    /// which this tier has no seam for; it is argued in that method's own doc
+    /// and unexecuted.
+    #[tokio::test]
+    async fn a_stolen_claim_stops_the_term() {
+        let db = shared_db().await;
+        // A short TTL and a heartbeat well inside it: the holder is healthy
+        // and renewing right up until the claim is taken out from under it,
+        // which is the interesting case. A holder that had simply stopped
+        // renewing would reach the same `Ok(false)` by a less demanding route.
+        let holder = ClaimRowElector::with_timings(
+            Arc::clone(&db),
+            Duration::from_millis(200),
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        );
+        let thief = elector(&db);
+
+        assert!(
+            holder.acquire(ROLE_JIRA_POLLER).await.unwrap(),
+            "the holder must start out holding it"
+        );
+
+        // Work that does nothing but park on its term token, so the *only*
+        // way `hold_and_run` returns is `end_term` cancelling it.
+        let parked = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&parked);
+        let work: LeaderWorkFn = work_fn(move |term| {
+            let observed = Arc::clone(&observed);
+            async move {
+                term.cancelled().await;
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        });
+
+        // Never fired: this test is about losing the claim, not about
+        // shutting down, and the two must not be confusable.
+        let never = CancellationToken::new();
+
+        let steal = async {
+            loop {
+                expire_the_claim(&db, ROLE_JIRA_POLLER).await;
+                if thief.acquire(ROLE_JIRA_POLLER).await.unwrap() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+
+        let term = tokio::time::timeout(
+            Duration::from_secs(10),
+            async { tokio::join!(holder.hold_and_run(ROLE_JIRA_POLLER, &never, &work), steal).0 },
+        )
+        .await
+        .expect(
+            "hold_and_run must return once the claim is stolen; hanging here means the \
+             heartbeat no longer ends the term, and a dispossessed replica would poll \
+             alongside the new holder indefinitely",
+        );
+
+        term.unwrap();
+        assert_eq!(
+            parked.load(Ordering::SeqCst),
+            1,
+            "the term's work must have observed its own token being cancelled"
+        );
+        assert!(
+            !never.is_cancelled(),
+            "and the caller's token must not have been touched: losing a claim is not \
+             a shutdown, and `run_role` has to be able to tell them apart to contend again"
+        );
+        assert!(
+            !holder.renew(ROLE_JIRA_POLLER).await.unwrap(),
+            "the dispossessed holder must not still be able to renew"
+        );
+        assert!(thief.renew(ROLE_JIRA_POLLER).await.unwrap());
     }
 
     /// **The takeover path, on the dialect this gear actually deploys.**

@@ -77,7 +77,27 @@ const JIRA_KEY: &str = "V-1";
 /// timeout, so the interleaving happens every run. The timeout is what lets it
 /// work in the fixed direction too: with an elector, the loser never arrives,
 /// and the winner must not wait forever for it.
+///
+/// # Single-shot, on purpose, and it is one bug's worth of purpose
+///
+/// [`Self::arrived`] is never reset, so a *second* `check_status` anywhere in
+/// the process walks straight through. That is deliberate and it is exactly
+/// sized to the one fixture that uses it:
+/// [`two_pollers_over_one_database`] stages **one** bug and two replicas, so a
+/// complete run is two arrivals and `expected` is 2. It is also the safe
+/// direction to be wrong in — a stale count can only make the rendezvous
+/// *weaker*, never make it park a caller that should have proceeded.
+///
+/// A second bug, or a second pass, would need a generation counter here
+/// (`arrived / expected` as the round, or a `tokio::sync::Barrier` per round).
+/// Adding one now would be untested machinery; this comment is the marker for
+/// whoever needs it.
+///
+/// The 5ms poll rather than a `Notify` is the same trade: a condvar-shaped
+/// rendezvous is the right structure and buys nothing at two parties and one
+/// round, where the poll is four lines with no wake-up ordering to get wrong.
 struct Rendezvous {
+    /// Monotonic — see the type's own doc for why it is never reset.
     arrived: std::sync::atomic::AtomicUsize,
     expected: usize,
     timeout: std::time::Duration,
@@ -892,13 +912,21 @@ async fn two_pollers_over_one_database() -> (crate::infra::storage::test_db::PgH
 
     // Both replicas share one rendezvous, so the pass that gets there first
     // waits for its peer instead of racing ahead to `resolve_bug` — see
-    // [`Rendezvous`] for why the test is a coin flip without it. 500ms is the
-    // fixed case's whole cost: with an elector only one replica ever arrives,
-    // and it waits that out once.
+    // [`Rendezvous`] for why the test is a coin flip without it.
+    //
+    // **The timeout is asymmetric and that is why it is generous.** In the
+    // fixed direction it is pure cost, paid once: only one replica ever
+    // arrives, and it waits the whole thing out. In the broken direction it is
+    // the guard itself — if a loaded machine put more than this between the
+    // two replicas' `open_bugs` reads, the first would time out, proceed to
+    // `resolve_bug`, and the test would go green against the defect. That is
+    // the coin flip this type exists to remove, reintroduced at a longer
+    // timescale. Three seconds against two round trips to a container on
+    // loopback; raising it further costs only the green path's one-time wait.
     let rendezvous = Arc::new(Rendezvous {
         arrived: std::sync::atomic::AtomicUsize::new(0),
         expected: 2,
-        timeout: Duration::from_millis(500),
+        timeout: Duration::from_secs(3),
     });
 
     let a = build_on(
@@ -963,6 +991,21 @@ async fn two_pollers_over_one_database() -> (crate::infra::storage::test_db::PgH
 /// With `NoopLeaderElector` in place of `ClaimRowElector` — the elector the
 /// other two tickers still use — this test reports two launches, which is the
 /// defect finding #5 names.
+///
+/// # The loser may still run a second, empty term, and the assertion survives it
+///
+/// `ClaimRowElector::run_role` releases its claim *before* it checks for
+/// shutdown — deliberately, so a rolling restart does not idle the role for a
+/// whole TTL — which leaves a window in which the loser's 10ms retry can win a
+/// term of its own. That pass finds nothing: the winner's `resolve_bug` has
+/// committed, so `open_bugs` is empty and there is no bug to launch. Worth
+/// saying out loud because it means the *green* direction leans partly on the
+/// resolve write, which is the very thing [`Rendezvous`] neutralises in the
+/// red direction. The asymmetry is fine — a second term that launches nothing
+/// is the correct behaviour for a role that really is free — but a reader
+/// should not take this test as proving the loser never runs at all.
+/// `infra::leader::claim_row::tests::only_the_holder_runs_the_work` is the one
+/// that proves that, on a fixture where nothing else can end the term.
 #[cfg(feature = "integration")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_concurrent_pollers_produce_one_rerun() {
