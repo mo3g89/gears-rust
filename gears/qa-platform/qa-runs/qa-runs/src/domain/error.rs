@@ -370,7 +370,6 @@ impl DomainError {
     /// Task 5: its `what` is a `&'static str` *"because it always names a column
     /// … never caller-controlled text"* — but its `value` is the offending column
     /// contents, which is exactly what must not travel.
-    #[must_use]
     pub(crate) const fn disclosable(&self) -> bool {
         match self {
             // The caller's own request, or their own row's state. Every one of
@@ -427,7 +426,6 @@ impl DomainError {
     ///
     /// The **error returned to the caller is never affected** — services return
     /// the original value; this is only what gets written down.
-    #[must_use]
     pub(crate) fn recorded_text(&self) -> String {
         if self.disclosable() {
             self.to_string()

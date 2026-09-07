@@ -64,10 +64,13 @@ mod plugin_registry;
 mod products;
 mod repos;
 mod ssh_keys;
-// Public (unlike its siblings): the multi-branch integration suite in
-// `tests/multi_branch.rs` drives the real engine through the same two-tier
-// locks the service uses.
-pub mod sync_cache;
+// Private, like its siblings. It was `pub mod` so that
+// `tests/multi_branch.rs` could name `domain::service::sync_cache`; review
+// finding #38 made `domain` itself `pub(crate)`, so that path stopped working
+// and the test now reaches the type through `qa_catalog::SyncCache` (see
+// `lib.rs`). Nothing outside this module names the module any more -- only the
+// `pub use` below.
+mod sync_cache;
 mod validation;
 
 pub use bundles::BundlesService;

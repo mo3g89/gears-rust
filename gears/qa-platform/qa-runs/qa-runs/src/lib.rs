@@ -34,15 +34,27 @@ pub use gear::QaRuns;
 // `domain::repos` and `infra::logs`.
 //
 // None of that is a visibility question. Each item is a decision — delete it
-// and the tests that cover it, or wire the feature — and an
-// `#[allow(dead_code)]` over a subsystem would trade a real signal for a green
-// build. Making the modules private also turns every `pub(crate)` item inside
-// them into a `clippy::redundant_pub_crate` error (103 sites here), which
-// is denied repo-wide; that part is mechanical, the dead code is not.
+// and the tests that cover it, or wire the feature.
+//
+// **Two ways of not making that decision were weighed and rejected.** The
+// blunt one is an `#[allow(dead_code)]` over a whole subsystem: it trades a
+// real signal for a green build, and it goes on hiding the next dead thing to
+// land there. The sharp one is per-item `#[expect(dead_code, reason = "…")]`,
+// which is already how this repo records a deliberately-unused item
+// (`infra::storage::entity::mod`, `api::rest::dto`) and which keeps the
+// signal, because `expect` starts warning the moment the item stops being
+// dead. It was rejected here for one reason only: it is not a way to *defer*
+// the decision. A `reason` written on each of these items records an
+// adjudication nobody has made, and reads to the next reader as though one
+// had. Where the follow-up's answer turns out to be "keep, deliberately
+// unused", `#[expect(dead_code, reason = "…")]` is exactly what should land —
+// it is that task's likely output, not a substitute for doing it.
+//
+// Making the modules private also turns every `pub(crate)` item inside them
+// into a `clippy::redundant_pub_crate` error (103 sites here), which is denied
+// repo-wide; that part is mechanical, the dead code is not.
 //
 // Left as its own task, with the count above as the size estimate.
-/// The in-process executor `tests/mock_executor_control_surface.rs` drives.
-pub use infra::executor::mock::MockRunExecutor;
 
 /// Every identifier this crate's prose cites must exist. Crate-wide rather than
 /// per-module, because the defect it guards has landed in several unrelated
