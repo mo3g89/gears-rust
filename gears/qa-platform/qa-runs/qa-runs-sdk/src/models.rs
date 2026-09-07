@@ -334,17 +334,22 @@ pub struct Run {
     /// line cannot answer once the log has rotated.
     ///
     /// **Named `resolved_exclusive`, not `exclusive`.** This is the *resolved*
-    /// decision, while [`LaunchRequest::exclusive`] is an `Option<bool>`
-    /// tri-state request. Under the short name the obvious re-run
-    /// transcription `exclusive: Some(run.exclusive)` type-checked and was
-    /// **wrong**: it pins a stored `false` onto the launch tier, which
-    /// outranks everything and suppresses a `TEST_META`/`plan.yaml`
+    /// decision, while [`LaunchRequest::exclusive`] is a closed three-state
+    /// [`Exclusivity`] tri-state request. Under the short name the obvious
+    /// re-run transcription — `exclusive: if run.exclusive { Exclusivity::Exclusive }
+    /// else { Exclusivity::Shared }` — type-checked and was **wrong**: it
+    /// pins a stored `false` onto the launch tier as `Exclusivity::Shared`,
+    /// which outranks everything and suppresses a `TEST_META`/`plan.yaml`
     /// declaration added since — relaunching a since-marked-destructive test
     /// in parallel on a shared platform. Legacy had no type barrier either and
     /// guarded it with the same prose comment three times
     /// (`manager/src/routes/runs.rs:958-967`, `:1008-1018`, `:1071-1081`); the
     /// distinct name is this port's structural replacement for it. The correct
-    /// transcription is `run.resolved_exclusive.then_some(true)`.
+    /// transcription is `if run.resolved_exclusive { Exclusivity::Exclusive }
+    /// else { Exclusivity::Inherit }` — **never** `Exclusivity::Shared`, so a
+    /// since-marked-destructive test is re-resolved rather than replayed
+    /// parallel (`domain::service::runs::replay` is where this is done; see
+    /// `replay_inherits_exclusivity_upward_only`).
     /// `DESIGN.md:582` already names the column `resolved_exclusive` — the SDK
     /// field was the outlier. [`QueueEntry::exclusive`] keeps the short name:
     /// DESIGN's `run_queue` column list spells it that way, and it is a

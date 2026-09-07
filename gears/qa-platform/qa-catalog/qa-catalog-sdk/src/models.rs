@@ -91,8 +91,9 @@ pub struct TestRepositoryUpdate {
 /// `api::rest::dto::LaunchRunReq` (both directions) are the three boundaries
 /// today. `plan_dto_preserves_exclusive_tri_state` and
 /// `an_absent_exclusive_stays_inherit_rather_than_becoming_parallel` (plus
-/// their wire-form siblings) are what fails if a fourth boundary is added
-/// without calling through this seam.
+/// their wire-form siblings) are what pin those three boundaries; nothing
+/// detects a *fourth* boundary being added without calling through this
+/// seam; a new one needs its own named test, the same way these were.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Exclusivity {
     /// Nothing declared at this tier; ask the tier below.

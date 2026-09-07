@@ -1838,13 +1838,17 @@ mod tests {
         assert_eq!(request.exclusive, sdk::Exclusivity::Inherit);
     }
 
-    /// The wire boundary for `LaunchRequest::exclusive`: `sdk::Exclusivity`
-    /// carries no serde impl of its own — this crate's contract-purity rule
-    /// is exactly what makes that type's doc name this DTO as one of the
-    /// boundaries the guarantee is pinned at, by test, rather than by the
-    /// type. `LaunchRunReq::exclusive` stays a plain `Option<bool>` and
-    /// `into_domain`'s `Exclusivity::from_option_bool` call is what actually
-    /// reads `null`/absent/`true`/`false` off the wire.
+    /// The inbound wire boundary for `LaunchRequest::exclusive`:
+    /// `sdk::Exclusivity` carries no serde impl of its own — this crate's
+    /// contract-purity rule is exactly what makes that type's doc name this
+    /// DTO as one of the boundaries the guarantee is pinned at, by test,
+    /// rather than by the type. `LaunchRunReq::exclusive` stays a plain
+    /// `Option<bool>` and `into_domain`'s `Exclusivity::from_option_bool`
+    /// call is what actually reads `null`/absent/`true`/`false` off the wire.
+    ///
+    /// **Inbound only, and deliberately so.** `LaunchRunReq` is a request DTO
+    /// (`#[api_dto(request)]`) — no HTTP client here ever serializes a
+    /// `LaunchRequest` back out, so there is no outbound direction to cover.
     ///
     /// Driven from JSON literals, not struct literals, so this pins the wire
     /// shape and not a proxy for it (the same reason
@@ -1854,7 +1858,7 @@ mod tests {
     /// — this module's header explains why `serde_with`'s absence makes that
     /// automatic rather than incidental for this one field.
     #[test]
-    fn the_exclusive_tri_state_survives_the_wire_in_both_directions() {
+    fn the_exclusive_tri_state_survives_every_inbound_wire_shape() {
         fn body_with(exclusive: Option<serde_json::Value>) -> serde_json::Value {
             let mut body = serde_json::json!({
                 "target": {
