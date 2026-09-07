@@ -28,12 +28,18 @@
 //! The aggregate this gear manages is called `Environment` in Rust, on the
 //! REST wire, in the routes and in the UI. The PDP resource string and the
 //! GTS type ids both kept `platform` — `domain::service::resources::PLATFORM`'s
-//! own doc (`domain/service/mod.rs:107-116`) records why: the string is what
-//! deployment policies are written against, and changing it would silently
-//! change who is authorized for what. This catalog follows the PDP string,
-//! because that is what a role grant actually matches against — a catalog
-//! generated from the aggregate's Rust name would emit `qa.environment`,
-//! match no policy, grant nothing, and look entirely correct while doing it.
+//! own doc records why: the string is what deployment policies are written
+//! against, and changing it would silently change who is authorized for what.
+//! That doc is **named rather than line-cited**. As a `:N` range the citation
+//! was wrong twice: it was copied stale from the spec, and the correction then
+//! drifted three lines the same day. `file_citations_tests.rs` validates file
+//! existence only - never a line number - so nothing here would have caught
+//! either.
+//!
+//! This catalog follows the PDP string, because that is what a role grant
+//! actually matches against — a catalog generated from the aggregate's Rust
+//! name would emit `qa.environment`, match no policy, grant nothing, and look
+//! entirely correct while doing it.
 //! `permissions_tests::the_catalog_names_qa_platform_not_qa_environment` pins
 //! both halves.
 //!

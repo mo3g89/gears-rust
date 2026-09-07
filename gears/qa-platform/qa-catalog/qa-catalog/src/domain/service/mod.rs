@@ -131,9 +131,11 @@ pub type DbProvider = DBProvider<DomainError>;
 /// Each descriptor is built from a sibling `*_NAME` `&str` const rather than
 /// from an inline literal, so the PDP resource string has one declaration and
 /// two consumers: the descriptor the PEP is called with, and
-/// [`authz_surface::ENFORCED`]. qa-insights' `resources::TEST_RESULT_NAME`
-/// (`qa-insights/src/domain/service/mod.rs:208-216`) is the precedent and carries
-/// the reason the descriptor cannot supply the string itself.
+/// [`authz_surface::ENFORCED`]. qa-insights' `resources::TEST_RESULT_NAME` -
+/// its own doc, in that gear's `domain/service/mod.rs` - is the precedent and
+/// carries the reason the descriptor cannot supply the string itself. Cited by
+/// name rather than by line: nothing validates a `:N` in this repository, and
+/// this citation had already drifted twice as a line range.
 pub mod resources {
     use super::ResourceType;
     use toolkit_security::pep_properties;

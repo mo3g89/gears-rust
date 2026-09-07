@@ -423,9 +423,17 @@ fn one_value(values: Option<&BTreeSet<String>>, what: &str, site: &str) -> Strin
 /// This is what the `*_NAME` consts beside each descriptor are for: the string
 /// has one declaration and two consumers — the descriptor the enforcer is
 /// called with, and [`super::ENFORCED`] — so this scan reads the very literal
-/// the `PDP` was handed. `resources::TEST_RESULT_NAME` in
-/// `qa-insights/src/domain/service/mod.rs:208-216` records why the descriptor
-/// cannot supply it itself.
+/// the `PDP` was handed. `resources::TEST_RESULT_NAME`'s own doc, in
+/// `qa-insights`' `domain/service/mod.rs`, records why the descriptor cannot
+/// supply it itself.
+///
+/// That citation names the **item, not a line**, deliberately. As a `:N` range
+/// it drifted twice inside this one phase - once when four lines went in above
+/// the target, and again when the fix wave's own `resources_tests` module
+/// declaration went in three lines above it - and `file_citations_tests.rs`'
+/// header says outright that line numbers are never validated, so no gate in
+/// this repository will catch the next drift either. An identifier does not go
+/// stale, and a reader greps for it faster than counting lines.
 fn resource_strings(
     files: &[Source],
     strings: &BTreeMap<String, BTreeSet<String>>,
