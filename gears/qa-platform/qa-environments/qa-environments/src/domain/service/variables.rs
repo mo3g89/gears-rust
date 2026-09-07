@@ -10,6 +10,7 @@ use authz_resolver_sdk::PolicyEnforcer;
 
 use super::{actions, resources};
 use qa_environments_sdk::{NewVariable, RESERVED_VARIABLE_NAMES, Variable};
+use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -49,15 +50,51 @@ impl<V: VariablesRepository, P: EnvironmentsRepository> VariablesService<V, P> {
 
 // Business logic methods
 impl<V: VariablesRepository, P: EnvironmentsRepository> VariablesService<V, P> {
-    /// List all pipeline (global) variables, plus environment variables when
-    /// `environment_id` is given. Both variable reads share the same VARIABLE
-    /// PEP scope; the environment existence precheck uses its own PLATFORM scope.
-    #[instrument(skip(self, ctx))]
+    /// One page of the pipeline (global) variables, plus an environment's
+    /// variables when `environment_id` is given. Both variable reads share the
+    /// same VARIABLE PEP scope; the environment existence precheck uses its own
+    /// PLATFORM scope.
+    ///
+    /// # The scope is resolved before the filter
+    ///
+    /// As in [`EnvironmentsService::list_environments`](super::EnvironmentsService::list_environments):
+    /// the `AccessScope` comes from the PDP here and the repository composes the
+    /// caller's `OData` query on top of it. A `$filter` narrows; it cannot widen.
+    ///
+    /// # What is paged, and what is bounded-but-not-cursored
+    ///
+    /// **This response is the union of two tables**, and that decides the
+    /// paging contract, which is not uniform across the two cases:
+    ///
+    /// * **`environment_id` absent** — one table (`qa_pipeline_variables`), so
+    ///   the page is an ordinary cursor page: `next_cursor` is real and
+    ///   resuming from it walks the whole collection.
+    /// * **`environment_id` present** — two tables. `toolkit-db`'s pager is a
+    ///   single-entity pager: its cursor encodes the sort-key values of one
+    ///   table's last row, and there is no room in `CursorV1` for a segment
+    ///   discriminator, so a cursor handed back for the second table would be
+    ///   re-applied to the first on the follow-up request and either duplicate
+    ///   or skip rows. Hand-rolling a cross-table cursor is exactly the class of
+    ///   code the toolkit's pager exists to remove. So in this case the two
+    ///   halves are **bounded** — pipeline first, up to the clamped limit, then
+    ///   the environment's own rows filling whatever remains — and
+    ///   `next_cursor` is `None`. Callers narrow with `$filter` (or with
+    ///   `environment_id` itself) rather than paging.
+    ///
+    /// Bounding pipeline-first preserves the precedence the previous
+    /// `vars.truncate(max_variables)` had and documented: a full page drops
+    /// environment-specific variables before it ever drops a pipeline one.
+    ///
+    /// Review finding #55: before this, both halves were
+    /// `find().secure().scope_with(scope).all()` with no limit, and the only
+    /// bound was that silent `truncate`.
+    #[instrument(skip(self, ctx, query))]
     pub async fn list_for_env(
         &self,
         ctx: &SecurityContext,
         environment_id: Option<Uuid>,
-    ) -> Result<Vec<Variable>, DomainError> {
+        query: &ODataQuery,
+    ) -> Result<Page<Variable>, DomainError> {
         debug!("Listing variables for environment");
 
         let scope = self
@@ -67,7 +104,7 @@ impl<V: VariablesRepository, P: EnvironmentsRepository> VariablesService<V, P> {
 
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        let mut vars = self.repo.list_pipeline(&conn, &scope).await?;
+        let mut page = self.repo.list_pipeline_page(&conn, &scope, query).await?;
 
         if let Some(environment_id) = environment_id {
             // Tenancy precheck: the environment must exist within the caller's
@@ -88,22 +125,61 @@ impl<V: VariablesRepository, P: EnvironmentsRepository> VariablesService<V, P> {
                 .await?
                 .ok_or(DomainError::EnvironmentNotFound { id: environment_id })?;
 
-            let environment_vars = self
-                .repo
-                .list_for_environment(&conn, &scope, environment_id)
-                .await?;
-            vars.extend(environment_vars);
+            // Whatever the first half left of the page. `page_info.limit` is
+            // the *clamped* limit `paginate_odata` actually applied, so the
+            // arithmetic follows `$top` and `PAGE_LIMITS` without this method
+            // re-deriving either.
+            let remaining = page
+                .page_info
+                .limit
+                .saturating_sub(page.items.len() as u64);
+
+            // A pipeline half that already filled the page leaves no room, and
+            // asking for `$top=0` would be clamped back up to 1 by
+            // `clamp_limit` -- so the read is skipped rather than issued.
+            if remaining > 0 {
+                let environment_page = self
+                    .repo
+                    .list_for_environment_page(
+                        &conn,
+                        &scope,
+                        environment_id,
+                        &query.clone().with_limit(remaining),
+                    )
+                    .await?;
+                page.items.extend(environment_page.items);
+            }
+
+            // See this method's header: a union cannot carry a single-table
+            // cursor. Cleared rather than left as the pipeline half's, which
+            // would resume the pipeline table and silently re-serve rows the
+            // caller has already had.
+            page.page_info.next_cursor = None;
+            page.page_info.prev_cursor = None;
         }
 
-        // Cap the merged result at `max_variables`. Pipeline (global)
-        // variables are appended first and environment variables second, so
-        // truncating here always drops environment-specific variables before
-        // ever dropping a pipeline variable when the combined set exceeds
-        // the configured limit.
-        vars.truncate(self.max_variables);
+        // The configured `max_variables` (default 500) still applies on top of
+        // the page limit, because it is a *deployment* setting rather than a
+        // request one and may be set lower than a page. Same precedence as
+        // before: pipeline variables are first in `items`, so a truncation here
+        // drops environment-specific variables before it ever drops a pipeline
+        // variable.
+        //
+        // **And when it bites, the cursor goes with it.** `paginate_odata` built
+        // that cursor from the *untruncated* page's last row, so leaving it
+        // would hand the caller a resume point past rows this method just
+        // dropped -- silently skipping them, which is worse than the truncation
+        // itself. A deployment cap is not a page boundary: it is the operator
+        // saying no caller sees more than N variables, and there is nothing
+        // beyond it to resume to.
+        if page.items.len() > self.max_variables {
+            page.items.truncate(self.max_variables);
+            page.page_info.next_cursor = None;
+            page.page_info.prev_cursor = None;
+        }
 
-        debug!("Successfully listed {} variables", vars.len());
-        Ok(vars)
+        debug!("Successfully listed {} variables", page.items.len());
+        Ok(page)
     }
 
     /// Insert or update a variable. `var.environment_id == None` targets the

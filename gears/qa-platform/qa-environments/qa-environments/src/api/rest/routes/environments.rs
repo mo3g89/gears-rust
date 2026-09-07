@@ -2,10 +2,11 @@ use http::StatusCode;
 
 use axum::Router;
 use toolkit::api::OpenApiRegistry;
-use toolkit::api::operation_builder::OperationBuilder;
+use toolkit::api::operation_builder::{OperationBuilder, OperationBuilderODataExt};
 
 use super::License;
 use crate::api::rest::{dto, handlers};
+use crate::infra::storage::odata::EnvironmentFilterField;
 
 const API_TAG: &str = "QA Environments";
 
@@ -13,20 +14,36 @@ pub(super) fn register_environment_routes(
     mut router: Router,
     openapi: &dyn OpenApiRegistry,
 ) -> Router {
-    // GET /qa/v1/environments - List target environments
+    // GET /qa/v1/environments - one page of the target environments
     router = OperationBuilder::get("/qa/v1/environments")
         .operation_id("qa_environments.list_environments")
         .summary("List target environments")
-        .description("Retrieve all target environments visible to the caller")
+        .description(
+            "One page of the target environments visible to the caller, by name. Supports \
+             OData $filter, $orderby and cursor pagination; the page size defaults to 200 \
+             and is clamped to 500.",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
         .handler(handlers::list_environments)
-        .json_array_response_with_schema::<dto::EnvironmentDto>(
+        // `Page<EnvironmentDto>`, not `Vec<EnvironmentDto>`: every `Vec<_>`
+        // collapses onto one OpenAPI component name and aborts registration.
+        // `Page<T>` carries a hand-written schema impl that registers `T`
+        // alongside it.
+        .json_response_with_schema::<toolkit_odata::Page<dto::EnvironmentDto>>(
             openapi,
             StatusCode::OK,
-            "List of target environments",
+            "One page of target environments",
         )
+        // The same `EnvironmentFilterField` the repository translates with.
+        // Passing one type to both is what stops the advertised fields and the
+        // SQL-translatable fields drifting apart.
+        .with_odata_filter::<EnvironmentFilterField>()
+        .with_odata_orderby::<EnvironmentFilterField>()
+        // 400 is reachable here and is the caller's: a `$filter` naming a field
+        // outside the allow-list, or a cursor from a different sort order.
+        .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
         .error_500(openapi)

@@ -28,6 +28,7 @@ use qa_product_sdk::observation::{
     FailureClass, HealthOutcome, HealthState, ObservationOutcome, ObservedAttrs, PluginFailure,
     PluginObservation,
 };
+use toolkit_odata::ODataQuery;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
@@ -910,9 +911,10 @@ async fn a_create_that_stores_no_required_secret_is_refused() {
         assert!(
             services
                 .environments
-                .list_environments(&ctx(Uuid::new_v4()))
+                .list_environments(&ctx(Uuid::new_v4()), &ODataQuery::default())
                 .await
                 .unwrap()
+                    .items
                 .is_empty(),
             "{label}: no environment may have been created"
         );

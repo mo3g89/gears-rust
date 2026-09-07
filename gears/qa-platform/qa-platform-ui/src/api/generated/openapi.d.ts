@@ -730,7 +730,7 @@ export interface paths {
         };
         /**
          * List target environments
-         * @description Retrieve all target environments visible to the caller
+         * @description One page of the target environments visible to the caller, by name. Supports OData $filter, $orderby and cursor pagination; the page size defaults to 200 and is clamped to 500.
          */
         get: operations["qa_environments.list_environments"];
         put?: never;
@@ -1454,7 +1454,7 @@ export interface paths {
         };
         /**
          * List environment variables
-         * @description List global pipeline variables, plus an environment's variables when `environment_id` is given
+         * @description One page of the global pipeline variables, plus an environment's variables when `environment_id` is given. Supports OData $filter and $orderby; the page size defaults to 200 and is clamped to 500. Cursor pagination applies only when `environment_id` is absent -- with it the response is the union of two tables, which a single-table cursor cannot address, so the page is bounded (pipeline variables first) and `next_cursor` is null. Narrow with $filter.
          */
         get: operations["qa_environments.list_variables"];
         /**
@@ -3747,6 +3747,10 @@ export interface components {
             next_cursor?: string | null;
             prev_cursor?: string | null;
         };
+        Page_EnvironmentDto: {
+            items: components["schemas"]["EnvironmentDto"][];
+            page_info: components["schemas"]["PageInfo"];
+        };
         Page_GroupDto: {
             items: components["schemas"]["GroupDto"][];
             page_info: components["schemas"]["PageInfo"];
@@ -3773,6 +3777,10 @@ export interface components {
         };
         Page_TestResultDto: {
             items: components["schemas"]["TestResultDto"][];
+            page_info: components["schemas"]["PageInfo"];
+        };
+        Page_VariableDto: {
+            items: components["schemas"]["VariableDto"][];
             page_info: components["schemas"]["PageInfo"];
         };
         Page_TypeDto: {
@@ -8980,20 +8988,56 @@ export interface operations {
     };
     "qa_environments.list_environments": {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description OData v4 filter expression
+                 *     - id: eq|ne|in
+                 *     - name: eq|ne|contains|startswith|endswith|in
+                 *     - product_id: eq|ne|in
+                 *     - is_default: eq|ne
+                 *     - observed_version: eq|ne|contains|startswith|endswith|in
+                 *     - created_at: eq|ne|gt|ge|lt|le|in
+                 */
+                $filter?: string;
+                /**
+                 * @description OData v4 orderby expression
+                 *     - id asc
+                 *     - id desc
+                 *     - name asc
+                 *     - name desc
+                 *     - product_id asc
+                 *     - product_id desc
+                 *     - is_default asc
+                 *     - is_default desc
+                 *     - observed_version asc
+                 *     - observed_version desc
+                 *     - created_at asc
+                 *     - created_at desc
+                 */
+                $orderby?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description List of target environments */
+            /** @description One page of target environments */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["EnvironmentDto"][];
+                    "application/json": components["schemas"]["Page_EnvironmentDto"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Unauthorized */
@@ -12150,6 +12194,23 @@ export interface operations {
             query?: {
                 /** @description Optional environment UUID to also include that environment's variables */
                 environment_id?: string;
+                /**
+                 * @description OData v4 filter expression
+                 *     - id: eq|ne|in
+                 *     - name: eq|ne|contains|startswith|endswith|in
+                 *     - created_at: eq|ne|gt|ge|lt|le|in
+                 */
+                $filter?: string;
+                /**
+                 * @description OData v4 orderby expression
+                 *     - id asc
+                 *     - id desc
+                 *     - name asc
+                 *     - name desc
+                 *     - created_at asc
+                 *     - created_at desc
+                 */
+                $orderby?: string;
             };
             header?: never;
             path?: never;
@@ -12157,13 +12218,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description List of variables */
+            /** @description One page of variables */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["VariableDto"][];
+                    "application/json": components["schemas"]["Page_VariableDto"];
                 };
             };
             /** @description Bad Request */

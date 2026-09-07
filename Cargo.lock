@@ -9146,6 +9146,7 @@ dependencies = [
  "cf-gears-toolkit-db",
  "cf-gears-toolkit-db-macros",
  "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-odata",
  "cf-gears-toolkit-security",
  "http",
  "hyper-util",

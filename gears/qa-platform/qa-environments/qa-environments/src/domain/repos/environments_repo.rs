@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use qa_environments_sdk::{Environment, EnvironmentCredential, EnvironmentPatch, NewEnvironment};
 use toolkit_db::secure::DBRunner;
+use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -91,12 +92,29 @@ pub trait EnvironmentsRepository: Send + Sync {
         id: Uuid,
     ) -> Result<Option<Environment>, DomainError>;
 
-    /// List all environments visible within the given security scope.
-    async fn list<C: DBRunner>(
+    /// One page of the environments visible within `scope`, ordered by name,
+    /// with the caller's `OData` `$filter`/`$orderby`/`$top`/cursor applied on
+    /// top of the scope.
+    ///
+    /// **This replaced an unbounded `find().secure().scope_with(scope).all()`**
+    /// — review finding #55. `cpt-cf-qa-nfr-scale`'s first number is *100
+    /// platforms*, and this is the collection that number is about, so this
+    /// gear ignoring the bound while two sibling gears enforced it was the
+    /// exact inversion the finding names.
+    ///
+    /// The `scope` is applied **before** the filter and cannot be widened by
+    /// one: `paginate_odata`'s first parameter is
+    /// `SecureSelect<E, Scoped>`, so an unscoped select does not type-check,
+    /// and the caller's `$filter` is `AND`ed onto the tenant predicate rather
+    /// than substituted for it. A `$filter` naming a field outside
+    /// [`EnvironmentFilterField`](crate::infra::storage::odata::EnvironmentFilterField)
+    /// is a [`DomainError::Validation`] (HTTP 400), not a scan.
+    async fn list_page<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
-    ) -> Result<Vec<Environment>, DomainError>;
+        query: &ODataQuery,
+    ) -> Result<Page<Environment>, DomainError>;
 
     /// Every environment visible within `scope`, paired with the tenant that
     /// owns it. The sole caller is the background observation ticker's

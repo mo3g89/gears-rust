@@ -31,6 +31,8 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { queryClient as sharedQueryClient } from '@/api/queryClient';
+
 
 vi.mock('@/api/client', () => ({
   apiGet: vi.fn(),
@@ -92,7 +94,8 @@ function environmentDto(overrides: Record<string, unknown> = {}) {
 function mockApiFor(dto: unknown) {
   mockedApiGet.mockImplementation(async (path: string) => {
     if (path === '/environments') {
-      return [dto] as never;
+      // `GET /qa/v1/environments` is a page since review finding #55.
+      return { items: [dto], page_info: { limit: 200, next_cursor: null, prev_cursor: null } } as never;
     }
     if (path.startsWith(`/environments/${ENVIRONMENT_ID}`)) {
       return dto as never;
@@ -195,6 +198,12 @@ function renderPageViaOldPlatformsRoute() {
 }
 
 beforeEach(() => {
+  // `fetchEnvironmentDtos` caches the environment name index in the app's SHARED
+  // query client (`api/queryClient.ts`) rather than in this file's per-test one,
+  // because it is a plain function with no provider to read a client from. That
+  // cache outlives a test, so it is cleared here -- without this, one test's
+  // environments answer the next test's lookup.
+  sharedQueryClient.clear();
   mockedApiGet.mockReset();
   mockedApiPost.mockReset();
   toastSuccess.mockReset();

@@ -6,21 +6,28 @@ use axum::http::Uri;
 use uuid::Uuid;
 
 use toolkit::api::canonical_prelude::*;
+use toolkit::api::odata::OData;
 use toolkit_security::SecurityContext;
 
 use crate::api::rest::dto::{CreateEnvironmentReq, EnvironmentDto, LeaseDto, UpdateEnvironmentReq};
 use crate::gear::ConcreteAppServices;
 
-/// List all target environments visible to the caller.
-#[tracing::instrument(skip(svc, ctx))]
+/// `GET /qa/v1/environments`
+///
+/// One page of the target environments visible to the caller, by name.
+///
+/// The `OData` query is handed to the service untouched; the service resolves
+/// the caller's `AccessScope` from the policy enforcer **first** and the
+/// repository composes the two. A `$filter` cannot widen what this returns.
+/// (Same shape and same reason as `qa-runs`' `list_runs`.)
+#[tracing::instrument(skip(svc, ctx, query))]
 pub async fn list_environments(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteAppServices>>,
-) -> ApiResult<Json<Vec<EnvironmentDto>>> {
-    let environments = svc.environments.list_environments(&ctx).await?;
-    Ok(Json(
-        environments.into_iter().map(EnvironmentDto::from).collect(),
-    ))
+    OData(query): OData,
+) -> ApiResult<JsonPage<EnvironmentDto>> {
+    let page = svc.environments.list_environments(&ctx, &query).await?;
+    Ok(Json(page.map_items(EnvironmentDto::from)))
 }
 
 /// Get a single target environment by ID.

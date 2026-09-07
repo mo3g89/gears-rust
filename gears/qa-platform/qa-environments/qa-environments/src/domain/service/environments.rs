@@ -84,6 +84,7 @@ use qa_environments_sdk::{
     CredentialMaterial, Environment, EnvironmentPatch, LeaseState, NewEnvironment,
 };
 use std::collections::BTreeMap;
+use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -250,11 +251,26 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             .ok_or(DomainError::EnvironmentNotFound { id })
     }
 
-    #[instrument(skip(self, ctx))]
+    /// One page of the environments the caller may list, ordered by name.
+    ///
+    /// # The scope is resolved before the filter, and that ordering is the point
+    ///
+    /// The `AccessScope` is compiled from the PDP's decision *here*, and the
+    /// repository composes the caller's `OData` query on top of it — never
+    /// instead of it. So a `$filter` can only ever narrow what this returns; it
+    /// cannot widen it, and the type system enforces that rather than this
+    /// comment (`EnvironmentsRepository::list_page` takes an already-scoped
+    /// select). Same ordering, same reason, as `qa-runs`' `RunsService::list`.
+    ///
+    /// **This used to be an unbounded read** — review finding #55, and
+    /// `cpt-cf-qa-nfr-scale`'s first number (*100 platforms*) is about exactly
+    /// this collection.
+    #[instrument(skip(self, ctx, query))]
     pub async fn list_environments(
         &self,
         ctx: &SecurityContext,
-    ) -> Result<Vec<Environment>, DomainError> {
+        query: &ODataQuery,
+    ) -> Result<Page<Environment>, DomainError> {
         debug!("Listing environments");
 
         let scope = self
@@ -264,10 +280,10 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
 
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        let environments = self.repo.list(&conn, &scope).await?;
+        let page = self.repo.list_page(&conn, &scope, query).await?;
 
-        debug!("Successfully listed {} environments", environments.len());
-        Ok(environments)
+        debug!("Successfully listed {} environments", page.items.len());
+        Ok(page)
     }
 
     /// Register an environment from either a credstore reference the caller holds

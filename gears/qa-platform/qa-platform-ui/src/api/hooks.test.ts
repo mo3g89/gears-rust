@@ -29,7 +29,8 @@ vi.mock('./client', () => ({
 }));
 
 import { apiGet } from './client';
-import { useAnalyticsOverview, useAnalyticsBuildTests } from './hooks';
+import { queryClient as sharedQueryClient } from './queryClient';
+import { queryKeys, useAnalyticsOverview, useAnalyticsBuildTests, useEnvironmentDetails } from './hooks';
 import type { AnalyticsOverviewQuery, AnalyticsBuildTestsQuery } from './types';
 
 const mockedApiGet = vi.mocked(apiGet);
@@ -70,6 +71,11 @@ const FULL_BUILD_TESTS_QUERY: AnalyticsBuildTestsQuery = {
 };
 
 beforeEach(() => {
+  // `fetchEnvironmentDtos` caches in the app's SHARED client (it is not a hook
+  // and has no provider to read one from), so unlike `makeWrapper`'s per-test
+  // client that cache outlives a test. Cleared here so one test's environments
+  // cannot answer the next one's request.
+  sharedQueryClient.clear();
   mockedApiGet.mockReset();
   // `useAnalyticsOverview`'s adapter wants an object it can pick fields off of;
   // `useAnalyticsBuildTests`'s calls `.map` straight on the response, so it needs an
@@ -151,5 +157,72 @@ describe('useAnalyticsBuildTests', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
     expect(mockedApiGet).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('fetchEnvironmentDtos (the environment name index)', () => {
+  /** `GET /qa/v1/environments` as it answers since review finding #55: a page. */
+  const ENVIRONMENTS_PAGE = {
+    items: [
+      { id: 'env-uuid-1', name: 'alpha' },
+      { id: 'env-uuid-2', name: 'beta' },
+    ],
+    page_info: { limit: 200, next_cursor: null, prev_cursor: null },
+  };
+
+  function mockEnvironments() {
+    mockedApiGet.mockImplementation(async (path: string) =>
+      path === '/environments' ? (ENVIRONMENTS_PAGE as never) : ({ id: 'env-uuid-1', name: 'alpha' } as never)
+    );
+  }
+
+  /** How many times `/environments` itself was requested. */
+  function environmentListCalls() {
+    return mockedApiGet.mock.calls.filter(([path]) => path === '/environments').length;
+  }
+
+  it('reads the page shape rather than a bare array, so a name still resolves to an id', async () => {
+    mockEnvironments();
+    const { result } = renderHook(() => useEnvironmentDetails('alpha'), { wrapper: makeWrapper() });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(mockedApiGet.mock.calls.map(([path]) => path)).toContain('/environments/env-uuid-1');
+  });
+
+  it('does not repeat the fetch within the stale window -- the regression finding #55 measured', async () => {
+    // `useRun(name, 5000)` reaches this through `fetchRunDetails` every 5 s per
+    // open Run Detail page, and `useDashboard` every 15 s. Two consumers here
+    // stand in for two polls: before the cache, each was its own request for the
+    // whole fleet's state.
+    mockEnvironments();
+
+    const first = renderHook(() => useEnvironmentDetails('alpha'), { wrapper: makeWrapper() });
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true));
+
+    const second = renderHook(() => useEnvironmentDetails('beta'), { wrapper: makeWrapper() });
+    await waitFor(() => expect(second.result.current.isSuccess).toBe(true));
+
+    expect(environmentListCalls()).toBe(1);
+  });
+
+  it('does fetch again once an environment mutation has invalidated it', async () => {
+    // Every environment mutation calls
+    // `invalidateQueries({ queryKey: queryKeys.environments })`, and
+    // `queryKeys.environmentDtos` is a child of that key, so the prefix match
+    // drops this cache too. That is what keeps a rename or a create from being
+    // hidden behind the staleTime -- assert the prefix key, not the exact one.
+    mockEnvironments();
+
+    const first = renderHook(() => useEnvironmentDetails('alpha'), { wrapper: makeWrapper() });
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true));
+    expect(environmentListCalls()).toBe(1);
+
+    await sharedQueryClient.invalidateQueries({ queryKey: queryKeys.environments });
+
+    const second = renderHook(() => useEnvironmentDetails('beta'), { wrapper: makeWrapper() });
+    await waitFor(() => expect(second.result.current.isSuccess).toBe(true));
+
+    expect(environmentListCalls()).toBe(2);
   });
 });
