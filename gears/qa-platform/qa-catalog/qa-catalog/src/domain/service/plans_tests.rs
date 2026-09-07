@@ -126,15 +126,16 @@ async fn list_plans_parses_fixtures_and_skips_invalid() {
     assert_eq!(plans[0].repo_id, repo_id);
     assert_eq!(plans[0].branch, "main");
     assert_eq!(
-        plans[0].exclusive, None,
-        "absent exclusive stays None (inherit)"
+        plans[0].exclusive,
+        qa_catalog_sdk::Exclusivity::Inherit,
+        "absent exclusive stays Inherit"
     );
     assert!(
         !plans[0].validation,
         "a plan with neither the bool nor a `validation` tag is not a validation run"
     );
     assert_eq!(plans[1].path, "plans/upgrade.yaml");
-    assert_eq!(plans[1].exclusive, Some(true));
+    assert_eq!(plans[1].exclusive, qa_catalog_sdk::Exclusivity::Exclusive);
     assert_eq!(plans[1].tags, vec!["e2e".to_owned()]);
 }
 
@@ -769,10 +770,10 @@ async fn get_test_meta_attaches_paths() {
     );
     assert_eq!(metas[0].title.as_deref(), Some("Exclusive test"));
     assert_eq!(metas[0].tags, vec!["ha".to_owned()]);
-    assert_eq!(metas[0].exclusive, Some(true));
+    assert_eq!(metas[0].exclusive, qa_catalog_sdk::Exclusivity::Exclusive);
     assert_eq!(metas[0].bugs, vec!["VHP-123".to_owned()]);
     assert_eq!(metas[1].path, "tests/test_plain.py");
-    assert_eq!(metas[1].exclusive, None);
+    assert_eq!(metas[1].exclusive, qa_catalog_sdk::Exclusivity::Inherit);
 }
 
 #[tokio::test]

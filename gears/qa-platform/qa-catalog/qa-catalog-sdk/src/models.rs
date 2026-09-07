@@ -55,9 +55,83 @@ pub struct TestRepositoryUpdate {
     pub credential_ref: Option<String>,
 }
 
-/// Three-state exclusivity: None = inherit (NOT the same as Some(false)).
-/// This distinction is load-bearing — see PRD cpt-cf-qa-fr-runs-exclusivity.
-pub type ExclusiveFlag = Option<bool>;
+/// A three-state exclusivity declaration: the plan's, the test file's, or the
+/// launch request's.
+///
+/// **`Inherit` is not `Shared`.** `Inherit` means "this tier says nothing, ask
+/// the tier below"; `Shared` means "this tier says explicitly: do not take the
+/// platform". Collapsing them resolves a destructive suite as parallel, which
+/// is the failure `qa_runs`'s `domain::exclusivity` module carries an operator
+/// warning for. This distinction is load-bearing — see PRD
+/// `cpt-cf-qa-fr-runs-exclusivity`.
+///
+/// This was `Option<bool>` behind a `pub type ExclusiveFlag` alias. The alias
+/// named the concept and enforced nothing: `flag.unwrap_or(false)` compiled
+/// and meant "treat inherit as shared". Review findings #10 and #11.
+///
+/// # No `serde` here, on purpose
+///
+/// The wire form is `null` / `true` / `false` — unchanged from the
+/// `Option<bool>` this replaces, because these values are persisted in
+/// `plan.yaml` files and posted by CI callers. But this is a *contract*
+/// crate: `qa-catalog-sdk`, like every qa-platform SDK crate, stays free of
+/// `serde`/`utoipa`/`http` by a repo-wide rule enforced by review, not by a
+/// lint (`qa_runs_sdk`'s crate doc states it in full; the two
+/// `de010x_no_*_in_contract` dylint rules are in `Gears.toml`'s skip list
+/// because the *tooling* needs migration, not because the rule is relaxed).
+/// So this type carries no `Serialize`/`Deserialize` impl — there is nothing
+/// here for the compiler to check the wire shape against.
+///
+/// [`Self::to_option_bool`] and [`Self::from_option_bool`] are the seam every
+/// boundary that touches the wire crosses instead. The guarantee is pinned by
+/// *name*, at each boundary, rather than by the type: `qa-catalog`'s
+/// `domain::parsing::plan_yaml` (`RawPlanYaml`/`ParsedPlan`, deserialized by
+/// `serde_saphyr`) on the way in, `qa-catalog`'s `api::rest::dto::PlanDto`
+/// (`serde`+`utoipa`) on the way out, and `qa-runs`'s
+/// `api::rest::dto::LaunchRunReq` (both directions) are the three boundaries
+/// today. `plan_dto_preserves_exclusive_tri_state` and
+/// `an_absent_exclusive_stays_inherit_rather_than_becoming_parallel` (plus
+/// their wire-form siblings) are what fails if a fourth boundary is added
+/// without calling through this seam.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Exclusivity {
+    /// Nothing declared at this tier; ask the tier below.
+    #[default]
+    Inherit,
+    /// This tier declares: give the run the platform to itself.
+    Exclusive,
+    /// This tier declares, explicitly, "not exclusive" — distinct from
+    /// silence. Still overrides a lower tier's `Exclusive`.
+    Shared,
+}
+
+impl Exclusivity {
+    /// Encode as the `Option<bool>` wire shape this type replaced: `None`
+    /// inherits, `Some(true)` is exclusive, `Some(false)` is explicitly
+    /// shared. Every caller lives in a gear crate that owns a wire boundary
+    /// (see this type's doc); nothing in this crate itself needs the
+    /// `Option<bool>` shape.
+    #[must_use]
+    pub fn to_option_bool(self) -> Option<bool> {
+        match self {
+            Self::Inherit => None,
+            Self::Exclusive => Some(true),
+            Self::Shared => Some(false),
+        }
+    }
+
+    /// [`Self::to_option_bool`]'s inverse. Infallible: every `Option<bool>`
+    /// has a reading, which is the whole point of a closed three-state type
+    /// over the two-state-plus-null it replaces.
+    #[must_use]
+    pub fn from_option_bool(value: Option<bool>) -> Self {
+        match value {
+            None => Self::Inherit,
+            Some(true) => Self::Exclusive,
+            Some(false) => Self::Shared,
+        }
+    }
+}
 
 /// A plan discovered from a repository's plan.yaml (not persisted — materialized on read).
 #[derive(Clone, Debug, PartialEq)]
@@ -77,7 +151,7 @@ pub struct Plan {
     /// `validation` tag (`manager/src/services/plans.rs:35-39`). Consumed by
     /// qa-runs, which re-homes it as a run classification.
     pub validation: bool,
-    pub exclusive: ExclusiveFlag,
+    pub exclusive: Exclusivity,
 }
 
 /// Parsed `TEST_META` for one test file.
@@ -86,7 +160,7 @@ pub struct TestFileMeta {
     pub path: String,
     pub title: Option<String>,
     pub tags: Vec<String>,
-    pub exclusive: ExclusiveFlag,
+    pub exclusive: Exclusivity,
     /// JIRA issue keys referenced by the meta block (e.g. "VHP-123").
     pub bugs: Vec<String>,
 }
@@ -525,3 +599,69 @@ pub struct UniverseTest {
 /// mode this port does not have, since ADR-0005 confines content to synced
 /// repository working copies.
 pub const SOURCE_REPO: &str = "repo";
+
+#[cfg(test)]
+mod exclusivity_tests {
+    use super::Exclusivity;
+
+    /// **The three exclusivity states are three values, not two plus a null.**
+    ///
+    /// `None` means *inherit* and `Some(false)` means *explicitly shared*, and
+    /// the difference decides whether a destructive suite gets the platform to
+    /// itself. Both SDKs documented that rule in prose and typed it as
+    /// `Option<bool>`, so `flag.unwrap_or(false)` -- which collapses inherit
+    /// into shared -- compiled everywhere. `ExclusiveFlag` gave the concept a
+    /// name without giving the compiler anything to check. Review findings
+    /// #10 and #11.
+    #[test]
+    fn inherit_and_shared_are_distinguishable_without_convention() {
+        assert_ne!(Exclusivity::Inherit, Exclusivity::Shared);
+        // The trap the alias permitted: a default that silently means "shared".
+        assert_eq!(Exclusivity::default(), Exclusivity::Inherit);
+    }
+
+    /// **Not the wire test.** This crate is serde-free by the contract-purity
+    /// rule this type's own doc explains, so there is no `Serialize` impl to
+    /// serialize here. What this pins is the conversion methods' round trip --
+    /// necessary for the wire form to survive, but not sufficient: it cannot
+    /// fail if a boundary struct (`PlanDto`, `LaunchRunReq`, ...) forgets to
+    /// call through `to_option_bool`/`from_option_bool` at all. The actual
+    /// `null`/`true`/`false` wire assertions live where the wire lives --
+    /// `qa-catalog`'s `plan_dto_preserves_exclusive_tri_state` and the
+    /// `plan_yaml` parsing tests, and `qa-runs`'s
+    /// `an_absent_exclusive_stays_inherit_rather_than_becoming_parallel` and
+    /// its wire-form siblings.
+    #[test]
+    fn to_option_bool_and_back_round_trips_through_every_variant() {
+        for variant in [
+            Exclusivity::Inherit,
+            Exclusivity::Exclusive,
+            Exclusivity::Shared,
+        ] {
+            assert_eq!(
+                Exclusivity::from_option_bool(variant.to_option_bool()),
+                variant
+            );
+        }
+    }
+
+    #[test]
+    fn to_option_bool_matches_the_old_option_bool_shape() {
+        assert_eq!(Exclusivity::Inherit.to_option_bool(), None);
+        assert_eq!(Exclusivity::Exclusive.to_option_bool(), Some(true));
+        assert_eq!(Exclusivity::Shared.to_option_bool(), Some(false));
+    }
+
+    #[test]
+    fn from_option_bool_matches_the_old_option_bool_shape() {
+        assert_eq!(Exclusivity::from_option_bool(None), Exclusivity::Inherit);
+        assert_eq!(
+            Exclusivity::from_option_bool(Some(true)),
+            Exclusivity::Exclusive
+        );
+        assert_eq!(
+            Exclusivity::from_option_bool(Some(false)),
+            Exclusivity::Shared
+        );
+    }
+}

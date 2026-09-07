@@ -18,6 +18,7 @@
 //! (`cpt-cf-qa-principle-db-first-state`), so there is no live/persisted
 //! overlay to port — only the union of their fields.
 
+use qa_catalog_sdk::Exclusivity;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -201,10 +202,14 @@ pub struct LaunchRequest {
     pub include_tags: Vec<String>,
     pub exclude_tags: Vec<String>,
     pub parameters: Vec<RunParameter>,
-    /// The launch exclusivity tier: three-state. `None` means "inherit",
-    /// which is **not** `Some(false)` — that distinction is the whole reason
-    /// the upper tiers are `Option<bool>` (guide lines 35-45).
-    pub exclusive: Option<bool>,
+    /// The launch exclusivity tier: three-state. `Exclusivity::Inherit` means
+    /// "inherit", which is **not** `Exclusivity::Shared` — that distinction is
+    /// the whole reason this and the tiers below it are a closed three-state
+    /// type rather than `bool` (guide lines 35-45). Was `Option<bool>` behind
+    /// a `qa_catalog_sdk::ExclusiveFlag` alias; see [`Exclusivity`]'s doc for
+    /// why the type closes it and why the wire form does not move. Review
+    /// findings #10 and #11.
+    pub exclusive: Exclusivity,
     /// Per-run timeout override, seconds. `None` falls back to the plan's
     /// `timeout_seconds`, then the configured default — the source system's
     /// two `activeDeadlineSeconds` sites (`manager/src/services/argo.rs:539`

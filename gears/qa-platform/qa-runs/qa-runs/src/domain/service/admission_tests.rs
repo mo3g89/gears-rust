@@ -102,9 +102,9 @@ pub(in crate::domain::service) mod fakes {
     };
     use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
     use qa_catalog_sdk::{
-        BundleRequest, CustomPlan, CustomPlanEntry, NewCustomPlan, NewTestRepository, Plan,
-        Product, QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle, TestFileMeta,
-        TestRepository, TestRepositoryUpdate, UniverseTest,
+        BundleRequest, CustomPlan, CustomPlanEntry, Exclusivity, NewCustomPlan, NewTestRepository,
+        Plan, Product, QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle,
+        TestFileMeta, TestRepository, TestRepositoryUpdate, UniverseTest,
     };
     use qa_environments_sdk::{
         AcquireOutcome, Environment, EnvironmentPatch, LeaseMode, LeaseState, NewEnvironment,
@@ -2796,7 +2796,7 @@ pub(in crate::domain::service) mod fakes {
                 timeout_seconds: Some(300),
                 tags: Vec::new(),
                 validation: false,
-                exclusive: None,
+                exclusive: Exclusivity::Inherit,
             };
             Ok(vec![
                 plan("smoke", self.test_files.lock().unwrap().clone()),
@@ -2821,7 +2821,7 @@ pub(in crate::domain::service) mod fakes {
                 timeout_seconds: Some(300),
                 tags: Vec::new(),
                 validation: false,
-                exclusive: None,
+                exclusive: Exclusivity::Inherit,
             })
         }
 

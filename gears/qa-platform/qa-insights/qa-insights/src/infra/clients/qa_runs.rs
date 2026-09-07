@@ -60,8 +60,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use qa_runs_sdk::{
-    LaunchRequest, QaRunsClientV1, QaRunsError, Run, RunSource, RunTarget, RunTestResult,
-    ScheduleNotificationSettings,
+    Exclusivity, LaunchRequest, QaRunsClientV1, QaRunsError, Run, RunSource, RunTarget,
+    RunTestResult, ScheduleNotificationSettings,
 };
 use time::OffsetDateTime;
 use toolkit_security::SecurityContext;
@@ -245,7 +245,7 @@ impl RunsLauncher for QaRunsReader {
             include_tags: Vec::new(),
             exclude_tags: Vec::new(),
             parameters: Vec::new(),
-            exclusive: None,
+            exclusive: Exclusivity::Inherit,
             timeout_seconds: None,
             source: RunSource::Manual,
             schedule_id: None,
@@ -266,10 +266,10 @@ impl RunsLauncher for QaRunsReader {
     /// non-scheduled source to `manual`, `manager/src/services/argo.rs:2461-2466`,
     /// called at `:2293-2296` for the run-source annotation this path would
     /// otherwise carry) and no schedule.
-    /// `exclusive: None` is the field this method's own port doc calls out —
-    /// legacy's `SubmitSingleTestRunRequest.exclusive: None` — so the launch
-    /// resolves its exclusivity from the plan and the tiers rather than this
-    /// adapter overriding it.
+    /// `exclusive: Exclusivity::Inherit` is the field this method's own port
+    /// doc calls out — legacy's `SubmitSingleTestRunRequest.exclusive: None`
+    /// — so the launch resolves its exclusivity from the plan and the tiers
+    /// rather than this adapter overriding it.
     ///
     /// `platform_id` and `branch` cross verbatim, unresolved further: this
     /// adapter does not default a branch, and neither does
@@ -296,7 +296,7 @@ impl RunsLauncher for QaRunsReader {
             include_tags: Vec::new(),
             exclude_tags: Vec::new(),
             parameters: Vec::new(),
-            exclusive: None,
+            exclusive: Exclusivity::Inherit,
             timeout_seconds: None,
             source: RunSource::Manual,
             schedule_id: None,

@@ -95,7 +95,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::PolicyEnforcer;
-use qa_catalog_sdk::{CustomPlanEntry, QaCatalogClientV1, QaCatalogError, TestFileMeta};
+use qa_catalog_sdk::{
+    CustomPlanEntry, Exclusivity, QaCatalogClientV1, QaCatalogError, TestFileMeta,
+};
 use qa_environments_sdk::{Environment, QaEnvironmentsClientV1};
 use qa_product_sdk::access::RunVarContract;
 use qa_runs_sdk::{
@@ -988,7 +990,12 @@ fn file_meta(meta: TestFileMeta) -> FileMeta {
     FileMeta {
         path: meta.path,
         tags: meta.tags,
-        exclusive: meta.exclusive,
+        // `exclusivity::FileMeta` is the pure core's own `Option<bool>`
+        // projection (its doc explains why it is not `Exclusivity` itself —
+        // that module stays out of this task's scope), so the catalog's
+        // closed type is decoded back to the wire shape here, at the one
+        // point the two meet.
+        exclusive: meta.exclusive.to_option_bool(),
     }
 }
 
@@ -1189,7 +1196,7 @@ impl<R: RunsRepository> LaunchService<R> {
             groups: group_by_repo(&files),
             branch,
             exclusivity: ExclusivitySource::SinglePlan {
-                plan_flag: plan.exclusive,
+                plan_flag: plan.exclusive.to_option_bool(),
                 include,
                 exclude,
             },
@@ -1950,9 +1957,18 @@ impl<R: RunsRepository> LaunchService<R> {
             // `plan.yaml` decided; this plan's files are never read
             // (`manager/src/services/exclusivity.rs:549-550`). A plan that
             // declared nothing falls through to its own scan (`:551-561`).
+            //
+            // A three-arm match on the closed type, in place of the old
+            // `Some(flag) => Declared(flag), None => scan` on `Option<bool>`.
+            // That two-arm match already read `None` correctly as "nothing
+            // declared" rather than folding it into `flag` -- this call site
+            // was not itself an instance of review findings #10/#11's bug --
+            // but it depended on every caller getting that reading right by
+            // convention. `resolved.exclusive`'s type now says so.
             Ok(resolved) => match resolved.exclusive {
-                Some(flag) => Ok(NestedContribution::Declared(flag)),
-                None => self.scan_nested_plan(ctx, branch, plan).await,
+                Exclusivity::Exclusive => Ok(NestedContribution::Declared(true)),
+                Exclusivity::Shared => Ok(NestedContribution::Declared(false)),
+                Exclusivity::Inherit => self.scan_nested_plan(ctx, branch, plan).await,
             },
             // Absent, exactly as legacy's "an unresolvable nested plan
             // contributes nothing" (`exclusivity.rs:540-546`): wrong branch,
@@ -2583,7 +2599,7 @@ impl<R: RunsRepository> LaunchService<R> {
         let facts = self.resolve_target(ctx, request, platform.as_ref()).await?;
 
         let exclusivity = self
-            .resolve_exclusivity(ctx, request.exclusive, &facts)
+            .resolve_exclusivity(ctx, request.exclusive.to_option_bool(), &facts)
             .await?;
 
         let timeout_seconds = resolve_timeout_seconds(

@@ -103,7 +103,7 @@ use std::sync::Arc;
 
 use authz_resolver_sdk::PolicyEnforcer;
 use qa_runs_sdk::{
-    LaunchRequest, NewSchedule, RunSource, SLACK_NOTIFICATION_EVENTS, Schedule,
+    Exclusivity, LaunchRequest, NewSchedule, RunSource, SLACK_NOTIFICATION_EVENTS, Schedule,
     ScheduleNotificationSettings,
 };
 use time::OffsetDateTime;
@@ -1096,12 +1096,15 @@ fn outstanding(
 ///
 /// Two fields are decisions rather than copies:
 ///
-/// * **`exclusive: schedule.exclusive_choice`** goes into the *launch* tier.
-///   A schedule's stored choice is that tier — see
-///   [`crate::domain::exclusivity::Tiers::launch`] — so `Some(false)` suppresses
-///   an exclusive `TEST_META` declaration and `None` inherits from `plan.yaml`
-///   and then `TEST_META`. Delivering it as anything else would either make a
-///   schedule unable to override, or make `auto` mean "parallel".
+/// * **`exclusive: Exclusivity::from_option_bool(schedule.exclusive_choice)`**
+///   goes into the *launch* tier. A schedule's stored choice is that tier —
+///   see [`crate::domain::exclusivity::Tiers::launch`] — so `Shared`
+///   suppresses an exclusive `TEST_META` declaration and `Inherit` inherits
+///   from `plan.yaml` and then `TEST_META`. Delivering it as anything else
+///   would either make a schedule unable to override, or make `auto` mean
+///   "parallel". `schedule.exclusive_choice` itself stays `Option<bool>` —
+///   it is the stored three-token (`true`/`false`/`auto`) vocabulary, a
+///   distinct wire form this task does not touch (see that field's doc).
 /// * **`timeout_seconds: None`**, because a schedule has no timeout of its own
 ///   to override with: `qa_runs_sdk::Schedule` carries no such field. Resolution
 ///   therefore falls to the plan's `timeout_seconds` and then to the configured
@@ -1114,7 +1117,7 @@ fn launch_request_for(schedule: &Schedule) -> LaunchRequest {
         include_tags: schedule.include_tags.clone(),
         exclude_tags: schedule.exclude_tags.clone(),
         parameters: schedule.parameters.clone(),
-        exclusive: schedule.exclusive_choice,
+        exclusive: Exclusivity::from_option_bool(schedule.exclusive_choice),
         timeout_seconds: None,
         source: RunSource::Scheduled,
         schedule_id: Some(schedule.id),

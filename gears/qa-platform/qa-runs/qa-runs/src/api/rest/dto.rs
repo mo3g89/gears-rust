@@ -801,7 +801,7 @@ impl LaunchRunReq {
             include_tags: self.include_tags,
             exclude_tags: self.exclude_tags,
             parameters: self.parameters.into_iter().map(Into::into).collect(),
-            exclusive: self.exclusive,
+            exclusive: sdk::Exclusivity::from_option_bool(self.exclusive),
             timeout_seconds: self.timeout_seconds,
             // Not caller-supplied - see the type's doc.
             source: sdk::RunSource::Manual,
@@ -1829,13 +1829,65 @@ mod tests {
         assert_eq!(request.schedule_id, None);
     }
 
-    /// Absent `exclusive` must stay `None`, not become `Some(false)`: `false`
+    /// Absent `exclusive` must stay `Inherit`, not become `Shared`: `Shared`
     /// is the launch tier asserting parallel, which outranks a `plan.yaml` or
     /// `TEST_META` declaration and would run a destructive test beside another.
     #[test]
     fn an_absent_exclusive_stays_inherit_rather_than_becoming_parallel() {
         let request = request().into_domain(limits()).unwrap();
-        assert_eq!(request.exclusive, None);
+        assert_eq!(request.exclusive, sdk::Exclusivity::Inherit);
+    }
+
+    /// The wire boundary for `LaunchRequest::exclusive`: `sdk::Exclusivity`
+    /// carries no serde impl of its own — this crate's contract-purity rule
+    /// is exactly what makes that type's doc name this DTO as one of the
+    /// boundaries the guarantee is pinned at, by test, rather than by the
+    /// type. `LaunchRunReq::exclusive` stays a plain `Option<bool>` and
+    /// `into_domain`'s `Exclusivity::from_option_bool` call is what actually
+    /// reads `null`/absent/`true`/`false` off the wire.
+    ///
+    /// Driven from JSON literals, not struct literals, so this pins the wire
+    /// shape and not a proxy for it (the same reason
+    /// `the_launch_request_deserialises_environment_id_from_the_wire` is
+    /// JSON-driven). Absent is asserted separately from explicit `null`
+    /// because they are two different wire shapes that must read identically
+    /// — this module's header explains why `serde_with`'s absence makes that
+    /// automatic rather than incidental for this one field.
+    #[test]
+    fn the_exclusive_tri_state_survives_the_wire_in_both_directions() {
+        fn body_with(exclusive: Option<serde_json::Value>) -> serde_json::Value {
+            let mut body = serde_json::json!({
+                "target": {
+                    "kind": "plan",
+                    "repo_id": Uuid::from_u128(0xA1),
+                    "path": "suites/smoke/plan.yaml",
+                },
+            });
+            if let Some(exclusive) = exclusive {
+                body["exclusive"] = exclusive;
+            }
+            body
+        }
+
+        for (wire, expected) in [
+            (
+                body_with(Some(serde_json::json!(null))),
+                sdk::Exclusivity::Inherit,
+            ),
+            (
+                body_with(Some(serde_json::json!(true))),
+                sdk::Exclusivity::Exclusive,
+            ),
+            (
+                body_with(Some(serde_json::json!(false))),
+                sdk::Exclusivity::Shared,
+            ),
+            (body_with(None), sdk::Exclusivity::Inherit),
+        ] {
+            let req: LaunchRunReq = serde_json::from_value(wire).expect("must deserialize");
+            let request = req.into_domain(limits()).unwrap();
+            assert_eq!(request.exclusive, expected);
+        }
     }
 
     // -- legacy field trap (ruling G-4) -------------------------------------

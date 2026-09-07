@@ -9349,6 +9349,7 @@ dependencies = [
  "async-trait",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-security",
+ "qa-catalog-sdk",
  "time",
  "uuid",
 ]

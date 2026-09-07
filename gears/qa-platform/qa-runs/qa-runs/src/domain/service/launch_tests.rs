@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
-use qa_runs_sdk::{LaunchOutcome, LaunchRequest, RunParameter, RunSource, RunState, RunTarget};
+use qa_runs_sdk::{
+    Exclusivity, LaunchOutcome, LaunchRequest, RunParameter, RunSource, RunState, RunTarget,
+};
 
 use super::*;
 use crate::domain::repos::RunsRepository;
@@ -63,7 +65,7 @@ impl Builder {
                     .with_plan(plan_fixture("Smoke Tests", &["tests/test_smoke.py"]))
                     .with_meta(
                         "tests/test_smoke.py",
-                        meta_fixture("tests/test_smoke.py", &[], None),
+                        meta_fixture("tests/test_smoke.py", &[], Exclusivity::Inherit),
                     ),
             ),
             environments: Arc::new(MockEnvironments::empty()),
@@ -146,7 +148,7 @@ fn plan_request() -> LaunchRequest {
         include_tags: Vec::new(),
         exclude_tags: Vec::new(),
         parameters: Vec::new(),
-        exclusive: None,
+        exclusive: Exclusivity::Inherit,
         timeout_seconds: None,
         source: RunSource::Manual,
         schedule_id: None,
@@ -269,7 +271,7 @@ async fn a_platforms_default_branch_overrides_the_repository_default_end_to_end(
                 .with_plan(plan_fixture("Smoke", &["tests/test_smoke.py"]))
                 .with_meta(
                     "tests/test_smoke.py",
-                    meta_fixture("tests/test_smoke.py", &[], None),
+                    meta_fixture("tests/test_smoke.py", &[], Exclusivity::Inherit),
                 ),
         )
         .build()
@@ -312,7 +314,7 @@ async fn an_explicit_branch_still_beats_a_pinned_platform_end_to_end() {
                 .with_plan(plan_fixture("Smoke", &["tests/test_smoke.py"]))
                 .with_meta(
                     "tests/test_smoke.py",
-                    meta_fixture("tests/test_smoke.py", &[], None),
+                    meta_fixture("tests/test_smoke.py", &[], Exclusivity::Inherit),
                 ),
         )
         .build()
@@ -354,7 +356,7 @@ async fn a_run_with_no_platform_uses_the_repository_default() {
                 .with_plan(plan_fixture("Smoke", &["tests/test_smoke.py"]))
                 .with_meta(
                     "tests/test_smoke.py",
-                    meta_fixture("tests/test_smoke.py", &[], None),
+                    meta_fixture("tests/test_smoke.py", &[], Exclusivity::Inherit),
                 ),
         )
         .build()
@@ -402,8 +404,14 @@ async fn a_multi_repo_custom_plan_with_an_explicit_branch_produces_one_group_per
                     (REPO_ID, "tests/a.py"),
                     (OTHER_REPO_ID, "ui/b.spec.ts"),
                 ]))
-                .with_meta("tests/a.py", meta_fixture("tests/a.py", &[], None))
-                .with_meta("ui/b.spec.ts", meta_fixture("ui/b.spec.ts", &[], None)),
+                .with_meta(
+                    "tests/a.py",
+                    meta_fixture("tests/a.py", &[], Exclusivity::Inherit),
+                )
+                .with_meta(
+                    "ui/b.spec.ts",
+                    meta_fixture("ui/b.spec.ts", &[], Exclusivity::Inherit),
+                ),
         )
         .build()
         .await;
@@ -508,7 +516,7 @@ async fn the_resolved_branch_label_is_recorded_as_the_test_version() {
 #[tokio::test]
 async fn a_plan_flag_decides_without_the_catalog_being_asked_for_test_meta() {
     let mut plan = plan_fixture("Smoke", &["tests/test_smoke.py"]);
-    plan.exclusive = Some(true);
+    plan.exclusive = Exclusivity::Exclusive;
     let harness = Builder::new()
         .catalog(MockCatalog::new().with_plan(plan))
         .build()
@@ -538,8 +546,14 @@ async fn an_exclusive_test_file_makes_the_run_exclusive_and_reports_the_test_met
         .catalog(
             MockCatalog::new()
                 .with_plan(plan_fixture("Smoke", &["tests/a.py", "tests/b.py"]))
-                .with_meta("tests/a.py", meta_fixture("tests/a.py", &[], Some(false)))
-                .with_meta("tests/b.py", meta_fixture("tests/b.py", &[], Some(true))),
+                .with_meta(
+                    "tests/a.py",
+                    meta_fixture("tests/a.py", &[], Exclusivity::Shared),
+                )
+                .with_meta(
+                    "tests/b.py",
+                    meta_fixture("tests/b.py", &[], Exclusivity::Exclusive),
+                ),
         )
         .build()
         .await;
@@ -564,13 +578,16 @@ async fn a_launch_override_of_false_beats_an_exclusive_test_file() {
         .catalog(
             MockCatalog::new()
                 .with_plan(plan_fixture("Smoke", &["tests/b.py"]))
-                .with_meta("tests/b.py", meta_fixture("tests/b.py", &[], Some(true))),
+                .with_meta(
+                    "tests/b.py",
+                    meta_fixture("tests/b.py", &[], Exclusivity::Exclusive),
+                ),
         )
         .build()
         .await;
 
     let request = LaunchRequest {
-        exclusive: Some(false),
+        exclusive: Exclusivity::Shared,
         ..plan_request()
     };
     harness
@@ -600,7 +617,11 @@ async fn files_dropped_by_the_exclude_filter_do_not_make_the_run_exclusive() {
                 .with_plan(plan_fixture("Smoke", &["tests/destructive.py"]))
                 .with_meta(
                     "tests/destructive.py",
-                    meta_fixture("tests/destructive.py", &["destructive"], Some(true)),
+                    meta_fixture(
+                        "tests/destructive.py",
+                        &["destructive"],
+                        Exclusivity::Exclusive,
+                    ),
                 ),
         )
         .build()
@@ -755,7 +776,7 @@ async fn a_partially_unreadable_group_still_lets_the_readable_files_vote() {
                 .with_plan(plan_fixture("Smoke", &["tests/gone.py", "tests/here.py"]))
                 .with_meta(
                     "tests/here.py",
-                    meta_fixture("tests/here.py", &[], Some(true)),
+                    meta_fixture("tests/here.py", &[], Exclusivity::Exclusive),
                 ),
         )
         .build()
@@ -801,7 +822,7 @@ async fn a_forbidden_test_meta_read_fails_the_launch_rather_than_going_parallel(
                 .with_plan(plan_fixture("Smoke", &["tests/destructive.py"]))
                 .with_meta(
                     "tests/destructive.py",
-                    meta_fixture("tests/destructive.py", &[], Some(true)),
+                    meta_fixture("tests/destructive.py", &[], Exclusivity::Exclusive),
                 )
                 .deny_test_meta(),
         )
@@ -846,7 +867,7 @@ async fn a_missing_file_is_omitted_and_the_rest_still_vote() {
                 ))
                 .with_meta(
                     "tests/destructive.py",
-                    meta_fixture("tests/destructive.py", &[], Some(true)),
+                    meta_fixture("tests/destructive.py", &[], Exclusivity::Exclusive),
                 ),
         )
         .build()
@@ -880,7 +901,11 @@ async fn a_custom_plans_scan_ignores_the_requests_tag_filter() {
                 .with_custom_plan(custom_plan_fixture(&[(REPO_ID, "tests/destructive.py")]))
                 .with_meta(
                     "tests/destructive.py",
-                    meta_fixture("tests/destructive.py", &["destructive"], Some(true)),
+                    meta_fixture(
+                        "tests/destructive.py",
+                        &["destructive"],
+                        Exclusivity::Exclusive,
+                    ),
                 ),
         )
         .build()
@@ -932,7 +957,7 @@ async fn a_custom_plans_scan_ignores_the_requests_tag_filter() {
 #[tokio::test]
 async fn a_nested_plans_declaration_makes_a_custom_plan_exclusive() {
     let mut nested = plan_fixture("Destructive", &["tests/a.py", "tests/b.py"]);
-    nested.exclusive = Some(true);
+    nested.exclusive = Exclusivity::Exclusive;
 
     let harness = Builder::new()
         .catalog(
@@ -943,8 +968,14 @@ async fn a_nested_plans_declaration_makes_a_custom_plan_exclusive() {
                 ]))
                 .with_plan_at(REPO_ID, "plans/destructive.yaml", nested)
                 // Both files silent: `Some(false)` is a vote, not an abstention.
-                .with_meta("tests/a.py", meta_fixture("tests/a.py", &[], Some(false)))
-                .with_meta("tests/b.py", meta_fixture("tests/b.py", &[], Some(false))),
+                .with_meta(
+                    "tests/a.py",
+                    meta_fixture("tests/a.py", &[], Exclusivity::Shared),
+                )
+                .with_meta(
+                    "tests/b.py",
+                    meta_fixture("tests/b.py", &[], Exclusivity::Shared),
+                ),
         )
         .build()
         .await;
@@ -977,9 +1008,9 @@ async fn a_nested_plans_declaration_makes_a_custom_plan_exclusive() {
 #[tokio::test]
 async fn a_custom_plan_ors_the_declarations_of_the_plans_it_composes() {
     let mut parallel = plan_fixture("Parallel", &["tests/a.py"]);
-    parallel.exclusive = Some(false);
+    parallel.exclusive = Exclusivity::Shared;
     let mut destructive = plan_fixture("Destructive", &["tests/b.py"]);
-    destructive.exclusive = Some(true);
+    destructive.exclusive = Exclusivity::Exclusive;
 
     let harness = Builder::new()
         .catalog(
@@ -1013,7 +1044,7 @@ async fn a_custom_plan_ors_the_declarations_of_the_plans_it_composes() {
 #[tokio::test]
 async fn a_nested_plan_declaring_parallel_reports_tier_plan_not_default() {
     let mut nested = plan_fixture("Parallel", &["tests/a.py"]);
-    nested.exclusive = Some(false);
+    nested.exclusive = Exclusivity::Shared;
 
     let harness = Builder::new()
         .catalog(
@@ -1056,7 +1087,7 @@ async fn a_nested_plan_declaring_nothing_scans_its_own_files_without_a_tag_filte
                     "tests/destructive.py",
                     Some("plans/silent.yaml"),
                 )]))
-                // `exclusive: None` — the plan.yaml says nothing.
+                // `exclusive: Exclusivity::Inherit` — the plan.yaml says nothing.
                 .with_plan_at(
                     REPO_ID,
                     "plans/silent.yaml",
@@ -1064,7 +1095,11 @@ async fn a_nested_plan_declaring_nothing_scans_its_own_files_without_a_tag_filte
                 )
                 .with_meta(
                     "tests/destructive.py",
-                    meta_fixture("tests/destructive.py", &["destructive"], Some(true)),
+                    meta_fixture(
+                        "tests/destructive.py",
+                        &["destructive"],
+                        Exclusivity::Exclusive,
+                    ),
                 ),
         )
         .build()
@@ -1100,7 +1135,10 @@ async fn an_entry_naming_no_nested_plan_resolves_from_test_meta_alone() {
         .catalog(
             MockCatalog::new()
                 .with_custom_plan(custom_plan_fixture(&[(REPO_ID, "tests/a.py")]))
-                .with_meta("tests/a.py", meta_fixture("tests/a.py", &[], Some(true))),
+                .with_meta(
+                    "tests/a.py",
+                    meta_fixture("tests/a.py", &[], Exclusivity::Exclusive),
+                ),
         )
         .build()
         .await;
@@ -1129,9 +1167,9 @@ async fn an_entry_naming_no_nested_plan_resolves_from_test_meta_alone() {
 #[tokio::test]
 async fn each_nested_plan_is_resolved_in_its_own_repository() {
     let mut here = plan_fixture("Here", &["tests/a.py"]);
-    here.exclusive = Some(false);
+    here.exclusive = Exclusivity::Shared;
     let mut there = plan_fixture("There", &["tests/b.py"]);
-    there.exclusive = Some(true);
+    there.exclusive = Exclusivity::Exclusive;
 
     let harness = Builder::new()
         .catalog(
@@ -1192,7 +1230,7 @@ async fn each_nested_plan_is_resolved_in_its_own_repository() {
 #[tokio::test]
 async fn an_unresolvable_nested_plan_contributes_nothing_and_does_not_fail_the_launch() {
     let mut destructive = plan_fixture("Destructive", &["tests/b.py"]);
-    destructive.exclusive = Some(true);
+    destructive.exclusive = Exclusivity::Exclusive;
 
     let harness = Builder::new()
         .catalog(
@@ -1345,7 +1383,7 @@ async fn a_custom_plan_whose_every_nested_plan_is_unresolvable_resolves_default(
 #[tokio::test]
 async fn a_launch_override_skips_a_custom_plans_nested_plans_entirely() {
     let mut nested = plan_fixture("Destructive", &["tests/a.py"]);
-    nested.exclusive = Some(true);
+    nested.exclusive = Exclusivity::Exclusive;
 
     let harness = Builder::new()
         .catalog(
@@ -1361,7 +1399,7 @@ async fn a_launch_override_skips_a_custom_plans_nested_plans_entirely() {
         .await;
 
     let request = LaunchRequest {
-        exclusive: Some(false),
+        exclusive: Exclusivity::Shared,
         ..custom_plan_request()
     };
     harness
@@ -1432,7 +1470,7 @@ async fn an_entirely_unreadable_nested_plan_resolves_default_not_test_meta_false
 #[tokio::test]
 async fn two_nested_plans_in_one_repository_are_two_groups() {
     let mut declaring = plan_fixture("Declaring", &["tests/a.py"]);
-    declaring.exclusive = Some(false);
+    declaring.exclusive = Exclusivity::Shared;
 
     let harness = Builder::new()
         .catalog(
@@ -1448,7 +1486,10 @@ async fn two_nested_plans_in_one_repository_are_two_groups() {
                     plan_fixture("Silent", &["tests/b.py"]),
                 )
                 // Only the silent plan's file is scanned, and it is destructive.
-                .with_meta("tests/b.py", meta_fixture("tests/b.py", &[], Some(true))),
+                .with_meta(
+                    "tests/b.py",
+                    meta_fixture("tests/b.py", &[], Exclusivity::Exclusive),
+                ),
         )
         .build()
         .await;
@@ -1591,7 +1632,7 @@ async fn a_class_method_selector_is_stripped_before_the_test_meta_read() {
                 // The catalog only knows the file, which is the whole point.
                 .with_meta(
                     "tests/test_upgrade.py",
-                    meta_fixture("tests/test_upgrade.py", &[], Some(true)),
+                    meta_fixture("tests/test_upgrade.py", &[], Exclusivity::Exclusive),
                 ),
         )
         .build()
@@ -1635,7 +1676,7 @@ async fn a_single_test_selector_is_stripped_for_the_scan() {
                 .with_plan(plan_fixture("Smoke", &["tests/test_b.py"]))
                 .with_meta(
                     "tests/test_b.py",
-                    meta_fixture("tests/test_b.py", &[], Some(true)),
+                    meta_fixture("tests/test_b.py", &[], Exclusivity::Exclusive),
                 ),
         )
         .build()
@@ -2005,7 +2046,7 @@ async fn the_concurrency_limit_surfaces_its_own_error_naming_its_own_limit() {
 #[tokio::test]
 async fn the_run_row_records_the_resolved_exclusivity_tier() {
     let mut plan = plan_fixture("Smoke", &["tests/a.py"]);
-    plan.exclusive = Some(false);
+    plan.exclusive = Exclusivity::Shared;
     let harness = Builder::new()
         .catalog(MockCatalog::new().with_plan(plan))
         .build()
@@ -2465,7 +2506,7 @@ async fn a_single_test_run_scans_only_its_own_file_and_is_named_after_it() {
                 ))
                 .with_meta(
                     "tests/test_b.py",
-                    meta_fixture("tests/test_b.py", &["destructive"], Some(true)),
+                    meta_fixture("tests/test_b.py", &["destructive"], Exclusivity::Exclusive),
                 ),
         )
         .build()
@@ -2507,7 +2548,10 @@ async fn a_custom_plan_run_is_named_after_the_plans_id() {
         .catalog(
             MockCatalog::new()
                 .with_custom_plan(custom_plan_fixture(&[(REPO_ID, "tests/a.py")]))
-                .with_meta("tests/a.py", meta_fixture("tests/a.py", &[], None)),
+                .with_meta(
+                    "tests/a.py",
+                    meta_fixture("tests/a.py", &[], Exclusivity::Inherit),
+                ),
         )
         .build()
         .await;
@@ -2572,7 +2616,10 @@ async fn the_configured_default_reaches_the_run_deadline() {
                 // Production shape: the plan declares a timeout, and a single-test
                 // run must ignore it.
                 .with_plan(plan_fixture("Smoke", &["tests/a.py"]))
-                .with_meta("tests/a.py", meta_fixture("tests/a.py", &[], None)),
+                .with_meta(
+                    "tests/a.py",
+                    meta_fixture("tests/a.py", &[], Exclusivity::Inherit),
+                ),
         )
         .default_timeout(4242)
         .build()
@@ -2611,7 +2658,10 @@ async fn the_di_container_assembles_a_working_launch_service() {
     let catalog = Arc::new(
         MockCatalog::new()
             .with_plan(plan_fixture("Smoke Tests", &["tests/a.py"]))
-            .with_meta("tests/a.py", meta_fixture("tests/a.py", &[], None)),
+            .with_meta(
+                "tests/a.py",
+                meta_fixture("tests/a.py", &[], Exclusivity::Inherit),
+            ),
     );
     let services = AppServices::new(
         Arc::clone(&runs),

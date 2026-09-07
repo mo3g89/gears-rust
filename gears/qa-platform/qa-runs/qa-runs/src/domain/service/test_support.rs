@@ -33,9 +33,9 @@ use authz_resolver_sdk::models::{
 };
 use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
 use qa_catalog_sdk::{
-    BundleRequest, CustomPlan, CustomPlanEntry, NewCustomPlan, NewTestRepository, Plan, Product,
-    QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle, TestFileMeta,
-    TestRepository, TestRepositoryUpdate, UniverseTest,
+    BundleRequest, CustomPlan, CustomPlanEntry, Exclusivity, NewCustomPlan, NewTestRepository,
+    Plan, Product, QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle,
+    TestFileMeta, TestRepository, TestRepositoryUpdate, UniverseTest,
 };
 use qa_environments_sdk::{
     AcquireOutcome, Environment, EnvironmentPatch, LeaseMode, LeaseState, NewEnvironment,
@@ -964,12 +964,12 @@ pub(super) fn plan_fixture(name: &str, test_files: &[&str]) -> Plan {
         timeout_seconds: Some(300),
         tags: Vec::new(),
         validation: false,
-        exclusive: None,
+        exclusive: Exclusivity::Inherit,
     }
 }
 
 /// A `TEST_META` fixture.
-pub(super) fn meta_fixture(path: &str, tags: &[&str], exclusive: Option<bool>) -> TestFileMeta {
+pub(super) fn meta_fixture(path: &str, tags: &[&str], exclusive: Exclusivity) -> TestFileMeta {
     TestFileMeta {
         path: path.to_owned(),
         title: None,
@@ -2061,7 +2061,7 @@ impl Fleet {
             path: "tests/a.py".to_owned(),
             title: None,
             tags: Vec::new(),
-            exclusive: Some(true),
+            exclusive: Exclusivity::Exclusive,
             bugs: Vec::new(),
         }];
         self
