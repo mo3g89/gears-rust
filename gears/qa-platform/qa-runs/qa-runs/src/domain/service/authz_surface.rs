@@ -46,13 +46,15 @@
 //!
 //! # Why both items carry `#[allow(dead_code)]`
 //!
-//! Their consumers arrive with the companion tasks: the anti-drift test that
-//! compares this list to the generated catalog reads [`ENFORCED`] under
-//! `cfg(test)` only, and [`RESOURCE_TYPES`] is read by the stub type-schema
-//! registration once that lands. An `#[expect]` cannot express this - `clippy
+//! [`ENFORCED`]'s consumer arrived with the companion task: the anti-drift
+//! test that compares this list to the generated catalog reads it under
+//! `cfg(test)` only. [`RESOURCE_TYPES`] has no consumer, and is **not** getting
+//! the stub type-schema registration it was written for - see that item's own
+//! doc for what settled that. An `#[expect]` cannot express this - `clippy
 //! --all-targets` builds this crate twice and the test build *does* use both,
 //! so the expectation would be unfulfilled there and fulfilled in the lib
-//! build. The `allow`s come off with the commits that add the consumers.
+//! build. `ENFORCED`'s `allow` comes off with the commit that adds a non-test
+//! consumer.
 //!
 //! Review finding #1.
 
@@ -105,11 +107,22 @@ pub(crate) const ENFORCED: &[(&str, &str)] = &[
 
 /// The distinct resource types in [`ENFORCED`].
 ///
-/// Consumed to register one stub type schema per resource type: the platform
-/// RBAC role-definition validator resolves a rule's `target_type` through the
-/// types registry, so a resource type missing from this list is a permission
-/// no role definition can target. `ledger`'s `labels::ALL`
-/// (`gears/bss/ledger/ledger/src/authz.rs:109`) exists for the same reason.
+/// Written to drive one stub type-schema registration per resource type: the
+/// platform RBAC role-definition validator resolves a rule's `target_type`
+/// through the types registry, so a resource type it cannot resolve is a
+/// permission no role definition can target -- which is why `ledger` registers
+/// a stub per authz label from `labels::ALL`
+/// (`gears/bss/ledger/ledger/src/authz.rs:109`).
+///
+/// **No such registration exists here, and none can be built from these
+/// strings.** A types-registry type-schema id must end with `~`
+/// (`types-registry-sdk/src/models.rs:53-55`), these are plain strings like
+/// `qa.plan`, and renaming them to GTS type ids is precluded because they are
+/// what a deployment's policies are written against. So this list is measured
+/// and pinned to [`ENFORCED`] by the scan, but nothing consumes it; the
+/// consequence -- no custom role can target a QA resource type -- is recorded
+/// as a follow-up in
+/// `docs/superpowers/specs/2026-09-05-review-remediation-design.md` section 12.
 #[allow(
     dead_code,
     reason = "no non-test consumer yet - see this module's header"

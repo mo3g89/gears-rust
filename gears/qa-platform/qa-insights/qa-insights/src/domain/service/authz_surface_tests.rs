@@ -752,10 +752,13 @@ fn every_enforced_pair_is_reached_by_an_access_scope_call_site() {
 /// **[`super::RESOURCE_TYPES`] is exactly the distinct resource types in
 /// [`super::ENFORCED`].**
 ///
-/// It is consumed to register one type schema per resource type, and the `RBAC`
-/// role-definition validator resolves a rule's `target_type` through that
-/// registry - so a type missing here is a permission no role definition can
-/// target, and one that is here but enforced nowhere is a schema for nothing.
+/// It was written to drive one stub type schema per resource type, because the
+/// `RBAC` role-definition validator resolves a rule's `target_type` through
+/// that registry - so a type missing here would be a permission no role
+/// definition can target, and one here but enforced nowhere would be a schema
+/// for nothing. **That registration was never built and cannot be, from these
+/// strings** - see [`super::RESOURCE_TYPES`]' own doc - which leaves this
+/// equality as the only thing keeping the list honest.
 #[test]
 fn resource_types_lists_exactly_the_resource_types_in_enforced() {
     let distinct: BTreeSet<&str> = ENFORCED.iter().map(|(resource, _)| *resource).collect();

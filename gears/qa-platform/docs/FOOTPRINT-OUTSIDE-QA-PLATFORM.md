@@ -39,8 +39,8 @@ qa-platform` compiles none of it.
 | 6 | `Cargo.toml` (root) | Workspace members | None | Required |
 | 7 | `Cargo.lock` | Generated | None | Regenerated |
 | 8 | `.github/workflows/ci.yml` | **Shared CI** | **Real** | Yes, trivially |
-| 9 | `Makefile` | Tooling | None | Yes, trivially |
-| 10 | `.gitignore` | Tooling | None (one caveat) | Yes, mostly |
+| 9 | `Makefile` | Tooling | Minimal — one narrowed exclude (§4.1) | Yes, trivially |
+| 10 | `.gitignore` | Tooling | None for builds (two caveats — §4.2) | Yes, mostly |
 | 11 | `docs/GEARS.md` | Docs | None | Yes, trivially |
 | 12 | `config/qa-platform.yaml` | New config | None | Yes, trivially |
 
@@ -209,8 +209,38 @@ anyway, and it is independent of qa-platform.
 ### 4.1 `Makefile`
 
 Adds `ui-install`, `ui-lint`, `ui-test`, `ui-build`, `ui-contract` and
-`test-qa-runs-pg`. New targets only; nothing existing was altered. Fully
-revertible.
+`test-qa-runs-pg`, and — with the review remediation — `test-qa-insights-pg`,
+`test-qa-catalog-git`, `test-qa-platform-features` and `helm-tests`. All new
+targets, fully revertible.
+
+**One pre-existing target was altered** (review remediation, Phase 7): the
+shared `gts-docs` target gained `--exclude "**/tsconfig*.json"` beside the four
+excludes it already carried. This is the only edit qa-platform has made to
+something in this file that other gears use, which is why row 9's risk is no
+longer literally "None".
+
+*Why it was needed.* `make gts-docs` had been **red since `a1767401f`**, the
+commit that landed the QA Platform subsystem: the validator's strict JSON
+parser reports a scan error on `qa-platform-ui/tsconfig.json:9`
+(`/* Bundler mode */`, from the Vite template), and the target treats an
+unscannable file as a failure — *"✗ 1 file(s) could not be scanned — CI must
+treat this as a failure"*, exit 2. Nothing had named it until Phase 7's
+completion gates ran, because no workflow calls `gts-docs` on this branch (see
+§5 and finding Z9-3 on the missing UI gate).
+
+*Why an exclude rather than editing `tsconfig.json`.* tsconfig is **JSONC by
+specification** — TypeScript's own format permits comments — so the parse
+failure is a false positive by nature, not a malformed file; stripping the
+comments would leave the next gear with a Vite UI to rediscover it. A GTS
+*documentation* validator also has no business parsing a TypeScript build
+config: no tsconfig can contain a GTS id, so nothing is lost by not scanning
+one.
+
+*What the risk actually is.* Any `tsconfig*.json` anywhere under `docs/`,
+`gears/`, `libs/` or `examples/` is no longer scanned for GTS ids — today that
+is two files, both qa-platform's. Measured after the change: 839 files scanned,
+0 failed, 0 errors, exit 0 (it was 840 scanned / 1 failed / exit 2 before).
+Reverting is deleting one line, at the cost of putting the gate back to red.
 
 ### 4.2 `.gitignore`
 
@@ -226,6 +256,18 @@ Three additions:
    existing unanchored patterns; listed explicitly. Safe to drop.
 3. `gears/qa-platform/deploy/remote/*kubeconfig*.yaml` — prevents committing a
    client private key. qa-platform-specific; drop it with the directory.
+4. `gears/qa-platform/docs/Reviews/qa-platform-review-findings.md` — a
+   single-file rule, added later than the three above and **not** the caveat
+   row 10 refers to (that is item 1, the `logs` un-ignore, which is a fix worth
+   keeping). Its effect is worth stating plainly: the 55-finding review this
+   subsystem's remediation branch exists to answer is **invisible to the
+   repository** — it lives only in a working copy, and so does every "closed
+   by" annotation added as findings were fixed. The rule's own comment explains
+   the intent (it was swept in by a `git add -A`, and deleting it would let the
+   next one put it back) and says to remove the line if `docs/Reviews/` ever
+   becomes tracked. Durable records therefore go elsewhere: §12 of
+   `docs/superpowers/specs/2026-09-05-review-remediation-design.md` carries the
+   Phase 7 follow-up, and this file carries the tooling change above.
 
 ---
 

@@ -615,6 +615,72 @@ per phase, so the lead who filed the findings reviews each delta against them.
   rule-by-rule parity. Unreviewed is not the same as defective; they are out of
   scope because nothing has been filed against them.
 
+**Discovered during Phase 7 execution, not decided here: QA's PEP resource
+types are not registrable GTS type ids, so no custom role can *target* one.**
+This is the same boundary as **Grants** above, reached the same way, and it was
+measured rather than designed — the phase's own plan specified a stub
+type-schema registration per resource type, and it turned out not to be
+implementable.
+
+*What shipped.* Four `gts/permissions.rs` catalogs declaring **71**
+`AuthzPermissionV1` instances —
+`cf.qa.{catalog,environments,insights,runs}.<pep_entity>_<action>.v1`, one per
+`(resource_type, action)` pair each gear's PEP enforces — pinned to
+`domain::service::authz_surface::ENFORCED` in both directions by
+`the_catalog_matches_the_enforced_surface`. The grantable permissions are
+enumerable, which is what finding #1 asked for.
+
+*What is therefore still missing.* A role **definition** targets a type, not a
+permission: the platform RBAC role-definitions API resolves a rule's
+`target_type` through the types-registry. That is why ledger registers a stub
+type-schema per authz label (`authz_label_type_schemas`,
+`gears/bss/ledger/ledger/src/authz.rs:252-263`), account-management registers
+one per PEP resource type — *"without it every tenant operation is denied (403)
+because no role can name the type"*
+(`gears/system/account-management/account-management-sdk/src/gts.rs:250-262`)
+— and credstore says the same
+(`gears/credstore/credstore-sdk/src/gts.rs:41-51`). QA cannot register one,
+because the stub needs a *type-schema id* and QA has none:
+
+1. A types-registry type-schema id must end with `~`
+   (`gears/system/types-registry/types-registry-sdk/src/models.rs:53-55`), and
+   the register path's kind check
+   (`types-registry/src/domain/local_client.rs:399-406`),
+   `resolve_type_schema_arc` (`:129-134`) and `GtsTypeSchema::try_new`
+   (`types-registry-sdk/src/models.rs:138`) each refuse an id that does not.
+2. Both precedents' PEP resource strings **are** GTS type ids — `labels::ENTRY`
+   is `gts_id!("cf.bss.ledger.entry.v1~")` (`ledger/src/authz.rs:57`),
+   `TENANT_RESOURCE_TYPE` is `gts_id!("cf.core.am.tenant.v1~")`
+   (`account-management-sdk/src/gts.rs:29`) — which is why registration works
+   for them.
+3. QA's 17 are plain strings — `qa.plan`, `qa.platform`, `qa.run`, … — with no
+   `gts.` prefix and no trailing `~` (the `resources::*_NAME` consts in each
+   gear's `domain/service/mod.rs`). Ledger's `format!("gts://{gts_id}")` over
+   one of them yields `gts://qa.plan`, which every check above refuses.
+
+*Not a regression.* `deploy/realm/keycloak/realm-qa-platform.json` declares no
+`roles` at all — two clients and two users carrying only
+`default-roles-qa-platform` — so no QA permission is granted today under
+either scheme. The catalog added grantable *names*; what is missing is a type a
+role can name.
+
+*The two ways forward.* (a) Register a stub type-schema per resource type under
+new GTS type ids (`gts.cf.qa.catalog.product.v1~` and so on) **and teach each
+PEP to send the new string** — a policy-visible rename of the very strings a
+deployment's policies are written against, `qa.platform` (the name
+qa-environments deliberately keeps for its `Environment` aggregate) included.
+(b) Extend the platform's role-definition validator to accept a PEP resource
+type that is not a registered GTS type id. Both belong with whoever owns the
+deployment's realm, because it is the same decision as authoring the grants:
+(a) changes the strings a grant names, (b) changes what a grant may name.
+
+*The limit of this finding.* The role-definition validator is **not in this
+repository** — `grep -rn "target_type" gears/` finds only doc comments, no
+validator — so its behaviour is asserted by ledger's, account-management's and
+credstore's SDK docs (cited above), not verified here. Points 1–3 and the realm
+JSON were verified directly; the validator's dependence on the types-registry
+was not.
+
 **Stopping points.** Phases are ordered so the branch is coherent after each
 one. Phases 1–4 are the correctness and security core; 5–6 are quality with real
 but lower stakes; 7 and 8 are each a subsystem's worth of work and can be
