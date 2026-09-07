@@ -286,22 +286,60 @@ async function fetchProductDtos(): Promise<S['ProductDto'][]> {
 }
 
 /**
- * Pipeline variables, plus one environment's when `environmentId` is given.
+ * A drain loop's ceiling. 200 rows a page against the gear's `max_variables`
+ * cap of 500 means three requests at the very most; ten is a runaway, not a
+ * large tenant.
+ */
+const MAX_VARIABLE_PAGES = 10;
+
+/**
+ * Pipeline variables, plus one environment's when `environmentId` is given —
+ * **all of them**, following the cursor.
  *
- * `GET /qa/v1/variables` became a `Page` with review finding #55 — the two
- * halves of its union used to be unbounded reads. Not cached: unlike the
- * environment name index this is read once per settings screen rather than per
- * poll, and `saveVariables` re-reads it precisely to diff against what is
- * *currently* stored.
+ * `GET /qa/v1/variables` became a `Page` with review finding #55; the two halves
+ * of its union used to be unbounded reads. Not cached: unlike the environment
+ * name index this is read once per settings screen rather than per poll, and
+ * `saveVariables` re-reads it precisely to diff against what is *currently*
+ * stored.
  *
- * `page_info.next_cursor` is null whenever `environmentId` is given (the gear
- * cannot cursor a union of two tables — see `VariablesService::list_for_env`),
- * so it is not followed on either path; the page limit of 200 is the bound, and
- * the deployment's `max_variables` was already a lower one before this.
+ * # Why the cursor is followed here and not on `/environments`
+ *
+ * **Corrected 2026-09-07, Task 24 review finding 3.** The first version of this
+ * function discarded `page_info.next_cursor`, on the reasoning that the union
+ * case never returns one. That is true of the union case and false of the other
+ * one: without `environment_id` the response is a single table and the cursor is
+ * real, so `usePipelineVariables` rendered the Settings → Variables screen as if
+ * a 200-row first page were the whole set. `variableWritePlan` derives its
+ * deletes only from the `previous` array it is handed (`adapters.ts`), so
+ * nothing was destroyed by this — but the operator was editing a list that
+ * claimed to be the variable set and was not.
+ *
+ * `fetchEnvironmentDtos` still does not drain, and the asymmetry is deliberate:
+ * that one is a *name index* consulted on a 5-second poll, where a second page
+ * means a deployment past its own NFR ceiling and the fix is a filtered read.
+ * This one is the actual content of an editor.
+ *
+ * The union case still terminates on the first iteration, because the gear
+ * returns no cursor for it (`VariablesService::list_for_env`) — and refuses a
+ * `cursor` sent together with `environment_id` outright, which is why this
+ * appends the token only to a request that has no `environment_id`.
  */
 async function fetchVariableDtos(environmentId?: string | null): Promise<S['VariableDto'][]> {
-  const query = environmentId ? `?environment_id=${encodeURIComponent(environmentId)}` : '';
-  return (await apiGet<S['Page_VariableDto']>(`/variables${query}`)).items;
+  const scope = environmentId ? `?environment_id=${encodeURIComponent(environmentId)}` : '';
+  const rows: S['VariableDto'][] = [];
+  let cursor: string | null | undefined;
+
+  for (let page = 0; page < MAX_VARIABLE_PAGES; page += 1) {
+    // `cursor` is a bare query parameter on this gear's OData extractor, not
+    // `$skiptoken`. It is only ever appended to the no-environment_id form: the
+    // gear answers 400 for the pair, and would be right to.
+    const suffix = cursor ? `${scope ? '&' : '?'}cursor=${encodeURIComponent(cursor)}` : '';
+    const body = await apiGet<S['Page_VariableDto']>(`/variables${scope}${suffix}`);
+    rows.push(...body.items);
+    cursor = body.page_info.next_cursor;
+    if (!cursor) return rows;
+  }
+  return rows;
 }
 
 /** uuid -> display name, for the several places legacy drew a platform *name* and the

@@ -73,6 +73,12 @@ mod observation_projection_tests;
 #[cfg(test)]
 mod variables_tests;
 
+/// What `GET /qa/v1/variables` -- and therefore what a run -- actually
+/// receives. Both properties are about how `list_for_env` *composes* two paged
+/// reads, so neither is expressible at the repository level.
+#[cfg(test)]
+mod variables_paging_tests;
+
 #[cfg(test)]
 mod tests_tenant_scoping;
 

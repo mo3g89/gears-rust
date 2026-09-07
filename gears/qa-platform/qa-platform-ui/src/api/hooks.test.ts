@@ -30,7 +30,13 @@ vi.mock('./client', () => ({
 
 import { apiGet } from './client';
 import { queryClient as sharedQueryClient } from './queryClient';
-import { queryKeys, useAnalyticsOverview, useAnalyticsBuildTests, useEnvironmentDetails } from './hooks';
+import {
+  queryKeys,
+  useAnalyticsOverview,
+  useAnalyticsBuildTests,
+  useEnvironmentDetails,
+  usePipelineVariables,
+} from './hooks';
 import type { AnalyticsOverviewQuery, AnalyticsBuildTestsQuery } from './types';
 
 const mockedApiGet = vi.mocked(apiGet);
@@ -224,5 +230,77 @@ describe('fetchEnvironmentDtos (the environment name index)', () => {
     await waitFor(() => expect(second.result.current.isSuccess).toBe(true));
 
     expect(environmentListCalls()).toBe(2);
+  });
+});
+
+describe('fetchVariableDtos (the Settings -> Variables editor)', () => {
+  /**
+   * Two pages of pipeline variables, the way the gear serves them without an
+   * `environment_id`: a single table, so `next_cursor` is real.
+   *
+   * Task 24 review finding 3: the first version of `fetchVariableDtos`
+   * discarded that cursor, so the editor rendered a first page as if it were
+   * the whole variable set. `variableWritePlan` derives deletes only from the
+   * `previous` array it is handed, so nothing was destroyed by it -- but the
+   * operator was editing a list that claimed to be the set and was not.
+   */
+  function mockTwoPagesOfVariables() {
+    mockedApiGet.mockImplementation(async (path: string) => {
+      if (path === '/variables') {
+        return {
+          items: [{ id: 'v1', name: 'ALPHA', value: 'a', environment_id: null }],
+          page_info: { limit: 200, next_cursor: 'page-2-token', prev_cursor: null },
+        } as never;
+      }
+      if (path.startsWith('/variables?cursor=')) {
+        return {
+          items: [{ id: 'v2', name: 'BETA', value: 'b', environment_id: null }],
+          page_info: { limit: 200, next_cursor: null, prev_cursor: null },
+        } as never;
+      }
+      throw new Error(`unexpected apiGet(${path})`);
+    });
+  }
+
+  it('follows next_cursor, so the editor sees the whole set rather than the first page', async () => {
+    mockTwoPagesOfVariables();
+
+    const { result } = renderHook(() => usePipelineVariables(), { wrapper: makeWrapper() });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.variables?.map((row) => row.name)).toEqual(['ALPHA', 'BETA']);
+    expect(mockedApiGet).toHaveBeenCalledTimes(2);
+  });
+
+  it('sends the cursor as a bare `cursor` parameter, which is what the gear extractor reads', async () => {
+    // Not `$skiptoken`: `ODataParams` renames only `$filter`/`$orderby`/`$select`
+    // and takes `limit` and `cursor` bare. A wrong spelling here is not an error
+    // -- it is an ignored parameter and an infinite first page.
+    mockTwoPagesOfVariables();
+
+    const { result } = renderHook(() => usePipelineVariables(), { wrapper: makeWrapper() });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(mockedApiGet.mock.calls.map(([path]) => path)).toEqual([
+      '/variables',
+      '/variables?cursor=page-2-token',
+    ]);
+  });
+
+  it('stops after one request when the gear returns no cursor, which is the union case', async () => {
+    // With `environment_id` the response is the union of two tables and the gear
+    // returns `next_cursor: null` -- and refuses a `cursor` sent alongside it.
+    // So this path must not invent a second request.
+    mockedApiGet.mockImplementation(async () =>
+      ({
+        items: [{ id: 'v1', name: 'ALPHA', value: 'a', environment_id: null }],
+        page_info: { limit: 500, next_cursor: null, prev_cursor: null },
+      }) as never
+    );
+
+    const { result } = renderHook(() => usePipelineVariables(), { wrapper: makeWrapper() });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(mockedApiGet).toHaveBeenCalledTimes(1);
   });
 });

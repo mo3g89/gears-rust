@@ -33,7 +33,6 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryClient as sharedQueryClient } from '@/api/queryClient';
 
-
 vi.mock('@/api/client', () => ({
   apiGet: vi.fn(),
   apiGetBlob: vi.fn(),

@@ -30,7 +30,6 @@ import { NotificationsSlackPage } from './pages/notifications/NotificationsSlack
 import { AuthProvider, AuthCallbackPage, LoginPage, RequireAuth } from './auth';
 import { queryClient } from './api/queryClient';
 
-
 /** `/platforms` -> `/environments` (D5's route rename), kept reachable so a
  *  bookmarked or shared link still lands.
  *

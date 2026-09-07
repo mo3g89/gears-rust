@@ -12,6 +12,7 @@ use qa_environments_sdk::{
 };
 use toolkit_odata::{CursorV1, ODataQuery, Page};
 use toolkit_security::SecurityContext;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
@@ -40,9 +41,13 @@ impl QaEnvironmentsLocalClient {
 /// Terminates when a page reports no `next_cursor`, or -- defensively -- when a
 /// cursor comes back that does not decode. The latter cannot happen against
 /// this gear's own pager (it emits what `CursorV1::encode` produced), and
-/// stopping is the right answer if it ever does: a partial list is what the
-/// caller already handles for a page, whereas looping on an undecodable cursor
-/// would not terminate.
+/// stopping is the right answer if it ever does: looping on an undecodable
+/// cursor would not terminate.
+///
+/// **But it stops with a partial list, which is the failure mode
+/// `qa-insights`' `EnvironmentReader` header argues against** ("a cap that
+/// silently dropped an environment would silently unlabel a bar"), so it is not
+/// silent: the arm warns with the token that failed. Task 24 review finding 6.
 async fn drain_pages<T, F, Fut>(mut read: F) -> Result<Vec<T>, QaEnvironmentsError>
 where
     F: FnMut(ODataQuery) -> Fut,
@@ -56,8 +61,17 @@ where
         let Some(token) = page.page_info.next_cursor else {
             return Ok(all);
         };
-        let Ok(cursor) = CursorV1::decode(&token) else {
-            return Ok(all);
+        let cursor = match CursorV1::decode(&token) {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                warn!(
+                    %error,
+                    collected = all.len(),
+                    "qa-environments SDK drain stopped early: a page returned a cursor this \
+                     build cannot decode, so the list handed to the caller is PARTIAL"
+                );
+                return Ok(all);
+            }
         };
         query = ODataQuery::default().with_cursor(cursor);
     }
@@ -152,13 +166,23 @@ impl QaEnvironmentsClientV1 for QaEnvironmentsLocalClient {
     /// and a variable missing from it is a variable the run silently does not
     /// get.
     ///
-    /// **The drain terminates after one page whenever `environment_id` is
+    /// **The drain terminates after one call whenever `environment_id` is
     /// `Some`**, because `VariablesService::list_for_env` returns no cursor in
     /// that case — the response is the union of two tables and a single-table
-    /// cursor cannot address it. See that method's doc. The bound that then
-    /// applies is `PAGE_LIMITS.default` and the deployment's own
-    /// `max_variables`, which is the bound the previous code applied too (as a
-    /// silent `truncate`), so this is not a new ceiling.
+    /// cursor cannot address it. See that method's doc.
+    ///
+    /// **Corrected 2026-09-07, Task 24 review finding 1.** This doc used to say
+    /// the bound that then applies is `PAGE_LIMITS.default` and that this "is
+    /// not a new ceiling". It was a new ceiling and the claim was false: the old
+    /// unpaged code returned everything and truncated at `max_variables`
+    /// (`config.rs`: **500**), while `PAGE_LIMITS.default` is **200** — and this
+    /// is the call `qa-runs`' `dispatch_spec` assembles a run's variables from,
+    /// where the rows lost at a pipeline-first boundary are the
+    /// *environment-specific overrides*. The fix is in `list_for_env`, which now
+    /// asks for `max_variables` rows rather than a page, so this call site needs
+    /// no limit of its own: the ceiling belongs where `max_variables` is
+    /// visible, and a second copy of it here — in a layer that cannot see the
+    /// config — would be a weaker duplicate of the same rule.
     async fn list_variables(
         &self,
         ctx: &SecurityContext,

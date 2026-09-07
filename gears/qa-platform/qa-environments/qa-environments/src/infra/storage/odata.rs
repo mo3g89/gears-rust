@@ -81,6 +81,25 @@ use crate::infra::storage::entity::pipeline_variable::{
 ///   page. `health_state` is the tempting one — *"show me the down clusters"*
 ///   is a real operator question — and it is left out for exactly this reason;
 ///   it is a filter that wants a non-cursor mechanism, not this one.
+///
+/// ## The criterion above applies, once, to the key this enum sorts by
+///
+/// **Stated rather than glossed over (Task 24 review finding 4).** `name` is
+/// not immutable either: `EnvironmentPatch::name` is `Option<String>` and the
+/// UI exposes `useRenameEnvironment`, so an environment renamed *between* two
+/// page requests moves across the cursor boundary and is served twice or not at
+/// all — the same defect the paragraph above excludes four columns for.
+///
+/// It is still the right key, and the difference is rate, not kind. Those four
+/// are rewritten by a background ticker on every cycle for every row, so the
+/// hazard is the steady state; a rename is an operator action on one row, and a
+/// registry read that spans pages at the instant one is renamed misplacing that
+/// one row is the ordinary cost of keyset pagination over mutable data. There
+/// is no immutable alternative that is also indexed: `id` is immutable and
+/// unique but orders by a random UUID, which is not an order any caller of an
+/// environment *directory* wants, and `created_at` is unindexed and non-unique
+/// (see the header — `paginate_odata` takes a single tiebreaker, so a
+/// non-unique one is not a total cursor at all).
 /// * **`observed_build`, `observed_base_url`, `default_branch`, `available`** —
 ///   unindexed and nobody asks a *collection* question by them. An
 ///   unadvertised field can be added later; an advertised one is a wire

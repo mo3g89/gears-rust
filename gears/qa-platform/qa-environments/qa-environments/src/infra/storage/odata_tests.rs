@@ -275,13 +275,23 @@ async fn listing_variables_is_bounded_by_the_page_limit() {
     );
 }
 
-/// **`FIELDS` must list every variant**, because it is what the route
-/// advertises *and* what the repository translates — a variant missing from it
-/// is a field that exists in the type and nowhere else, silently unfilterable.
-/// Counted rather than iterated, for the reason qa-runs'
-/// `every_run_field_variant_is_advertised` records: `map_field` is a total
-/// exhaustive match, so a variant added to *both* is already a compile error,
-/// and a variant missing from `FIELDS` is simply never iterated.
+/// **`FIELDS` cannot change length without a deliberate edit here**, and each
+/// name in it is distinct.
+///
+/// **Re-worded 2026-09-07, Task 24 review finding 5.** This doc used to claim
+/// it pinned that "`FIELDS` must list every variant". It does not and cannot:
+/// the comparison is `FIELDS.len()` against a hand-maintained constant, so
+/// adding a seventh variant *and* forgetting `FIELDS` leaves both at 6 and this
+/// test green. What it does pin is the mutation qa-runs measured and that
+/// nothing else in the gear catches — **deleting** a variant from `FIELDS`,
+/// which is otherwise invisible (`map_field` is a total exhaustive match, so a
+/// variant present in both is a compile error either way, and a variant missing
+/// from `FIELDS` is simply never iterated). Adding a variant is caught by the
+/// exhaustive `name`/`kind` matches failing to compile; remembering to bump the
+/// constant here is then the deliberate edit this test asks for.
+///
+/// The dedup half is a real, independent claim: two variants advertising one
+/// name would make one of them unreachable through `from_name`.
 #[test]
 fn every_field_variant_is_advertised() {
     /// See [`every_field_variant_is_advertised`].
