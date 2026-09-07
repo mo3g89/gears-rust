@@ -4,7 +4,9 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use authz_resolver_sdk::models::{EvaluationRequest, EvaluationResponse};
+use authz_resolver_sdk::models::{
+    EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
+};
 use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
 use qa_catalog_sdk::{NewTestRepository, TestRepository, TestRepositoryUpdate};
 use time::OffsetDateTime;
@@ -14,6 +16,7 @@ use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
 use super::DbProvider;
+use super::authz_surface::ENFORCED;
 use crate::domain::error::DomainError;
 use crate::domain::repos::{RefreshTarget, SshKeysRepository, TestReposRepository};
 
@@ -85,6 +88,83 @@ impl AuthZResolverClient for PermissiveAuthZ {
         request: EvaluationRequest,
     ) -> Result<EvaluationResponse, AuthZResolverError> {
         Ok(permissive_response(&request))
+    }
+}
+
+/// The [`ENFORCED`] entry for `(resource_type, action)`, as the `&'static
+/// str`s that list holds.
+///
+/// **Panics** when this gear enforces no such pair, which is the point: it is
+/// how a test names a permission without hand-typing one. A pair that came
+/// through here is a pair the permission catalog declares an
+/// `AuthzPermissionV1` instance for, because
+/// `crate::gts::permissions_tests::the_catalog_matches_the_enforced_surface`
+/// pins the two to each other in both directions.
+pub(super) fn enforced_pair(resource_type: &str, action: &str) -> (&'static str, &'static str) {
+    *ENFORCED
+        .iter()
+        .find(|&&(r, a)| r == resource_type && a == action)
+        .unwrap_or_else(|| {
+            panic!(
+                "qa-catalog's PEP enforces no ({resource_type}, {action}) pair, so no role \
+                 could be granted it -- see `authz_surface::ENFORCED`"
+            )
+        })
+}
+
+/// `AuthZ` resolver granting exactly **one** `(resource_type, action)` pair
+/// and denying every other.
+///
+/// [`PermissiveAuthZ`] and [`crate::test_support::DenyAllAuthZ`] were this
+/// crate's only two `AuthZ` doubles, and neither can express "this principal
+/// holds grants, just not *this* one": one grants every pair and the other
+/// refuses every pair, so a denial either produces is a denial of something
+/// nothing could have authorized. This double sits between them, which is
+/// what makes a denial attributable to a missing grant — see
+/// `products_tests::an_action_without_a_grant_is_denied`.
+///
+/// The granted pair answers with [`permissive_response`], so the PEP compiles
+/// a real tenant-scoped `AccessScope` from it and the authorized operation
+/// runs the path a granted caller runs. Every other pair answers with the
+/// `decision: false` shape `DenyAllAuthZ` returns for everything, which the
+/// enforcer turns into `EnforcerError::Denied` and hence
+/// [`DomainError::Forbidden`].
+///
+/// The grant is resolved through [`enforced_pair`] rather than taken as two
+/// strings, so it can only name a pair this gear actually enforces: a typo'd
+/// action would otherwise build a fixture that grants *nothing*, and the
+/// denial half of a test would then pass for the wrong reason.
+pub(super) struct SelectiveGrantAuthZ {
+    granted: (&'static str, &'static str),
+}
+
+impl SelectiveGrantAuthZ {
+    /// Grant `(resource_type, action)` — which must be one of [`ENFORCED`]'s
+    /// pairs — and nothing else.
+    pub(super) fn granting(resource_type: &str, action: &str) -> Self {
+        Self {
+            granted: enforced_pair(resource_type, action),
+        }
+    }
+}
+
+#[async_trait]
+impl AuthZResolverClient for SelectiveGrantAuthZ {
+    async fn evaluate(
+        &self,
+        request: EvaluationRequest,
+    ) -> Result<EvaluationResponse, AuthZResolverError> {
+        let asked = (
+            request.resource.resource_type.as_str(),
+            request.action.name.as_str(),
+        );
+        if asked == self.granted {
+            return Ok(permissive_response(&request));
+        }
+        Ok(EvaluationResponse {
+            decision: false,
+            context: EvaluationResponseContext::default(),
+        })
     }
 }
 
