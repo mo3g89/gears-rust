@@ -2877,8 +2877,13 @@ pub struct NotificationPreviewDto {
     pub event_label: String,
     pub rendered_message: String,
     pub fallback_text: String,
-    /// Slack Block Kit blocks, opaque JSON — the same shape
-    /// `domain::notify::render::RenderedScheduledRunMessage::blocks` carries.
+    /// Slack Block Kit blocks: literally the `blocks` array the tenant's
+    /// Slack would receive, so this endpoint's contract is Slack's wire
+    /// format rather than this gear's own. Encoded from
+    /// `domain::ports::SlackBlock` by `infra::notify::block_kit`, the one
+    /// encoder the outbound adapter uses too — which is what makes "the
+    /// preview shows what gets sent" true by construction (review finding
+    /// #17).
     pub blocks: Vec<serde_json::Value>,
 }
 
@@ -2889,7 +2894,7 @@ impl From<crate::domain::service::notify::ScheduledRunPreview> for NotificationP
             event_label: preview.event_label,
             rendered_message: preview.rendered_message,
             fallback_text: preview.fallback_text,
-            blocks: preview.blocks,
+            blocks: crate::infra::notify::block_kit::encode_blocks(&preview.blocks),
         }
     }
 }
@@ -4682,13 +4687,21 @@ mod tests {
             event_label: "Failed".to_owned(),
             rendered_message: "the rendered body".to_owned(),
             fallback_text: "the fallback text".to_owned(),
-            blocks: vec![serde_json::json!({"type": "section"})],
+            blocks: vec![crate::domain::ports::SlackBlock::Section {
+                text: "the block text".to_owned(),
+            }],
         });
 
         assert_eq!(dto.event, "failed");
         assert_eq!(dto.event_label, "Failed");
         assert_eq!(dto.rendered_message, "the rendered body");
         assert_eq!(dto.fallback_text, "the fallback text");
-        assert_eq!(dto.blocks, vec![serde_json::json!({"type": "section"})]);
+        assert_eq!(
+            dto.blocks,
+            vec![serde_json::json!({
+                "type": "section",
+                "text": { "type": "mrkdwn", "text": "the block text" }
+            })]
+        );
     }
 }

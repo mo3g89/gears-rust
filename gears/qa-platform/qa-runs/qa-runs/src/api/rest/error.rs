@@ -343,7 +343,7 @@ impl From<DomainError> for CanonicalError {
             // does not resolve" as "the gear is down", this layer cannot tell
             // which, and answering 503 to the first would invite a client to
             // retry something that will never succeed.
-            DomainError::Database(_)
+            DomainError::Database { .. }
             | DomainError::Internal(_)
             | DomainError::ExecutorFailed(_)
             | DomainError::CorruptState { .. }
@@ -458,7 +458,7 @@ mod tests {
             DomainError::Catalog(_) => "Catalog",
             DomainError::Environments(_) => "Environments",
             DomainError::Forbidden => "Forbidden",
-            DomainError::Database(_) => "Database",
+            DomainError::Database { .. } => "Database",
             DomainError::Internal(_) => "Internal",
         }
     }
@@ -561,7 +561,7 @@ mod tests {
             (DomainError::Catalog(SENTINEL.to_owned()), None),
             (DomainError::Environments(SENTINEL.to_owned()), None),
             (DomainError::Forbidden, None),
-            (DomainError::Database(SENTINEL.to_owned()), None),
+            (DomainError::database(SENTINEL), None),
             (DomainError::Internal(SENTINEL.to_owned()), None),
         ]
     }

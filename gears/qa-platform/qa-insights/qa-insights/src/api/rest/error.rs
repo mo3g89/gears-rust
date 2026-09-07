@@ -274,7 +274,7 @@ impl From<DomainError> for CanonicalError {
 
             // -- 500, opaque ------------------------------------------------
             DomainError::CorruptState { .. }
-            | DomainError::Database(_)
+            | DomainError::Database { .. }
             | DomainError::Internal(_) => opaque_internal(&e),
         };
 
@@ -480,10 +480,9 @@ mod tests {
     fn the_three_internal_variants_are_500_and_disclose_nothing() {
         let secrets = [
             (
-                DomainError::Database(
+                DomainError::database(
                     "duplicate key value violates unique constraint \
-                     \"qa_test_results_tenant_run_file_key\""
-                        .to_owned(),
+                     \"qa_test_results_tenant_run_file_key\"",
                 ),
                 "qa_test_results_tenant_run_file_key",
             ),

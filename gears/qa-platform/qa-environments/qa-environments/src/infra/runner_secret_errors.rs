@@ -26,7 +26,7 @@ use kube::config::KubeconfigError;
 ///
 /// Returns a `&'static str` on purpose: a `&'static str` cannot carry input.
 /// That is the invariant, expressed as a type rather than as a promise.
-pub(crate) fn describe_kubeconfig_error(error: &KubeconfigError) -> &'static str {
+pub fn describe_kubeconfig_error(error: &KubeconfigError) -> &'static str {
     match error {
         KubeconfigError::Parse(_) => "it is not valid YAML",
         KubeconfigError::InvalidStructure(_) => {
@@ -73,7 +73,7 @@ pub(crate) fn describe_kubeconfig_error(error: &KubeconfigError) -> &'static str
 ///
 /// `kube::Error`'s TLS variants wrap the very certificate and key bytes the
 /// config was built from, so this never formats the error.
-pub(crate) const CLIENT_BUILD_FAILURE: &str = "its credentials could not be turned into a working Kubernetes client (check that \
+pub const CLIENT_BUILD_FAILURE: &str = "its credentials could not be turned into a working Kubernetes client (check that \
      `client-certificate-data`/`client-key-data` are valid PEM and that the \
      `certificate-authority` is a certificate)";
 
@@ -83,7 +83,7 @@ pub(crate) const CLIENT_BUILD_FAILURE: &str = "its credentials could not be turn
 /// ambient kubeconfig it tried, so it is never formatted either. The fixed
 /// text names the three places `infer` looks, which is the whole diagnostic
 /// value the formatted error would have carried.
-pub(crate) const INFER_FAILURE: &str = "no Kubernetes configuration could be inferred: this process is not running in-cluster \
+pub const INFER_FAILURE: &str = "no Kubernetes configuration could be inferred: this process is not running in-cluster \
      (no service-account token at /var/run/secrets/kubernetes.io/serviceaccount), $KUBECONFIG \
      is unset or unusable, and there is no readable ~/.kube/config. Set \
      `qa-environments.argo.kubeconfig_path` to a kubeconfig for the Argo cluster";
@@ -204,7 +204,7 @@ const OTHER_TRANSPORT_OR_CREDENTIAL_FAILURE: &str = "the request to the API serv
 /// ([`is_tls_certificate_failure`], [`is_connect_failure`]), not by matching
 /// on `kube::Error`'s message text — a `kube` or TLS-stack upgrade can change
 /// wording without silently reclassifying anything here.
-pub(crate) fn describe_kube_error(error: &kube::Error) -> String {
+pub fn describe_kube_error(error: &kube::Error) -> String {
     match error {
         kube::Error::Api(status) => {
             format!(

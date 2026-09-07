@@ -28,6 +28,18 @@ use super::{
     RenderedScheduledRunMessage, RunCompletedRenderContext, ScheduledRunRenderContext,
     preview_scheduled_run, render_run_completed, render_scheduled_run,
 };
+use crate::domain::ports::SlackBlock;
+
+/// The text of one rendered block, whichever variant it is. Replaced the
+/// `blocks[i]["text"]["text"]` JSON indexing these assertions used before
+/// review finding #17 gave the blocks a domain type; the *Block Kit* shape
+/// each variant encodes to is pinned in `infra::notify::block_kit`'s own
+/// tests, which is now the only place that shape exists.
+fn block_text(block: &SlackBlock) -> &str {
+    match block {
+        SlackBlock::Section { text } | SlackBlock::Context { text } => text,
+    }
+}
 
 /// A context with every optional field populated, so a template exercising
 /// every placeholder has something non-default to show. Mirrors legacy's
@@ -149,9 +161,7 @@ fn every_section_status_icon_and_fallback_survive_the_shared_renderer() {
         // The default header template is `{{status_icon}} \`{{run_name}}\` —
         // *{{status_headline}}*`; every token has a distinct default icon
         // (`status_defaults`), so it must show up in the header block.
-        let header = sent.blocks[0]["text"]["text"]
-            .as_str()
-            .expect("header block has text");
+        let header = block_text(&sent.blocks[0]);
         assert!(
             header.contains(':'),
             "{token}: status_icon (a `:name:` emoji) must appear in the header"
@@ -188,7 +198,7 @@ fn each_event_token_resolves_to_its_own_template() {
     ];
     for (token, marker) in expectations {
         let rendered = render_ok(&config, token, &ctx);
-        let header = rendered.blocks[0]["text"]["text"].as_str().unwrap();
+        let header = block_text(&rendered.blocks[0]);
         assert_eq!(
             header, marker,
             "token {token} must resolve to its own template, not another one's"
@@ -240,9 +250,10 @@ fn an_unknown_placeholder_is_left_verbatim() {
         Some("{{not_a_real_placeholder}}".to_owned());
 
     let rendered = render_ok(&config, "failed", &full_context());
-    let footer = rendered.blocks.last().unwrap()["elements"][0]["text"]
-        .as_str()
-        .unwrap();
+    let last = rendered.blocks.last().expect("the footer rendered a block");
+    let SlackBlock::Context { text: footer } = last else {
+        panic!("the footer section renders a `Context` block, got {last:?}");
+    };
     assert_eq!(footer, "{{not_a_real_placeholder}}");
 }
 
@@ -288,7 +299,7 @@ fn a_status_icon_override_reaches_the_header() {
     config.scheduled_run_slack_templates.failed.status_icon = Some(":boom:".to_owned());
 
     let rendered = render_ok(&config, "failed", &full_context());
-    let header = rendered.blocks[0]["text"]["text"].as_str().unwrap();
+    let header = block_text(&rendered.blocks[0]);
     assert!(header.contains(":boom:"));
 }
 
@@ -321,7 +332,7 @@ fn error_status_counts_as_a_failure_in_the_results_section() {
     let ctx = full_context(); // 2 PASSED, 1 FAILED, 1 ERROR, 1 SKIPPED
 
     let rendered = render_ok(&config, "failed", &ctx);
-    let results = rendered.blocks[2]["text"]["text"].as_str().unwrap();
+    let results = block_text(&rendered.blocks[2]);
     assert!(
         results.contains(":x: 2"),
         "FAILED and ERROR together must count as 2 failures, got: {results}"
@@ -340,7 +351,7 @@ fn fallback_text_never_repeats_the_results_sections_own_wording() {
     config.scheduled_run_slack_templates.failed.results = Some("RESULTS-SECTION-MARKER".to_owned());
 
     let rendered = render_ok(&config, "failed", &full_context());
-    let results_block = rendered.blocks[2]["text"]["text"].as_str().unwrap();
+    let results_block = block_text(&rendered.blocks[2]);
     assert_eq!(results_block, "RESULTS-SECTION-MARKER");
     assert!(
         !rendered.fallback_text.contains("RESULTS-SECTION-MARKER"),

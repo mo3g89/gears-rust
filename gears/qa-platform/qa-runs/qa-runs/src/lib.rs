@@ -14,6 +14,36 @@ pub mod infra;
 
 pub use gear::QaRuns;
 
+// === `domain` and `infra` stay `pub` here — review finding #38, measured ===
+//
+// Finding #38 asks for `pub(crate) mod domain` / `pub(crate) mod infra` in all
+// four gears, so SeaORM entities and repository traits stop being part of the
+// crate's public API. It landed that way in `qa-catalog` and
+// `qa-environments`. **It does not land here as a visibility-only change**,
+// which is what the finding is scoped to.
+//
+// Measured rather than guessed: the change was made, the compiler run, and
+// then reverted. With both modules `pub(crate)`, this crate reports 16 groups
+// of newly-dead code — items nothing outside its own `#[cfg(test)]` modules
+// reaches, which `pub mod` was keeping the compiler quiet about.
+//
+// They are scattered rather than one subsystem: `domain::cron`'s
+// skip-reporting helpers, `domain::repos::log_line`'s archive-side constants,
+// `domain::state_machine`'s terminal-state helpers, four
+// `infra::logs::broadcast` methods, and several unused re-exports in
+// `domain::repos` and `infra::logs`.
+//
+// None of that is a visibility question. Each item is a decision — delete it
+// and the tests that cover it, or wire the feature — and an
+// `#[allow(dead_code)]` over a subsystem would trade a real signal for a green
+// build. Making the modules private also turns every `pub(crate)` item inside
+// them into a `clippy::redundant_pub_crate` error (103 sites here), which
+// is denied repo-wide; that part is mechanical, the dead code is not.
+//
+// Left as its own task, with the count above as the size estimate.
+/// The in-process executor `tests/mock_executor_control_surface.rs` drives.
+pub use infra::executor::mock::MockRunExecutor;
+
 /// Every identifier this crate's prose cites must exist. Crate-wide rather than
 /// per-module, because the defect it guards has landed in several unrelated
 /// files, including this crate's own guard against it.

@@ -125,7 +125,7 @@ impl From<DomainError> for CanonicalError {
                 CanonicalError::internal("An internal credential store error occurred").create()
             }
 
-            DomainError::Database(_) => {
+            DomainError::Database { .. } => {
                 tracing::error!(error = ?e, "Database error occurred");
                 CanonicalError::internal("An internal database error occurred").create()
             }
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn database_error_maps_to_internal_500() {
-        let ce: CanonicalError = DomainError::Database("connection reset".to_owned()).into();
+        let ce: CanonicalError = DomainError::database("connection reset").into();
         assert_eq!(ce.status_code(), 500);
         assert!(
             matches!(ce, CanonicalError::Internal { .. }),

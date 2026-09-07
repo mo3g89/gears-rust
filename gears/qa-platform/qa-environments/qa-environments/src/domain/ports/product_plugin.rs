@@ -25,8 +25,21 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginUnavailable {
     /// The environment names no product, so there is nothing to resolve a
-    /// plugin from. `Environment::product_id` is still `Option<Uuid>` until
-    /// Task 20 makes the column `NOT NULL`.
+    /// plugin from.
+    ///
+    /// **Never constructed in this crate**, and deliberately so:
+    /// `m20260903_000013` made `product_id` `NOT NULL` (Task 20b), which makes
+    /// the state unrepresentable in a row. The variant stays because the port's
+    /// contract still declares it and a resolver may still answer it —
+    /// `domain::service::environments::observe_through_plugin` and
+    /// `observation_projection_tests` both record that reasoning. Review
+    /// finding #38 made `domain` `pub(crate)`, which is what turned a
+    /// deliberately-unconstructed variant into a visible `dead_code`.
+    #[allow(
+        dead_code,
+        reason = "kept as port contract: unrepresentable in a row since Task 20b, still \
+                  answerable by a resolver"
+    )]
     NoProduct,
     /// The product is not visible to this caller, names no plugin, or names
     /// one this binary does not register. `qa-catalog` distinguishes all

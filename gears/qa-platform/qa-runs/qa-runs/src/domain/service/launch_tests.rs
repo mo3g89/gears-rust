@@ -2121,9 +2121,7 @@ async fn a_database_admission_failure_does_not_reach_the_run_row() {
                        constraint \"idx_qa_run_queue_tenant_run\" DETAIL: Key (tenant_id, \
                        run_id)=(0a11, 0b02) already exists";
     let harness = Builder::new()
-        .admitter(RecordingAdmitter::refusing(DomainError::Database(
-            RAW.to_owned(),
-        )))
+        .admitter(RecordingAdmitter::refusing(DomainError::database(RAW)))
         .build()
         .await;
 

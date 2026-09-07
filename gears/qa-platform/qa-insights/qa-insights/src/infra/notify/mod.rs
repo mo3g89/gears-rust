@@ -18,6 +18,7 @@
 //! delivered: R107 is an open release-gate item and
 //! [`slack_oagw`]'s "Finding B" carries the whole argument.
 
+pub mod block_kit;
 pub mod mail_unsupported;
 pub mod slack_oagw;
 

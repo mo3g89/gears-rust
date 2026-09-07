@@ -22,7 +22,7 @@ pub struct QaEnvironmentsLocalClient {
 
 impl QaEnvironmentsLocalClient {
     #[must_use]
-    pub(crate) fn new(services: Arc<ConcreteAppServices>) -> Self {
+    pub fn new(services: Arc<ConcreteAppServices>) -> Self {
         Self { services }
     }
 }

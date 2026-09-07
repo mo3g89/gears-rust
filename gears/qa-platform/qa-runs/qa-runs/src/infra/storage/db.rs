@@ -1,7 +1,5 @@
 //! Database error conversion helpers.
 
-use std::fmt::Display;
-
 use toolkit_db::odata::sea_orm_filter::LimitCfg;
 use toolkit_odata::Error as ODataError;
 
@@ -77,7 +75,12 @@ pub fn odata_err(error: &ODataError) -> DomainError {
             field: odata_field_of(error).to_owned(),
             message: error.to_string(),
         },
-        ODataError::Db(text) => DomainError::Database(text.clone()),
+        // No source to keep: `toolkit_odata` has already flattened its own
+        // driver error to a `String` by the time it reaches here (review
+        // finding #25 — `DomainError::database` is the sourceless
+        // constructor, and this is one of the two places that is the honest
+        // answer rather than a shortcut).
+        ODataError::Db(text) => DomainError::database(text.clone()),
         ODataError::ParsingUnavailable(what) => DomainError::Internal((*what).to_owned()),
     }
 }
@@ -92,9 +95,20 @@ fn odata_field_of(error: &ODataError) -> &'static str {
     }
 }
 
-/// Convert any displayable error into a `DomainError::Database`.
-pub fn db_err(e: impl Display) -> DomainError {
-    DomainError::Database(e.to_string())
+/// Convert a storage error into [`DomainError::Database`], keeping the error
+/// itself as the `.source()`.
+///
+/// The bound used to be `impl Display` and the body `e.to_string()`, which
+/// dropped the error at the one boundary almost every storage failure in this
+/// gear crosses — review finding #25 is about `From<toolkit_db::DbError>`, but
+/// fixing only that would have left this helper flattening `sea_orm::DbErr`
+/// (SQLSTATE and constraint name included) to a bare message. Every caller
+/// already passes a `sea_orm::DbErr`, so the tighter bound cost nothing.
+pub fn db_err(e: impl std::error::Error + Send + Sync + 'static) -> DomainError {
+    DomainError::Database {
+        message: e.to_string(),
+        source: Some(Box::new(e)),
+    }
 }
 
 /// Whether a failed transaction failed *because* something else was writing the
@@ -110,10 +124,19 @@ pub fn db_err(e: impl Display) -> DomainError {
 /// classifies it by the text that `DbErr` renders — for Postgres the SQLSTATE
 /// and the `"could not serialize access"` / `"deadlock detected"` wordings,
 /// because sqlx surfaces some serialization failures without the numeric code.
-/// [`DomainError::Database`] holds that rendered text and not the `DbErr`:
-/// [`db_err`] takes `impl Display` and stores `to_string()`. So the typed error
-/// is already gone by the time anything can ask about it, and re-wrapping the
-/// text is the only form left.
+/// This function classifies on [`DomainError::Database`]'s `message` — the
+/// rendered text — and re-wraps it as a `DbErr::Query` to hand to that
+/// library function.
+///
+/// **Review finding #25 changed what is available here but deliberately not
+/// what this function does.** [`db_err`] now keeps the `sea_orm::DbErr` as
+/// `.source()`, so a `downcast_ref::<sea_orm::DbErr>()` would recover the
+/// typed error and let the real variant dispatch apply. That is a *behaviour*
+/// change — it would narrow which errors are retried, which is exactly the
+/// widening the next paragraph describes — so it is not made here, where the
+/// task was to stop discarding the source. It is now possible, which it was
+/// not before; `a_database_error_is_classified_by_text_alone` still pins
+/// today's answer.
 ///
 /// **What that costs, stated because the delegation is only partial.**
 /// `toolkit_db::contention` matches on `DbErr::Exec | DbErr::Query` and answers
@@ -145,12 +168,12 @@ pub fn db_err(e: impl Display) -> DomainError {
 /// A non-`Database` variant is never retryable: those are this gear's own
 /// refusals, and repeating one repeats the refusal.
 pub fn is_retryable_contention(error: &DomainError, db: &toolkit_db::Db) -> bool {
-    let DomainError::Database(text) = error else {
+    let DomainError::Database { message, .. } = error else {
         return false;
     };
     toolkit_db::contention::is_retryable_contention(
         db.backend(),
-        &sea_orm::DbErr::Query(sea_orm::RuntimeErr::Internal(text.clone())),
+        &sea_orm::DbErr::Query(sea_orm::RuntimeErr::Internal(message.clone())),
     )
 }
 
@@ -180,8 +203,11 @@ mod tests {
     /// call would answer `false` for such an error, because it is not a
     /// `DbErr::Exec` or `DbErr::Query`.
     ///
-    /// It is pinned, not fixed: the typed error is discarded upstream by
-    /// [`super::db_err`], so there is nothing left here to dispatch on.
+    /// It is pinned, not fixed. Before review finding #25 there was nothing left
+    /// to dispatch on — [`super::db_err`] discarded the typed error. It now
+    /// keeps it as `.source()`, so narrowing this is possible; it is a
+    /// behaviour change and not part of that finding. See
+    /// [`super::is_retryable_contention`]'s own doc.
     #[tokio::test]
     async fn a_database_error_is_classified_by_text_alone() {
         use crate::domain::error::DomainError;
@@ -192,13 +218,13 @@ mod tests {
         // Not a serialization failure, and not from any `DbErr` — but the
         // marker is in the text, so it is retried.
         assert!(super::is_retryable_contention(
-            &DomainError::Database("(code: 5) database is locked".to_owned()),
+            &DomainError::database("(code: 5) database is locked"),
             &db,
         ));
 
         // Text with no contention marker is not retried.
         assert!(!super::is_retryable_contention(
-            &DomainError::Database("relation \"qa_runs\" does not exist".to_owned()),
+            &DomainError::database("relation \"qa_runs\" does not exist"),
             &db,
         ));
 

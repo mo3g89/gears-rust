@@ -1016,7 +1016,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                   Err), each of which owes an operator a distinct log line - same diagnosis as \
                   qa-runs' `service::dispatch::run_tick`/`reconcile_claims`"
     )]
-    pub(crate) async fn run_observation_cycle(
+    pub async fn run_observation_cycle(
         &self,
         cancel: &CancellationToken,
     ) -> ObservationCycleReport {

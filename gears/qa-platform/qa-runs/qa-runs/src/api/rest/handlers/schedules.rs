@@ -395,7 +395,7 @@ mod tests {
                 name: "nightly".to_owned(),
             }),
             (404, |id| DomainError::ScheduleNotFound { id }),
-            (500, |_| DomainError::Database("driver text".to_owned())),
+            (500, |_| DomainError::database("driver text")),
         ];
 
         for (expected_status, make) in cases {

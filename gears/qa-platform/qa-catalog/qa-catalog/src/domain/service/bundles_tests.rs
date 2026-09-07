@@ -121,7 +121,7 @@ impl BundlesRepository for MockBundlesRepository {
         bundle: TestBundle,
     ) -> Result<TestBundle, DomainError> {
         if self.failing_create {
-            return Err(DomainError::Database("descriptor write failed".to_owned()));
+            return Err(DomainError::database("descriptor write failed"));
         }
         self.rows
             .lock()
@@ -713,7 +713,7 @@ async fn create_bundle_deletes_the_blob_when_the_descriptor_write_fails() {
         .unwrap_err();
 
     assert!(
-        matches!(err, DomainError::Database(_)),
+        matches!(err, DomainError::Database { .. }),
         "the original write error must propagate, not the cleanup outcome: {err:?}"
     );
     assert!(

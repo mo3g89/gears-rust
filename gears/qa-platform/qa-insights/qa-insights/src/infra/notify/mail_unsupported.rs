@@ -34,6 +34,7 @@
 //!    never only a placeholder for the time before the SMTP adapter exists.
 
 use async_trait::async_trait;
+use toolkit_security::SecurityContext;
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::{MailClient, MailMessage, SendOutcome};
@@ -45,14 +46,31 @@ pub struct UnsupportedMailClient;
 
 #[async_trait]
 impl MailClient for UnsupportedMailClient {
-    async fn send(&self, _message: &MailMessage) -> Result<SendOutcome, DomainError> {
+    async fn send(
+        &self,
+        _ctx: &SecurityContext,
+        _message: &MailMessage,
+    ) -> Result<SendOutcome, DomainError> {
         Ok(SendOutcome::UnsupportedEgress)
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The tenant these tests send as. Not [`SecurityContext::anonymous`]:
+    /// review finding #37 gave this port the `ctx` parameter so a caller never
+    /// has to fall back to that, and a test that passed the anonymous context
+    /// would be pinning the shape the finding removed.
+    fn ctx() -> SecurityContext {
+        SecurityContext::builder()
+            .subject_id(uuid::Uuid::from_u128(0xDEAD))
+            .subject_tenant_id(uuid::Uuid::from_u128(0x1A11))
+            .build()
+            .expect("subject_id and subject_tenant_id are both set")
+    }
 
     fn message() -> MailMessage {
         MailMessage {
@@ -71,7 +89,7 @@ mod tests {
     #[tokio::test]
     async fn the_unsupported_mail_client_reports_rather_than_fails() {
         let outcome = UnsupportedMailClient
-            .send(&message())
+            .send(&ctx(), &message())
             .await
             .expect("never errors");
         assert_eq!(outcome, SendOutcome::UnsupportedEgress);
@@ -84,7 +102,7 @@ mod tests {
     async fn every_message_reports_unsupported_egress() {
         let client = UnsupportedMailClient;
         for _ in 0..3 {
-            let outcome = client.send(&message()).await.expect("never errors");
+            let outcome = client.send(&ctx(), &message()).await.expect("never errors");
             assert_eq!(outcome, SendOutcome::UnsupportedEgress);
         }
     }

@@ -194,6 +194,10 @@ fn build_request(message: &SlackMessage) -> Result<http::Request<Body>, DomainEr
 /// (`manager/src/services/notifications.rs:880-904`), field for field: `text`
 /// always, `channel` only when [`SlackMessage::channel`] is present and
 /// non-blank after trimming, `blocks` only when non-empty.
+///
+/// The `blocks` value is [`super::block_kit::encode_blocks`]' output — review
+/// finding #17 moved that encoding out of `domain::notify::render` and into
+/// this adapter's own module.
 fn slack_webhook_payload(message: &SlackMessage) -> serde_json::Value {
     let mut payload = serde_json::Map::new();
     payload.insert(
@@ -214,7 +218,7 @@ fn slack_webhook_payload(message: &SlackMessage) -> serde_json::Value {
     if !message.blocks.is_empty() {
         payload.insert(
             "blocks".to_owned(),
-            serde_json::Value::Array(message.blocks.clone()),
+            serde_json::Value::Array(super::block_kit::encode_blocks(&message.blocks)),
         );
     }
     serde_json::Value::Object(payload)

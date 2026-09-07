@@ -70,15 +70,13 @@ mod ssh_keys;
 pub mod sync_cache;
 mod validation;
 
-pub(crate) use bundles::BundlesService;
-pub(crate) use custom_plans::CustomPlansService;
-pub(crate) use plans::PlansService;
-pub(crate) use plugin_registry::{
-    ProductPluginPresence, QaProductRegistry, RegisteredProductPlugin,
-};
-pub(crate) use products::ProductsService;
-pub(crate) use repos::ReposService;
-pub(crate) use ssh_keys::SshKeysService;
+pub use bundles::BundlesService;
+pub use custom_plans::CustomPlansService;
+pub use plans::PlansService;
+pub use plugin_registry::{ProductPluginPresence, QaProductRegistry, RegisteredProductPlugin};
+pub use products::ProductsService;
+pub use repos::ReposService;
+pub use ssh_keys::SshKeysService;
 pub use sync_cache::SyncCache;
 
 #[cfg(test)]
@@ -116,10 +114,10 @@ mod unscoped_read_guard_tests;
 /// calls (which return `DomainError`) as-is, and any `Err` rolls the
 /// transaction back while preserving the domain variant (e.g.
 /// `BranchCacheConflict`) instead of flattening it to a database error.
-pub(crate) type DbProvider = DBProvider<DomainError>;
+pub type DbProvider = DBProvider<DomainError>;
 
 /// Authorization resource types and their PEP-supported properties.
-pub(crate) mod resources {
+pub mod resources {
     use super::ResourceType;
     use toolkit_security::pep_properties;
 
@@ -154,7 +152,7 @@ pub(crate) mod resources {
     );
 }
 
-pub(crate) mod actions {
+pub mod actions {
     pub const GET: &str = "get";
     pub const LIST: &str = "list";
     pub const CREATE: &str = "create";
@@ -171,7 +169,7 @@ pub(crate) mod actions {
 // do NOT touch database objects - they call service methods with business
 // parameters only.
 #[domain_model]
-pub(crate) struct AppServices<R, C, P, K, B>
+pub struct AppServices<R, C, P, K, B>
 where
     R: TestReposRepository,
     C: CustomPlansRepository,
@@ -197,7 +195,7 @@ where
 
 /// Everything `AppServices::new` needs beyond the repositories: shared
 /// infrastructure handles plus the typed config values the services enforce.
-pub(crate) struct ServiceDeps {
+pub struct ServiceDeps {
     pub(crate) db: Arc<DbProvider>,
     pub(crate) authz: Arc<dyn AuthZResolverClient>,
     pub(crate) credstore: Arc<dyn CredStoreClientV1>,

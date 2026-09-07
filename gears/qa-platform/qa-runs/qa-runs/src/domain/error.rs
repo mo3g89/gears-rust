@@ -263,8 +263,37 @@ pub enum DomainError {
     #[error("access denied")]
     Forbidden,
 
-    #[error("database error: {0}")]
-    Database(String),
+    /// A storage failure: the driver's own message, plus the error it came
+    /// from when there was a typed one.
+    ///
+    /// # Why there is a boxed source here — review finding #25
+    ///
+    /// This was `Database(String)`, so `From<toolkit_db::DbError>` kept
+    /// `e.to_string()` and dropped the error itself: `.source()` returned
+    /// `None`, and anything a caller might have wanted from the original —
+    /// `sea_orm::DbErr`'s SQLSTATE, a `sqlx::Error`'s constraint name, the
+    /// whole cause chain rendered into a `tracing` field with `{:?}` — was
+    /// unrecoverable by the time the error left `infra::storage`. The
+    /// `TODO(DE1302)` that used to sit above the `From` impl below named
+    /// exactly this fix.
+    ///
+    /// `message` keeps the rendered text and the `Display` string is
+    /// unchanged (`"database error: {message}"`), so every response body, log
+    /// line and persisted `error` column this variant reaches reads exactly as
+    /// it did before.
+    #[error("database error: {message}")]
+    Database {
+        /// The driver's rendered message — `DbError::to_string()` for a
+        /// converted error, or the text a caller had in hand for one built
+        /// with [`DomainError::database`].
+        message: String,
+        /// The error this was converted from. `From<toolkit_db::DbError>`
+        /// always sets it; `None` for a failure that only ever existed as text
+        /// (a `toolkit_odata::Error::Db` string, a test fixture), which is why
+        /// this is an `Option` rather than a required field.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("internal error: {0}")]
     Internal(String),
@@ -341,6 +370,7 @@ impl DomainError {
     /// Task 5: its `what` is a `&'static str` *"because it always names a column
     /// … never caller-controlled text"* — but its `value` is the offending column
     /// contents, which is exactly what must not travel.
+    #[must_use]
     pub(crate) const fn disclosable(&self) -> bool {
         match self {
             // The caller's own request, or their own row's state. Every one of
@@ -372,8 +402,24 @@ impl DomainError {
             | Self::ExecutorFailed(_)
             | Self::Catalog(_)
             | Self::Environments(_)
-            | Self::Database(_)
+            | Self::Database { .. }
             | Self::Internal(_) => false,
+        }
+    }
+
+    /// A [`Self::Database`] from a rendered message alone, with no source to
+    /// attach — for a storage failure that arrives as text rather than as a
+    /// typed error (`infra::storage`'s `toolkit_odata` mapping, and test
+    /// fixtures).
+    ///
+    /// Prefer `?` on a `toolkit_db::DbError`, which goes through
+    /// `From<toolkit_db::DbError>` and keeps the original as `.source()`
+    /// (review finding #25).
+    #[must_use]
+    pub fn database(message: impl Into<String>) -> Self {
+        Self::Database {
+            message: message.into(),
+            source: None,
         }
     }
 
@@ -381,6 +427,7 @@ impl DomainError {
     ///
     /// The **error returned to the caller is never affected** — services return
     /// the original value; this is only what gets written down.
+    #[must_use]
     pub(crate) fn recorded_text(&self) -> String {
         if self.disclosable() {
             self.to_string()
@@ -390,13 +437,17 @@ impl DomainError {
     }
 }
 
-// TODO(DE1302): `Database(String)` only stores a formatted message, so these
-// `From` impls drop the source error. Extend `Database` to hold a boxed source
-// so `.source()` returns the original error, then remove these allows.
-#[allow(unknown_lints, de1302_error_from_to_string)]
+/// Review finding #25: the source is boxed into [`DomainError::Database`]
+/// rather than flattened to `e.to_string()`, so `.source()` reaches the
+/// original `DbError` and its own cause chain. See that variant's doc; the
+/// TODO(DE1302) comment and its lint allowance, which named exactly this fix,
+/// are gone with it.
 impl From<toolkit_db::DbError> for DomainError {
     fn from(e: toolkit_db::DbError) -> Self {
-        DomainError::Database(e.to_string())
+        DomainError::Database {
+            message: e.to_string(),
+            source: Some(Box::new(e)),
+        }
     }
 }
 
@@ -461,7 +512,7 @@ mod tests {
         let raw = "duplicate key value violates unique constraint \
                    \"idx_qa_run_queue_tenant_run\" DETAIL: Key (tenant_id, run_id)=(0a11) exists";
         for error in [
-            DomainError::Database(raw.to_owned()),
+            DomainError::database(raw),
             DomainError::Internal(raw.to_owned()),
             DomainError::ExecutorFailed(raw.to_owned()),
             DomainError::Catalog(raw.to_owned()),
@@ -589,5 +640,43 @@ mod tests {
             ));
             assert!(matches!(DomainError::from(e), DomainError::Internal(_)));
         }
+    }
+
+    /// Review finding #25, and the `TODO(DE1302)` that used to sit above
+    /// `From<toolkit_db::DbError>`: the conversion keeps the original error as
+    /// `.source()` instead of flattening it to its `Display` text. Without
+    /// this, `sea_orm`'s SQLSTATE and `sqlx`'s constraint name are gone by the
+    /// time the error leaves `infra::storage`.
+    #[test]
+    fn a_db_error_converted_to_a_domain_error_keeps_its_source() {
+        let db_error = toolkit_db::DbError::UnknownDsn("mysql://nowhere".to_owned());
+        let rendered = db_error.to_string();
+
+        let domain = DomainError::from(db_error);
+
+        // The `Display` string is unchanged by the boxing, which is what lets
+        // every existing response body and `error` column stay as it was.
+        assert_eq!(domain.to_string(), format!("database error: {rendered}"));
+
+        let source = std::error::Error::source(&domain).expect("the DbError is now the source");
+        assert!(
+            source.is::<toolkit_db::DbError>(),
+            "the source must be the original error, not a re-wrapping of its text"
+        );
+        assert_eq!(source.to_string(), rendered);
+    }
+
+    /// The other constructor deliberately has no source: a failure that only
+    /// ever existed as text cannot invent one, and `.source()` says so rather
+    /// than pointing at a stand-in.
+    #[test]
+    fn a_database_error_built_from_text_alone_has_no_source() {
+        let domain = DomainError::database("relation \"qa\" does not exist");
+
+        assert_eq!(
+            domain.to_string(),
+            "database error: relation \"qa\" does not exist"
+        );
+        assert!(std::error::Error::source(&domain).is_none());
     }
 }
