@@ -36,15 +36,15 @@
 //!
 //! # Why both items carry `#[allow(dead_code)]`
 //!
-//! [`ENFORCED`]'s consumer arrived with the companion task: the anti-drift
-//! test that compares this list to the generated catalog reads it under
-//! `cfg(test)` only. [`RESOURCE_TYPES`] has no consumer, and is **not** getting
-//! the stub type-schema registration it was written for - see that item's own
-//! doc for what settled that. An `#[expect]` cannot express this - `clippy
-//! --all-targets` builds this crate twice and the test build *does* use both,
-//! so the expectation would be unfulfilled there and fulfilled in the lib
-//! build. `ENFORCED`'s `allow` comes off with the commit that adds a non-test
-//! consumer.
+//! Neither has a non-test consumer, and neither is waiting for one.
+//! [`ENFORCED`] is read under `cfg(test)` only, by the anti-drift test that
+//! compares this list to the generated catalog; [`RESOURCE_TYPES`] likewise, by
+//! the scan's equality test - and it is **not** getting the stub type-schema
+//! registration it was written for, which is the non-test consumer it was
+//! waiting on (see that item's own doc for what settled that). An `#[expect]`
+//! cannot express this - `clippy --all-targets` builds this crate twice and the
+//! test build *does* use both, so the expectation would be unfulfilled there
+//! and fulfilled in the lib build.
 //!
 //! Review finding #1.
 
@@ -57,7 +57,7 @@ use super::{actions, resources};
 /// calls produced them.
 #[allow(
     dead_code,
-    reason = "no non-test consumer yet - see this module's header"
+    reason = "read under cfg(test) only - see this module's header"
 )]
 pub const ENFORCED: &[(&str, &str)] = &[
     // `qa.test_repo` - `repos`, plus the precondition reads `plans` and
@@ -121,15 +121,15 @@ pub const ENFORCED: &[(&str, &str)] = &[
 /// **No such registration exists here, and none can be built from these
 /// strings.** A types-registry type-schema id must end with `~`
 /// (`types-registry-sdk/src/models.rs:53-55`), these are plain strings like
-/// `qa.plan`, and renaming them to GTS type ids is precluded because they are
+/// `qa.bundle`, and renaming them to GTS type ids is precluded because they are
 /// what a deployment's policies are written against. So this list is measured
-/// and pinned to [`ENFORCED`] by the scan, but nothing consumes it; the
-/// consequence -- no custom role can target a QA resource type -- is recorded
-/// as a follow-up in
+/// and pinned to [`ENFORCED`] by the scan, but no production code consumes it;
+/// the consequence -- no custom role can target a QA resource type -- is
+/// recorded as a follow-up in
 /// `docs/superpowers/specs/2026-09-05-review-remediation-design.md` section 12.
 #[allow(
     dead_code,
-    reason = "no non-test consumer yet - see this module's header"
+    reason = "test-only consumer by design - see this item's doc"
 )]
 pub const RESOURCE_TYPES: &[&str] = &[
     resources::BUNDLE_NAME,

@@ -115,12 +115,17 @@ pub(super) fn enforced_pair(resource_type: &str, action: &str) -> (&'static str,
 /// `AuthZ` resolver granting exactly **one** `(resource_type, action)` pair
 /// and denying every other.
 ///
-/// [`PermissiveAuthZ`] and [`crate::test_support::DenyAllAuthZ`] were this
-/// crate's only two `AuthZ` doubles, and neither can express "this principal
-/// holds grants, just not *this* one": one grants every pair and the other
-/// refuses every pair, so a denial either produces is a denial of something
-/// nothing could have authorized. This double sits between them, which is
-/// what makes a denial attributable to a missing grant — see
+/// **No `AuthZ` double in this crate varied its decision by action.** The
+/// seven that existed all answer the same way whatever is asked:
+/// [`PermissiveAuthZ`], [`crate::test_support::TenantScopedAuthZ`],
+/// [`crate::test_support::SystemActorGrantAuthZ`] (which varies by *subject*,
+/// never by action) and the three `RecordingAuthZ` copies (`products_tests`,
+/// `tests_tenant_scoping`, `bundles_tests`) grant every pair;
+/// [`crate::test_support::DenyAllAuthZ`] refuses every pair. So none of them
+/// can express "this principal holds grants, just not *this* one", and a
+/// denial any of them produces is a denial of something nothing could have
+/// authorized. This double is the one that discriminates, which is what makes
+/// a denial attributable to a missing grant — see
 /// `products_tests::an_action_without_a_grant_is_denied`.
 ///
 /// The granted pair answers with [`permissive_response`], so the PEP compiles

@@ -634,12 +634,12 @@ enumerable, which is what finding #1 asked for.
 permission: the platform RBAC role-definitions API resolves a rule's
 `target_type` through the types-registry. That is why ledger registers a stub
 type-schema per authz label (`authz_label_type_schemas`,
-`gears/bss/ledger/ledger/src/authz.rs:252-263`), account-management registers
+`gears/bss/ledger/ledger/src/authz.rs:257-267`), account-management registers
 one per PEP resource type — *"without it every tenant operation is denied (403)
 because no role can name the type"*
-(`gears/system/account-management/account-management-sdk/src/gts.rs:250-262`)
+(`gears/system/account-management/account-management-sdk/src/gts.rs:256-260`)
 — and credstore says the same
-(`gears/credstore/credstore-sdk/src/gts.rs:41-51`). QA cannot register one,
+(`gears/credstore/credstore-sdk/src/gts.rs:46-51`). QA cannot register one,
 because the stub needs a *type-schema id* and QA has none:
 
 1. A types-registry type-schema id must end with `~`
