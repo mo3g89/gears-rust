@@ -30,13 +30,33 @@
 //! [`forwarded_actions`] carries the two shapes and why the resolution is
 //! file-local.
 //!
+//! # Every misreading this scan can make is loud
+//!
+//! That is the property the whole guard rests on, so it is spelled out. Any
+//! `resources::*` name it cannot resolve to a `&str` const, any const name
+//! that resolves ambiguously, any argument list that does not close, and any
+//! forwarded action it cannot trace **panic** rather than dropping a call site
+//! from the measurement. Two further checks close the two ways a call site
+//! could otherwise have gone missing quietly:
+//! [`assert_every_access_scope_is_a_method_call`] pins the one spelling the
+//! scan matches, and the forward test compares the number of call sites
+//! reached against `super::EXPECTED_ACCESS_SCOPE_SITES` so a scan that
+//! silently stops reading part of the crate fails instead of passing on a
+//! smaller set.
+//!
+//! # This file is duplicated in all four gears
+//!
+//! Byte for byte, and `authz_surface_parity_tests.rs` in `qa-catalog` is what
+//! detects a divergence. See that file's header for why the duplication is
+//! correct and what to do when it fails.
+//!
 //! Review finding #1.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{ENFORCED, RESOURCE_TYPES};
+use super::{ENFORCED, EXPECTED_ACCESS_SCOPE_SITES, RESOURCE_TYPES};
 
 /// One `(resource_type, action)` pair the scan measured, and where from.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -313,12 +333,23 @@ fn strip_tokens<'a>(text: &'a str, tokens: &[&str]) -> Option<&'a str> {
     Some(rest)
 }
 
-/// Every `const <NAME>: &str = "<value>";` this crate declares.
+/// Every `const <NAME>: &str = "<value>";` this crate declares, as
+/// name -> the set of values declared under that name.
 ///
 /// Whitespace-tolerant rather than line-based, so a declaration rustfmt wraps
 /// onto a second line still resolves.
-fn str_consts(files: &[Source]) -> BTreeMap<String, String> {
-    let mut found = BTreeMap::new();
+///
+/// **A set, not one value, because the key is a bare const name with no module
+/// qualification and this crate already declares some names twice.** Keeping
+/// every value and refusing the *lookup* of an ambiguous one
+/// ([`one_value`]) is what makes a collision a named failure rather than a
+/// silent last-file-in-walk-order win: a future `const GET: &str` in an
+/// unrelated module would otherwise corrupt a measured action string. Refusing
+/// duplicates outright is not available - qa-environments has two today
+/// (`CANARY`, `STAMP`, both test-probe strings) and neither is a name this
+/// scan ever consults.
+fn str_consts(files: &[Source]) -> BTreeMap<String, BTreeSet<String>> {
+    let mut found: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for file in files {
         for start in token_positions(&file.code, "const ") {
             let Some((name, rest)) = file.code.get(start + 6..).and_then(split_ident) else {
@@ -327,10 +358,39 @@ fn str_consts(files: &[Source]) -> BTreeMap<String, String> {
             let Some(rest) = strip_tokens(rest, &[":", "&str", "=", "\""]) else {
                 continue;
             };
-            found.insert(name, rest.chars().take_while(|ch| *ch != '"').collect());
+            found
+                .entry(name)
+                .or_default()
+                .insert(rest.chars().take_while(|ch| *ch != '"').collect());
         }
     }
     found
+}
+
+/// The single value declared under `name`, or a named failure.
+///
+/// # Panics
+///
+/// When the name is undeclared, or declared with more than one value - see
+/// [`str_consts`] for why the second case has to be a panic and not a pick.
+fn one_value(values: Option<&BTreeSet<String>>, what: &str, site: &str) -> String {
+    let values = values.unwrap_or_else(|| {
+        panic!("{what}, enforced at {site}, is not a `&str` const this scan can read")
+    });
+    assert_eq!(
+        values.len(),
+        1,
+        "{what}, enforced at {site}, resolves to {} different `&str` consts of that name \
+         ({}). The scan keys const names crate-wide and cannot tell them apart; qualify or \
+         rename one of them.",
+        values.len(),
+        values
+            .iter()
+            .map(|value| format!("`{value}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    values.iter().next().cloned().unwrap_or_default()
 }
 
 /// Every `resources::*` descriptor, resolved to the `PDP` string it carries.
@@ -343,8 +403,8 @@ fn str_consts(files: &[Source]) -> BTreeMap<String, String> {
 /// cannot supply it itself.
 fn resource_strings(
     files: &[Source],
-    strings: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
+    strings: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeMap<String, BTreeSet<String>> {
     let head = &[
         ":",
         "ResourceType",
@@ -354,7 +414,7 @@ fn resource_strings(
         "from_static",
         "(",
     ];
-    let mut found = BTreeMap::new();
+    let mut found: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for file in files {
         for start in token_positions(&file.code, "const ") {
             let Some((name, rest)) = file.code.get(start + 6..).and_then(split_ident) else {
@@ -366,8 +426,11 @@ fn resource_strings(
             else {
                 continue;
             };
-            if let Some(value) = strings.get(&carrier) {
-                found.insert(name, value.clone());
+            if let Some(values) = strings.get(&carrier) {
+                found
+                    .entry(name)
+                    .or_default()
+                    .extend(values.iter().cloned());
             }
         }
     }
@@ -469,15 +532,26 @@ fn forwarded_actions(file: &Source, offset: usize) -> BTreeSet<String> {
     found
 }
 
+/// What one pass over this crate's source found.
+struct Scan {
+    /// Every `(resource_type, action)` pair reached, one row per call site.
+    pairs: Vec<Measured>,
+    /// How many `.access_scope(` call sites produced them.
+    sites: usize,
+}
+
 /// Every `(resource_type, action)` pair an `access_scope` call site in this
 /// crate's source reaches.
-fn measured_pairs() -> Vec<Measured> {
+fn scan() -> Scan {
     let files = sources();
+    assert_every_access_scope_is_a_method_call(&files);
     let strings = str_consts(&files);
     let types = resource_strings(&files, &strings);
     let mut found = Vec::new();
+    let mut sites = 0;
     for file in &files {
         for call in file.code.match_indices(".access_scope(").map(|(at, _)| at) {
+            sites += 1;
             let site = format!("{}:{}", file.path, line_of(&file.code, call));
             let args = call_arguments(file, call + ".access_scope".len(), &site);
             let resource = resource_at(&args, &types, &site);
@@ -501,7 +575,56 @@ fn measured_pairs() -> Vec<Measured> {
             }
         }
     }
-    found
+    Scan {
+        pairs: found,
+        sites,
+    }
+}
+
+/// **Every `access_scope` in this crate's code is spelled as a method call.**
+///
+/// The scan matches the one spelling `.access_scope(`, and that is the single
+/// direction in which drift could be *silent*: a UFCS call
+/// (`PolicyEnforcer::access_scope(&enforcer, ..)`), or a thin wrapper named
+/// something else, would enforce a pair the forward test never sees while the
+/// reverse test went on passing. Every other misreading this scan can make
+/// ends in a panic. So the spelling itself is pinned here.
+///
+/// `access_scope_with` is caught by the same assertion, through the trailing
+/// `(`: it is a *different* PEP entry point (it can turn off
+/// `require_constraints`), no gear uses it today, and each gear's
+/// `domain::service` header says so about itself. One appearing must break this
+/// test rather than be counted as an `access_scope`.
+///
+/// # Panics
+///
+/// Naming the file, line and surrounding text of the offending spelling.
+fn assert_every_access_scope_is_a_method_call(files: &[Source]) {
+    let mut offenders: Vec<String> = Vec::new();
+    for file in files {
+        for at in file.code.match_indices("access_scope").map(|(at, _)| at) {
+            let raw = file.code.as_bytes();
+            let method = at.checked_sub(1).is_some_and(|prev| raw[prev] == b'.')
+                && raw.get(at + "access_scope".len()) == Some(&b'(');
+            if !method {
+                let line = line_of(&file.code, at);
+                let from = at.saturating_sub(40);
+                let to = (at + 60).min(file.code.len());
+                let context = file.code.get(from..to).unwrap_or_default().trim();
+                offenders.push(format!("{}:{line}: {context}", file.path));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "{} `access_scope` occurrence(s) are not spelled `.access_scope(`, so the scan \
+         below cannot see them:\n  {}\n\nA UFCS call or an `access_scope_with` compiles a \
+         scope this guard does not measure - the one way a new enforced pair can go \
+         missing without any test failing. Spell it as a method call, or teach the scan \
+         the new entry point; do not relax this assertion.",
+        offenders.len(),
+        offenders.join("\n  "),
+    );
 }
 
 /// The argument text of the `access_scope` call whose `(` is at `open`.
@@ -524,7 +647,7 @@ fn call_arguments(file: &Source, open: usize, site: &str) -> String {
 /// resolves to a string — one scope per resource type is the rule every
 /// service module here states, and an unresolvable name means a descriptor
 /// built some way this scan cannot read.
-fn resource_at(args: &str, types: &BTreeMap<String, String>, site: &str) -> String {
+fn resource_at(args: &str, types: &BTreeMap<String, BTreeSet<String>>, site: &str) -> String {
     let named = qualified(args, "resources");
     assert_eq!(
         named.len(),
@@ -534,13 +657,13 @@ fn resource_at(args: &str, types: &BTreeMap<String, String>, site: &str) -> Stri
         named.len(),
     );
     let name = named.into_iter().next().unwrap_or_default();
-    types.get(&name).cloned().unwrap_or_else(|| {
-        panic!(
-            "resources::{name}, enforced at {site}, is not a `ResourceType::from_static` \
-             built from a sibling `&str` const, so this scan cannot read the string the PDP \
-             is handed. Declare a `{name}_NAME` const and build the descriptor from it."
-        )
-    })
+    assert!(
+        types.contains_key(&name),
+        "resources::{name}, enforced at {site}, is not a `ResourceType::from_static` built \
+         from a sibling `&str` const, so this scan cannot read the string the PDP is \
+         handed. Declare a `{name}_NAME` const and build the descriptor from it."
+    );
+    one_value(types.get(&name), &format!("resources::{name}"), site)
 }
 
 /// The `PDP` action string for the `actions::<name>` const.
@@ -548,10 +671,8 @@ fn resource_at(args: &str, types: &BTreeMap<String, String>, site: &str) -> Stri
 /// # Panics
 ///
 /// When the const is not a `&str` declaration this scan could find.
-fn action_string(name: &str, strings: &BTreeMap<String, String>, site: &str) -> String {
-    strings.get(name).cloned().unwrap_or_else(|| {
-        panic!("actions::{name}, enforced at {site}, is not a `&str` const this scan can read")
-    })
+fn action_string(name: &str, strings: &BTreeMap<String, BTreeSet<String>>, site: &str) -> String {
+    one_value(strings.get(name), &format!("actions::{name}"), site)
 }
 
 /// Render measured pairs for an assertion message.
@@ -572,15 +693,19 @@ fn describe(pairs: &[&Measured]) -> String {
 /// to grant. Fails with the pair and the file and line that enforces it.
 #[test]
 fn every_access_scope_call_site_appears_in_the_enforced_list() {
-    let measured = measured_pairs();
-    assert!(
-        measured.len() * 2 > ENFORCED.len(),
-        "the scan found only {} enforced pairs against a list of {}; a scan that finds \
-         nothing passes this guard vacuously",
-        measured.len(),
-        ENFORCED.len(),
+    let measured = scan();
+    assert_eq!(
+        measured.sites, EXPECTED_ACCESS_SCOPE_SITES,
+        "the scan reached {} `.access_scope(` call sites; this crate is recorded as having \
+         {}. A scan that reaches fewer sites than the source has passes the check below \
+         vacuously, which is why this is an equality and not a floor. If a call site was \
+         genuinely added or removed, update EXPECTED_ACCESS_SCOPE_SITES in the sibling \
+         module and re-derive ENFORCED; if it was not, the scan has stopped reading part \
+         of this crate.",
+        measured.sites, EXPECTED_ACCESS_SCOPE_SITES,
     );
     let missing: Vec<&Measured> = measured
+        .pairs
         .iter()
         .filter(|pair| !ENFORCED.contains(&(pair.resource.as_str(), pair.action.as_str())))
         .collect();
@@ -602,7 +727,8 @@ fn every_access_scope_call_site_appears_in_the_enforced_list() {
 /// is the same defect as a missing one seen from the catalog's side.
 #[test]
 fn every_enforced_pair_is_reached_by_an_access_scope_call_site() {
-    let measured: BTreeSet<(String, String)> = measured_pairs()
+    let measured: BTreeSet<(String, String)> = scan()
+        .pairs
         .into_iter()
         .map(|pair| (pair.resource, pair.action))
         .collect();

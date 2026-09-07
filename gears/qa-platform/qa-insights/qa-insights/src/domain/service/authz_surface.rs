@@ -130,7 +130,22 @@ pub(crate) const RESOURCE_TYPES: &[&str] = &[
     resources::TEST_RESULT_NAME,
 ];
 
+/// How many `.access_scope(` call sites this crate's non-test source has.
+///
+/// Not a summary of [`ENFORCED`] and not derivable from it: several call sites
+/// enforce the same pair (`qa-insights`'s precondition reads), and one call site can
+/// contribute several pairs (a forwarded action resolved through its helper's
+/// callers). This counts the *calls*, and the scan's forward test asserts it
+/// reaches exactly this many - so a scan that silently stops reading part of
+/// the crate fails rather than passing against a smaller set.
+///
+/// **It moves whenever a call site is added or removed**, including one that
+/// enforces a pair already listed above. Re-run the scan and take the number
+/// from its failure message; do not adjust it to make a red test green without
+/// checking what changed.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+const EXPECTED_ACCESS_SCOPE_SITES: usize = 10;
+
+#[cfg(test)]
 #[path = "authz_surface_tests.rs"]
 mod tests;

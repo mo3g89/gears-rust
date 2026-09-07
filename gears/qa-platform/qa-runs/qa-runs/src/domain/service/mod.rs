@@ -71,15 +71,15 @@ use crate::domain::error::DomainError;
 use crate::domain::repos::RunsRepository;
 use crate::domain::system_actor;
 
-/// `pub(crate)` rather than private-plus-re-export (qa-catalog's idiom): Tasks
-/// 14 and 15 name [`Admission`](launch::Admission) and the two seam traits, and
-/// a `pub(crate) use` of a name *this* module never mentions is an unused
-/// import until the task that needs it lands.
 /// The `(resource_type, action)` pairs this gear's PEP enforces, and the
 /// distinct resource types among them. The source side of the permission
 /// catalog's anti-drift test - review finding #1.
 pub mod authz_surface;
 
+/// `pub(crate)` rather than private-plus-re-export (qa-catalog's idiom): Tasks
+/// 14 and 15 name [`Admission`](launch::Admission) and the two seam traits, and
+/// a `pub(crate) use` of a name *this* module never mentions is an unused
+/// import until the task that needs it lands.
 pub(crate) mod launch;
 
 pub(crate) mod admission;
