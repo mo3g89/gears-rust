@@ -6,6 +6,7 @@
 pub mod api;
 pub mod config;
 pub mod gear;
+pub mod gts;
 
 pub use gear::QaEnvironments;
 
