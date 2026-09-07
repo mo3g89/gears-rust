@@ -113,6 +113,9 @@ mod tests_tenant_scoping;
 #[cfg(test)]
 mod unscoped_read_guard_tests;
 
+#[cfg(test)]
+mod resources_tests;
+
 /// `DB` provider alias.
 ///
 /// Unlike qa-environments (which aliases `DBProvider<DbError>` and has no
@@ -129,7 +132,7 @@ pub type DbProvider = DBProvider<DomainError>;
 /// from an inline literal, so the PDP resource string has one declaration and
 /// two consumers: the descriptor the PEP is called with, and
 /// [`authz_surface::ENFORCED`]. qa-insights' `resources::TEST_RESULT_NAME`
-/// (`qa-insights/src/domain/service/mod.rs:206`) is the precedent and carries
+/// (`qa-insights/src/domain/service/mod.rs:208-216`) is the precedent and carries
 /// the reason the descriptor cannot supply the string itself.
 pub mod resources {
     use super::ResourceType;

@@ -27,22 +27,37 @@
 //! action, and most of this crate's call sites are one: each service compiles
 //! its scopes through a private helper that takes `action: &str`. Those are
 //! resolved through the helper's own callers, in the same file, transitively.
-//! [`forwarded_actions`] carries the two shapes and why the resolution is
-//! file-local.
+//! [`forwarded_actions`] carries the two shapes, how their failure modes
+//! differ, and why the resolution is file-local.
 //!
-//! # Every misreading this scan can make is loud
+//! # Every misreading that drops a pair is loud; one that adds a pair is not
 //!
-//! That is the property the whole guard rests on, so it is spelled out. Any
-//! `resources::*` name it cannot resolve to a `&str` const, any const name
-//! that resolves ambiguously, any argument list that does not close, and any
-//! forwarded action it cannot trace **panic** rather than dropping a call site
-//! from the measurement. Two further checks close the two ways a call site
-//! could otherwise have gone missing quietly:
-//! [`assert_every_access_scope_is_a_method_call`] pins the one spelling the
-//! scan matches, and the forward test compares the number of call sites
-//! reached against `super::EXPECTED_ACCESS_SCOPE_SITES` so a scan that
-//! silently stops reading part of the crate fails instead of passing on a
-//! smaller set.
+//! The direction matters, and the guard's own claim about itself used to read
+//! "every misreading this scan can make is loud", which is true of only one
+//! of the two directions. Both halves are therefore spelled out.
+//!
+//! **Nothing goes missing quietly.** Any `resources::*` name it cannot
+//! resolve to a `&str` const, any const name that resolves ambiguously, any
+//! argument list that does not close, and any forwarded action it cannot
+//! trace **panic** rather than dropping a call site from the measurement. Two
+//! further checks close the two ways a call site could otherwise have gone
+//! missing quietly: [`assert_every_access_scope_is_a_method_call`] pins the
+//! one spelling the scan matches, and the forward test compares the number of
+//! call sites reached against `super::EXPECTED_ACCESS_SCOPE_SITES` so a scan
+//! that silently stops reading part of the crate fails instead of passing on
+//! a smaller set.
+//!
+//! **A pair the code does not enforce can be added quietly**, and one of the
+//! two forwarded-action shapes is how: the same-function shape unions every
+//! `actions::*` name in the enclosing `fn` without regard to which
+//! `resources::*` each was paired with, so a spurious `(resource_type,
+//! action)` pair is emitted as measured rather than refused.
+//! [`forwarded_actions`] carries the live instance of that shape, why it is
+//! harmless there, and the named follow-up that would narrow it. The
+//! helper-caller shape has no such hole. Nothing downstream catches a
+//! spurious pair either — `super::ENFORCED` was transcribed from this scan's
+//! own output and the catalog is pinned to `super::ENFORCED` — so this
+//! paragraph is the only place a reader is warned.
 //!
 //! # This file is duplicated in all four gears
 //!
@@ -84,9 +99,16 @@ fn source_root() -> PathBuf {
 
 /// Every non-test `.rs` file under `src/`.
 ///
-/// `*_tests.rs` and `test_support.rs` are skipped: those build `PDP` doubles
-/// and call the enforcer with fixture pairs, which are not this gear's
-/// enforcement surface. Inline `#[cfg(test)]` blocks inside production files
+/// A `*_tests.rs`, `tests_*.rs` or `test_support.rs` module is skipped: those
+/// build `PDP` doubles and call the enforcer with fixture pairs, which are not
+/// this gear's enforcement surface. The `tests_` *prefix* is in the filter
+/// because two modules defeat the suffix — `qa-catalog` and `qa-environments`
+/// both carry `domain/service/tests_tenant_scoping.rs` — and a fixture call
+/// site added to either would otherwise have been measured as that gear's
+/// enforcement surface. Neither reaches the enforcer today (qa-catalog's only
+/// `access_scope` there is inside a doc comment, which is blanked anyway, and
+/// qa-environments has none), so widening the filter changed no measured
+/// number. Inline `#[cfg(test)]` blocks inside production files
 /// *are* scanned — no production file here has one that reaches the enforcer,
 /// and one that did would either name a real pair (harmless) or invent one,
 /// which is exactly what this guard should refuse to let pass.
@@ -129,7 +151,10 @@ fn sources() -> Vec<Source> {
 /// Is this a production `.rs` file this guard reads?
 fn is_scanned(path: &Path) -> bool {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    name.ends_with(".rs") && !name.ends_with("_tests.rs") && name != "test_support.rs"
+    name.ends_with(".rs")
+        && !name.ends_with("_tests.rs")
+        && !name.starts_with("tests_")
+        && name != "test_support.rs"
 }
 
 /// Is this byte part of a Rust identifier?
@@ -399,7 +424,7 @@ fn one_value(values: Option<&BTreeSet<String>>, what: &str, site: &str) -> Strin
 /// has one declaration and two consumers — the descriptor the enforcer is
 /// called with, and [`super::ENFORCED`] — so this scan reads the very literal
 /// the `PDP` was handed. `resources::TEST_RESULT_NAME` in
-/// `qa-insights/src/domain/service/mod.rs:206` records why the descriptor
+/// `qa-insights/src/domain/service/mod.rs:208-216` records why the descriptor
 /// cannot supply it itself.
 fn resource_strings(
     files: &[Source],
@@ -503,6 +528,50 @@ fn declares_fn(code: &str, start: usize) -> bool {
 /// merging surfaces that a deployment must be able to grant apart. A helper
 /// whose callers move to another file makes this guard fail rather than guess,
 /// which is the right direction for a gate.
+///
+/// # The two shapes fail differently, and only shape 2 fails loudly
+///
+/// **Shape 2 cannot be silently wrong.** It reads only the forwarded call's
+/// own argument list; a caller whose argument names no `actions::*` const is
+/// pushed back onto `pending` and chased to *its* caller, and a chain that
+/// ends with nothing named leaves the call site with no action at all, which
+/// [`scan`]'s own assertion turns into a panic. It never substitutes a
+/// neighbouring action for the one it could not read.
+///
+/// **Shape 1 can be.** `qualified(body, "actions")` unions *every*
+/// `actions::*` name in the [`enclosing_fn`] region, with no regard for which
+/// `resources::*` each of them was paired with. A function that enforces two
+/// resource types and forwards the action for one of them therefore credits
+/// the forwarded site with the other's actions too, and the extra
+/// `(resource_type, action)` pair is emitted as **measured** rather than
+/// refused.
+///
+/// That shape is live today. In `qa-environments`,
+/// `domain/service/variables.rs`' `VariablesService::upsert` spans `:326`
+/// to `:403` and enforces `resources::PLATFORM`/`actions::GET` at `:348`
+/// (the cross-tenant environment precheck) and
+/// `resources::VARIABLE`/`actions::GET` at `:373` (the natural-key probe)
+/// before choosing `UPDATE`-or-`CREATE` at `:386`-`:388`. So the forwarded
+/// site at `:393` is credited with `{CREATE, GET, UPDATE}` and emits
+/// `(qa.variable, get)` on top of the two pairs it really reaches.
+///
+/// **It is harmless there only because `:373` enforces `(qa.variable, get)`
+/// independently**, so the pair is real and the catalog entry it produces
+/// grants something the PEP does ask for. Nothing here checks that
+/// coincidence: a rearrangement of `upsert` that dropped `:373` would leave
+/// the spurious pair behind, `super::ENFORCED` (transcribed from this scan)
+/// would still match the catalog (pinned to `super::ENFORCED`), and the
+/// subsystem would ship a permission that authorizes nothing — which
+/// `crate::gts::permissions`' own header calls worse than an absent one,
+/// because it reads as coverage.
+///
+/// Narrowing shape 1 is a **named follow-up**, recorded in §12 of
+/// `gears/qa-platform/docs/superpowers/specs/2026-09-05-review-remediation-design.md`
+/// with its two candidate fixes; it is deliberately not done here, because
+/// the measured surface has been independently re-derived as correct twice
+/// and perturbing the scan late risks changing a verified measurement for no
+/// pre-merge benefit. Whoever takes it must port the change to all four
+/// copies of this file.
 fn forwarded_actions(file: &Source, offset: usize) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     let mut resolved: BTreeSet<String> = BTreeSet::new();

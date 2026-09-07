@@ -25,21 +25,47 @@
 //! taken straight from `AccessScope::allow_all()` or `for_tenant` asks the PDP
 //! nothing, so there is no decision for a policy to grant or refuse.
 //!
-//! This gear's one call of the second kind is `tenants::TenantDirectory`'s
-//! cross-tenant enumeration, which reads through
-//! [`crate::domain::elevated::enumeration_scope`] - see that module's doc. So
-//! do the event-ingest and reconcile sweeps, which scope with
-//! `AccessScope::for_tenant`; `qa.test_result`/`rebuild` below is the
-//! operator-triggered replay, not the sweep. Each ticker's per-tenant pass
-//! that follows the enumeration *is* authorized normally, under
-//! `system_actor`'s tenant-bound factories.
+//! The calls of the second kind, as measured 2026-09-07 by grepping this
+//! crate's production source for every `AccessScope::` constructor. **Apply
+//! the rule above rather than this list**: it is current at that date and not
+//! guaranteed closed, and a `for_tenant` call site added tomorrow is one of
+//! these whether or not anyone adds it here.
+//!
+//! * `tenants::TenantDirectory`'s cross-tenant enumeration - the only path
+//!   that reads through [`crate::domain::elevated::enumeration_scope`]'s
+//!   `AccessScope::allow_all()`. See that module's doc.
+//! * The event-ingest and reconcile sweeps, which scope with
+//!   `AccessScope::for_tenant` (`qa-insights/src/domain/service/reconcile.rs:690`
+//!   for the sweep itself and `:831` for its watermark advance).
+//!   `qa.test_result`/`rebuild` below is the operator-triggered replay, not
+//!   the sweep.
+//! * The public HMAC collect callback
+//!   (`qa-insights/src/domain/service/collect.rs:735`) - see the next section.
+//! * `notify::NotifyService::log`'s audit-row append
+//!   (`qa-insights/src/domain/service/notify.rs:1193`). The write always
+//!   targets the same tenant's own log whichever action compiled the scope
+//!   that authorized the operation being audited, so it takes
+//!   `AccessScope::for_tenant` rather than re-deriving one.
+//! * The leader-election claim rows
+//!   (`qa-insights/src/infra/leader/claim_row.rs:379`, `:466` and `:498`),
+//!   which scope with `AccessScope::for_tenant(CLAIM_TENANT)` - an
+//!   infrastructure lock held in a reserved tenant, not a tenant resource any
+//!   deployment policy is written about.
+//!
+//! Each ticker's per-tenant pass that follows the enumeration *is* authorized
+//! normally, under `system_actor`'s tenant-bound factories.
 //!
 //! # The two collect routes are not the same call site
 //!
 //! `qa.test_result`/`collect` is enforced on the *authenticated* trigger
 //! (`api::rest::handlers::collect`'s `trigger_collect`). The public HMAC route
-//! has no `SecurityContext` to enforce against and so compiles no scope; it is
-//! not a pair.
+//! has no `SecurityContext` to enforce against and so compiles no
+//! **PDP-derived** scope - it is one of the `for_tenant` paths above.
+//! `CollectService::record_count` does build an `AccessScope`
+//! (`AccessScope::for_tenant(tenant_id)`,
+//! `qa-insights/src/domain/service/collect.rs:735`), off the tenant its own
+//! signed callback URL carries; what it never does is ask the PDP, so there is
+//! no decision to grant or refuse and it is not a pair.
 //!
 //! # `qa.notification_config` is the PEP string, verbatim
 //!

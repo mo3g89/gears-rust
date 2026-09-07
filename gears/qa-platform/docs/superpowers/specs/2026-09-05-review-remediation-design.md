@@ -664,6 +664,34 @@ because the stub needs a *type-schema id* and QA has none:
 either scheme. The catalog added grantable *names*; what is missing is a type a
 role can name.
 
+*The same breach, in the form the next owner meets first.* The role-targeting
+path above is the consequence that motivated Phase 7's measurement, but it is
+not the first thing a reader will trip over. `AuthzPermissionV1.resource_type`
+has a **documented contract** and QA's 71 instances do not satisfy it:
+`libs/toolkit-gts/src/permission.rs:9-19` says the field "accepts a GTS
+expression" and enumerates exactly three accepted forms — a concrete GTS type
+identifier, a wildcard pattern (GTS §3.5), or a Query Language predicate
+(GTS §3.3) — and the field's own doc repeats it at `:65-68`. `qa.plan`,
+`qa.platform` and `qa.run` are none of the three. Both in-repo precedents do
+comply, which is why nothing has surfaced this before: ledger's `labels::ENTRY`
+is `gts_id!("cf.bss.ledger.entry.v1~")` (`ledger/src/authz.rs:57`) and
+account-management's `TENANT_RESOURCE_TYPE` is
+`gts_id!("cf.core.am.tenant.v1~")` (`account-management-sdk/src/gts.rs:29`).
+
+Nothing validates the field, so **boot is safe** — `gts_instance!` submits the
+string as written and `types-registry::init()` does not parse it. What is not
+safe is the consumer `permission.rs`' own header names: *"The future AuthZ
+Management gear / admin UI lists permissions by querying types-registry for
+Instances of `gts.cf.toolkit.authz.permission.v1~`"*. That consumer will find
+71 entries whose `resource_type` it cannot resolve to anything.
+
+This is **the same decision as the rest of this handoff, not a second one**, and
+it resolves the same two ways: under (a) below the strings become GTS type ids
+and the field becomes contract-compliant as a side effect; under (b) the
+platform accepts a plain PEP resource type and the contract is what gets
+amended. It is recorded here so whoever picks the handoff up recognises the
+field-shape complaint as this boundary rather than as a defect in the catalogs.
+
 *The two ways forward.* (a) Register a stub type-schema per resource type under
 new GTS type ids (`gts.cf.qa.catalog.product.v1~` and so on) **and teach each
 PEP to send the new string** — a policy-visible rename of the very strings a
@@ -680,6 +708,45 @@ validator — so its behaviour is asserted by ledger's, account-management's and
 credstore's SDK docs (cited above), not verified here. Points 1–3 and the realm
 JSON were verified directly; the validator's dependence on the types-registry
 was not.
+
+**Named follow-up (Phase 7, final fix wave): narrow the source scan's
+same-function action resolution.** `authz_surface_tests.rs`'
+`forwarded_actions` resolves a forwarded action through two shapes, and they
+fail in opposite directions. The **helper-caller** shape reads only the
+forwarded call's own arguments and panics on a chain it cannot resolve, so it
+cannot be silently wrong. The **same-function** shape unions *every*
+`actions::*` name in the enclosing `fn` region with no regard for which
+`resources::*` each was paired with, so it can emit a `(resource_type, action)`
+pair the code does not enforce, silently and as *measured*.
+
+That shape is live. `qa-environments`' `domain/service/variables.rs`' `upsert`
+(`:326`–`:403`) enforces `resources::PLATFORM`/`actions::GET` at `:348` and
+`resources::VARIABLE`/`actions::GET` at `:373` before choosing
+`UPDATE`-or-`CREATE` at `:386`–`:388`, so the forwarded site at `:393` is
+credited with `{CREATE, GET, UPDATE}` and emits `(qa.variable, get)`. It is
+correct today **only because `:373` enforces that pair independently**, which
+nothing checks. Because `ENFORCED` was transcribed from the scan's own output
+and the catalog is pinned to `ENFORCED`, a spurious pair would keep every
+guard in the chain green while shipping a permission that authorizes nothing —
+which `gts/permissions.rs`' own header calls worse than an absent one, because
+it reads as coverage.
+
+*Two candidate fixes*, either acceptable: (1) restrict the same-function shape
+to the `actions::*` names appearing in the **same statement or expression** as
+the forwarded argument; or (2) make it **pair-aware**, attributing each
+`actions::*` name to its nearest preceding `resources::*`. Whichever is taken
+must be **ported to all four copies** of `authz_surface_tests.rs` —
+`authz_surface_parity_tests.rs` requires them byte-identical — and must be
+proven not to change the measured numbers (`ENFORCED` at 25/13/15/18 pairs and
+`EXPECTED_ACCESS_SCOPE_SITES` at 38/18/10/12 for
+qa-catalog/qa-environments/qa-insights/qa-runs); a change in any of them is a
+finding, not a number to adjust.
+
+*Why it was not done in Phase 7.* The controller ruled it deliberately: the
+measured surface has now been independently re-derived as correct twice, and
+perturbing the scan late risks changing a verified measurement for no
+pre-merge benefit. The fix wave corrected the scanner's own prose — which had
+claimed *"every misreading this scan can make is loud"* — instead.
 
 **Stopping points.** Phases are ordered so the branch is coherent after each
 one. Phases 1–4 are the correctness and security core; 5–6 are quality with real

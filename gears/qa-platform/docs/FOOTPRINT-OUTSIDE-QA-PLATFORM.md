@@ -244,7 +244,7 @@ Reverting is deleting one line, at the cost of putting the gate back to red.
 
 ### 4.2 `.gitignore`
 
-Three additions:
+Four additions:
 
 1. `!**/src/**/logs/` — a **fix to a pre-existing bug**, not a qa-platform
    concern. The tree's unanchored `logs` pattern silently swallowed any Rust
@@ -259,13 +259,25 @@ Three additions:
 4. `gears/qa-platform/docs/Reviews/qa-platform-review-findings.md` — a
    single-file rule, added later than the three above and **not** the caveat
    row 10 refers to (that is item 1, the `logs` un-ignore, which is a fix worth
-   keeping). Its effect is worth stating plainly: the 55-finding review this
-   subsystem's remediation branch exists to answer is **invisible to the
-   repository** — it lives only in a working copy, and so does every "closed
-   by" annotation added as findings were fixed. The rule's own comment explains
-   the intent (it was swept in by a `git add -A`, and deleting it would let the
-   next one put it back) and says to remove the line if `docs/Reviews/` ever
-   becomes tracked. Durable records therefore go elsewhere: §12 of
+   keeping). Its effect is worth stating plainly: the 393-line, 55-finding
+   review this subsystem's remediation branch exists to answer is **invisible
+   to the repository** — it lives only in a working copy, and so does every
+   "closed by" annotation added as findings were fixed (the current copy was
+   revised on 2026-09-07, at the end of Phase 7).
+
+   **The rule's comment was wrong until the final fix wave and is now
+   corrected.** It described the ignored file as "a 280-line review of a
+   DIFFERENT branch"; that was the earlier, shorter version of *this same*
+   document, and it was deleted on `backup/pre-squash-qa-product-plugins`
+   (`dce9bbad4`, finding I-6). What the rule ignores today is this
+   subsystem's own review. The reason for ignoring rather than deleting is
+   unchanged: it is a working copy, and the next `git add -A` would sweep it
+   back into the index (re-review, N-4).
+
+   **Whether `docs/Reviews/` should become a tracked directory is open**, and
+   belongs to whoever owns the branch — the remediation deliberately did not
+   take that decision, and reversing it is deleting one line. Durable records
+   therefore go elsewhere in the meantime: §12 of
    `docs/superpowers/specs/2026-09-05-review-remediation-design.md` carries the
    Phase 7 follow-up, and this file carries the tooling change above.
 

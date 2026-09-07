@@ -146,6 +146,9 @@ pub mod test_support;
 #[cfg(test)]
 mod unscoped_read_guard_tests;
 
+#[cfg(test)]
+mod resources_tests;
+
 /// `DB` provider alias.
 ///
 /// Parameterized with [`DomainError`] directly, like qa-catalog's and qa-runs'

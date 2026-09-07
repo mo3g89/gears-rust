@@ -27,8 +27,8 @@
 //!
 //! The aggregate this gear manages is called `Environment` in Rust, on the
 //! REST wire, in the routes and in the UI. The PDP resource string and the
-//! GTS type ids both kept `platform` — `domain::service::mod`'s `resources`
-//! doc (`domain/service/mod.rs:90-99`) records why: the string is what
+//! GTS type ids both kept `platform` — `domain::service::resources::PLATFORM`'s
+//! own doc (`domain/service/mod.rs:107-116`) records why: the string is what
 //! deployment policies are written against, and changing it would silently
 //! change who is authorized for what. This catalog follows the PDP string,
 //! because that is what a role grant actually matches against — a catalog

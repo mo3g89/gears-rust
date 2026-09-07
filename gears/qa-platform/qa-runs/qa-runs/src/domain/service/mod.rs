@@ -112,6 +112,9 @@ mod tenant_scoping_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+#[cfg(test)]
+mod resources_tests;
+
 /// The golden `RunSpec` — product-plugin plan Task 16's hard gate. In-lib
 /// rather than in `tests/`, because `build_spec` is private on a `pub(crate)`
 /// service and every double it needs is `#[cfg(test)]`; see that module's
@@ -332,7 +335,7 @@ pub(in crate::domain::service) use serialized_db::SerializedDb;
 /// than from an inline literal, so the PDP resource string has one declaration
 /// and two consumers: the descriptor the PEP is called with, and
 /// [`authz_surface::ENFORCED`]. qa-insights' `resources::TEST_RESULT_NAME`
-/// (`qa-insights/src/domain/service/mod.rs:206`) is the precedent and carries
+/// (`qa-insights/src/domain/service/mod.rs:208-216`) is the precedent and carries
 /// the reason the descriptor cannot supply the string itself.
 pub(crate) mod resources {
     use super::ResourceType;

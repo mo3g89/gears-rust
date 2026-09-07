@@ -53,11 +53,16 @@
 //! (`domain::service::collect::CollectService::trigger`, reached from
 //! `api::rest::handlers::collect`'s `trigger_collect`), so that is the only
 //! grantable `collect` permission below. The public HMAC callback
-//! (`report_collect_count`) has no `SecurityContext` to enforce against and
-//! so compiles no `AccessScope` at all — there is nothing there for a role to
-//! grant or withhold. A reader comparing this catalog to the REST surface and
-//! finding one collect endpoint with a permission and one without has found
-//! this asymmetry, not a gap.
+//! (`report_collect_count`) has no `SecurityContext` to enforce against and so
+//! compiles no **PDP-derived** `AccessScope`. It is not scope-less:
+//! `CollectService::record_count` writes under
+//! `AccessScope::for_tenant(tenant_id)`
+//! (`qa-insights/src/domain/service/collect.rs:735`), taken from the tenant in
+//! the callback URL this gear itself signed. What is absent is the PDP
+//! round-trip, so there is nothing there for a role to grant or withhold. A
+//! reader comparing this catalog to the REST surface and finding one collect
+//! endpoint with a permission and one without has found this asymmetry, not a
+//! gap.
 //!
 //! Also unlike every other resource type here, `qa.test_result` carries no
 //! `get`/`create`/`update`/`delete` at all — only `collect`, `list` and
@@ -219,7 +224,10 @@ gts_instance! {
         id: gts_id!("cf.toolkit.authz.permission.v1~cf.qa.insights.notification_config_update.v1"),
         resource_type: resources::NOTIFICATION_CONFIG_NAME.to_owned(),
         action: actions::UPDATE.to_owned(),
-        display_name: "Update the tenant's notification settings".to_owned(),
+        display_name:
+            "Write the tenant's notification state: its settings, and the send-once \
+             claim rows and audit-log entries a notification send makes"
+                .to_owned(),
     }
 }
 
