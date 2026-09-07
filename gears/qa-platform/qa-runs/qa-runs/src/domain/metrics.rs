@@ -78,40 +78,75 @@ pub const QA_RUNS_DISPATCH_DURATION: &str = "qa_runs_dispatch_duration_seconds";
 ///
 /// Counts only runs that were genuinely **queued**: a launch admission decided
 /// `Dispatch` for never enters the tick's FIFO, and a launch with no platform
-/// is never queued at all. So this family's rate is the queued arrival rate,
-/// and it is the companion failure-rate query for
-/// [`QA_RUNS_QUEUE_WAIT_DURATION`]'s p95.
+/// is never queued at all.
+///
+/// **It counts departures, not arrivals.** Every increment is a row leaving the
+/// queue *successfully*, so two populations are missing from it: a claimed row
+/// whose dispatch failed, and a queued row the TTL sweep expired before any
+/// tick reached it. It therefore equals the rate at which runs are enqueued
+/// only in steady state, and diverges from it in exactly the incidents an
+/// operator is reading it during — pair it with the dispatcher's own report
+/// and with [`QA_RUNS_DISPATCH`] rather than treating it as an arrival rate.
+///
+/// It is the companion counter for [`QA_RUNS_QUEUE_WAIT_DURATION`]'s p95, which
+/// observes the same events.
 pub const QA_RUNS_QUEUE_WAIT: &str = "qa_runs_queue_wait_total";
 
-/// How long a queued run waited before its execution was requested — the
-/// closest measurable stand-in for `cpt-cf-qa-nfr-dispatch-latency`, and
-/// deliberately **not** claimed to be it.
+/// **Queue residency**: how long a queued run sat in the queue before this
+/// gear had recorded its execution as started.
+///
+/// It is the nearest thing to `cpt-cf-qa-nfr-dispatch-latency` the stored
+/// timestamps support, and it is **not** that NFR. Read the two sections below
+/// before writing an alert on it: the relationship holds in one direction on
+/// the common path and in the other direction on three specific paths.
 ///
 /// # What it measures, exactly
 ///
-/// From the queue row's `enqueued_at` to the instant
-/// `RunExecutor::start` returned an accepted execution for that run. Emitted
-/// once per queued run, by the tick that drained it.
+/// From the queue row's `enqueued_at` to `OffsetDateTime::now_utc()` read in
+/// `service::dispatch`'s drain immediately after `dispatch_one` returned `Ok`.
+/// Emitted once per queued run, by the tick that drained it.
 ///
-/// # Where it diverges from the NFR, and in which direction
+/// **That end instant is later than the execution request itself.** `submit`
+/// stamps the moment the executor accepted the run, and `record_started` then
+/// writes the execution reference, marks the queue row running and transitions
+/// the run — all before the drain reads its clock. So the tail of every
+/// observation includes those three scoped writes. The accepted-at instant is
+/// not visible to the drain: `dispatch_one` returns `Result<(), _>` and keeps
+/// it inside itself. The error is one-signed — it can only inflate — so it
+/// cannot mask a slow drain, and what it adds is three writes rather than a
+/// wait on anything.
 ///
-/// `DESIGN.md`'s row and `PRD.md` both state the requirement as *platform
-/// release → execution request*. The **end** point matches: `start` returning
-/// is the execution request. The **start** point does not — `enqueued_at` is
-/// when the run joined the queue, which is earlier than when its platform
-/// became free by however long the run ahead of it still had to run.
+/// # How it relates to the NFR, in both directions
 ///
-/// Nothing in this gear can do better today: the lease lives in
-/// `qa-environments` and this gear reads only free-or-held, never *since
-/// when*. So the measured value is an **upper bound** on the NFR's quantity.
-/// That is the safe direction for an alert — it cannot hide a violation — but
-/// it is a loose bound on a busy platform, where it is dominated by the
-/// predecessor's runtime rather than by anything the dispatcher controls.
+/// `DESIGN.md`'s row and `PRD.md` both state the requirement over *platform
+/// release → execution request*. This series shares neither endpoint exactly.
 ///
-/// Read it against a low-occupancy window, or as a trend, and pair it with
-/// [`QA_RUNS_DISPATCH_DURATION`] to tell a slow cycle from a long wait.
-/// `DECOMPOSITION.md` records this NFR as "implemented, unmeasured"; this
-/// narrows that gap and does not close it.
+/// **Where it over-states the NFR window** — the common case. A run enqueued
+/// while its platform was occupied starts waiting before the platform is free,
+/// so its residency contains the whole NFR window plus the predecessor's
+/// remaining runtime. There the series is an upper bound, and an alert on it
+/// cannot miss a violation, though on a busy platform the bound is loose enough
+/// to be dominated by the predecessor rather than by anything the dispatcher
+/// controls.
+///
+/// **Where it under-states it.** `queue::decide_admission` queues a launch
+/// whenever the platform already has a queued row, *whatever* its occupancy —
+/// strict FIFO, so a later arrival cannot overtake. A run can therefore be
+/// enqueued while its platform is already free, and its residency then starts
+/// *after* the release the NFR measures from. Three ways that happens, all
+/// ordinary: a tick that stopped at the concurrency cap, a tick whose executor
+/// listing failed, and simply the gap between sweeps. On those paths the
+/// measured value is smaller than the NFR's quantity and an alert on it **can**
+/// miss a violation.
+///
+/// Nothing in this gear can do better today, which is why the definition is
+/// stated rather than fixed: the lease lives in `qa-environments`, and this gear
+/// reads only free-or-held, never *since when*. Closing the gap needs a release
+/// instant from that gear.
+///
+/// Read it as a trend, and beside [`QA_RUNS_DISPATCH_DURATION`] — a rising
+/// residency with a flat cycle duration is a queue backing up, and a rising
+/// cycle duration is the dispatcher itself slowing down.
 pub const QA_RUNS_QUEUE_WAIT_DURATION: &str = "qa_runs_queue_wait_duration_seconds";
 
 /// What admission decided for a launch: dispatch inline, queue, or neither.

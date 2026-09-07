@@ -92,17 +92,40 @@ const DECISION: &str = "decision";
 ///
 /// Declared rather than left to the SDK default, and this is load-bearing. The
 /// `OTel` defaults are `[0, 5, 10, 25, 50, … 10000]`, which are milliseconds in
-/// all but name: against a value recorded in **seconds**, a dispatcher cycle
-/// and an ingest pass both land in the second bucket, `(0, 5]`, and everything
-/// this gear does is squeezed into a single interval five seconds wide. A p95
-/// read off that is not an estimate of anything — it is that bucket's upper
-/// edge. A quantile query is the entire reason these families exist, so the
-/// boundaries are part of the metric's definition rather than a tuning knob.
+/// all but name. Read as **seconds** their first interval above zero is
+/// `(0, 5]`, and that single bucket swallows every healthy observation this
+/// gear makes: an ordinary ingest pass is one scoped read and one write, and a
+/// dispatcher cycle that finds nothing to drain is a handful of scoped queries.
+/// A p95 over those is the bucket's upper edge rather than an estimate of
+/// anything.
+///
+/// It swallows the interesting part of the third family too. Residency values
+/// run from seconds to minutes, so the defaults do resolve their tail — but
+/// `cpt-cf-qa-nfr-dispatch-latency`'s own design argument puts a healthy
+/// dispatch below 5 s (a 5 s sweep, p95 ≈ 4.75 s), and *that* is exactly the
+/// range the defaults cannot see inside. A quantile query is the entire reason
+/// these families exist, so the boundaries are part of the metric's definition
+/// rather than a tuning knob.
+///
+/// **What is not claimed: that a dispatcher cycle is short.** A cycle contains
+/// its drain, and the drain dispatches each claimed row inline, so a tick can
+/// run for as long as the force-syncs and bundle builds inside it —
+/// `DispatchService::run_tick`'s own doc says a tenant with twenty
+/// slow-building runs holds one for twenty of them. The upper boundaries here
+/// serve that case; the lower ones serve the healthy one.
 ///
 /// The low end goes down to 5 ms because the ingest path's common case is a
-/// single-row upsert; the high end runs to a minute because
-/// [`QA_RUNS_QUEUE_WAIT_DURATION`] is bounded by the run ahead in the queue and
-/// is expected to be minutes on a busy platform.
+/// single-row upsert.
+///
+/// **The top boundary is 60 s, and that is a stated limit rather than a claim
+/// of adequacy.** Two of the three families can legitimately exceed it — a
+/// residency behind a long-running predecessor, and a cycle whose drain is
+/// building bundles — and both land in the overflow bucket, where a quantile is
+/// again an edge rather than an estimate. The set is sized for the range in
+/// which these paths are *healthy*, which is the range an alert is written
+/// against; past a minute the counter beside each histogram and the trend are
+/// what an operator reads. Extending the high end is a change to make with real
+/// residency and cycle data in hand rather than by guessing at one now.
 ///
 /// **10.0 and 5.0 are boundaries because the two NFR thresholds are those
 /// numbers**, so an alert can be written against a bucket edge rather than

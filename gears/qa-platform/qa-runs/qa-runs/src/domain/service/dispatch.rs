@@ -2387,12 +2387,20 @@ where
     /// # The extra read, and the repository shape that forces it
     ///
     /// `plan_dispatch_batch` returns queue-row ids, and acquiring a lease needs
-    /// the **run** id. `queue::QueuedRow` carries only `{id, exclusive}`, so the
-    /// run id is recovered from `claims_for_platform` *after* the rows are marked
+    /// the **run** id. `queue::QueuedRow` does not carry one, so the run id is
+    /// recovered from `claims_for_platform` *after* the rows are marked
     /// `dispatching` — which is when they become claims. That is one extra query
     /// inside the critical section, and it exists only because the FIFO row shape
     /// omits `run_id`. Reported to the coordinator: widening `QueuedRow` (Task 6's
     /// file) or `queued_rows` (Task 10's) would remove it.
+    ///
+    /// **Corrected by the observability task.** This said `QueuedRow` "carries
+    /// only `{id, exclusive}`", which stopped being true in the same commit that
+    /// added `enqueued_at` to it for the queue-wait metric and left this
+    /// sentence standing. The premise the extra read rests on is narrower than
+    /// that and is unchanged: the type has no `run_id`. Nor does widening it for
+    /// the metric make the read removable — `enqueued_at` is a timestamp, not
+    /// the id the lease needs.
     async fn drain_platform(
         &self,
         platform: QueuedPlatform,
