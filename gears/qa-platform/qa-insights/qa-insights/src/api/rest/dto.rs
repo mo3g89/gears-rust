@@ -4287,6 +4287,16 @@ mod tests {
     /// quoting it, which would be the double-encoding
     /// [`a_saved_views_query_json_renders_as_an_object_not_a_nested_string`]
     /// exists to keep off the *response* side too.
+    ///
+    /// The four field asserts below are **not** review finding #46's
+    /// constructor echoes, even though they look like it: the compact-JSON
+    /// assert covers exactly one field (`query_json`), while `impl
+    /// From<NewSavedViewReq> for SavedViewInput` moves five, and `scope` and
+    /// `name` are both plain `String`s — nothing but this assert stops a
+    /// transposition (`scope: req.name, name: req.scope`) from compiling and
+    /// shipping. This is also the only test that exercises that `From` impl
+    /// at all; `saved_views_tests.rs`'s `view()` helper builds
+    /// `SavedViewInput` directly and never goes through it.
     #[test]
     fn a_new_saved_view_req_serialises_query_json_to_compact_text() {
         let req = NewSavedViewReq {
@@ -4298,6 +4308,10 @@ mod tests {
         };
         let input: SavedViewInput = req.into();
         assert_eq!(input.query_json, r#"{"version":"5.0.1"}"#);
+        assert_eq!(input.scope, "plan");
+        assert_eq!(input.repo_id, Some(Uuid::from_u128(9)));
+        assert_eq!(input.plan_path.as_deref(), Some("plans/smoke/plan.yaml"));
+        assert_eq!(input.name, "Regressions");
     }
 
     /// **`CollectReportQuery`'s own header says its three fields "must agree
