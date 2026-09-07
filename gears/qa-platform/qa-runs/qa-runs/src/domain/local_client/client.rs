@@ -33,8 +33,8 @@ use toolkit_odata::ODataQuery;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use crate::api::rest::error::{as_queue_error, as_schedule_error};
-use crate::infra::ConcreteAppServices;
+use crate::domain::error_attribution::{as_queue_error, as_schedule_error};
+use crate::gear::ConcreteAppServices;
 
 /// Local implementation of the object-safe `QaRunsClientV1`.
 pub struct QaRunsLocalClient {

@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::api::rest::dto::{NewScheduleReq, ScheduleDto, UpdateScheduleNotificationsReq};
 use crate::api::rest::error::as_schedule_error;
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 
 /// `GET /qa/v1/schedules`
 ///

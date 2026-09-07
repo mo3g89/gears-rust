@@ -30,7 +30,7 @@ use uuid::Uuid;
 use super::{cancel_run, get_run, launch_run, rerun_run, stream_run_logs};
 use crate::api::rest::dto::{BoundaryLimits, LaunchRunReq, RunTargetDto};
 use crate::domain::service::test_support::{Fleet, ctx};
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 use crate::infra::logs::{MAX_RETAINED_RUNS, MAX_SUBSCRIBERS_PER_RUN, RunLogBroadcaster};
 
 const TENANT: Uuid = Uuid::from_u128(0x0A11_0000_0000_0001);

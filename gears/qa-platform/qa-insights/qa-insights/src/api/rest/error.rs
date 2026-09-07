@@ -108,14 +108,22 @@ struct TestResultResourceError;
 #[resource_error(gts_id!("cf.qa.insights.saved_view.v1~"))]
 struct SavedViewResourceError;
 
-/// `qa_jira_bugs` and the two JIRA configuration singletons. Tasks 31-35.
-#[resource_error(gts_id!("cf.qa.insights.jira_bug.v1~"))]
-struct JiraBugResourceError;
-
 /// `qa_notification_config`, `qa_notification_log` and `qa_run_notifications`.
 /// Tasks 36-39; [`as_notification_error`] is Task 38's call-site renderer.
 #[resource_error(gts_id!("cf.qa.insights.notification.v1~"))]
 struct NotificationResourceError;
+
+// The JIRA attribution lives in `domain::error_attribution`, not here:
+// `domain::local_client` needs it and a domain module must not import the
+// transport layer (review findings #15, #16). Re-exported so this module stays
+// the one place a REST handler imports error rendering from, and the type
+// imported rather than re-declared so the blanket `match` below and
+// `as_jira_error` raise the same `gts_id` rather than two that could disagree.
+//
+// The other three resource types and the other two call-site renderers stayed:
+// nothing in `domain` names them.
+use crate::domain::error_attribution::JiraBugResourceError;
+pub(crate) use crate::domain::error_attribution::as_jira_error;
 
 impl From<DomainError> for CanonicalError {
     fn from(e: DomainError) -> Self {
@@ -311,40 +319,6 @@ pub(crate) fn as_saved_view_error(e: DomainError) -> CanonicalError {
             .with_field_violation(field, message, "VALIDATION")
             .create(),
         DomainError::Forbidden => SavedViewResourceError::permission_denied()
-            .with_reason("ACCESS_DENIED")
-            .create(),
-        other => other.into(),
-    }
-}
-
-/// Render an error from a **JIRA** operation — settings or bug registry —
-/// attributing a `Validation` or a `Forbidden` to the JIRA resource rather
-/// than to the test result.
-///
-/// [`as_saved_view_error`]'s reason, and this call site has one of its own.
-/// Task 32's settings surface raises `Validation` naming `url` or
-/// `poll_interval_seconds`; Task 33's registry raises it naming `plan_path`
-/// (R85's "together or not at all" rule on `GET /qa/v1/jira/open-bugs`) — none
-/// of the three is a test-result field, and every PDP denial on either surface
-/// is about `qa.jira_config` or `qa.jira_bug`. `JiraNotConfigured` and
-/// `RunNotIngested` already carry their own resource in the blanket `match`
-/// (the latter is [`TestResultResourceError`] on purpose —
-/// [`JiraService::file_bugs`](crate::domain::service::jira::JiraService::file_bugs)'s
-/// own doc says why an unprojected run is that error and not a JIRA one), so
-/// the fall-through arm leaves both of them (and `Database`) untouched.
-///
-/// One function for both surfaces rather than a settings-only
-/// `as_jira_config_error` (this function's Task 32 name) plus a bug-only
-/// second one: [`JiraBugResourceError`] already covers "`qa_jira_bugs` and
-/// the two JIRA configuration singletons" in one type (this file's own
-/// declaration, above), so a second function would only be routing two
-/// identical `match` arms to the same resource through two names.
-pub(crate) fn as_jira_error(e: DomainError) -> CanonicalError {
-    match e {
-        DomainError::Validation { field, message } => JiraBugResourceError::invalid_argument()
-            .with_field_violation(field, message, "VALIDATION")
-            .create(),
-        DomainError::Forbidden => JiraBugResourceError::permission_denied()
             .with_reason("ACCESS_DENIED")
             .create(),
         other => other.into(),

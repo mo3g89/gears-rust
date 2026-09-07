@@ -213,7 +213,7 @@ use crate::domain::service::watch::{RunWatcher, SpawningRunWatcher, WatchTarget}
 use crate::domain::service::{AppServices, DbProvider, LogArchive, QueueLimits, ServiceDeps};
 use crate::domain::state_machine::ExecutorOutcome;
 use crate::domain::system_actor::TenantBound;
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 use crate::infra::executor::mock::MockRunExecutor;
 use crate::infra::logs::{RunLogArchive, RunLogBroadcaster};
 use crate::infra::storage::test_db::{inmem_db, sample_new_run, scope};

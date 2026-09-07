@@ -30,12 +30,43 @@ use crate::domain::error::DomainError;
 use crate::domain::local_client::QaRunsLocalClient;
 use crate::domain::ports::run_executor::RunExecutor;
 use crate::domain::service::{AppServices, LogArchive, LogFanout, QueueLimits, ServiceDeps};
-use crate::infra::ConcreteAppServices;
 use crate::infra::executor::mock::MockRunExecutor;
 use crate::infra::leader::{LeaderElector, elector, work_fn};
 use crate::infra::logs::{RunLogArchive, RunLogBroadcaster};
 use crate::infra::product_plugin::HubProductPluginResolver;
 use crate::infra::storage::{OrmQueueRepository, OrmRunsRepository, OrmSchedulesRepository};
+
+/// The generic `AppServices<R, Q, S>` container bound to the `SeaORM`
+/// repositories - the type the REST handlers extract and the gear bootstrap
+/// builds.
+///
+/// # Why it lives here, in the composition root
+///
+/// It lived in `infra/mod.rs` until Task 21, whose review finding #39 is what
+/// moved it: `domain::local_client` holds one and so had
+/// `use crate::infra::ConcreteAppServices;` — a production domain module
+/// naming an infrastructure module. `domain::service::watch`'s header records
+/// that contradiction at length, including the earlier, false claim that no
+/// production module under `domain/` did any such thing.
+///
+/// The composition root is where an alias for *the domain services bound to
+/// the concrete repositories* belongs: binding them is exactly what this
+/// module does, and both sibling gears declare their equivalent here
+/// (`qa-insights/src/gear.rs`, `qa-environments/src/gear.rs`). The plan's Step
+/// 5 said so from the start; the alias went to `infra/` only because the REST
+/// handlers needed it a stage before this file existed, and that reason has
+/// been spent since Task 17.
+///
+/// The old home's argument that *"the domain layer could not hold it — it
+/// would have to name `OrmRunsRepository`"* is unaffected and still true: the
+/// alias is not declared in `domain`, it is declared here and named by one
+/// domain module that is itself a composition-root adapter.
+///
+/// **Nothing may declare its own second alias.** Two aliases for the same
+/// instantiation would compile and would silently allow the handlers and the
+/// lifecycle tasks to be wired to different repository types.
+pub(crate) type ConcreteAppServices =
+    AppServices<OrmRunsRepository, OrmQueueRepository, OrmSchedulesRepository>;
 
 /// The role name the dispatcher ticker holds.
 ///

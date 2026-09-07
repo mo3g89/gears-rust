@@ -70,7 +70,7 @@ use qa_insights_sdk::{QaInsightsClientV1, QaInsightsError, SkipListEntry};
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use crate::api::rest::error::as_jira_error;
+use crate::domain::error_attribution::as_jira_error;
 use crate::domain::jira::registry::skip_list_entries;
 use crate::domain::repos::{JiraRepository, ResultsRepository};
 use crate::domain::service::jira::JiraService;

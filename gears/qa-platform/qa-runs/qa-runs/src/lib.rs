@@ -36,3 +36,12 @@ mod file_citations_tests;
 // `domain::service::test_support` for the service doubles and
 // `infra::storage::test_db` for the migrated in-memory database. A third,
 // crate-level module would have been a re-export of those two.
+
+/// **No `domain` module imports the `api` layer.** `api` is a transport over
+/// `domain`, and the dependency may not run the other way. A structural guard
+/// rather than a `cargo gears lint` rule -- see the module's own header for
+/// why that CLI cannot express this one. Review findings #15, #16, #39.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "no_api_in_domain_tests.rs"]
+mod no_api_in_domain_tests;

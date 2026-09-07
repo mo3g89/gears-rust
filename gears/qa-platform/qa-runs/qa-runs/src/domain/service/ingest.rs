@@ -125,19 +125,20 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::{LogArchive, LogFanout, SerializedDb, actions, resources};
-// A domain module reaching into `api::rest` for a constant is the layering
-// complaint whole-branch review I2 records and defers: the number is
-// write-side policy that happens to live beside the read-side cap it is
-// derived from. Importing it is still strictly better than a second copy of
-// `256` here, which is the drift this crate keeps re-discovering.
-use crate::api::rest::sse::ASSUMED_ARCHIVE_PREFIX_BYTES;
 use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::{
     ExecutionEvent, ExecutionStream, NodeOutcome, TestObservation,
 };
+// `ASSUMED_ARCHIVE_PREFIX_BYTES` came from `api::rest::sse` until Task 21 --
+// the layering complaint whole-branch review I2 recorded and deferred. It is
+// write-side policy, so it moved to `domain::repos::log_line` beside the
+// read-side cap it is derived from and beside `flatten_log_char`, the other
+// rule the archived text obeys. Imported rather than copied, for the same
+// reason as before: a second `256` here is the drift this crate keeps
+// re-discovering.
 use crate::domain::repos::{
-    LogResume, NewTestResult, QueueRepository, RunResultDelta, RunStatePatch, RunsRepository,
-    TestResultRow, flatten_log_char,
+    ASSUMED_ARCHIVE_PREFIX_BYTES, LogResume, NewTestResult, QueueRepository, RunResultDelta,
+    RunStatePatch, RunsRepository, TestResultRow, flatten_log_char,
 };
 use crate::domain::state_machine::{
     ExecutorOutcome, can_transition, derive_terminal_state, is_terminal, reconcile_recorded_state,
@@ -959,10 +960,10 @@ where
         prefixed.push('[');
         prefixed.extend(node.chars().map(flatten_log_char));
         prefixed.push_str("] ");
-        // The one place the archive prefix's real width exists. `api::rest::sse`
-        // reserves `ASSUMED_ARCHIVE_PREFIX_BYTES` for it in
-        // `WRITE_SIDE_MAX_LINE_BYTES` and has no way to see a node name, so an
-        // assumption it documents but nothing measures is how a wrong
+        // The one place the archive prefix's real width exists.
+        // `domain::repos::log_line` reserves `ASSUMED_ARCHIVE_PREFIX_BYTES` for
+        // it in `WRITE_SIDE_MAX_LINE_BYTES` and has no way to see a node name,
+        // so an assumption it documents but nothing measures is how a wrong
         // dropped-byte count would reach an operator with no trail back to its
         // cause. Measured after the prefix and before the line, so this is the
         // prefix alone. Today's one producer is `format!("repo-{uuid}")`, ~41
@@ -975,7 +976,7 @@ where
         // it on every one of its lines.
         debug_assert!(
             prefixed.len() <= ASSUMED_ARCHIVE_PREFIX_BYTES,
-            "archive prefix for node {node:?} is {} bytes, over api::rest::sse::\
+            "archive prefix for node {node:?} is {} bytes, over domain::repos::\
              ASSUMED_ARCHIVE_PREFIX_BYTES ({ASSUMED_ARCHIVE_PREFIX_BYTES}); \
              WRITE_SIDE_MAX_LINE_BYTES no longer reserves enough and this node's \
              truncated lines will be re-cut on read with a wrong dropped-byte count",
@@ -988,7 +989,7 @@ where
                     %node,
                     prefix_bytes = prefixed.len(),
                     assumed = ASSUMED_ARCHIVE_PREFIX_BYTES,
-                    "this node's archive prefix is wider than api::rest::sse reserves for it; \
+                    "this node's archive prefix is wider than domain::repos reserves for it; \
                      an over-long line from this node is truncated twice and the marker it \
                      carries under-reports the dropped bytes. Raise \
                      ASSUMED_ARCHIVE_PREFIX_BYTES or shorten the node name",

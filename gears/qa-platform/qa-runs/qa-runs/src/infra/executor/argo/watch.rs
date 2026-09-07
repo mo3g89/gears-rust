@@ -73,13 +73,17 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::api::rest::sse::sanitize_line_for_archive;
 use crate::config::ArgoExecutorConfig;
 use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::{
     ExecutionEvent, ExecutionRef, ExecutionSink, ExecutionStream, NodeOutcome, TestObservation,
 };
-use crate::domain::repos::{LogResume, flatten_log_char};
+// `sanitize_line_for_archive` came from `api::rest::sse` until Task 21 (review
+// findings #15, #16, #39): an infra module importing the transport layer for a
+// cap that decides what the archive holds. It now sits in `domain::repos`
+// beside `flatten_log_char`, the other rule the archived text obeys, and the
+// two arrive here in one `use`.
+use crate::domain::repos::{LogResume, flatten_log_char, sanitize_line_for_archive};
 use crate::domain::state_machine::ExecutorOutcome;
 use crate::infra::executor::argo::markers::MarkerParser;
 use crate::infra::executor::argo::workflow::NODE_ANNOTATION;
@@ -1213,7 +1217,7 @@ impl Watcher {
 ///
 /// # Two forms of one line, and why there are two (review finding #30)
 ///
-/// [`sanitize_line_for_archive`] — `api::rest::sse`'s own write-side
+/// [`sanitize_line_for_archive`] — `domain::repos::log_line`'s write-side
 /// truncation, capping at a budget that leaves room for the archive prefix
 /// `IngestService::fan_out_log` wraps every line in (see that function's
 /// doc for why a plain `sanitize_line` here would get re-truncated on
@@ -1386,10 +1390,11 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{FollowOutcome, LineSkip, Watcher, handle_line, workflow_resource};
-    use crate::api::rest::sse::{MAX_LINE_BYTES, TRUNCATION_MARKER_MAX, sanitize_line_for_archive};
     use crate::config::ArgoExecutorConfig;
     use crate::domain::ports::run_executor::{ExecutionEvent, ExecutionStream};
-    use crate::domain::repos::{LogPosition, LogResume};
+    use crate::domain::repos::{
+        LogPosition, LogResume, MAX_LINE_BYTES, TRUNCATION_MARKER_MAX, sanitize_line_for_archive,
+    };
     use crate::infra::executor::argo::markers::MarkerParser;
 
     /// Build a resume position the way a real `LogResume::from_archived_text`
@@ -1626,7 +1631,7 @@ mod tests {
     /// **A pathological log line is truncated before it enters the
     /// broadcaster.**
     ///
-    /// Truncation lived only on the read side (`api::rest::sse`), so a 2 MB
+    /// Truncation lived only on the read side, so a 2 MB
     /// line was carried in full through the broadcaster and into the archive
     /// and only shrank when a reader asked. One such line per node is
     /// hundreds of megabytes of resident memory for output no reader can

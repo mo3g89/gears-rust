@@ -59,7 +59,7 @@ use crate::domain::service::admission::CapSlot;
 use crate::domain::service::admission::tests::fakes::{FakeCatalog, FakeEnvironments};
 use crate::domain::service::launch::Admitted;
 use crate::domain::service::{AppServices, FlushReport, LogArchive, QueueLimits, ServiceDeps};
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 use crate::infra::executor::mock::MockRunExecutor;
 use crate::infra::logs::RunLogBroadcaster;
 use crate::infra::storage::entity::schedule_tick;

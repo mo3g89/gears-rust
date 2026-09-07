@@ -61,7 +61,7 @@ use toolkit::api::OpenApiRegistry;
 use toolkit::api::operation_builder::{CORE_GLOBAL_BASE_LICENSE_FEATURE, LicenseFeature};
 
 use crate::api::rest::dto::BoundaryLimits;
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 use crate::infra::logs::RunLogBroadcaster;
 
 mod queue;

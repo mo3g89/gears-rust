@@ -44,9 +44,10 @@
 //!
 //! 1. That a schedule's field violation *"cannot be fixed here"* and would need
 //!    a new [`DomainError`] variant. [`ScheduleResourceError`] was already
-//!    declared 200 lines away, and [`RunResourceError`]'s own visibility note
-//!    already described the pattern - a refusal raised where the resource is
-//!    known.
+//!    declared 200 lines away -- in `domain::error_attribution` since Task 21,
+//!    but declared all the same -- and [`RunResourceError`]'s own visibility
+//!    note already described the pattern: a refusal raised where the resource
+//!    is known.
 //! 2. That the empty-name refusal specifically could not be reached by a handler
 //!    `map_err` *"without also re-attributing `ScheduleNameExists`, `Forbidden`,
 //!    `Database`"*. The counter-example was the fall-through arm of the very
@@ -71,7 +72,6 @@
 //! and for what it still does not enforce.
 
 use toolkit::api::canonical_prelude::*;
-use uuid::Uuid;
 
 use crate::domain::error::{DomainError, OPAQUE_ERROR_TEXT};
 
@@ -88,197 +88,17 @@ use crate::domain::error::{DomainError, OPAQUE_ERROR_TEXT};
 #[resource_error(gts_id!("cf.qa.runs.run.v1~"))]
 pub(crate) struct RunResourceError;
 
-#[resource_error(gts_id!("cf.qa.runs.queue_entry.v1~"))]
-struct QueueResourceError;
-
-/// `qa_schedules`, the third resource type this gear owns.
-///
-/// **The vocabulary is the plan's, not `DESIGN.md`'s** — corrected here after
-/// this comment shipped attributing it to DESIGN §3.7. It is not there: the
-/// whole document contains no `qa.queue_entry` and no `qa.run` resource type
-/// (its six `qa.run` hits are event topics), and its single `qa.schedule` is the
-/// `qa.schedule.fired` *event* in §3.3's **Events** table. What §3.7 names are
-/// **tables**. The three resource types are listed in the plan, and the
-/// attribution was already correct three files away, in
-/// `domain::service::resources`: *"The plan lists three — `qa.run`,
-/// `qa.queue_entry` and `qa.schedule`"*. That module remains where the
-/// vocabulary is recorded, so the names do not get invented twice.
-///
-/// Declared by Task 17 rather than by Task 20, which owns the schedules REST
-/// layer, because the `match` below is exhaustive: adding
-/// [`DomainError::ScheduleNameExists`] to the enum makes this file fail to
-/// compile until the variant has an arm, and the arm needs a resource type that
-/// is not `run`. A caller told a *run* already exists while creating a schedule
-/// would go looking for the wrong row.
-#[resource_error(gts_id!("cf.qa.runs.schedule.v1~"))]
-struct ScheduleResourceError;
-
-/// Render an error from a **schedule** operation, attributing a field violation
-/// to the schedule resource rather than to the run.
-///
-/// # Why this exists rather than a better `From` impl
-///
-/// [`DomainError::Validation`] carries a field name and a message and nothing
-/// that says which resource the field belongs to, so the `match` below cannot
-/// tell `NewScheduleReq`'s `name` from `LaunchRunReq`'s `branch` and maps both
-/// to [`RunResourceError`]. Until Task 20 that was harmless — every
-/// `Validation` reaching the boundary really was a run's. It stopped being
-/// harmless the moment a schedule payload could raise one, and a caller told
-/// `cf.qa.runs.run.v1~` rejected their schedule's `name` goes looking for the
-/// wrong row.
-///
-/// **The call site is where the resource is known, and it knows it
-/// statically.** That is the same reasoning that makes [`RunResourceError`]
-/// `pub(crate)` for `handlers::runs::subscriber_cap_reached`: a refusal the
-/// exhaustive `match` cannot see is raised where the facts are, against the one
-/// declared type for that resource.
-///
-/// **Not a field-name heuristic**, which would be the wrong fix: branching on
-/// the string `"name"` would silently mis-attribute the next field added on
-/// either side — and `target.custom_plan_id`, which both payloads can raise,
-/// is exactly the field it would get wrong.
-///
-/// # Where it is applied, and why each site is sound
-///
-/// `handlers::schedules` wraps **both** the payload decode and the service call
-/// with it:
-///
-/// * `decode_payload` converts a `NewScheduleReq` and nothing else, so every
-///   `Validation` it can produce is a schedule's field, including the ones
-///   `RunTargetDto`'s shared `TryFrom` raises. Its signature is concrete rather
-///   than generic over `TryInto`, so it cannot later be reused for a run
-///   payload; `LaunchRunReq` reaches the same shared `TryFrom` through the runs
-///   handler, which never comes here. The two paths are disjoint by type.
-/// * `ScheduleService::create` and `::update` produce exactly one `Validation`
-///   between them — the empty-name refusal at
-///   `domain::service::schedules`'s `validate` — which is measured rather than
-///   assumed: it is the only `Validation` producer anywhere in that call graph.
-///   `mapper`'s `db_i32_from_i64` is the one generic helper that could
-///   theoretically appear and does not; it is reached only from
-///   `runs_sea_repo`'s counter-delta write.
-///
-/// `domain::local_client` is the **third** site and shipped without it, which
-/// is the whole reason this section exists as a list rather than as "the
-/// schedule handlers". It reaches the same `ScheduleService` methods by a
-/// different door, so every argument above applies to it unchanged; that door
-/// simply had no `map_err` at all. `client::tests` drives all five methods.
-///
-/// # `Forbidden` is re-attributed too, and it is the one that matters most
-///
-/// A denial is the **most likely** error on a fresh deployment of these
-/// endpoints — a policy engine that has not been taught `qa.schedule` yet
-/// refuses every one of them — and it was pointing the operator at *run*
-/// permissions. That is worse than the field violations: a 403 carries no field
-/// to disambiguate it, so the resource type is the only thing in the body an
-/// operator can act on.
-///
-/// It stays `permission_denied` with the same `ACCESS_DENIED` reason and still
-/// says nothing about *what* was denied — the cross-tenant oracle every read in
-/// this gear closes. Only the resource type changes.
-///
-/// # Everything else falls through, which is what makes the wrapper cheap
-///
-/// Anything that is neither a `Validation` nor a `Forbidden` is handed to the
-/// ordinary mapping untouched, so wrapping a whole service call leaves
-/// `ScheduleNameExists`, `ScheduleNotFound`, `Database` and `CorruptState`
-/// exactly as they were — the first two already carry the schedule's own type.
-/// It is also why a later variant becomes an ordinary error here rather than a
-/// wrongly-attributed one.
-pub(crate) fn as_schedule_error(e: DomainError) -> CanonicalError {
-    match e {
-        DomainError::Validation { field, message } => ScheduleResourceError::invalid_argument()
-            .with_field_violation(field, message, "VALIDATION")
-            .create(),
-        DomainError::Forbidden => ScheduleResourceError::permission_denied()
-            .with_reason("ACCESS_DENIED")
-            .create(),
-        other => other.into(),
-    }
-}
-
-/// Render an error from a **queue** operation, attributing it to the queue
-/// entry the caller addressed rather than to the run behind it.
-///
-/// The third of the three wrappers, and the last one missing. `/qa/v1/queue`'s
-/// three handlers used a bare `?` throughout, so every refusal they could raise
-/// took whatever resource type the exhaustive `match` below happens to assign —
-/// which is `run` for three of them, on endpoints whose scopes are compiled for
-/// [`resources::QUEUE_ENTRY`](crate::domain::service::resources::QUEUE_ENTRY).
-///
-/// `addressed` is the queue id from the path, or `None` for the collection
-/// endpoint. It is a parameter rather than something recovered from the error
-/// because it is what the *request* named, which is the whole point: two of the
-/// arms below exist to stop the body quoting an id the caller never sent.
-///
-/// # The four arms, and why each is one
-///
-/// * **`Forbidden`** — the one that matters most, for the reason
-///   [`as_schedule_error`] gives at length: a 403 carries no field, a fresh
-///   deployment whose policy has not been taught `qa.queue_entry` refuses all
-///   three of these endpoints, and the resource type is then the only thing in
-///   the body an operator can act on. It was naming `qa.run`.
-/// * **`ConcurrencyLimit`** — raisable from `launch` *and* from
-///   `RunsService::force_start`, so the enum variant cannot carry one resource
-///   type. The default mapping keeps it run-typed, which is right for the
-///   launch endpoint; `POST /queue/{id}/force-start` is the caller that has to
-///   re-attribute, and the actionable content (`max_concurrent_runs`) survives
-///   unchanged either way.
-/// * **`RunNotFound`** — `cancel_queued` reads the row's run under the caller's
-///   own `qa.run`/`cancel` scope, so a caller who may drop a queue row but may
-///   not cancel its run was answered *"Run {uuid} was not found"* for a uuid
-///   they never supplied. Re-pointed at the queue row they did. **This is
-///   attribution, not an oracle fix**: `QueueEntryDto::run_id` means the
-///   row-to-run association is already readable by anyone who can list the row.
-/// * **`Validation`** — the same field-without-a-resource problem
-///   [`as_schedule_error`] documents. `QueueQuery::reject_legacy_field`
-///   raises one for a caller still sending `platform_id` (ruling G-4); this
-///   arm is what keeps that refusal attributed to the queue entry rather than
-///   silently becoming a run's.
-///
-/// # What is deliberately left alone
-///
-/// `IllegalTransition` keeps its run attribution and its run id. It is
-/// reachable here only through `cancel_queued` losing a race with the
-/// dispatcher, and its content — *"Run {id} is in state {state} and cannot be
-/// cancelled"* — is a statement about the run, whose state is the only
-/// actionable part of it. Re-pointing it at the queue row would keep the
-/// wrong id and lose the reason.
-///
-/// Everything else falls through untouched, which is what keeps the wrapper
-/// cheap: `QueueRowNotFound`, `QueueRowNotQueued` and `QueueRowExists` already
-/// carry this type, and `Database`/`CorruptState` stay opaque.
-pub(crate) fn as_queue_error(addressed: Option<Uuid>, e: DomainError) -> CanonicalError {
-    match e {
-        DomainError::Forbidden => QueueResourceError::permission_denied()
-            .with_reason("ACCESS_DENIED")
-            .create(),
-        DomainError::Validation { field, message } => QueueResourceError::invalid_argument()
-            .with_field_violation(field, message, "VALIDATION")
-            .create(),
-        DomainError::ConcurrencyLimit { limit } => {
-            let refusal = QueueResourceError::resource_exhausted(format!(
-                "Max concurrent runs limit reached ({limit})"
-            ))
-            .with_quota_violation(
-                "max_concurrent_runs",
-                format!("the cluster-wide limit of {limit} concurrent runs is reached"),
-            );
-            match addressed {
-                Some(id) => refusal.with_resource(id.to_string()).create(),
-                None => refusal.create(),
-            }
-        }
-        // Only re-pointed when the request named a row. Without one there is
-        // nothing truer to say than what the ordinary mapping already says.
-        DomainError::RunNotFound { .. } => match addressed {
-            Some(id) => QueueResourceError::not_found(format!("Queue row {id} was not found"))
-                .with_resource(id.to_string())
-                .create(),
-            None => e.into(),
-        },
-        other => other.into(),
-    }
-}
+// The queue and schedule attribution lives in `domain::error_attribution`, not
+// here: `domain::local_client` needs it and a domain module must not import the
+// transport layer (review findings #15, #16). Re-exported so this module stays
+// the one place a REST handler imports error rendering from, and imported
+// rather than re-declared so the `match` below and the two wrappers raise the
+// same `gts_id` per resource rather than two that could disagree.
+//
+// `RunResourceError` above is the one that did not move: nothing in `domain`
+// names it -- it is `pub(crate)` for `handlers::runs::subscriber_cap_reached`.
+use crate::domain::error_attribution::{QueueResourceError, ScheduleResourceError};
+pub(crate) use crate::domain::error_attribution::{as_queue_error, as_schedule_error};
 
 /// A 500 whose body says nothing, with the real cause logged.
 ///

@@ -44,7 +44,7 @@ use super::{AppServices, LogArchive, QueueLimits, ServiceDeps};
 use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::RunExecutor;
 use crate::domain::repos::RunsRepository;
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 use crate::infra::executor::mock::MockRunExecutor;
 use crate::infra::logs::RunLogBroadcaster;
 use crate::infra::storage::test_db::{inmem_db, scope};
