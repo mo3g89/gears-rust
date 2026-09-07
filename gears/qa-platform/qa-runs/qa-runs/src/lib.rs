@@ -10,6 +10,7 @@ pub mod api;
 pub mod config;
 pub mod domain;
 pub mod gear;
+pub mod gts;
 pub mod infra;
 
 pub use gear::QaRuns;
