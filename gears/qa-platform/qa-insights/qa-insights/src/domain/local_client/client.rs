@@ -21,11 +21,11 @@
 //! # `DomainError` becomes `QaInsightsError` through `as_jira_error`, not `Into`
 //!
 //! `qa_insights_sdk::errors` re-exports `toolkit_canonical_errors::CanonicalError`
-//! as `QaInsightsError`, and `api::rest::error` is where `DomainError` becomes
+//! as `QaInsightsError`, and `domain::error` is where `DomainError` becomes
 //! one. But the blanket `From<DomainError> for CanonicalError` attributes a bare
 //! `Validation` or `Forbidden` to the test-result resource by default — right
 //! for the callers that predate the JIRA surface, wrong for this one. `as_jira_error`
-//! is the renderer `api::rest::error`'s own header built for exactly this call
+//! is the renderer `domain::error_attribution` documents for exactly this call
 //! site's two refusal shapes (a `plan_path` pairing violation, a `qa.jira_bug`
 //! denial), and `open_bugs`'s own doc names it as its caller's obligation. This
 //! seam is qa-runs' `QaRunsLocalClient`'s `as_schedule_error`/`as_queue_error`

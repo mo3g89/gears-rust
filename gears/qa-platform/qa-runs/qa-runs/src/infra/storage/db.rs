@@ -45,7 +45,7 @@ pub const PAGE_LIMITS: LimitCfg = LimitCfg {
 /// `Db` and `ParsingUnavailable` are the two that are genuinely not the
 /// caller's: the first is a driver failure, the second means the deployment was
 /// built without `OData` parsing at all. Both are redacted by the mapping in
-/// `api::rest::error`, so neither leaks.
+/// `domain::error`, so neither leaks.
 ///
 /// The `match` **in this function** is exhaustive with no `_` arm, so a new
 /// `toolkit_odata::Error` variant is a compile error here rather than silently

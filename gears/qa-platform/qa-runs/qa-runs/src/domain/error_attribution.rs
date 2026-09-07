@@ -12,24 +12,36 @@
 //! rather than the other way round. Review findings #15, #16.
 //!
 //! So the two wrappers and the two resource types they raise live here, and
-//! `api::rest::error` re-exports them — a REST handler still imports its error
-//! rendering from exactly one module, and the surfaces that share an
+//! `api::rest::error` re-exports the wrappers — a REST handler still imports
+//! its error rendering from exactly one module, and the surfaces that share an
 //! attribution decision share one definition of it rather than two `gts_id`s
-//! that could disagree. `crate::no_api_in_domain_tests` is what keeps the
-//! import direction from drifting back.
+//! that could disagree.
 //!
-//! **`RunResourceError` deliberately stayed behind** in `api::rest::error`.
-//! Nothing in `domain` names it: it is `pub(crate)` for one *handler*
-//! (`handlers::runs::subscriber_cap_reached`, an SSE subscriber cap that is a
-//! boundary decision with no `DomainError` behind it), so moving it here would
-//! have been motion without a caller.
+//! # The fall-through arm, and why the exhaustive mapping had to move too
+//!
+//! Both wrappers end in `other => other.into()`, which resolves to
+//! `impl From<DomainError> for CanonicalError`. Moving these two functions out
+//! of `api::rest::error` therefore did **not**, on its own, remove the edge the
+//! findings were about: the impl was still declared in the transport layer, so
+//! every fall-through here was a domain call into it. The impl now lives in
+//! [`crate::domain::error`], beside the enum it maps, and that is what closes
+//! the direction — along with `RunResourceError`, which came with it because
+//! the mapping raises it. (`handlers::runs::subscriber_cap_reached` still
+//! imports that type from `api::rest::error`, which re-exports it.)
+//!
+//! **`crate::no_api_in_domain_tests` cannot see any of this.** It is a text
+//! scan over imports; a trait impl is resolved by coherence and leaves no
+//! `use` line to find. It pins the imports and nothing more, which is worth
+//! stating because an earlier revision of this header cited it as the thing
+//! keeping the property — a guard that could not have contradicted the claim
+//! it was offered as evidence for.
 
 use toolkit_canonical_errors::{CanonicalError, resource_error};
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 
-/// `qa_queue_entries`. `pub(crate)` for `api::rest::error`, whose
+/// `qa_queue_entries`. `pub(crate)` for `domain::error`, whose
 /// exhaustive mapping raises the same type for the four queue-row variants
 /// that already carry it -- one `gts_id` per resource, not two.
 #[resource_error(gts_id!("cf.qa.runs.queue_entry.v1~"))]
@@ -49,8 +61,8 @@ pub(crate) struct QueueResourceError;
 /// vocabulary is recorded, so the names do not get invented twice.
 ///
 /// Declared by Task 17 rather than by Task 20, which owns the schedules REST
-/// layer, because `api::rest::error`'s `match` is exhaustive: adding
-/// [`DomainError::ScheduleNameExists`] to the enum makes *that* file fail to
+/// layer, because the boundary mapping's `match` is exhaustive: adding
+/// [`DomainError::ScheduleNameExists`] to the enum makes the mapping fail to
 /// compile until the variant has an arm, and the arm needs a resource type that
 /// is not `run`. A caller told a *run* already exists while creating a schedule
 /// would go looking for the wrong row. (The declaration moved here with the two
@@ -65,10 +77,10 @@ pub(crate) struct ScheduleResourceError;
 /// # Why this exists rather than a better `From` impl
 ///
 /// [`DomainError::Validation`] carries a field name and a message and nothing
-/// that says which resource the field belongs to, so `api::rest::error`'s
+/// that says which resource the field belongs to, so `domain::error`'s
 /// exhaustive `match` cannot tell `NewScheduleReq`'s `name` from
 /// `LaunchRunReq`'s `branch` and maps both to
-/// [`RunResourceError`](crate::api::rest::error::RunResourceError). Until Task
+/// [`RunResourceError`](crate::domain::error::RunResourceError). Until Task
 /// 20 that was harmless — every
 /// `Validation` reaching the boundary really was a run's. It stopped being
 /// harmless the moment a schedule payload could raise one, and a caller told
@@ -77,7 +89,7 @@ pub(crate) struct ScheduleResourceError;
 ///
 /// **The call site is where the resource is known, and it knows it
 /// statically.** That is the same reasoning that makes
-/// [`RunResourceError`](crate::api::rest::error::RunResourceError)
+/// [`RunResourceError`](crate::domain::error::RunResourceError)
 /// `pub(crate)` for `handlers::runs::subscriber_cap_reached`: a refusal the
 /// exhaustive `match` cannot see is raised where the facts are, against the one
 /// declared type for that resource.
@@ -150,7 +162,7 @@ pub(crate) fn as_schedule_error(e: DomainError) -> CanonicalError {
 ///
 /// The third of the three wrappers, and the last one missing. `/qa/v1/queue`'s
 /// three handlers used a bare `?` throughout, so every refusal they could raise
-/// took whatever resource type `api::rest::error`'s exhaustive `match` happens
+/// took whatever resource type `domain::error`'s exhaustive `match` happens
 /// to assign — which is `run` for three of them, on endpoints whose scopes are
 /// compiled for
 /// [`resources::QUEUE_ENTRY`](crate::domain::service::resources::QUEUE_ENTRY).

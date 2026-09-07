@@ -20,7 +20,7 @@ const TENANT: Uuid = Uuid::from_u128(0x0E02_0000_0000_0001);
 
 /// The resource type the saved-view endpoints must attribute a refusal to —
 /// confirmed against `SavedViewResourceError`'s own declaration
-/// (`api/rest/error.rs:108`).
+/// (`domain/error.rs:531`).
 const SAVED_VIEW_GTS: &str = "cf.qa.insights.saved_view.v1~";
 
 async fn rendered(response: axum::response::Response) -> (u16, String) {

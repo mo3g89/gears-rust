@@ -16,7 +16,7 @@
 //!   executed; the second was a live cross-tenant disclosure.
 //! * **A run endpoint attributes its refusals to the run resource.** The
 //!   variant-to-status mapping is exhaustively checked by the compiler in
-//!   `api::rest::error`; the endpoint-to-resource-type pairing is checked by
+//!   `domain::error`; the endpoint-to-resource-type pairing is checked by
 //!   nothing but tests like these, which is how the same defect was found in
 //!   six places across three reviews. See `handlers::queue`'s `handler_tests` for
 //!   the same loop over the queue surface.

@@ -1,300 +1,51 @@
-//! Canonical error mapping: [`DomainError`] to `CanonicalError`.
+//! **Where a REST handler imports its error rendering from**, and the two
+//! call-site renderers that belong to a handler rather than to a mapping.
 //!
-//! **The single place in this gear that decides an HTTP-visible error shape.**
-//! `api/mod.rs` said so from Task 9, before there was a mapping to hold to it;
-//! this is that file. Shape copied from
-//! `qa-environments/src/api/rest/error.rs`.
+//! The blanket mapping itself — `impl From<DomainError> for CanonicalError`,
+//! the three resource types it raises and the `opaque_internal` redaction
+//! helper — is in [`crate::domain::error`], next to the enum it maps; the JIRA
+//! attribution is in [`crate::domain::error_attribution`]. Both modules carry
+//! the reasoning that used to be in this header, beside the code it is about.
 //!
-//! * **The `match` has no catch-all arm**, so adding a [`DomainError`] variant is
-//!   a compile error here rather than a silent 500.
+//! # Why the mapping is not here
 //!
-//!   **Corrected in Task 16's fix round.** This bullet was introduced as "the one
-//!   discipline qa-runs added and this gear adopts". It is not: qa-environments'
-//!   own `match` (`qa-environments/src/api/rest/error.rs:32-127`) is already
-//!   exhaustive with no catch-all, so the *rule* was inherited straight from the
-//!   template. What qa-runs added is the **statement** of the rule — naming it in
-//!   the header as a property to preserve rather than leaving it as something a
-//!   later edit could quietly drop. That is worth inheriting too, and it is what
-//!   this bullet actually does. qa-runs' own header makes the same slip about its
-//!   own template; the point of writing this down is not to inherit it here.
+//! It was, and that put `domain::error_attribution::as_jira_error`'s
+//! `other => other.into()` — a *domain* module — in the position of calling a
+//! function in the transport layer. `domain::local_client` is an in-process
+//! call that never touches HTTP; `api` is a transport over `domain` rather than
+//! the other way round. Review findings #15, #16.
 //!
-//!   **Two** variants are mapped below that nothing in this crate constructs
-//!   yet, and they are mapped anyway for exactly the reason above: the task that
-//!   raises one should find the boundary decision already taken and reviewed,
-//!   not discover it as an unexplained 500. Named individually rather than
-//!   counted, so that a `grep -rn 'DomainError::<variant>'` can settle the claim:
+//! **The `use` line was not the finding.** An earlier round deleted
+//! `domain::error_attribution`'s `use crate::api::rest::error::...` and left the
+//! edge standing, because a trait impl is resolved by coherence rather than by
+//! an import: `other.into()` went on resolving into this file.
+//! `crate::no_api_in_domain_tests` is a text scan over imports and could never
+//! have contradicted that — it pins the imports, and the impl's location is what
+//! pins the rest.
 //!
-//!   * [`DomainError::UnsupportedEgress`] — the notification router, Tasks
-//!     36-39.
-//!   * [`DomainError::IngestConflict`] — **neither loop.** Task 13 forecast it
-//!     for the ingest path and did not need it; `domain/error.rs`' own list
-//!     records why (the projection's delete-then-insert runs inside the caller's
-//!     transaction, so a lost race is a rolled-back database error).
+//! # What stayed, and why
 //!
-//!   **[`DomainError::JiraNotConfigured`] left that list at Task 32**, which is
-//!   both its first constructor and its first path to this boundary:
-//!   `domain::service::jira::JiraService::check_status` raises it for a tenant
-//!   with no config or a disabled one, and `infra::jira::oagw_client` raises it
-//!   before it will provision egress for a disabled integration. It is the
-//!   third variant to make that transition (after `SavedViewNameExists` and
-//!   `SavedViewNotFound` at Task 28) and the count above is adjusted rather than
-//!   the bullet merely deleted, because a stale count is what this section's own
-//!   preamble is about.
-//!
-//!   One variant is deliberately **not** in that list, and was wrongly put
-//!   there by earlier revisions of this paragraph:
-//!
-//!   * [`DomainError::BugNotFound`] — constructed since `ef878c22` at
-//!     `infra/storage/jira_sea_repo.rs:189`, on the "the bug row is gone between
-//!     the insert and the re-read of the same transaction" race in `upsert_bug`.
-//!     That site's own comment calls the race unreachable in practice, which is
-//!     a different claim from "no code constructs it" — and treating the two as
-//!     one is what would let a Tasks 31-34 engineer skip the path without ever
-//!     looking at it.
-//!
-//!   **The rule this paragraph keeps getting wrong**, stated so the next edit
-//!   does not: "has no constructor", "is unreachable in practice" and "cannot
-//!   reach a handler yet" are three different properties. Only the first belongs
-//!   in the list above, and only a grep decides it.
-//!
-//!   [`DomainError::SavedViewNameExists`] used to be a second example here —
-//!   "constructed, but nothing reaches this boundary yet" — and Task 28's
-//!   `POST`/`PUT` handlers are exactly what makes that no longer true.
-//!   [`DomainError::SavedViewNotFound`] is Task 28's own new variant, mapped
-//!   and constructed in the same commit, so it never spent a task in either
-//!   limbo.
-//!
-//! # The two mappings this file *owed* before it existed
-//!
-//! `domain/error.rs`' header names them, and the debt is discharged here:
-//! [`DomainError::IngestConflict`] to `CanonicalError::Aborted` (409, retryable),
-//! and [`DomainError::UnsupportedEgress`] to `CanonicalError::Unimplemented`
-//! (501 — a working configuration and a missing adapter, which is why it is not
-//! a `Validation`). `qa-insights-sdk/src/errors.rs` pointed at `domain/error.rs`,
-//! which pointed here; the chain now terminates.
-//!
-//! # What a caller may read
-//!
-//! [`DomainError::Database`], [`DomainError::Internal`] and
-//! [`DomainError::CorruptState`] carry text that originates in a database
-//! driver, in this gear's internals, or in a persisted column. **None of it may
-//! reach an HTTP body**: driver text names indexes, columns and key values, and
-//! `CorruptState` carries the offending column's contents verbatim. Each is
-//! logged at ERROR with the real cause and answered with the canonical internal
-//! detail, which `toolkit-canonical-errors` supplies and this gear does not
-//! choose.
-//!
-//! `opaque_internal` takes the [`DomainError`] rather than a message, so it
-//! cannot be handed pre-formatted text by mistake — qa-runs' idiom, and the
-//! reason it is worth copying is that the mistake it prevents is a one-word edit.
+//! [`as_saved_view_error`] and [`as_notification_error`]. Nothing in `domain`
+//! calls either, and moving a renderer whose only caller is a handler would be
+//! motion without a reason. The rule this layering exists to satisfy is about
+//! the direction of a dependency, not about collecting every mapper in one
+//! place.
 
 use toolkit::api::canonical_prelude::*;
 
 use crate::domain::error::DomainError;
 
-/// `qa_test_results` and `qa_test_case_results` — the projection this gear
-/// exists to serve, and the resource the rebuild endpoint mutates.
-///
-/// Matches `domain::service::resources::TEST_RESULT`, deliberately: the PEP
-/// resource type and the error resource type name the same thing, and a caller
-/// denied on `qa.test_result` should be told about `cf.qa.insights.test_result`.
-#[resource_error(gts_id!("cf.qa.insights.test_result.v1~"))]
-struct TestResultResourceError;
-
-/// `qa_saved_views`. Declared now because [`DomainError::SavedViewNameExists`]
-/// already exists and the `match` below is exhaustive — a caller told a *test
-/// result* already exists while naming a saved view would go looking for the
-/// wrong row. Task 28 owns the endpoints.
-#[resource_error(gts_id!("cf.qa.insights.saved_view.v1~"))]
-struct SavedViewResourceError;
-
-/// `qa_notification_config`, `qa_notification_log` and `qa_run_notifications`.
-/// Tasks 36-39; [`as_notification_error`] is Task 38's call-site renderer.
-#[resource_error(gts_id!("cf.qa.insights.notification.v1~"))]
-struct NotificationResourceError;
-
-// The JIRA attribution lives in `domain::error_attribution`, not here:
-// `domain::local_client` needs it and a domain module must not import the
-// transport layer (review findings #15, #16). Re-exported so this module stays
-// the one place a REST handler imports error rendering from, and the type
-// imported rather than re-declared so the blanket `match` below and
-// `as_jira_error` raise the same `gts_id` rather than two that could disagree.
-//
-// The other three resource types and the other two call-site renderers stayed:
-// nothing in `domain` names them.
-use crate::domain::error_attribution::JiraBugResourceError;
+// The blanket `DomainError -> CanonicalError` mapping and the three resource
+// types it raises live in `domain::error`, and the JIRA attribution in
+// `domain::error_attribution`: `domain::local_client` and `as_jira_error`'s
+// fall-through both reach that mapping, and a domain module must not depend on
+// the transport layer (review findings #15, #16). The types are imported back
+// rather than re-declared so the mapping and the two call-site renderers below
+// raise the same `gts_id` per resource rather than two that could disagree, and
+// everything a handler needs is re-exported so this module stays the one place
+// a REST handler imports error rendering from.
+use crate::domain::error::{NotificationResourceError, SavedViewResourceError};
 pub(crate) use crate::domain::error_attribution::as_jira_error;
-
-impl From<DomainError> for CanonicalError {
-    fn from(e: DomainError) -> Self {
-        let ce = match &e {
-            // -- 404, not found ---------------------------------------------
-            //
-            // Asynchronous ingest makes this a *normal transient state*, not a
-            // corruption: the run finished and the event has not been consumed
-            // yet. `DomainError::RunNotIngested`'s own doc says a caller that
-            // can render an empty history should prefer doing so — so this arm
-            // exists for the callers that genuinely cannot, and 404 is the
-            // honest answer for them. It is also what keeps the cross-tenant
-            // existence oracle closed: a run in another tenant reaches this
-            // gear as the same variant (`infra::clients::qa_runs`).
-            DomainError::RunNotIngested { run_id } => TestResultResourceError::not_found(format!(
-                "No results have been ingested for run {run_id}"
-            ))
-            .with_resource(run_id.to_string())
-            .create(),
-
-            DomainError::BugNotFound { key } => {
-                JiraBugResourceError::not_found(format!("Bug {key} is not tracked"))
-                    .with_resource(key.clone())
-                    .create()
-            }
-
-            // Absent and another owner's are the same 404 — this variant's own
-            // doc states the cross-owner existence oracle it closes, matching
-            // `qa-runs`' `DomainError::ScheduleNotFound`.
-            DomainError::SavedViewNotFound { id } => {
-                SavedViewResourceError::not_found(format!("Saved view {id} not found"))
-                    .with_resource(id.to_string())
-                    .create()
-            }
-
-            // -- 409, already exists / aborted ------------------------------
-            DomainError::SavedViewNameExists { name } => SavedViewResourceError::already_exists(
-                format!("A saved view named '{name}' already exists in this scope"),
-            )
-            .with_resource(name.clone())
-            .create(),
-
-            // Retryable, and the reconciler retries whether or not the caller
-            // does — which is why this is `Aborted` (409, "try again") rather
-            // than an opaque 500.
-            DomainError::IngestConflict => {
-                TestResultResourceError::aborted("Concurrent ingest for the same run, retry")
-                    .with_reason("INGEST_CONFLICT")
-                    .create()
-            }
-
-            // -- 400, failed precondition / invalid argument ----------------
-            //
-            // Nothing was attempted, which is what separates this from a JIRA
-            // call that failed: the tenant has no configuration at all.
-            DomainError::JiraNotConfigured => JiraBugResourceError::failed_precondition()
-                .with_precondition_violation(
-                    "jira_configuration",
-                    "JIRA is not configured for this tenant",
-                    "NOT_CONFIGURED",
-                )
-                .create(),
-
-            // **This said "every `Validation` this gear can raise today comes
-            // from the rebuild window", and that was already false when it was
-            // written.** `domain::error`'s own header lists `infra::storage::db::
-            // odata_err` — `$filter`, `$orderby` and `cursor` on the two flat
-            // collections — and `infra::storage::mapper` raises one too. Task 25a
-            // adds `domain::analytics::query`, the overview query string's five
-            // rules (`product_id`, `version`, `scope`, `group_by`, `plan_id`) plus
-            // the build-tests drill-down's `build`. Corrected rather than extended,
-            // because the false premise is what made the conclusion look
-            // load-bearing.
-            //
-            // `TEST_RESULT` is nevertheless right for this arm's *unrendered*
-            // callers — every one of them sits behind a test-result read or
-            // write: `resources::TEST_RESULT` with `actions::LIST` is the grant
-            // the overview and both collections require, and
-            // `actions::REBUILD` the one the rebuild does.
-            //
-            // **The saved-view name was the candidate this comment named, and
-            // Task 28 is the fix round.** `domain::service::saved_views` raises
-            // `Validation` on `scope`, `name` and `plan_path`, none of which is
-            // a test-result field, so its four handlers do not reach this arm
-            // at all — they wrap the service call in `as_saved_view_error`
-            // instead, which re-attributes `Validation` (and `Forbidden`) to
-            // `SavedViewResourceError` before this blanket `match` ever sees
-            // them. This arm stays the right default for every caller that
-            // still reaches it unwrapped, and the rule for the *next* one is
-            // unchanged: a `Validation` whose resource is not the test result
-            // needs a call-site renderer, exactly as qa-runs' `Validation` arm
-            // records. Branching on the field name would mis-attribute the
-            // next field added on either side.
-            DomainError::Validation { field, message } => {
-                TestResultResourceError::invalid_argument()
-                    .with_field_violation(field, message, "VALIDATION")
-                    .create()
-            }
-
-            // A **grant** the write path cannot execute, not a denial — so 400
-            // with a named precondition violation and deliberately not the 403
-            // below. An operator who sees 403 goes and asks for the `rebuild`
-            // grant they already hold; what actually needs changing is the shape
-            // of the policy that answers it. `JiraNotConfigured` above sets the
-            // precedent for surfacing a deployment-configuration precondition
-            // this way.
-            //
-            // Attributed to the test-result resource because that is the only
-            // resource whose write path raises it today. A second raiser needs a
-            // call-site renderer, exactly as the `Validation` arm below records —
-            // and unlike that one, this variant carries the PEP resource type, so
-            // the renderer has something to switch on.
-            DomainError::UnsupportedScope { resource } => {
-                tracing::error!(
-                    %resource,
-                    "the authorization policy compiled to a scope this gear cannot execute; \
-                     the operation was refused. See domain::service::refuse_scope_beyond_tenant",
-                );
-                TestResultResourceError::failed_precondition()
-                    .with_precondition_violation(
-                        "authorization_policy",
-                        format!(
-                            "The policy for '{resource}' grants this operation with a scope \
-                             constraining more than the tenant, which this operation cannot \
-                             honour. It must constrain owner_tenant_id only."
-                        ),
-                        "SCOPE_NOT_TENANT_ONLY",
-                    )
-                    .create()
-            }
-
-            // -- 403 --------------------------------------------------------
-            DomainError::Forbidden => TestResultResourceError::permission_denied()
-                .with_reason("ACCESS_DENIED")
-                .create(),
-
-            // -- 501 --------------------------------------------------------
-            //
-            // Email, which design decision D10 defers: its config, routing,
-            // dedupe and logging all ship and only the send does not. A
-            // deployment reaching this has a *working* configuration and a
-            // missing adapter, so it is not a 400 — there is nothing the caller
-            // can change about the request.
-            DomainError::UnsupportedEgress { channel } => NotificationResourceError::unimplemented(
-                format!("This deployment has no adapter for the '{channel}' channel"),
-            )
-            .create(),
-
-            // -- 500, opaque ------------------------------------------------
-            DomainError::CorruptState { .. }
-            | DomainError::Database { .. }
-            | DomainError::Internal(_) => opaque_internal(&e),
-        };
-
-        if let Some(diag) = ce.diagnostic() {
-            tracing::debug!(diagnostic = %diag, "Canonical error diagnostic");
-        }
-
-        ce
-    }
-}
-
-/// Log the real cause, answer with the canonical internal detail.
-///
-/// Takes the error rather than a message so no call site can pass it text it
-/// formatted itself — the payloads of these three variants are precisely what
-/// must not cross the boundary.
-fn opaque_internal(e: &DomainError) -> CanonicalError {
-    tracing::error!(error = ?e, "internal error reached the API boundary");
-    CanonicalError::internal("An internal error occurred").create()
-}
 
 /// Render an error from a **saved-view** operation, attributing a `Validation`
 /// or a `Forbidden` to the saved-view resource rather than to the test result.

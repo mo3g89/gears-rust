@@ -89,7 +89,7 @@ pub(crate) const PAGE_LIMITS: LimitCfg = LimitCfg {
 /// reading error rates.
 ///
 /// `Db` is the one that is genuinely not the caller's — a driver failure — and it
-/// is redacted by the mapping in [`crate::api::rest::error`], so it does not leak.
+/// is redacted by the mapping in [`crate::domain::error`], so it does not leak.
 ///
 /// # Only five of these fifteen variants can reach here, and the doc used to
 /// # claim one that cannot

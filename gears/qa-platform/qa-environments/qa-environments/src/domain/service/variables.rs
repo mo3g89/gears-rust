@@ -107,6 +107,11 @@ impl<V: VariablesRepository, P: EnvironmentsRepository> VariablesService<V, P> {
     /// that is detected and warned about below rather than left to be
     /// rediscovered.
     ///
+    /// **This paragraph is about the union case only.** With `environment_id`
+    /// absent the response is an ordinary cursor page and `max_variables` is not
+    /// a ceiling on anything a cursor-following caller reads; the truncation at
+    /// the end of this method says what is and is not bounded there.
+    ///
     /// Bounding pipeline-first preserves the precedence the previous
     /// `vars.truncate(max_variables)` had and documented: a full result drops
     /// environment-specific variables before it ever drops a pipeline one.
@@ -254,12 +259,49 @@ impl<V: VariablesRepository, P: EnvironmentsRepository> VariablesService<V, P> {
             page.page_info.prev_cursor = None;
         }
 
-        // The configured `max_variables` (default 500) still applies on top of
-        // the page limit, because it is a *deployment* setting rather than a
-        // request one and may be set lower than a page. Same precedence as
-        // before: pipeline variables are first in `items`, so a truncation here
-        // drops environment-specific variables before it ever drops a pipeline
-        // variable.
+        // **`max_variables` bounds one response. It bounds the *collection*
+        // only when it is smaller than the page the pager applied.**
+        //
+        // Corrected 2026-09-07, final review finding 3. This said the cap
+        // "still applies on top of the page limit", which reads as a ceiling on
+        // what any caller can reach and is not one. What it does is truncate a
+        // single response, so whether it bounds the collection depends on which
+        // of the two paths above produced that response, and on the numbers:
+        //
+        // * **`environment_id` present** — no cursor exists, so one response
+        //   *is* the collection. The union already asked for at most
+        //   `max_variables` rows (`pipeline_query` above), so this truncation is
+        //   a belt rather than the bound; it is reachable only for a
+        //   `max_variables` of 0, which `clamp_limit` raises back to 1.
+        // * **`environment_id` absent** — an ordinary cursor page. If
+        //   `max_variables` is *below* the applied page limit the truncation
+        //   fires, and because it also clears the cursor (below) the collection
+        //   really is capped at `max_variables`. If it is at or above that limit
+        //   -- which is the shipped configuration, 500 against
+        //   `PAGE_LIMITS.default` of 200 -- `items.len()` never reaches it, the
+        //   cursor stays real, and a caller that follows the cursor reads the
+        //   whole of `qa_pipeline_variables` for its tenant. Past 500.
+        //
+        // Both drain loops do follow it: `local_client`'s `drain_pages` (no page
+        // cap at all -- "each round trip is bounded; the aggregate is not" is the
+        // SDK contract it defends) and the UI's `fetchVariableDtos`
+        // (`api/hooks.ts`, ten pages of 200). So `qa-runs`' `dispatch_spec`
+        // assembling a run with **no** environment now receives every pipeline
+        // variable the tenant has, where the pre-paging code handed it at most
+        // `max_variables`.
+        //
+        // **That is deliberate, and the direction is the safe one**: a drain
+        // returns more rows, never fewer, and `variableWritePlan` derives its
+        // deletes only from the array it is handed (`qa-platform-ui`'s
+        // `adapters.ts`), so no extra row destroys anything. Capping the drain
+        // instead would be the wrong fix -- the SDK contract those callers rely
+        // on is completeness, and a variable missing from a run's environment is
+        // a silent wrong-value launch, which is the regression the section above
+        // exists to record.
+        //
+        // Same precedence as before where it does fire: pipeline variables are
+        // first in `items`, so a truncation here drops environment-specific
+        // variables before it ever drops a pipeline variable.
         //
         // **And when it bites, the cursor goes with it.** `paginate_odata` built
         // that cursor from the *untruncated* page's last row, so leaving it

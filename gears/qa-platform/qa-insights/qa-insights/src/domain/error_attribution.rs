@@ -12,12 +12,28 @@
 //! rather than the other way round. Review findings #15, #16.
 //!
 //! So [`as_jira_error`] and the resource type it raises live here, and
-//! `api::rest::error` re-exports the function and imports the type back for
-//! its own blanket `match` — a REST handler still imports its error rendering
-//! from exactly one module, and the three surfaces that share this attribution
-//! decision share one definition of it rather than three `gts_id`s that could
-//! disagree. `crate::no_api_in_domain_tests` is what keeps the import
-//! direction from drifting back.
+//! `api::rest::error` re-exports the function — a REST handler still imports
+//! its error rendering from exactly one module, and the three surfaces that
+//! share this attribution decision share one definition of it rather than
+//! three `gts_id`s that could disagree.
+//!
+//! # The fall-through arm, and why the blanket mapping had to move too
+//!
+//! [`as_jira_error`] ends in `other => other.into()`, which resolves to
+//! `impl From<DomainError> for CanonicalError`. Moving this function out of
+//! `api::rest::error` therefore did **not**, on its own, remove the edge the
+//! findings were about: the impl was still declared in the transport layer, so
+//! every fall-through here was a domain call into it. That impl now lives in
+//! [`crate::domain::error`], beside the enum it maps, together with the three
+//! resource types it raises; `api::rest::error` imports two of them back for
+//! its own call-site renderers.
+//!
+//! **`crate::no_api_in_domain_tests` cannot see any of this.** It is a text
+//! scan over imports; a trait impl is resolved by coherence and leaves no
+//! `use` line to find. It pins the imports and nothing more, which is worth
+//! stating because an earlier revision of this header cited it as the thing
+//! keeping the property — a guard that could not have contradicted the claim
+//! it was offered as evidence for.
 //!
 //! **Only the JIRA attribution moved.** `as_saved_view_error`,
 //! `as_notification_error` and their resource types stayed in
@@ -32,7 +48,7 @@ use crate::domain::error::DomainError;
 
 /// `qa_jira_bugs` and the two JIRA configuration singletons. Tasks 31-35.
 ///
-/// `pub(crate)` for `api::rest::error`, whose blanket mapping raises this
+/// `pub(crate)` for `domain::error`, whose blanket mapping raises this
 /// same type for `JiraBugNotTracked` and `JiraNotConfigured` -- one
 /// `gts_id` per resource, not two that could disagree.
 #[resource_error(gts_id!("cf.qa.insights.jira_bug.v1~"))]
@@ -50,7 +66,7 @@ pub(crate) struct JiraBugResourceError;
 /// of the three is a test-result field, and every PDP denial on either surface
 /// is about `qa.jira_config` or `qa.jira_bug`. `JiraNotConfigured` and
 /// `RunNotIngested` already carry their own resource in the blanket `match`
-/// (the latter is `TestResultResourceError`, `api::rest::error`'s own, on
+/// (the latter is `TestResultResourceError`, `domain::error`'s own, on
 /// purpose —
 /// [`JiraService::file_bugs`](crate::domain::service::jira::JiraService::file_bugs)'s
 /// own doc says why an unprojected run is that error and not a JIRA one), so

@@ -70,7 +70,14 @@
 /// **Lowering it is a one-way migration for the runs already on disk, and it
 /// fails quietly.** An anchor archived under the old value holds text longer
 /// than a post-deploy re-read of the same line produces, so a node whose
-/// archived text was ever truncated cannot match its own anchor again.
+/// **first or last** archived line was itself truncated cannot match its own
+/// anchor again. Only those two lines are anchors — [`super::LogPosition`], the
+/// per-node value inside a [`LogResume`](super::LogResume), holds exactly
+/// `first_line` and `last_line` — so a truncated line between them is not
+/// compared to anything, which is what the next paragraph works out position by
+/// position. Corrected 2026-09-07, final review finding 5: this said *"a node
+/// whose archived text was ever truncated"*, which the paragraph immediately
+/// below refutes in its own second sentence.
 ///
 /// **What that costs depends on where the over-long line sits, and this
 /// paragraph used to overstate it.** It read *"`LineSkip`'s first-line guard

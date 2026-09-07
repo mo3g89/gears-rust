@@ -183,6 +183,26 @@ impl QaEnvironmentsClientV1 for QaEnvironmentsLocalClient {
     /// no limit of its own: the ceiling belongs where `max_variables` is
     /// visible, and a second copy of it here — in a layer that cannot see the
     /// config — would be a weaker duplicate of the same rule.
+    ///
+    /// # With `environment_id` `None`, nothing bounds the aggregate
+    ///
+    /// Stated 2026-09-07, final review finding 3, because the paragraph above
+    /// leaves the opposite impression. `max_variables` truncates a single
+    /// response; on the pipeline-only path the response is a cursor page whose
+    /// limit is `PAGE_LIMITS.default` (200) against a shipped `max_variables` of
+    /// 500, so the truncation never fires, the cursor is real, and this drain
+    /// follows it to the end of `qa_pipeline_variables` for the tenant. There is
+    /// no page cap in [`drain_pages`] either. `qa-runs`' `dispatch_spec` calls
+    /// this with `run.platform_id`, so a run with no environment now assembles
+    /// from *every* pipeline variable the tenant has, where the pre-paging code
+    /// gave it at most 500.
+    ///
+    /// That is the intended direction rather than a second regression: this
+    /// method's contract is completeness — the thing `qa-insights`'
+    /// `EnvironmentReader` argues for and the reason `drain_pages` exists — and
+    /// more rows can only add a variable a run should already have had. Only
+    /// `list_for_env`'s truncation ever removes one, and only when a deployment
+    /// sets `max_variables` below a page.
     async fn list_variables(
         &self,
         ctx: &SecurityContext,

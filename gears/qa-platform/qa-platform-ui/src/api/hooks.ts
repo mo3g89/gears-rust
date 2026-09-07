@@ -281,9 +281,22 @@ async function fetchProductDtos(): Promise<S['ProductDto'][]> {
 }
 
 /**
- * A drain loop's ceiling. 200 rows a page against the gear's `max_variables`
- * cap of 500 means three requests at the very most; ten is a runaway, not a
- * large tenant.
+ * A drain loop's ceiling — this loop's own, and the only one there is.
+ *
+ * **Corrected 2026-09-07, final review finding 3.** This said "200 rows a page
+ * against the gear's `max_variables` cap of 500 means three requests at the very
+ * most". `max_variables` is not a cap on the collection: it truncates a single
+ * response, and on the `/variables` form this loop actually pages — no
+ * `environment_id`, so an ordinary cursor page of `PAGE_LIMITS.default` = 200 —
+ * 200 rows never reach a `max_variables` of 500, so the gear never truncates and
+ * never stops handing back a cursor. A tenant with 5,000 pipeline variables gets
+ * 25 pages from the gear and 10 from this loop.
+ *
+ * So 10 x 200 = 2,000 rows is a ceiling this file chooses, not one it inherits,
+ * and going over it silently returns a partial list. It is set where it is
+ * because the Settings → Variables editor is a human-scale screen: a tenant past
+ * 2,000 variables has a problem no page size fixes. Raise it here if that stops
+ * being true — there is nothing on the gear side to raise with it.
  */
 const MAX_VARIABLE_PAGES = 10;
 

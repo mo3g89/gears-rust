@@ -135,6 +135,19 @@ pub trait EnvironmentsRepository: Send + Sync {
     /// afterwards (`crate::domain::system_actor::for_observation`) —
     /// everything the sweep does with a given environment beyond this listing
     /// goes through the ordinary PEP-scoped path, under that context.
+    ///
+    /// # Deliberately unpaged, unlike [`Self::list_page`]
+    ///
+    /// Review finding #55 is about a *client-facing* collection read with no
+    /// page, and [`Self::list_page`] above is where it is closed. This is the
+    /// exception, and it is one on purpose: no client can ask for it (it is on
+    /// no route), and its one caller needs every row — a paged sweep would
+    /// either carry a cursor across ticks, silently skipping or re-observing
+    /// rows created and deleted between them, or cap itself and leave the
+    /// environments past the cap never observed. The implementation carries the
+    /// same note beside the `.all()` itself
+    /// (`infra::storage::environments_sea_repo`), so a reader who arrives at the
+    /// query rather than at the trait finds it there too.
     async fn list_all_with_tenant<C: DBRunner>(
         &self,
         runner: &C,

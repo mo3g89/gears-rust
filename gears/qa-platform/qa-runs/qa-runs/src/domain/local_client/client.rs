@@ -1,7 +1,7 @@
 //! Local adapter: `QaRunsClientV1` over `AppServices`.
 //!
 //! `DomainError` becomes `QaRunsError` (which *is* `CanonicalError`) through
-//! the `From` impl in `api::rest::error`, so an in-process caller and an HTTP
+//! the `From` impl in `domain::error`, so an in-process caller and an HTTP
 //! caller get the same status and the same redaction - the disclosure rule is
 //! applied once, at one seam, rather than twice.
 //!

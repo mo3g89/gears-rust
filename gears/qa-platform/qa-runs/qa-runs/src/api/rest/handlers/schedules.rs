@@ -253,8 +253,8 @@ mod tests {
         }
     }
 
-    /// The body a client receives, as JSON, for the reason `api::rest::error`'s
-    /// own helper gives: `Problem` is the type that becomes the response, and a
+    /// The body a client receives, as JSON, for the reason `domain::error`'s
+    /// own test helper gives: `Problem` is the type that becomes the response, and a
     /// `Debug` rendering is a superset of the wire.
     fn wire(req: NewScheduleReq) -> (u16, String) {
         let error = decode_payload(req).expect_err("this payload must be refused");
@@ -435,7 +435,7 @@ mod tests {
     /// this gear is written to close.
     ///
     /// Asserted on the whole `cf.qa.runs.run.v1~` token, not on `"run "` with a
-    /// trailing space — which is how `api::rest::error`'s own
+    /// trailing space — which is how `domain::error`'s own
     /// `forbidden_is_403_and_says_nothing_about_what_was_denied` missed this for
     /// the whole of Phase B. The run's gts id has no trailing space, so that
     /// test's oracle list could never have matched it.

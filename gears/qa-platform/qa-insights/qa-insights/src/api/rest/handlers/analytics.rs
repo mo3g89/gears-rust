@@ -35,7 +35,7 @@
 //! [`crate::domain::analytics::query`], are applied by
 //! [`AnalyticsService`](crate::domain::service::analytics::AnalyticsService), and
 //! reach the wire as `invalid_argument` through
-//! [`crate::api::rest::error`]'s single `Validation` arm.
+//! [`crate::domain::error`]'s single `Validation` arm.
 //!
 //! The two request DTOs are `From`-converted into the domain's query types
 //! rather than passed through, which keeps wire-contract `serde` out of the

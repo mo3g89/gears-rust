@@ -54,7 +54,7 @@
 //! Everything else — transport failures, gateway errors, a 500 from the far side
 //! — becomes [`DomainError::Internal`], which is retryable at every call site
 //! that has a retry and an opaque 500 at the one that does not
-//! ([`crate::api::rest::error`] never discloses its payload).
+//! ([`crate::domain::error`]'s boundary mapping never discloses its payload).
 
 use std::sync::Arc;
 
@@ -339,7 +339,7 @@ mod tests {
     use crate::domain::error::DomainError;
 
     /// qa-runs' run resource, spelled exactly as
-    /// `qa-runs/src/api/rest/error.rs:88` spells it — this is the id its errors
+    /// `qa-runs/src/domain/error.rs:597` spells it — this is the id its errors
     /// carry.
     #[resource_error(gts_id!("cf.qa.runs.run.v1~"))]
     struct FarSide;
@@ -379,7 +379,7 @@ mod tests {
 
     /// Anything else is internal, and the message says which gear failed so a
     /// log line is attributable. Opaque to a client — `DomainError::Internal`
-    /// maps to the canonical internal detail in `api::rest::error`.
+    /// maps to the canonical internal detail in `domain::error`.
     #[test]
     fn any_other_failure_is_internal() {
         let boom = CanonicalError::internal("upstream exploded").create();
