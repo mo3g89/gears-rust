@@ -125,6 +125,10 @@ use crate::domain::repos::{
 };
 
 pub mod analytics;
+/// The `(resource_type, action)` pairs this gear's PEP enforces, and the
+/// distinct resource types among them. The source side of the permission
+/// catalog's anti-drift test - review finding #1.
+pub mod authz_surface;
 pub mod collect;
 pub mod dashboard;
 pub mod ingest;

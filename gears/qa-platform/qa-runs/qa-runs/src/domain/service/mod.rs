@@ -75,6 +75,11 @@ use crate::domain::system_actor;
 /// 14 and 15 name [`Admission`](launch::Admission) and the two seam traits, and
 /// a `pub(crate) use` of a name *this* module never mentions is an unused
 /// import until the task that needs it lands.
+/// The `(resource_type, action)` pairs this gear's PEP enforces, and the
+/// distinct resource types among them. The source side of the permission
+/// catalog's anti-drift test - review finding #1.
+pub mod authz_surface;
+
 pub(crate) mod launch;
 
 pub(crate) mod admission;
@@ -322,21 +327,36 @@ pub(in crate::domain::service) use serialized_db::SerializedDb;
 /// (`resolve_owned` on `qa.run`, then `insert` on `qa.queue_entry`), which is
 /// exactly the place a hoisted scope would be reused across types. Both scopes
 /// are derived immediately before their own call.
+///
+/// **Each descriptor is built from a sibling `*_NAME` `&str` const** rather
+/// than from an inline literal, so the PDP resource string has one declaration
+/// and two consumers: the descriptor the PEP is called with, and
+/// [`authz_surface::ENFORCED`]. qa-insights' `resources::TEST_RESULT_NAME`
+/// (`qa-insights/src/domain/service/mod.rs:206`) is the precedent and carries
+/// the reason the descriptor cannot supply the string itself.
 pub(crate) mod resources {
     use super::ResourceType;
     use toolkit_security::pep_properties;
 
     pub const RUN: ResourceType = ResourceType::from_static(
-        "qa.run",
+        RUN_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`RUN`]'s name as a `&'static str`, for the reason this module's header
+    /// cites.
+    pub const RUN_NAME: &str = "qa.run";
 
     /// `qa_run_queue`. The same two properties as [`RUN`]: rows are
     /// tenant-owned and addressed by id.
     pub const QUEUE_ENTRY: ResourceType = ResourceType::from_static(
-        "qa.queue_entry",
+        QUEUE_ENTRY_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`QUEUE_ENTRY`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const QUEUE_ENTRY_NAME: &str = "qa.queue_entry";
 
     /// `qa_schedules` **and** `qa_schedule_ticks`.
     ///
@@ -347,9 +367,13 @@ pub(crate) mod resources {
     /// addresses. Every method on that repository takes exactly one scope, and
     /// this is the type it is compiled for.
     pub const SCHEDULE: ResourceType = ResourceType::from_static(
-        "qa.schedule",
+        SCHEDULE_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`SCHEDULE`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const SCHEDULE_NAME: &str = "qa.schedule";
 }
 
 /// Authorization actions.

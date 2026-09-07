@@ -57,6 +57,10 @@ use crate::domain::repos::{
     TestReposRepository,
 };
 
+/// The `(resource_type, action)` pairs this gear's PEP enforces, and the
+/// distinct resource types among them. The source side of the permission
+/// catalog's anti-drift test - review finding #1.
+pub mod authz_surface;
 mod bundles;
 mod custom_plans;
 mod plans;
@@ -120,37 +124,68 @@ mod unscoped_read_guard_tests;
 pub type DbProvider = DBProvider<DomainError>;
 
 /// Authorization resource types and their PEP-supported properties.
+///
+/// Each descriptor is built from a sibling `*_NAME` `&str` const rather than
+/// from an inline literal, so the PDP resource string has one declaration and
+/// two consumers: the descriptor the PEP is called with, and
+/// [`authz_surface::ENFORCED`]. qa-insights' `resources::TEST_RESULT_NAME`
+/// (`qa-insights/src/domain/service/mod.rs:206`) is the precedent and carries
+/// the reason the descriptor cannot supply the string itself.
 pub mod resources {
     use super::ResourceType;
     use toolkit_security::pep_properties;
 
     pub const TEST_REPO: ResourceType = ResourceType::from_static(
-        "qa.test_repo",
+        TEST_REPO_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`TEST_REPO`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const TEST_REPO_NAME: &str = "qa.test_repo";
 
     pub const PLAN: ResourceType =
-        ResourceType::from_static("qa.plan", &[pep_properties::OWNER_TENANT_ID]);
+        ResourceType::from_static(PLAN_NAME, &[pep_properties::OWNER_TENANT_ID]);
+
+    /// [`PLAN`]'s name as a `&'static str`, for the reason this module's header
+    /// cites.
+    pub const PLAN_NAME: &str = "qa.plan";
 
     pub const CUSTOM_PLAN: ResourceType = ResourceType::from_static(
-        "qa.custom_plan",
+        CUSTOM_PLAN_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`CUSTOM_PLAN`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const CUSTOM_PLAN_NAME: &str = "qa.custom_plan";
 
     pub const PRODUCT: ResourceType = ResourceType::from_static(
-        "qa.product",
+        PRODUCT_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`PRODUCT`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const PRODUCT_NAME: &str = "qa.product";
 
     pub const SSH_KEY: ResourceType = ResourceType::from_static(
-        "qa.ssh_key",
+        SSH_KEY_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
+    /// [`SSH_KEY`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const SSH_KEY_NAME: &str = "qa.ssh_key";
+
     pub const BUNDLE: ResourceType = ResourceType::from_static(
-        "qa.bundle",
+        BUNDLE_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`BUNDLE`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const BUNDLE_NAME: &str = "qa.bundle";
 }
 
 pub mod actions {

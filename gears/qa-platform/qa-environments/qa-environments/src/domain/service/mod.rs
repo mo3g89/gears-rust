@@ -37,6 +37,10 @@ use toolkit_macros::domain_model;
 use crate::domain::ports::{ProductPluginPort, RunnerSecretWriter};
 use crate::domain::repos::{EnvironmentsRepository, LeasesRepository, VariablesRepository};
 
+/// The `(resource_type, action)` pairs this gear's PEP enforces, and the
+/// distinct resource types among them. The source side of the permission
+/// catalog's anti-drift test - review finding #1.
+pub mod authz_surface;
 mod environments;
 mod leases;
 mod variables;
@@ -89,6 +93,13 @@ mod unscoped_read_guard_tests;
 pub type DbProvider = DBProvider<DbError>;
 
 /// Authorization resource types and their PEP-supported properties.
+///
+/// Each descriptor is built from a sibling `*_NAME` `&str` const rather than
+/// from an inline literal, so the PDP resource string has one declaration and
+/// two consumers: the descriptor the PEP is called with, and
+/// [`authz_surface::ENFORCED`]. qa-insights' `resources::TEST_RESULT_NAME`
+/// (`qa-insights/src/domain/service/mod.rs:206`) is the precedent and carries
+/// the reason the descriptor cannot supply the string itself.
 pub mod resources {
     use super::ResourceType;
     use toolkit_security::pep_properties;
@@ -104,19 +115,33 @@ pub mod resources {
     /// reader's head. Renaming the resource type is a policy migration of its
     /// own, not part of this rename.
     pub const PLATFORM: ResourceType = ResourceType::from_static(
-        "qa.platform",
+        PLATFORM_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`PLATFORM`]'s name as a `&'static str`, for the reason this module's
+    /// header cites. **The string is `qa.platform`, not the aggregate's Rust
+    /// name** — see [`PLATFORM`]'s own doc for why the rename to `Environment`
+    /// deliberately stopped at the type and left the PDP string alone.
+    pub const PLATFORM_NAME: &str = "qa.platform";
 
     pub const VARIABLE: ResourceType = ResourceType::from_static(
-        "qa.variable",
+        VARIABLE_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
+    /// [`VARIABLE`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const VARIABLE_NAME: &str = "qa.variable";
+
     pub const LEASE: ResourceType = ResourceType::from_static(
-        "qa.lease",
+        LEASE_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`LEASE`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const LEASE_NAME: &str = "qa.lease";
 }
 
 pub mod actions {
