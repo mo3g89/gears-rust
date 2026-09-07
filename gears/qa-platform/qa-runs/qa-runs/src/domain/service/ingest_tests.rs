@@ -22,6 +22,8 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use super::*;
+use crate::domain::metrics::{QA_RUNS_INGEST, QA_RUNS_INGEST_DURATION};
+use crate::domain::ports::metrics::{IngestMetrics, IngestOutcome, NoopMetrics};
 use crate::domain::ports::run_executor::{ExecutionEvent, NodeOutcome, TestObservation};
 use crate::domain::repos::QueueRowRecord;
 use crate::domain::service::admission::tests::fakes::{
@@ -30,6 +32,7 @@ use crate::domain::service::admission::tests::fakes::{
 use crate::domain::service::test_support::{OTHER_TENANT, OWNER_TENANT, ctx, test_db_provider};
 use crate::domain::service::{FlushReport, LogArchive, LogFanout};
 use crate::domain::state_machine::{ExecutorOutcome, can_transition, is_terminal};
+use crate::infra::metrics::probe::MetricsProbe;
 
 const RUN: Uuid = Uuid::from_u128(0x0501);
 const QUEUE: Uuid = Uuid::from_u128(0x0E51);
@@ -307,6 +310,20 @@ async fn build(
     queue: Arc<FakeQueue>,
     environments: Arc<FakeEnvironments>,
 ) -> Harness {
+    build_with_metrics(runs, queue, environments, Arc::new(NoopMetrics)).await
+}
+
+/// The same wiring with an emission port named.
+///
+/// Split out rather than adding a parameter to [`build`], so the ~60 tests in
+/// this file that do not read metrics keep the production default — a service
+/// holding `NoopMetrics` — and say nothing about it.
+async fn build_with_metrics(
+    runs: Arc<FakeRuns>,
+    queue: Arc<FakeQueue>,
+    environments: Arc<FakeEnvironments>,
+    metrics: Arc<dyn IngestMetrics>,
+) -> Harness {
     let db = test_db_provider().await;
     let logs = Arc::new(RecordingLogs::default());
     let archive = Arc::new(RecordingArchive::default());
@@ -319,6 +336,7 @@ async fn build(
         logs: Arc::clone(&logs) as Arc<dyn LogFanout>,
         archive: Arc::clone(&archive) as Arc<dyn LogArchive>,
         policy_enforcer: enforcer,
+        metrics,
     });
     Harness {
         runs,
@@ -1988,4 +2006,165 @@ fn result_row(status: &str) -> crate::domain::repos::TestResultRow {
         created_at: stamp,
         updated_at: stamp,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry: one ingest pass is one measured observation
+// ---------------------------------------------------------------------------
+
+/// An ingest emission port that panics on its only method. See
+/// `dispatch_tests`' `PanickingMeter` for why one is needed at all.
+struct PanickingIngestMeter;
+
+impl IngestMetrics for PanickingIngestMeter {
+    fn ingest_batch(&self, _outcome: IngestOutcome, _duration: std::time::Duration) {
+        panic!("a metrics adapter must never be able to fail the path it measures");
+    }
+}
+
+/// The default fixture with a real adapter installed over a private meter.
+async fn metered_harness(probe: &MetricsProbe) -> Harness {
+    let run = qa_runs_sdk::Run {
+        started_at: Some(time::OffsetDateTime::now_utc()),
+        execution_ref: Some("mock-execution-1".to_owned()),
+        ..run_fixture(RUN, Some(PLATFORM_A), true, RunState::Running)
+    };
+    build_with_metrics(
+        Arc::new(FakeRuns::with(vec![(OWNER_TENANT, run)])),
+        Arc::new(FakeQueue::with(vec![queued_row(
+            QUEUE,
+            OWNER_TENANT,
+            RUN,
+            PLATFORM_A,
+            true,
+            QueueState::Running,
+        )])),
+        Arc::new(FakeEnvironments::holding(PLATFORM_A, LeaseState::Free)),
+        probe.adapter(),
+    )
+    .await
+}
+
+/// **An ingest pass emits exactly one counter increment and one duration.**
+///
+/// Driven through the real `OTel` SDK with an in-memory exporter for the reason
+/// `a_dispatch_pass_records_one_observation` gives: what needs proving is that
+/// the rendered series is what a dashboard query finds.
+#[tokio::test]
+async fn an_ingest_pass_records_one_observation() {
+    let probe = MetricsProbe::new();
+    let h = metered_harness(&probe).await;
+
+    h.ingest_log_line("repo-a", "hello").await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter(QA_RUNS_INGEST),
+        1,
+        "one observation, one increment; the exported names were {:?}",
+        series.names()
+    );
+    assert_eq!(series.histogram_count(QA_RUNS_INGEST_DURATION), 1);
+    assert_eq!(
+        series.counter_with(QA_RUNS_INGEST, &[("outcome", "applied")]),
+        1,
+        "a log line is an observation applied to a live run"
+    );
+}
+
+/// **A completion and its retry are told apart.**
+///
+/// The two are one `Finished` event applied twice, and folding the second into
+/// `applied` is what would hide a stuck executor — see [`IngestOutcome`]'s
+/// `Duplicate`.
+#[tokio::test]
+async fn a_completion_and_its_retry_record_different_outcomes() {
+    let probe = MetricsProbe::new();
+    let h = metered_harness(&probe).await;
+
+    h.ingest
+        .apply(&owner(), RUN, finished(ExecutorOutcome::Failed))
+        .await
+        .unwrap();
+    h.ingest
+        .apply(&owner(), RUN, finished(ExecutorOutcome::Failed))
+        .await
+        .unwrap();
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter_with(QA_RUNS_INGEST, &[("outcome", "completed")]),
+        1,
+        "the first event wrote a terminal state"
+    );
+    assert_eq!(
+        series.counter_with(QA_RUNS_INGEST, &[("outcome", "duplicate")]),
+        1,
+        "the second reconciled to the state already recorded"
+    );
+    assert_eq!(series.histogram_count(QA_RUNS_INGEST_DURATION), 2);
+}
+
+/// **A refused observation records, and is not counted as a failure.**
+///
+/// A run invisible under the caller's scope is the caller's own request being
+/// wrong, which `DomainError::disclosable` is the classification of — so it
+/// must not land in the series an alert fires on.
+#[tokio::test]
+async fn a_refused_ingest_records_a_refusal_not_a_failure() {
+    let probe = MetricsProbe::new();
+    let h = metered_harness(&probe).await;
+
+    let refused = h
+        .ingest
+        .apply(
+            &ctx(OTHER_TENANT),
+            RUN,
+            ExecutionEvent::Log {
+                node: "repo-a".to_owned(),
+                line: "not yours".to_owned(),
+            },
+        )
+        .await;
+
+    assert!(refused.is_err(), "the fixture must actually be refused");
+    let series = probe.collect();
+    assert_eq!(
+        series.counter_with(QA_RUNS_INGEST, &[("outcome", "refused")]),
+        1
+    );
+    assert_eq!(
+        series.counter_with(QA_RUNS_INGEST, &[("outcome", "failed")]),
+        0,
+        "a scoping refusal is not this gear's fault and must not page anybody"
+    );
+}
+
+/// **A metric emission never fails an ingest pass.**
+///
+/// The ingest counterpart of `a_broken_metrics_adapter_does_not_fail_the_pass`,
+/// and the one that matters more: this path runs per log line.
+#[tokio::test]
+async fn a_broken_metrics_adapter_does_not_fail_an_ingest_pass() {
+    let run = qa_runs_sdk::Run {
+        started_at: Some(time::OffsetDateTime::now_utc()),
+        execution_ref: Some("mock-execution-1".to_owned()),
+        ..run_fixture(RUN, Some(PLATFORM_A), true, RunState::Running)
+    };
+    let h = build_with_metrics(
+        Arc::new(FakeRuns::with(vec![(OWNER_TENANT, run)])),
+        Arc::new(FakeQueue::default()),
+        Arc::new(FakeEnvironments::holding(PLATFORM_A, LeaseState::Free)),
+        Arc::new(PanickingIngestMeter),
+    )
+    .await;
+
+    // Must not panic, and must still do the work.
+    h.ingest_log_line("repo-a", "hello").await;
+
+    assert_eq!(
+        h.published_lines(),
+        vec!["[repo-a] hello".to_owned()],
+        "a broken metrics adapter must not change what ingest does"
+    );
 }

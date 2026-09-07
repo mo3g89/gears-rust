@@ -310,6 +310,47 @@ mod serialized_db;
 
 pub(in crate::domain::service) use serialized_db::SerializedDb;
 
+/// Run one metric emission so that it cannot fail the path it is measuring.
+///
+/// # Why this exists when the port's contract already forbids failing
+///
+/// `domain::ports::metrics` states the contract — an implementation must not
+/// panic, must not block, and has no error to propagate by construction — and
+/// [`crate::infra::metrics::QaRunsMetricsMeter`] satisfies it structurally:
+/// every method is one `add` or one `record` on an instrument it already holds,
+/// with no `?`, no fallible lookup and no panic path.
+///
+/// Neither of those covers the call site. Both services take
+/// `Arc<dyn DispatchMetrics>` / `Arc<dyn IngestMetrics>`, so what they hold is
+/// whatever was injected: a later adapter, a different gear's adapter copied
+/// across, a `debug_assert!` somebody adds inside one. "Metrics must not change
+/// behaviour" is a property of the *dispatch and ingest paths*, and a property
+/// of those paths cannot be discharged by a promise written in another module —
+/// a promise is exactly what a defect breaks. So the emission is guarded here,
+/// where the path is, and `dispatch_tests`'
+/// `a_broken_metrics_adapter_does_not_fail_the_pass` drives a deliberately
+/// panicking port through it. Without this function that test panics; with a
+/// doc-only contract, so does production.
+///
+/// # It is silent
+///
+/// A caught panic is dropped rather than logged. Logging here would be a log
+/// line **per emission** on the two highest-volume paths in the gear, which is
+/// the failure mode the observability constraints name explicitly, and it would
+/// be emitted at exactly the moment the process is least able to absorb it. The
+/// panic hook has already run by the time control returns here, so the panic
+/// itself is not invisible — it reaches stderr like any other.
+///
+/// [`std::panic::AssertUnwindSafe`] is sound for the reason it is normally
+/// unsound: the state a panicking emission may have left inconsistent is that
+/// implementation's own instrument state, and nothing in this crate ever reads
+/// it back. A metric this gear cannot record is a metric this gear drops.
+pub(in crate::domain::service) fn emit(record: impl FnOnce()) {
+    drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        record,
+    )));
+}
+
 /// Authorization resource types and their PEP-supported properties.
 ///
 /// **Only the types this crate currently queries are declared.** The plan lists
@@ -712,6 +753,25 @@ pub(crate) struct ServiceDeps {
     /// it — see [`dispatch::DispatchService`] and
     /// `crate::domain::state_machine::reconcile_claim`. Minutes, not seconds.
     pub(crate) orphan_timeout_seconds: u64,
+    /// Where the dispatcher tick reports what it did, and how long it took.
+    ///
+    /// **An override with a silent default, like
+    /// [`Self::admitter`]/[`Self::dispatcher`]/[`Self::watcher`] — not a
+    /// mandatory field like [`Self::archive`].** `None` installs
+    /// [`crate::domain::ports::metrics::NoopMetrics`], which is the whole of
+    /// "metrics must not change behaviour": a service built without an adapter
+    /// emits every signal a wired one does and nothing observes, so no code
+    /// path anywhere branches on whether metrics are configured.
+    ///
+    /// `gear.rs` always passes `Some(..)`, because there is nothing to decide:
+    /// `infra::metrics::build_default_adapter` reads the process-global meter
+    /// provider, which is the built-in no-op until a pipeline installs one.
+    pub(crate) dispatch_metrics: Option<Arc<dyn crate::domain::ports::metrics::DispatchMetrics>>,
+    /// The ingest path's half of [`Self::dispatch_metrics`], with the same
+    /// default and for the same reason. Two fields rather than one, because
+    /// the two services take two different traits — see
+    /// `domain::ports::metrics`'s note on trait segregation.
+    pub(crate) ingest_metrics: Option<Arc<dyn crate::domain::ports::metrics::IngestMetrics>>,
 }
 
 /// # Why the services are `pub`, not `pub(crate)`
@@ -915,6 +975,10 @@ where
             logs: Arc::clone(&deps.logs),
             archive: Arc::clone(&deps.archive),
             policy_enforcer: enforcer.clone(),
+            metrics: deps.ingest_metrics.unwrap_or_else(|| {
+                Arc::new(crate::domain::ports::metrics::NoopMetrics)
+                    as Arc<dyn crate::domain::ports::metrics::IngestMetrics>
+            }),
         }));
         // Built together rather than through `unwrap_or_else` alone, because
         // `AppServices::shutdown` needs the *concrete* type back and
@@ -949,6 +1013,10 @@ where
             orphan_timeout_seconds: deps.orphan_timeout_seconds,
             policy_enforcer: enforcer.clone(),
             watcher,
+            metrics: deps.dispatch_metrics.unwrap_or_else(|| {
+                Arc::new(crate::domain::ports::metrics::NoopMetrics)
+                    as Arc<dyn crate::domain::ports::metrics::DispatchMetrics>
+            }),
         }));
 
         let admitter = deps

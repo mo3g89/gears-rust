@@ -20,12 +20,14 @@ use time::Duration as TimeDuration;
 use uuid::Uuid;
 
 use super::*;
+use crate::domain::metrics::{QA_RUNS_DISPATCH, QA_RUNS_DISPATCH_DURATION};
 use crate::domain::ports::run_executor::MountSpec;
 use crate::domain::service::admission::tests::fakes::{
     self, Builder, FakeCatalog, FakeEnvironments, FakeQueue, FakeRuns, PLATFORM_A, PLATFORM_B,
     RecordingAuthZ, queued_row, row_aged, run_fixture,
 };
 use crate::domain::service::test_support::{OTHER_TENANT, OWNER_TENANT, ctx};
+use crate::infra::metrics::probe::MetricsProbe;
 
 /// Ids, so a failure names something.
 const RUN_1: Uuid = Uuid::from_u128(0x1001);
@@ -2408,6 +2410,10 @@ async fn admission_and_dispatch_share_one_platform_lock_registry() {
                 queue_ttl_seconds: 7200,
             },
             orphan_timeout_seconds: 600,
+            // `None` is the production default: `NoopMetrics`, which emits
+            // everything a wired gear emits and lets nothing observe it.
+            dispatch_metrics: None,
+            ingest_metrics: None,
         },
     );
 
@@ -3396,5 +3402,233 @@ async fn the_ttl_sweep_does_not_consult_the_policy_engine() {
         !enforcer.requested_any_for_nil_tenant(),
         "the sweep must elevate through domain::elevated, not the PEP: the stock \
          static-authz plugin denies every nil-tenant request"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry: the dispatcher tick is one measured pass
+// ---------------------------------------------------------------------------
+
+/// A metrics port that panics on every method.
+///
+/// The gear never installs one. It exists because
+/// `a_broken_metrics_adapter_does_not_fail_the_pass` cannot be written without
+/// it: the property under test is that the emission is guarded at the *call
+/// site*, and a call site that trusts the port's written contract passes every
+/// other test in this file.
+struct PanickingMeter;
+
+impl crate::domain::ports::metrics::DispatchMetrics for PanickingMeter {
+    fn dispatch_pass(
+        &self,
+        _outcome: crate::domain::ports::metrics::DispatchOutcome,
+        _duration: std::time::Duration,
+    ) {
+        panic!("a metrics adapter must never be able to fail the path it measures");
+    }
+
+    fn dispatch_decision(&self, _decision: crate::domain::ports::metrics::DispatchDecision) {
+        panic!("a metrics adapter must never be able to fail the path it measures");
+    }
+}
+
+/// **A dispatch pass emits exactly one counter increment and one duration.**
+///
+/// Driven through the real `OTel` SDK with an in-memory exporter, not a mock:
+/// what this needs to prove is that the *rendered series* is what a dashboard
+/// query will find, and a mock of the trait proves only that the call site
+/// calls the trait.
+#[tokio::test]
+async fn a_dispatch_pass_records_one_observation() {
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new().metrics(probe.adapter()).build().await;
+
+    fakes.dispatch.run_tick().await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter(QA_RUNS_DISPATCH),
+        1,
+        "one pass, one increment; the exported names were {:?}",
+        series.names()
+    );
+    assert_eq!(
+        series.histogram_count(QA_RUNS_DISPATCH_DURATION),
+        1,
+        "the counter and its duration are driven from one call, so they cannot \
+         disagree about how many passes there were"
+    );
+    assert_eq!(
+        series.counter_with(QA_RUNS_DISPATCH, &[("outcome", "started")]),
+        1,
+        "a tick that reached the drain ran to the end"
+    );
+}
+
+/// **A failing dispatch pass still records, with a failure outcome.**
+///
+/// The RED half that is easy to omit: a metric that only counts successes tells
+/// an operator the rate and hides the errors.
+///
+/// The injected failure is `list_active`, which is the tick's *first* early
+/// return and the one an executor outage produces — the incident this counter
+/// is read during.
+#[tokio::test]
+async fn a_failing_dispatch_pass_records_a_failure_outcome() {
+    let executor = Arc::new(crate::infra::executor::mock::MockRunExecutor::new());
+    executor.fail_list_active("the executor is unreachable");
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .executor(Arc::clone(&executor) as Arc<dyn crate::domain::ports::run_executor::RunExecutor>)
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    fakes.dispatch.run_tick().await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter_with(QA_RUNS_DISPATCH, &[("outcome", "failed")]),
+        1,
+        "an executor outage is this gear's fault to fix, not the caller's"
+    );
+    assert_eq!(
+        series.histogram_count(QA_RUNS_DISPATCH_DURATION),
+        1,
+        "a pass that stopped early is still a pass that took time"
+    );
+}
+
+/// **A tick the concurrency cap stopped is refused, not failed.**
+///
+/// The distinction the outcome label exists for: a cluster at
+/// `max_concurrent_runs` is working as configured and must not page anybody,
+/// while the executor outage above must. Both stop the tick early and both
+/// leave `stopped_at` set, so nothing about *stopping* tells them apart.
+#[tokio::test]
+async fn a_tick_stopped_by_the_concurrency_cap_records_a_refusal() {
+    // One uncommitted claim against a cap of one, the fixture
+    // `the_ttl_sweep_runs_before_the_cap_check` uses to reach the same stop.
+    let claim = row_aged(
+        ROW_1,
+        OWNER_TENANT,
+        RUN_1,
+        PLATFORM_A,
+        false,
+        QueueState::Dispatching,
+        10,
+    );
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(
+            OWNER_TENANT,
+            run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Dispatching),
+        )])))
+        .queue(Arc::new(FakeQueue::with(vec![claim])))
+        .limits(QueueLimits {
+            queue_max_depth: 20,
+            max_concurrent_runs: 1,
+            queue_ttl_seconds: 7200,
+        })
+        .orphan_timeout(600)
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(
+        report.stopped_at,
+        Some("global cap evaluation"),
+        "the fixture must actually reach the cap, or this test proves nothing"
+    );
+    assert_eq!(
+        probe
+            .collect()
+            .counter_with(QA_RUNS_DISPATCH, &[("outcome", "refused")]),
+        1
+    );
+}
+
+/// **A metric emission never fails a request.**
+///
+/// Metrics are diagnostics. An adapter that panics or errors must not take the
+/// dispatch pass with it, and this pins that the emission path is infallible at
+/// the *call site* rather than only by the port's written contract — see
+/// `domain::service`'s `emit`.
+#[tokio::test]
+async fn a_broken_metrics_adapter_does_not_fail_the_pass() {
+    let fakes =
+        Builder::new()
+            .metrics(
+                Arc::new(PanickingMeter) as Arc<dyn crate::domain::ports::metrics::DispatchMetrics>
+            )
+            .build()
+            .await;
+
+    // Must not panic, and must still report what the tick did.
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(
+        report.stopped_at, None,
+        "a broken metrics adapter must not change what the tick does"
+    );
+}
+
+/// **A tick driven through the production adapter, with no `OTel` pipeline
+/// configured, behaves exactly as an unmetered one.**
+///
+/// This is the boot posture the gear ships in and the one every deployment
+/// without a collector runs: `gear.rs`'s init installs
+/// `infra::metrics::build_default_adapter` unconditionally, and with no
+/// provider ever registered the process-global one is the built-in no-op, so
+/// every instrument it built is a no-op.
+///
+/// The pairing is the test. Asserting only that the metered tick succeeds would
+/// pass against a tick that did nothing at all; running the *same* fixture
+/// twice, once through the real adapter and once through `NoopMetrics`, and
+/// requiring the two reports to be equal is what makes "measuring the path did
+/// not change it" the thing under test. `TickReport` is `PartialEq` precisely
+/// so a whole cycle's outcome can be compared this way.
+#[tokio::test]
+async fn a_tick_with_no_pipeline_configured_behaves_exactly_as_an_unmetered_one() {
+    async fn tick_with(
+        metrics: Arc<dyn crate::domain::ports::metrics::DispatchMetrics>,
+    ) -> TickReport {
+        let stale = row_aged(
+            ROW_1,
+            OWNER_TENANT,
+            RUN_1,
+            PLATFORM_A,
+            false,
+            QueueState::Queued,
+            9_000,
+        );
+        let fakes = Builder::new()
+            .runs(Arc::new(FakeRuns::with(vec![(
+                OWNER_TENANT,
+                run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Queued),
+            )])))
+            .queue(Arc::new(FakeQueue::with(vec![stale])))
+            .metrics(metrics)
+            .build()
+            .await;
+        fakes.dispatch.run_tick().await
+    }
+
+    let metered = tick_with(crate::infra::metrics::build_default_adapter()).await;
+    let unmetered = tick_with(Arc::new(crate::domain::ports::metrics::NoopMetrics)
+        as Arc<dyn crate::domain::ports::metrics::DispatchMetrics>)
+    .await;
+
+    assert_eq!(
+        metered.expired, 1,
+        "premise: the fixture must actually do work, or two empty reports would \
+         compare equal and prove nothing"
+    );
+    assert_eq!(
+        metered, unmetered,
+        "installing the production adapter with no pipeline behind it must change \
+         nothing about what the tick does"
     );
 }

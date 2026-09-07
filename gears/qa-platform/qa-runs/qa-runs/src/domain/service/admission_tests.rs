@@ -120,6 +120,7 @@ pub(in crate::domain::service) mod fakes {
     use uuid::Uuid;
 
     use crate::domain::error::DomainError;
+    use crate::domain::ports::metrics::{DispatchMetrics, NoopMetrics};
     use crate::domain::ports::product_plugin::{PluginUnavailable, ProductPluginPort};
     use crate::domain::ports::run_executor::{
         ExecutionRef, ExecutionStream, RunAccess, RunExecutor, RunSpec, RunnerSpec,
@@ -3104,6 +3105,11 @@ pub(in crate::domain::service) mod fakes {
         authz: Option<Arc<dyn AuthZResolverClient>>,
         limits: QueueLimits,
         orphan_timeout_seconds: u64,
+        /// The dispatcher's emission port. `None` builds the same
+        /// `NoopMetrics` production gets when no adapter was installed, so the
+        /// several hundred tests that do not read metrics see the pre-adapter
+        /// behaviour exactly.
+        metrics: Option<Arc<dyn DispatchMetrics>>,
     }
 
     impl Builder {
@@ -3122,6 +3128,7 @@ pub(in crate::domain::service) mod fakes {
                     queue_ttl_seconds: 7200,
                 },
                 orphan_timeout_seconds: 600,
+                metrics: None,
             }
         }
 
@@ -3182,6 +3189,18 @@ pub(in crate::domain::service) mod fakes {
             self
         }
 
+        /// Install a dispatcher emission port — the real
+        /// `infra::metrics::QaRunsMetricsMeter` in the metric tests, a
+        /// deliberately panicking double in the one that pins that a broken
+        /// adapter cannot fail a tick.
+        pub(in crate::domain::service) fn metrics(
+            mut self,
+            metrics: Arc<dyn DispatchMetrics>,
+        ) -> Self {
+            self.metrics = Some(metrics);
+            self
+        }
+
         pub(in crate::domain::service) async fn build(self) -> Fakes {
             let db: Arc<DbProvider> = test_db_provider().await;
             let logs = Arc::new(crate::domain::service::ingest::tests::RecordingLogs::default());
@@ -3220,6 +3239,9 @@ pub(in crate::domain::service) mod fakes {
                 orphan_timeout_seconds: self.orphan_timeout_seconds,
                 policy_enforcer: enforcer,
                 watcher: Arc::clone(&watcher) as Arc<dyn crate::domain::service::watch::RunWatcher>,
+                metrics: self
+                    .metrics
+                    .unwrap_or_else(|| Arc::new(NoopMetrics) as Arc<dyn DispatchMetrics>),
             });
 
             Fakes {

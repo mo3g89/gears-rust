@@ -133,6 +133,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::PolicyEnforcer;
@@ -148,8 +149,9 @@ use uuid::Uuid;
 use super::admission::{PlatformLocks, lease_occupancy};
 use super::launch::InlineDispatcher;
 use super::watch::{RunWatcher, WatchTarget};
-use super::{DbProvider, QueueLimits, actions, resources};
+use super::{DbProvider, QueueLimits, actions, emit, resources};
 use crate::domain::error::DomainError;
+use crate::domain::ports::metrics::{DispatchMetrics, DispatchOutcome};
 use crate::domain::ports::product_plugin::ProductPluginPort;
 use crate::domain::ports::run_executor::{ExecutionRef, RunExecutor};
 use crate::domain::queue::{
@@ -357,6 +359,10 @@ pub struct DispatchDeps<R, Q> {
     /// nobody is observing. The production value drains them into
     /// `service::ingest`; see [`super::watch`].
     pub watcher: Arc<dyn RunWatcher>,
+    /// Where [`DispatchService::run_tick`] reports what one tick did and how
+    /// long it took. `NoopMetrics` when no adapter is installed — see
+    /// [`super::ServiceDeps::dispatch_metrics`].
+    pub metrics: Arc<dyn DispatchMetrics>,
 }
 
 /// Submission, the dispatcher tick, and boot recovery.
@@ -405,6 +411,8 @@ pub struct DispatchService<R, Q> {
     /// because a healthy live run never leaves that candidate set.
     watch_scan_cursor: Mutex<Option<Uuid>>,
     watcher: Arc<dyn RunWatcher>,
+    /// See [`DispatchDeps::metrics`].
+    metrics: Arc<dyn DispatchMetrics>,
 }
 
 /// A queue row this tick claimed, with the run it is for.
@@ -502,6 +510,28 @@ fn committed_active(
     active.len().saturating_add(uncommitted)
 }
 
+/// How to label a tick that a swallowed pass failure stopped.
+///
+/// Two of [`DispatchService::run_tick`]'s early returns come out of helpers
+/// that fold their error into [`TickReport::note_failure`] and hand back a bare
+/// `None`, so the error itself is gone by the time the tick can label it. What
+/// survives is the one distinction the label needs: `note_failure` puts a
+/// [`DomainError::Forbidden`] — and nothing else — into `denied_passes`, which
+/// is the same "the caller's own configuration, not a fault" split
+/// [`DomainError::disclosable`] makes for the stop that *does* still have its
+/// error. Everything else is a genuine fault and is [`DispatchOutcome::Failed`].
+///
+/// `before` is the denial count read immediately ahead of the pass, not zero: a
+/// denial recorded by an *earlier* sweep must not relabel this one, and the
+/// sweeps run first by design.
+fn stopped_outcome(report: &TickReport, before: usize) -> DispatchOutcome {
+    if report.denied_passes.len() > before {
+        DispatchOutcome::Refused
+    } else {
+        DispatchOutcome::Failed
+    }
+}
+
 /// Where a claim scan stopped, so the caller can advance the cursor **after**
 /// every read that must see the same window.
 ///
@@ -564,6 +594,7 @@ where
             timeout_scan_cursor: Mutex::new(None),
             watch_scan_cursor: Mutex::new(None),
             watcher: deps.watcher,
+            metrics: deps.metrics,
         }
     }
 
@@ -1069,6 +1100,38 @@ where
     /// and cannot see any of it; `the_drain_order_is_oldest_queued_first` covers
     /// the half that landed.
     pub async fn run_tick(&self) -> TickReport {
+        let started = Instant::now();
+        let (report, outcome) = self.tick_passes().await;
+        // Guarded, not called directly: see `super::emit`. The clock is read
+        // once around the whole tick because the tick is the unit the NFR is
+        // stated over — a per-run emission inside `drain_platform` would time
+        // the submissions instead, and would multiply this family's sample
+        // count by the run count for no dashboard's benefit.
+        emit(|| self.metrics.dispatch_pass(outcome, started.elapsed()));
+        report
+    }
+
+    /// Every pass of one tick, with how the tick itself ended.
+    ///
+    /// Split from [`Self::run_tick`] so the emission wraps the whole cycle
+    /// rather than being repeated at each of its four early returns — and so
+    /// that the outcome is decided **where the tick stopped**, which is the only
+    /// place that knows. [`TickReport`] alone cannot answer it: the two stops
+    /// that record [`PASS_CAP`] are a full cluster and a failed cap read, which
+    /// are opposite answers to *"is this anybody's fault?"* and are
+    /// indistinguishable in the report.
+    ///
+    /// The three values are used as follows, and each is the label
+    /// [`DispatchOutcome`]'s own doc describes:
+    ///
+    /// * [`DispatchOutcome::Started`] — the cycle reached the drain. The
+    ///   ordinary tick, including a tick that found nothing to do.
+    /// * [`DispatchOutcome::Refused`] — a rule stopped it: the concurrency cap
+    ///   this cycle, or a policy denial, both of which that doc names.
+    /// * [`DispatchOutcome::Failed`] — a pass this gear owns failed: the
+    ///   execution plane could not be listed, the claim window could not be
+    ///   read, the queued platforms could not be enumerated.
+    async fn tick_passes(&self) -> (TickReport, DispatchOutcome) {
         let mut report = TickReport::default();
 
         // First, and before every early return below: expiry needs neither the
@@ -1103,7 +1166,11 @@ where
                 // every claim at once (`run_dispatcher.rs:353-359`).
                 report.note_failure(PASS_LIST_ACTIVE, &error);
                 report.stopped_at = Some(PASS_LIST_ACTIVE);
-                return report;
+                // The one stop with the error still in hand, so the label comes
+                // straight from `DomainError::disclosable` through Task 36's
+                // bridge rather than from a second reading of the report.
+                let outcome = DispatchOutcome::from(&error);
+                return (report, outcome);
             }
         };
 
@@ -1120,6 +1187,12 @@ where
 
         // Claims are re-read AFTER reconciliation so released ones are not
         // counted (`run_dispatcher.rs:376-377`), from the **same** window.
+        //
+        // The denial count is read *before* the pass so the two stops below can
+        // tell a denial raised by this pass from one an earlier sweep already
+        // recorded; both helpers swallow their error into `note_failure`, so the
+        // report is all there is to read afterwards.
+        let denials_before_cap = report.denied_passes.len();
         let cap = self.evaluate_cap(after, &active, &known, &mut report).await;
 
         // Only now: the tick is done reading claims, so moving the cursor
@@ -1130,17 +1203,24 @@ where
 
         let Some(cap) = cap else {
             report.stopped_at = Some(PASS_CAP);
-            return report;
+            // The claim window could not be read. Not the same event as the cap
+            // being reached below, though both record `PASS_CAP`.
+            let outcome = stopped_outcome(&report, denials_before_cap);
+            return (report, outcome);
         };
         if cap_reached(cap) {
             info!(cap = ?cap, "dispatcher waiting: max_concurrent_runs is reached");
             report.stopped_at = Some(PASS_CAP);
-            return report;
+            // A configured limit doing its job. `Refused`, never `Failed`: a
+            // cluster at `max_concurrent_runs` must not page anybody.
+            return (report, DispatchOutcome::Refused);
         }
 
+        let denials_before_enumerate = report.denied_passes.len();
         let Some(platforms) = self.queued_platforms(&mut report).await else {
             report.stopped_at = Some(PASS_ENUMERATE);
-            return report;
+            let outcome = stopped_outcome(&report, denials_before_enumerate);
+            return (report, outcome);
         };
 
         // Thread the budget across platforms: `plan_dispatch_batch` counts one
@@ -1155,7 +1235,11 @@ where
                 .saturating_add(self.drain_platform(platform, budget, &mut report).await);
         }
         report.claimed = claimed_so_far;
-        report
+        // The cycle reached the end. Row-level failures inside the sweeps and
+        // the drain are logged and counted in the report where they happened;
+        // folding them in here would make `Failed` mean "something, somewhere",
+        // which is not a signal an alert can be written against.
+        (report, DispatchOutcome::Started)
     }
 
     /// Expire queued rows past `queue_ttl_seconds`, one tenant at a time.

@@ -28,6 +28,7 @@ use crate::api::rest::routes;
 use crate::config::{ArgoExecutorConfig, ExecutorKind, QaRunsConfig};
 use crate::domain::error::DomainError;
 use crate::domain::local_client::QaRunsLocalClient;
+use crate::domain::ports::metrics::{DispatchMetrics, IngestMetrics};
 use crate::domain::ports::run_executor::RunExecutor;
 use crate::domain::service::{AppServices, LogArchive, LogFanout, QueueLimits, ServiceDeps};
 use crate::infra::executor::mock::MockRunExecutor;
@@ -375,6 +376,17 @@ impl Gear for QaRuns {
             policy_enforcer,
         ));
 
+        // Built unconditionally, and there is deliberately no "metrics enabled"
+        // branch here to get wrong. `build_default_adapter` reads the
+        // process-global meter provider, which `toolkit`'s
+        // `telemetry::init_metrics_provider` leaves as the built-in
+        // `NoopMeterProvider` whenever metrics are disabled or no pipeline is
+        // configured at all — so every instrument it builds is a no-op and every
+        // emission through it is silent. One adapter, coerced into the two
+        // per-trait views the services take, so the dispatcher and the ingest
+        // path report into the same instruments.
+        let metrics = crate::infra::metrics::build_default_adapter();
+
         let services = Arc::new(AppServices::new(
             runs_repo,
             Arc::new(OrmQueueRepository),
@@ -409,6 +421,8 @@ impl Gear for QaRuns {
                     queue_ttl_seconds: cfg.queue_ttl_seconds,
                 },
                 orphan_timeout_seconds: cfg.effective_orphan_timeout_seconds(),
+                dispatch_metrics: Some(Arc::clone(&metrics) as Arc<dyn DispatchMetrics>),
+                ingest_metrics: Some(metrics as Arc<dyn IngestMetrics>),
             },
         ));
 
@@ -1427,6 +1441,52 @@ mod tests {
             body.contains("archive,\n"),
             "premise: `QaRunsRuntime` must take the same binding, or the dispatcher \
              tick is draining an instance nothing buffers into: {body}"
+        );
+    }
+
+    /// **The metrics adapter is installed unconditionally, into both ports.**
+    ///
+    /// The two defects this guards are opposite and both silent. Wrapping the
+    /// construction in a "metrics enabled" branch would leave the gear with a
+    /// pipeline configured and nothing emitting into it; passing the adapter to
+    /// one field and not the other would leave one of the two NFR paths dark
+    /// while the dashboard for the other looked healthy. Neither is a compile
+    /// error — both `ServiceDeps` fields are `Option`, so omitting one is legal.
+    ///
+    /// A source scan for the reason its two siblings above are: `init` needs a
+    /// database, a `ClientHub` and four resolved cross-gear clients before it
+    /// will run.
+    ///
+    /// **Nothing here needs a "metrics off" branch**, which is why the absence
+    /// of one is assertable at all:
+    /// `infra::metrics::build_default_adapter` reads the process-global meter
+    /// provider, which `toolkit`'s `telemetry::init_metrics_provider` leaves as
+    /// the built-in `NoopMeterProvider` when metrics are disabled — and never
+    /// replaces at all when no pipeline is configured. That the resulting
+    /// adapter is safe to build and emit through is
+    /// `infra::metrics::tests::the_default_adapter_emits_silently_with_no_pipeline_configured`;
+    /// that a service driven through one behaves identically to one holding
+    /// `NoopMetrics` is
+    /// `dispatch::tests::a_tick_with_no_pipeline_configured_behaves_exactly_as_an_unmetered_one`.
+    #[test]
+    fn init_installs_one_metrics_adapter_into_both_ports() {
+        let body = init_source();
+        assert_eq!(
+            body.matches("build_default_adapter()").count(),
+            1,
+            "init must build the adapter once and share the Arc: {body}"
+        );
+        assert!(
+            body.contains("dispatch_metrics: Some("),
+            "premise: the dispatcher's port must be wired, or the queue-latency              NFR is unobservable in production while every test still passes: {body}"
+        );
+        assert!(
+            body.contains("ingest_metrics: Some("),
+            "premise: the ingest port must be wired, or the result-latency NFR              is unobservable in production: {body}"
+        );
+        assert!(
+            !body.contains("metrics.enabled"),
+            "init must not branch on whether a pipeline is configured: an              uninstalled provider already makes every instrument a no-op, and a              branch here is a second, weaker copy of that rule: {body}"
         );
     }
 

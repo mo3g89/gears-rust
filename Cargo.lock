@@ -9323,6 +9323,8 @@ dependencies = [
  "inventory",
  "k8s-openapi",
  "kube",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "qa-catalog",
  "qa-catalog-sdk",
  "qa-environments",
