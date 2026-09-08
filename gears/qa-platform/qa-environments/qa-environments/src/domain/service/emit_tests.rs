@@ -12,13 +12,13 @@
 //! work, under an explicit ruling that the extraction is a recorded follow-up
 //! rather than that task's job.
 //!
-//! A shared crate is the structural answer and is **out of this task's scope**:
-//! the observability plan puts one there, and creating one would be a
-//! cross-gear change of exactly the kind three tasks in this phase have already
-//! been told not to make. So the coupling is asserted instead. This test is
-//! cheaper than a crate, it fails loudly the moment the three diverge, and it
-//! leaves the decision about a shared home to whoever takes it — with the
-//! evidence that the three bodies are, today, one function.
+//! A shared crate is the structural answer and is **out of this phase's
+//! scope**: the observability plan puts one there, and creating one would be a
+//! cross-gear change of exactly the kind several tasks in this phase have been
+//! told not to make. So the coupling is asserted instead. This test is cheaper
+//! than a crate, it fails loudly the moment the four diverge, and it leaves the
+//! decision about a shared home to whoever takes it — with the evidence that
+//! the four bodies are, today, one function.
 //!
 //! # Bodies, not files
 //!
@@ -104,10 +104,10 @@ fn guard_body(gear: &str, relative: &str) -> String {
         .join("\n")
 }
 
-/// **All three gears run the same guard.**
+/// **All four gears run the same guard.**
 ///
 /// The property is not "these files look alike" — it is that a defect found in
-/// one gear's guard is a defect in three, and that fixing it in one leaves two
+/// one gear's guard is a defect in four, and that fixing it in one leaves three
 /// live. Comparing the bodies is the cheapest thing that makes the second half
 /// visible.
 ///

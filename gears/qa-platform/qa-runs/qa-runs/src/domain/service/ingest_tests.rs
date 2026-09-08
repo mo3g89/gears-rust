@@ -2206,3 +2206,131 @@ async fn the_inert_started_event_is_not_counted_as_an_observation() {
     );
     assert_eq!(series.histogram_count(QA_RUNS_INGEST_DURATION), 1);
 }
+
+/// A [`LogArchive`] that takes a known, non-trivial amount of wall-clock time
+/// to flush, delegating everything else to [`RecordingArchive`].
+///
+/// `finish` flushes the run's buffered log before it returns, so a delay there
+/// puts a floor under one whole ingest pass. Its only job is to make the
+/// *magnitude* of the recorded sample assertable: every other double in this
+/// file answers instantly, so a call site that recorded a constant would
+/// produce a plausible sample and no count-based assertion could tell.
+struct SlowArchive {
+    inner: RecordingArchive,
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl LogArchive for SlowArchive {
+    fn record(&self, tenant_id: Uuid, run_id: Uuid, line: &str) {
+        self.inner.record(tenant_id, run_id, line);
+    }
+
+    async fn flush(&self, run_id: Uuid) -> Result<(), DomainError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.flush(run_id).await
+    }
+
+    async fn flush_due(&self) -> FlushReport {
+        self.inner.flush_due().await
+    }
+
+    async fn resume_positions(
+        &self,
+        tenant: system_actor::TenantBound,
+        run_id: Uuid,
+    ) -> Result<crate::domain::repos::LogResume, DomainError> {
+        self.inner.resume_positions(tenant, run_id).await
+    }
+}
+
+/// **The recorded ingest duration really is a clock around the pass.**
+///
+/// Every other ingest metric assertion here is about counts and labels, and
+/// counts cannot see a *value*: a call site that recorded `Duration::ZERO`, or
+/// a constant, or an `Instant` taken in the wrong place would satisfy all of
+/// them and hand a dashboard a fabricated distribution. Measured in
+/// qa-environments during Task 40 — a mutation replacing the elapsed time with
+/// a six-second constant passed that gear's whole suite, and this family had
+/// the same hole.
+///
+/// Written as **two bracketing assertions rather than one equality**, because
+/// an equality would be a timing test:
+///
+/// * the archive's flush sleeps 150 ms and `finish` awaits it before returning,
+///   so the sample cannot be in a bucket whose upper edge is 100 ms or below —
+///   that direction is deterministic, since a sleep can only overrun;
+/// * and it must not be in the `(5 s, 10 s]` bucket, which no in-memory fixture
+///   can honestly reach.
+///
+/// Probed edge by edge rather than through one call: `histogram_bucket_of`
+/// answers for the single bucket a value falls in, so asking about one edge
+/// says nothing about the buckets below it.
+///
+/// The `Finished` event is the one driven here rather than a log line, because
+/// the flush this fixture slows down happens in `finish` alone — a log line's
+/// `record` is synchronous by contract and would leave the delay outside the
+/// measured pass.
+#[tokio::test]
+async fn the_recorded_ingest_duration_tracks_the_pass_it_measures() {
+    let delay = std::time::Duration::from_millis(150);
+    let probe = MetricsProbe::new();
+
+    let run = qa_runs_sdk::Run {
+        started_at: Some(time::OffsetDateTime::now_utc()),
+        execution_ref: Some("mock-execution-1".to_owned()),
+        ..run_fixture(RUN, Some(PLATFORM_A), true, RunState::Running)
+    };
+    let db = test_db_provider().await;
+    let runs = Arc::new(FakeRuns::with(vec![(OWNER_TENANT, run)]));
+    let queue = Arc::new(FakeQueue::with(vec![queued_row(
+        QUEUE,
+        OWNER_TENANT,
+        RUN,
+        PLATFORM_A,
+        true,
+        QueueState::Running,
+    )]));
+    let environments = Arc::new(FakeEnvironments::holding(PLATFORM_A, LeaseState::Free));
+    let ingest = IngestService::new(IngestDeps {
+        db: SerializedDb::new(db),
+        runs,
+        queue,
+        environments: environments as Arc<dyn QaEnvironmentsClientV1>,
+        logs: Arc::new(RecordingLogs::default()) as Arc<dyn LogFanout>,
+        archive: Arc::new(SlowArchive {
+            inner: RecordingArchive::default(),
+            delay,
+        }) as Arc<dyn LogArchive>,
+        policy_enforcer: authz_resolver_sdk::PolicyEnforcer::new(Arc::new(SystemGrantingAuthZ)),
+        metrics: probe.adapter(),
+    });
+
+    ingest
+        .apply(&owner(), RUN, finished(ExecutorOutcome::Succeeded))
+        .await
+        .unwrap();
+
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count(QA_RUNS_INGEST_DURATION),
+        1,
+        "premise: exactly one ingest pass was timed"
+    );
+    for edge in [0.005_f64, 0.01, 0.025, 0.05, 0.1] {
+        assert_eq!(
+            series.histogram_bucket_of(QA_RUNS_INGEST_DURATION, edge),
+            Some(0),
+            "a pass whose archive flush slept for {delay:?} cannot have been measured at \
+             {edge} s or less, so that bucket must be empty -- a zero or a near-zero here \
+             means the clock is not around the pass"
+        );
+    }
+    assert_eq!(
+        series.histogram_bucket_of(QA_RUNS_INGEST_DURATION, 6.0),
+        Some(0),
+        "and it cannot have taken between five and ten seconds either: an in-memory \
+         fixture does not, so a sample there is a fabricated or stale duration rather \
+         than a measured one"
+    );
+}

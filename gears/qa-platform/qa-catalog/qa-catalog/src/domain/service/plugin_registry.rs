@@ -209,10 +209,18 @@ impl<P: ProductsRepository> QaProductRegistry<P> {
     /// # It is measured
     ///
     /// One sample per call on the two families in [`crate::domain::metrics`],
-    /// labelled by how the resolution ended. The clock covers the whole of
-    /// [`Self::resolve_plugin`] and stops before the `debug!`/`warn!` line
-    /// below it, so nothing this method does *after* deciding an answer is
-    /// charged to it.
+    /// labelled by how the resolution ended.
+    ///
+    /// **What the span contains, exactly.** The whole of
+    /// [`Self::resolve_plugin`] — the policy check, the connection, the product
+    /// read, the `ClientHub` probe, **and that method's own `debug!`/`warn!`
+    /// line**, which is inside it and therefore inside the measurement. The
+    /// clock stops the instant `resolve_plugin` returns, which is before the
+    /// classification and before the emission; those two are the only things
+    /// this method does that are not charged to the sample. The logging is a
+    /// formatted line rather than a round trip and the bias is negligible, but
+    /// the span is stated as what it is rather than as an exactness the code
+    /// does not deliver.
     ///
     /// **This measurement is nested inside two of qa-environments'.** A
     /// resolution driven from that gear's observation cycle sits inside its
@@ -249,12 +257,14 @@ impl<P: ProductsRepository> QaProductRegistry<P> {
     /// [`Self::plugin_for`]'s body, so that the public method above is the
     /// measured wrapper and this is the work.
     ///
-    /// Split rather than measured in place because the method has four exits
-    /// and one of them is an early `return`; wrapping is the shape that makes
-    /// "exactly one sample per call, whichever exit was taken" a property of
-    /// the code rather than of four remembered emissions. qa-runs' `run_tick`
-    /// and qa-environments' `observe_every_environment` are the same split for
-    /// the same reason.
+    /// Split rather than measured in place because the body below has **six**
+    /// exits — four `?`s (the policy check, the connection, the product read,
+    /// and the `ok_or` that turns an absent row into a not-found), one early
+    /// `return` for the unregistered plugin, and the tail. Wrapping is the
+    /// shape that makes "exactly one sample per call, whichever exit was taken"
+    /// a property of the code rather than of six remembered emissions.
+    /// qa-runs' `run_tick` and qa-environments' `observe_every_environment` are
+    /// the same split for the same reason.
     ///
     /// It carries no `#[instrument]` of its own: this future is awaited inside
     /// the wrapper's span, so every log line below is filed under the

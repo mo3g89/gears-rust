@@ -360,24 +360,25 @@ fn the_declared_boundaries_include_the_pollers_floor_and_default_interval() {
 /// `as_secs_f64` would put a six-second sample in the overflow bucket above
 /// 300, and no assertion about the boundary set would notice.
 ///
-/// **Swept over both per-item histograms**, because each is a separate
-/// conversion in the adapter: a version that got the observation family right
-/// and the plugin-call family wrong would pass a test that only drove the
-/// first — measured, when this test drove only the first and a millisecond
-/// mutation on the plugin-call recording came back green.
+/// **Swept over every family in [`DURATIONS`]**, because each is a separate
+/// `as_secs_f64` call site in the adapter: a version that got one right and
+/// another wrong would pass a test that only drove the first — measured, when
+/// this test drove only the observation family and a millisecond mutation on
+/// the plugin-call recording came back green. The first repair swept the two
+/// per-item families and still left the cycle histogram undriven; this sweeps
+/// the declared list, which is the only form that cannot go stale when a family
+/// is added.
 #[test]
 fn a_duration_is_recorded_in_seconds() {
     let probe = MetricsProbe::new();
     let adapter = probe.adapter();
 
+    adapter.observation_cycle(CycleOutcome::Completed, Duration::from_secs(6));
     adapter.environment_observed(ObservationClass::Detected, Duration::from_secs(6));
     adapter.plugin_call(PluginCallClass::Detected, Duration::from_secs(6));
 
     let series = probe.collect();
-    for family in [
-        QA_ENVIRONMENTS_OBSERVATION_DURATION,
-        QA_ENVIRONMENTS_PLUGIN_CALL_DURATION,
-    ] {
+    for family in DURATIONS {
         assert_eq!(
             series.histogram_bucket_of(family, 6.0),
             Some(1),

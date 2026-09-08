@@ -1128,38 +1128,53 @@ impl qa_product_sdk::QaProductPluginV1 for SlowPlugin {
     }
 }
 
-/// **The recorded duration really is the clock around the plugin call.**
+/// **Every recorded duration really is a clock around the work it names.**
 ///
 /// Every other assertion in this file is about counts and labels, and counts
 /// cannot see a *value*: a call site that recorded `Duration::ZERO`, or a
-/// constant, or an `Instant` taken in the wrong place would satisfy all of
-/// them and hand a dashboard a fabricated distribution. Measured — a mutation
-/// replacing the elapsed time with a six-second constant passed the whole
-/// suite before this test existed.
+/// constant, or an `Instant` taken in the wrong place would satisfy all of them
+/// and hand a dashboard a fabricated distribution. Measured — a mutation
+/// replacing the plugin call's elapsed time with a six-second constant passed
+/// the whole suite before this test existed.
+///
+/// **All three of this gear's duration families are swept**, and one fixture
+/// covers them because they are nested: a plugin that sleeps puts a floor under
+/// its own round trip, under the observation that contains it, and under the
+/// cycle that contains that. A first version of this test swept only the plugin
+/// call and left Task 39's two families constant-substitutable.
 ///
 /// It is written as **two bracketing assertions rather than one equality**,
 /// because an equality would be a timing test:
 ///
-/// * the plugin sleeps 150 ms, so the sample cannot be in the 10 ms bucket or
-///   below — that direction is deterministic, since a sleep can only overrun;
-/// * and it must not be in the `(5 s, 10 s]` bucket, which no in-memory fake
-///   can honestly reach, so any constant large enough to look like a real
-///   cluster round trip fails here.
+/// * the plugin sleeps 150 ms, so no sample can be in a bucket whose upper edge
+///   is 100 ms or below — that direction is deterministic, since a sleep can
+///   only overrun;
+/// * and none may be in the `(5 s, 10 s]` bucket, which no in-memory fake can
+///   honestly reach, so any constant large enough to look like a real cluster
+///   round trip fails here.
 ///
-/// Between them they pin that the value tracks the call. They deliberately do
+/// Between them they pin that each value tracks its work. They deliberately do
 /// **not** pin it more tightly than that; a narrower window would start failing
 /// on a loaded machine, which is how a timing assertion gets deleted.
 #[tokio::test]
-async fn the_recorded_plugin_duration_tracks_the_call_it_measures() {
+async fn every_recorded_duration_tracks_the_work_it_measures() {
     let delay = std::time::Duration::from_millis(150);
     let probe = MetricsProbe::new();
-    let services = build_services_tenant_scoped_with_plugin_and_plugin_metrics(
+    // Both metric ports behind one adapter, which is also the production
+    // wiring: the cycle families and the plugin-call families have to be read
+    // off one exporter for the sweep below to see all three.
+    let services = build_services_with_plugin_port_and_metrics(
         inmem_db().await,
+        Arc::new(TenantScopedAuthZ),
+        Arc::new(RecordingCredStore::new()),
+        Arc::new(NoopRunnerSecretWriter),
         Arc::new(FixedPluginPort::new(Arc::new(SlowPlugin {
             inner: ScriptedPlugin::vhp_shaped(detected()),
             delay,
         }))),
-        probe.adapter(),
+        Some(probe.adapter()),
+        Some(probe.adapter()),
+        crate::config::QaEnvironmentsConfig::default().max_variables,
     );
     services
         .environments
@@ -1176,30 +1191,33 @@ async fn the_recorded_plugin_duration_tracks_the_call_it_measures() {
         .await;
 
     let series = probe.collect();
-    assert_eq!(
-        series.histogram_count(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION),
-        1,
-        "premise: exactly one plugin call was timed"
-    );
-    // Every bucket whose upper edge is at or below 100 ms must be empty. Probed
-    // edge by edge rather than through one call: `histogram_bucket_of` answers
-    // for the single bucket a value falls in, so asking about one edge says
-    // nothing about the buckets below it -- which is how the sibling version of
-    // this assertion in qa-catalog let a zero-duration mutation through.
-    for edge in [0.01_f64, 0.05, 0.1] {
+    for family in crate::domain::metrics::DURATIONS {
         assert_eq!(
-            series.histogram_bucket_of(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION, edge),
+            series.histogram_count(family),
+            1,
+            "premise: {family} took exactly one sample from this cycle"
+        );
+        // Every bucket whose upper edge is at or below 100 ms must be empty.
+        // Probed edge by edge rather than through one call:
+        // `histogram_bucket_of` answers for the single bucket a value falls in,
+        // so asking about one edge says nothing about the buckets below it --
+        // which is how the sibling version of this assertion in qa-catalog let
+        // a zero-duration mutation through.
+        for edge in [0.01_f64, 0.05, 0.1] {
+            assert_eq!(
+                series.histogram_bucket_of(family, edge),
+                Some(0),
+                "{family}: a cycle whose one plugin slept for {delay:?} cannot have been \
+                 measured at {edge} s or less, so that bucket must be empty -- a zero or \
+                 a near-zero here means the clock is not around the work"
+            );
+        }
+        assert_eq!(
+            series.histogram_bucket_of(family, 6.0),
             Some(0),
-            "a plugin that slept for {delay:?} cannot have been measured at {edge} s or \
-             less, so that bucket must be empty -- a zero or a near-zero here means the \
-             clock is not around the call"
+            "{family}: and it cannot have taken between five and ten seconds either: an \
+             in-memory double does not, so a sample there is a fabricated or stale \
+             duration rather than a measured one"
         );
     }
-    assert_eq!(
-        series.histogram_bucket_of(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION, 6.0),
-        Some(0),
-        "and it cannot have taken between five and ten seconds either: an in-memory \
-         double does not, so a sample there is a fabricated or stale duration rather \
-         than a measured one"
-    );
 }

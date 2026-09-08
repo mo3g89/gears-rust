@@ -193,11 +193,18 @@ fn the_declared_boundaries_resolve_the_sub_millisecond_range() {
     );
 }
 
-/// **The duration is recorded in seconds, not milliseconds.**
+/// **Every duration is recorded in seconds, not milliseconds.**
 ///
 /// A different defect from the boundaries themselves: `as_millis` instead of
 /// `as_secs_f64` would put a six-second resolution in the overflow bucket above
 /// ten, and no assertion about the boundary set would notice.
+///
+/// **Swept over [`DURATIONS`] rather than over the one family this gear has
+/// today**, because each family is a separate `as_secs_f64` call site in the
+/// adapter and a sweep is the only form that cannot go stale when a second one
+/// is added. The sibling gears learned that the expensive way: a millisecond
+/// mutation on a family their single-family version of this test did not drive
+/// came back green.
 #[test]
 fn a_duration_is_recorded_in_seconds() {
     let probe = MetricsProbe::new();
@@ -207,17 +214,19 @@ fn a_duration_is_recorded_in_seconds() {
         .plugin_resolution(PluginResolutionOutcome::Resolved, Duration::from_secs(6));
 
     let series = probe.collect();
-    assert_eq!(
-        series.histogram_bucket_of(QA_CATALOG_PLUGIN_RESOLUTION_DURATION, 6.0),
-        Some(1),
-        "six seconds recorded as seconds lands in the bucket that contains 6.0; \
-         recorded as 6000 it would land in the overflow bucket instead"
-    );
-    assert_eq!(
-        series.histogram_bucket_of(QA_CATALOG_PLUGIN_RESOLUTION_DURATION, 6000.0),
-        Some(0),
-        "and nothing may be sitting in the overflow bucket"
-    );
+    for family in DURATIONS {
+        assert_eq!(
+            series.histogram_bucket_of(family, 6.0),
+            Some(1),
+            "{family}: six seconds recorded as seconds lands in the bucket that contains \
+             6.0; recorded as 6000 it would land in the overflow bucket instead"
+        );
+        assert_eq!(
+            series.histogram_bucket_of(family, 6000.0),
+            Some(0),
+            "{family}: and nothing may be sitting in the overflow bucket"
+        );
+    }
 }
 
 /// **The default adapter builds and emits with no pipeline configured.**

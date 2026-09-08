@@ -42,7 +42,7 @@ use crate::domain::ports::metrics::{CollectMetrics, CollectOutcome, CollectRepor
 use crate::domain::ports::{CatalogReader, RunsLauncher};
 use crate::domain::repos::CollectRepository;
 use crate::domain::service::test_support::{
-    CatalogFailure, DenyAllAuthZ, FakeCatalog, RecordingAuthZ, TenantScopedAuthZ, ctx,
+    CatalogFailure, DenyAllAuthZ, FakeCatalog, RecordingAuthZ, SlowCatalog, TenantScopedAuthZ, ctx,
     universe_test,
 };
 use crate::domain::system_actor::TenantBound;
@@ -1064,5 +1064,77 @@ async fn a_broken_metrics_adapter_does_not_fail_a_collect_cycle() {
         launcher.calls().len(),
         2,
         "premise: both cycles really ran and really launched"
+    );
+}
+
+/// **The recorded cycle duration really is a clock around the cycle.**
+///
+/// Every other collect metric assertion here is about counts and labels, and
+/// counts cannot see a *value*: a call site that recorded `Duration::ZERO`, or
+/// a constant, or an `Instant` taken in the wrong place would satisfy all of
+/// them and hand a dashboard a fabricated distribution. Measured in
+/// qa-environments during Task 40 — a mutation replacing the elapsed time with
+/// a six-second constant passed that gear's whole suite, and this family had
+/// the same hole.
+///
+/// Written as **two bracketing assertions rather than one equality**, because
+/// an equality would be a timing test:
+///
+/// * the catalog's universe read sleeps 150 ms and the cycle awaits it before
+///   launching anything, so the sample cannot be in a bucket whose upper edge
+///   is 100 ms or below — that direction is deterministic, since a sleep can
+///   only overrun;
+/// * and it must not be in the `(5 s, 10 s]` bucket, which no in-memory fixture
+///   can honestly reach.
+///
+/// Probed edge by edge rather than through one call: `histogram_bucket_of`
+/// answers for the single bucket a value falls in, so asking about one edge
+/// says nothing about the buckets below it.
+#[tokio::test]
+async fn the_recorded_cycle_duration_tracks_the_cycle_it_measures() {
+    let delay = std::time::Duration::from_millis(150);
+    let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
+    let catalog = Arc::new(FakeCatalog::default());
+    catalog.add(Uuid::new_v4(), "main", universe_test("tests/a.py"));
+    let metrics = MetricsProbe::new();
+    let service = CollectService::new(
+        Arc::clone(&db),
+        OrmCollectRepository,
+        Arc::new(SlowCatalog::new(Arc::clone(&catalog), delay)) as Arc<dyn CatalogReader>,
+        Arc::new(FakeRunsLauncher::default()) as Arc<dyn RunsLauncher>,
+        PolicyEnforcer::new(Arc::new(TenantScopedAuthZ)),
+        DefaultCollectBranch("main".to_owned()),
+        CollectReportBaseUrl("http://insights.example".to_owned()),
+        CollectReportSigningSecret(SECRET.to_owned()),
+        Some(metrics.adapter()),
+    );
+
+    let launched = service
+        .run_collect_cycle(&ctx(TENANT), "main")
+        .await
+        .expect("the cycle runs");
+    assert_eq!(launched, 1, "premise: the cycle really did its work");
+
+    let series = metrics.collect();
+    assert_eq!(
+        series.histogram_count(QA_INSIGHTS_COLLECT_DURATION),
+        1,
+        "premise: exactly one cycle was timed"
+    );
+    for edge in [0.01_f64, 0.05, 0.1] {
+        assert_eq!(
+            series.histogram_bucket_of(QA_INSIGHTS_COLLECT_DURATION, edge),
+            Some(0),
+            "a cycle whose universe read slept for {delay:?} cannot have been measured at \
+             {edge} s or less, so that bucket must be empty -- a zero or a near-zero here \
+             means the clock is not around the cycle"
+        );
+    }
+    assert_eq!(
+        series.histogram_bucket_of(QA_INSIGHTS_COLLECT_DURATION, 6.0),
+        Some(0),
+        "and it cannot have taken between five and ten seconds either: an in-memory \
+         fixture does not, so a sample there is a fabricated or stale duration rather \
+         than a measured one"
     );
 }

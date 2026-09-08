@@ -186,7 +186,13 @@ fn every_duration_histogram_carries_the_declared_boundaries() {
     }
 }
 
-/// **The duration is recorded in seconds, not milliseconds.**
+/// **Every duration is recorded in seconds, not milliseconds.**
+///
+/// **Swept over every family in [`DURATIONS`]**, because each is a separate
+/// `as_secs_f64` call site in the adapter: a version that got one right and
+/// another wrong would pass a test that drove only the first. Measured in
+/// qa-environments, where exactly that mutation came back green against a
+/// single-family version of this test.
 ///
 /// The other half of what the old single test claimed, kept separate because it
 /// is a different defect: `as_millis` instead of `as_secs_f64` would put a
@@ -195,23 +201,27 @@ fn every_duration_histogram_carries_the_declared_boundaries() {
 #[test]
 fn a_duration_is_recorded_in_seconds() {
     let probe = MetricsProbe::new();
+    let adapter = probe.adapter();
 
-    probe
-        .adapter()
-        .dispatch_pass(DispatchOutcome::Started, Duration::from_secs(6));
+    // One six-second sample into every duration family this gear declares.
+    adapter.dispatch_pass(DispatchOutcome::Started, Duration::from_secs(6));
+    adapter.queue_wait(Duration::from_secs(6));
+    adapter.ingest_batch(IngestOutcome::Applied, Duration::from_secs(6));
 
     let series = probe.collect();
-    assert_eq!(
-        series.histogram_bucket_of(QA_RUNS_DISPATCH_DURATION, 6.0),
-        Some(1),
-        "six seconds recorded as seconds lands in the bucket that contains 6.0; \
-         recorded as 6000 it would land in the overflow bucket instead"
-    );
-    assert_eq!(
-        series.histogram_bucket_of(QA_RUNS_DISPATCH_DURATION, 6000.0),
-        Some(0),
-        "and nothing may be sitting in the overflow bucket"
-    );
+    for family in DURATIONS {
+        assert_eq!(
+            series.histogram_bucket_of(family, 6.0),
+            Some(1),
+            "{family}: six seconds recorded as seconds lands in the bucket that contains \
+             6.0; recorded as 6000 it would land in the overflow bucket instead"
+        );
+        assert_eq!(
+            series.histogram_bucket_of(family, 6000.0),
+            Some(0),
+            "{family}: and nothing may be sitting in the overflow bucket"
+        );
+    }
 }
 
 /// **One `queue_wait` call drives its counter and its histogram, unlabelled.**

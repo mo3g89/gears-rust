@@ -43,8 +43,8 @@ use crate::domain::ports::{CatalogReader, EnvironmentReader, RunsLauncher};
 use crate::domain::repos::{JiraRepository, NewTestResult, ResultsRepository};
 use crate::domain::service::jira::{JiraConfigInput, JiraService};
 use crate::domain::service::test_support::{
-    DEFAULT_BRANCH, FakeCatalog, FakePlatforms, TenantScopedAuthZ, UNIVERSE_TEST_PLAN_PATH,
-    UNIVERSE_TEST_REPO_ID, ctx,
+    DEFAULT_BRANCH, FakeCatalog, FakePlatforms, SlowCatalog, TenantScopedAuthZ,
+    UNIVERSE_TEST_PLAN_PATH, UNIVERSE_TEST_REPO_ID, ctx,
 };
 use crate::infra::leader::{LeaderElector, LeaderWorkFn, NoopLeaderElector, work_fn};
 use crate::infra::metrics::probe::MetricsProbe;
@@ -1497,5 +1497,77 @@ async fn a_broken_metrics_adapter_does_not_fail_a_poll_pass() {
     assert!(
         f.launcher.launches() >= 1,
         "premise: the passes really ran and really launched"
+    );
+}
+
+/// **The recorded pass duration really is a clock around the pass.**
+///
+/// Every other poller metric assertion here is about counts and labels, and
+/// counts cannot see a *value*: a call site that recorded `Duration::ZERO`, or
+/// a constant, or an `Instant` taken in the wrong place would satisfy all of
+/// them and hand a dashboard a fabricated distribution. Measured in
+/// qa-environments during Task 40 — a mutation replacing the elapsed time with
+/// a six-second constant passed that gear's whole suite, and this family had
+/// the same hole.
+///
+/// The service is rebuilt over the fixture's own collaborators with a slow
+/// catalog swapped in, rather than a new fixture builder being added: what has
+/// to change is one of five constructor arguments, and the bug, the build and
+/// the JIRA double all have to be the ones `fixture_with_resolved_bug_and_new_build`
+/// already set up for the pass to reach the catalog at all.
+///
+/// Written as **two bracketing assertions rather than one equality**, because
+/// an equality would be a timing test:
+///
+/// * the catalog read inside the per-bug rerun chain sleeps 150 ms and the pass
+///   awaits it, so the sample cannot be in a bucket whose upper edge is 100 ms
+///   or below — that direction is deterministic, since a sleep can only
+///   overrun;
+/// * and it must not be in the `(5 s, 10 s]` bucket, which no in-memory fixture
+///   can honestly reach.
+///
+/// Probed edge by edge rather than through one call: `histogram_bucket_of`
+/// answers for the single bucket a value falls in, so asking about one edge
+/// says nothing about the buckets below it.
+#[tokio::test]
+async fn the_recorded_pass_duration_tracks_the_pass_it_measures() {
+    let delay = std::time::Duration::from_millis(150);
+    let f = fixture_with_resolved_bug_and_new_build().await;
+    let service = JiraPollerService::new(
+        Arc::clone(&f.jira_service),
+        Arc::new(SlowCatalog::new(Arc::clone(&f.catalog), delay)) as Arc<dyn CatalogReader>,
+        Arc::clone(&f.platforms) as Arc<dyn EnvironmentReader>,
+        Arc::clone(&f.launcher) as Arc<dyn RunsLauncher>,
+        Some(f.metrics.adapter()),
+    );
+
+    service.poll_once(&f.ctx).await.expect("the pass runs");
+    assert_eq!(
+        f.launcher.launches(),
+        1,
+        "premise: the pass really reached the catalog and launched the rerun"
+    );
+
+    let series = f.metrics.collect();
+    assert_eq!(
+        series.histogram_count(QA_INSIGHTS_JIRA_POLL_DURATION),
+        1,
+        "premise: exactly one pass was timed"
+    );
+    for edge in [0.01_f64, 0.05, 0.1] {
+        assert_eq!(
+            series.histogram_bucket_of(QA_INSIGHTS_JIRA_POLL_DURATION, edge),
+            Some(0),
+            "a pass whose catalog read slept for {delay:?} cannot have been measured at \
+             {edge} s or less, so that bucket must be empty -- a zero or a near-zero here \
+             means the clock is not around the pass"
+        );
+    }
+    assert_eq!(
+        series.histogram_bucket_of(QA_INSIGHTS_JIRA_POLL_DURATION, 6.0),
+        Some(0),
+        "and it cannot have taken between five and ten seconds either: an in-memory \
+         fixture does not, so a sample there is a fabricated or stale duration rather \
+         than a measured one"
     );
 }

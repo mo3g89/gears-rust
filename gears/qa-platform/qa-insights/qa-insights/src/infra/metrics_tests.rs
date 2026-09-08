@@ -224,7 +224,13 @@ fn every_duration_histogram_carries_the_declared_boundaries() {
     }
 }
 
-/// **The duration is recorded in seconds, not milliseconds.**
+/// **Every duration is recorded in seconds, not milliseconds.**
+///
+/// **Swept over every family in [`DURATIONS`]**, because each is a separate
+/// `as_secs_f64` call site in the adapter: a version that got one right and
+/// another wrong would pass a test that drove only the first. Measured in
+/// qa-environments, where exactly that mutation came back green against a
+/// single-family version of this test.
 ///
 /// A different defect from the boundaries themselves: `as_millis` instead of
 /// `as_secs_f64` would put a six-second cycle in the overflow bucket above 300,
@@ -232,23 +238,26 @@ fn every_duration_histogram_carries_the_declared_boundaries() {
 #[test]
 fn a_duration_is_recorded_in_seconds() {
     let probe = MetricsProbe::new();
+    let adapter = probe.adapter();
 
-    probe
-        .adapter()
-        .collect_cycle(CollectOutcome::Completed, Duration::from_secs(6));
+    // One six-second sample into every duration family this gear declares.
+    adapter.collect_cycle(CollectOutcome::Completed, Duration::from_secs(6));
+    adapter.poll_pass(JiraPollOutcome::Completed, Duration::from_secs(6));
 
     let series = probe.collect();
-    assert_eq!(
-        series.histogram_bucket_of(QA_INSIGHTS_COLLECT_DURATION, 6.0),
-        Some(1),
-        "six seconds recorded as seconds lands in the bucket that contains 6.0; \
-         recorded as 6000 it would land in the overflow bucket instead"
-    );
-    assert_eq!(
-        series.histogram_bucket_of(QA_INSIGHTS_COLLECT_DURATION, 6000.0),
-        Some(0),
-        "and nothing may be sitting in the overflow bucket"
-    );
+    for family in DURATIONS {
+        assert_eq!(
+            series.histogram_bucket_of(family, 6.0),
+            Some(1),
+            "{family}: six seconds recorded as seconds lands in the bucket that contains \
+             6.0; recorded as 6000 it would land in the overflow bucket instead"
+        );
+        assert_eq!(
+            series.histogram_bucket_of(family, 6000.0),
+            Some(0),
+            "{family}: and nothing may be sitting in the overflow bucket"
+        );
+    }
 }
 
 /// **The default adapter builds and emits with no pipeline configured.**

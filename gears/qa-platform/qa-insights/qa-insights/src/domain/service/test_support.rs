@@ -1333,3 +1333,42 @@ impl Fleet {
             .expect("the fixture's own read must not fail")
     }
 }
+
+/// A [`CatalogReader`] that takes a known, non-trivial amount of wall-clock
+/// time to answer, delegating to a [`FakeCatalog`].
+///
+/// Its only job is to make the **magnitude** of a recorded duration assertable.
+/// Every other double in this crate answers instantly, so a call site that
+/// recorded `Duration::ZERO`, or a constant, or an `Instant` taken in the wrong
+/// place would produce a plausible sample and no count-based assertion could
+/// tell. Measured in qa-environments during Task 40, where exactly that
+/// mutation passed a whole gear's suite.
+///
+/// The catalog is the shared slow point on purpose: `run_collect_cycle` reads
+/// the universe before it launches anything, and the JIRA poller's per-bug
+/// chain reads it again to find a rerun's test file, so one double puts a floor
+/// under both measured passes.
+pub struct SlowCatalog {
+    inner: Arc<FakeCatalog>,
+    delay: std::time::Duration,
+}
+
+impl SlowCatalog {
+    #[must_use]
+    pub fn new(inner: Arc<FakeCatalog>, delay: std::time::Duration) -> Self {
+        Self { inner, delay }
+    }
+}
+
+#[async_trait]
+impl CatalogReader for SlowCatalog {
+    async fn list_universe(
+        &self,
+        ctx: &SecurityContext,
+        product_id: Option<Uuid>,
+        branch: Option<&str>,
+    ) -> Result<Vec<UniverseTest>, DomainError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.list_universe(ctx, product_id, branch).await
+    }
+}

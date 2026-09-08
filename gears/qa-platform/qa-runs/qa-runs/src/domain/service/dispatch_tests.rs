@@ -3804,3 +3804,114 @@ async fn a_persistently_panicking_adapter_is_called_once_and_then_never_again() 
         "the second cycle must not reach an adapter that has already panicked"
     );
 }
+
+/// A [`RunExecutor`] that takes a known, non-trivial amount of wall-clock time
+/// to answer `list_active`, delegating everything else to the ordinary mock.
+///
+/// `list_active` is the tick's first outbound call, so a delay there puts a
+/// floor under the whole cycle. Its only job is to make the *magnitude* of the
+/// recorded sample assertable: every other double in this file answers
+/// instantly, so a call site that recorded a constant would produce a plausible
+/// sample and no count-based assertion could tell.
+struct SlowExecutor {
+    inner: crate::infra::executor::mock::MockRunExecutor,
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl crate::domain::ports::run_executor::RunExecutor for SlowExecutor {
+    async fn start(
+        &self,
+        spec: crate::domain::ports::run_executor::RunSpec,
+    ) -> Result<crate::domain::ports::run_executor::ExecutionRef, DomainError> {
+        self.inner.start(spec).await
+    }
+
+    async fn watch(
+        &self,
+        execution_ref: &crate::domain::ports::run_executor::ExecutionRef,
+        resume: crate::domain::repos::LogResume,
+    ) -> Result<crate::domain::ports::run_executor::ExecutionStream, DomainError> {
+        self.inner.watch(execution_ref, resume).await
+    }
+
+    async fn cancel(
+        &self,
+        execution_ref: &crate::domain::ports::run_executor::ExecutionRef,
+    ) -> Result<(), DomainError> {
+        self.inner.cancel(execution_ref).await
+    }
+
+    async fn list_active(
+        &self,
+    ) -> Result<
+        std::collections::BTreeSet<crate::domain::ports::run_executor::ExecutionRef>,
+        DomainError,
+    > {
+        tokio::time::sleep(self.delay).await;
+        self.inner.list_active().await
+    }
+}
+
+/// **The recorded cycle duration really is a clock around the cycle.**
+///
+/// Every other dispatch metric assertion here is about counts and labels, and
+/// counts cannot see a *value*: a call site that recorded `Duration::ZERO`, or
+/// a constant, or an `Instant` taken in the wrong place would satisfy all of
+/// them and hand a dashboard a fabricated distribution. Measured in
+/// qa-environments during Task 40 — a mutation replacing the elapsed time with
+/// a six-second constant passed that gear's whole suite, and this family had
+/// the same hole.
+///
+/// Written as **two bracketing assertions rather than one equality**, because
+/// an equality would be a timing test:
+///
+/// * the executor's `list_active` sleeps 150 ms and the tick awaits it, so the
+///   sample cannot be in a bucket whose upper edge is 100 ms or below — that
+///   direction is deterministic, since a sleep can only overrun;
+/// * and it must not be in the `(5 s, 10 s]` bucket, which no in-memory fixture
+///   can honestly reach, so any constant large enough to look like a real
+///   dispatcher cycle fails here.
+///
+/// Probed edge by edge rather than through one call: `histogram_bucket_of`
+/// answers for the single bucket a value falls in, so asking about one edge
+/// says nothing about the buckets below it.
+#[tokio::test]
+async fn the_recorded_cycle_duration_tracks_the_cycle_it_measures() {
+    let delay = std::time::Duration::from_millis(150);
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .executor(Arc::new(SlowExecutor {
+            inner: crate::infra::executor::mock::MockRunExecutor::new(),
+            delay,
+        })
+            as Arc<dyn crate::domain::ports::run_executor::RunExecutor>)
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    fakes.dispatch.run_tick().await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count(QA_RUNS_DISPATCH_DURATION),
+        1,
+        "premise: exactly one cycle was timed"
+    );
+    for edge in [0.005_f64, 0.01, 0.025, 0.05, 0.1] {
+        assert_eq!(
+            series.histogram_bucket_of(QA_RUNS_DISPATCH_DURATION, edge),
+            Some(0),
+            "a cycle whose executor listing slept for {delay:?} cannot have been measured \
+             at {edge} s or less, so that bucket must be empty -- a zero or a near-zero \
+             here means the clock is not around the cycle"
+        );
+    }
+    assert_eq!(
+        series.histogram_bucket_of(QA_RUNS_DISPATCH_DURATION, 6.0),
+        Some(0),
+        "and it cannot have taken between five and ten seconds either: an in-memory \
+         fixture does not, so a sample there is a fabricated or stale duration rather \
+         than a measured one"
+    );
+}
