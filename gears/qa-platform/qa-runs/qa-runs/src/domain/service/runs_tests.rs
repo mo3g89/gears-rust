@@ -259,6 +259,7 @@ impl Builder {
             locks: locks.clone(),
             limits: self.limits,
             policy_enforcer: enforcer.clone(),
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
         }));
         let launch = Arc::new(LaunchService::new(
             Arc::clone(&db),
@@ -1236,6 +1237,10 @@ async fn the_container_wires_ingest_and_the_operator_actions_to_the_same_halves(
                 queue_ttl_seconds: 7200,
             },
             orphan_timeout_seconds: 600,
+            // `None` is the production default: `NoopMetrics`, which emits
+            // everything a wired gear emits and lets nothing observe it.
+            dispatch_metrics: None,
+            ingest_metrics: None,
         },
     );
 

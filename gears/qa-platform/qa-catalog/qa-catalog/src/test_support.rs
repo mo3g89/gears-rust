@@ -495,6 +495,7 @@ fn fixture_plugin_registry(
         Arc::new(OrmProductsRepository),
         PolicyEnforcer::new(authz),
         hub,
+        None,
     ))
 }
 
@@ -551,6 +552,7 @@ pub fn build_plugin_registry_tenant_scoped(
         Arc::new(OrmProductsRepository),
         PolicyEnforcer::new(Arc::new(TenantScopedAuthZ)),
         client_hub,
+        None,
     )
 }
 

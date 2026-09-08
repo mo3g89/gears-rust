@@ -114,6 +114,8 @@
 //!   remain is reported `Succeeded`.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use authz_resolver_sdk::PolicyEnforcer;
 use qa_environments_sdk::QaEnvironmentsClientV1;
@@ -124,8 +126,9 @@ use toolkit_security::{AccessScope, SecurityContext};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use super::{LogArchive, LogFanout, SerializedDb, actions, resources};
+use super::{LogArchive, LogFanout, SerializedDb, actions, emit, resources};
 use crate::domain::error::DomainError;
+use crate::domain::ports::metrics::{IngestMetrics, IngestOutcome};
 use crate::domain::ports::run_executor::{
     ExecutionEvent, ExecutionStream, NodeOutcome, TestObservation,
 };
@@ -617,6 +620,10 @@ pub struct IngestDeps<R, Q> {
     /// never reaches, such as a cancelled run's tail — see `finish`'s own doc.
     pub archive: Arc<dyn LogArchive>,
     pub policy_enforcer: PolicyEnforcer,
+    /// Where [`IngestService::apply`] reports how one observation landed and
+    /// how long it took. `NoopMetrics` when no adapter is installed — see
+    /// [`super::ServiceDeps::ingest_metrics`].
+    pub metrics: Arc<dyn IngestMetrics>,
 }
 
 /// Consumes one run's execution events.
@@ -631,6 +638,11 @@ pub struct IngestService<R, Q> {
     /// See [`IngestDeps::archive`].
     archive: Arc<dyn LogArchive>,
     policy_enforcer: PolicyEnforcer,
+    /// See [`IngestDeps::metrics`].
+    metrics: Arc<dyn IngestMetrics>,
+    /// This service's emission latch — see `super::emit`. Per service rather
+    /// than global, so a broken ingest adapter cannot silence the dispatcher.
+    metrics_silenced: AtomicBool,
 }
 
 impl<R, Q> IngestService<R, Q>
@@ -647,6 +659,8 @@ where
             logs: deps.logs,
             archive: deps.archive,
             policy_enforcer: deps.policy_enforcer,
+            metrics: deps.metrics,
+            metrics_silenced: AtomicBool::new(false),
         }
     }
 
@@ -805,13 +819,65 @@ where
         run_id: Uuid,
         event: ExecutionEvent,
     ) -> Result<(), DomainError> {
+        // `Started` is inert by design — the arm below returns `Ok` without
+        // reading or writing anything (see the module header). Counting it
+        // would put a no-op in the `applied` series and a near-zero sample in
+        // the histogram whose p95 is the point, so the measured population is
+        // the three events that do work. Decided before the move, because the
+        // event is consumed by the call.
+        let measured = !matches!(event, ExecutionEvent::Started);
+        let started = Instant::now();
+        let landed = self.apply_event(ctx, run_id, event).await;
+        // One observation is one measured pass: the event in hand here, the
+        // run row updated. That is the GEAR-SIDE HALF of
+        // `cpt-cf-qa-nfr-result-latency` and not the NFR's own span — the
+        // requirement is stated over runner emission -> API visibility, so this
+        // excludes the runner-to-gear transport ahead of it and the read side
+        // after it. `crate::domain::metrics::QA_RUNS_INGEST_DURATION`'s doc
+        // states the gap in full. `Self::ingest`'s loop is a driver over this,
+        // not a second unit — timing the loop would time the run.
+        //
+        // Guarded rather than called directly; see `super::emit`. It matters
+        // more here than on the dispatcher, because this path runs per log line.
+        if measured {
+            let outcome = match &landed {
+                Ok(outcome) => *outcome,
+                Err(error) => IngestOutcome::from(error),
+            };
+            emit(&self.metrics_silenced, || {
+                self.metrics.ingest_batch(outcome, started.elapsed());
+            });
+        }
+        landed.map(|_| ())
+    }
+
+    /// [`Self::apply`] without the measurement, returning **how** the
+    /// observation landed.
+    ///
+    /// The return value exists only for the label: `applied`, `completed` and
+    /// `duplicate` are three operationally different events that a caller does
+    /// not distinguish — [`Self::apply`] discards it — but that an operator
+    /// reading a rising duplicate rate very much does. See
+    /// [`IngestOutcome`]'s own doc.
+    async fn apply_event(
+        &self,
+        ctx: &SecurityContext,
+        run_id: Uuid,
+        event: ExecutionEvent,
+    ) -> Result<IngestOutcome, DomainError> {
         match event {
-            // Deliberately inert — see the module header.
-            ExecutionEvent::Started => Ok(()),
-            ExecutionEvent::Log { node, line } => self.fan_out_log(ctx, run_id, &node, &line).await,
-            ExecutionEvent::TestResult(observation) => {
-                self.ingest_result(ctx, run_id, observation).await
-            }
+            // Deliberately inert — see the module header. The value is never
+            // emitted: [`Self::apply`] excludes this arm from the measured
+            // population, and its comment says why.
+            ExecutionEvent::Started => Ok(IngestOutcome::Applied),
+            ExecutionEvent::Log { node, line } => self
+                .fan_out_log(ctx, run_id, &node, &line)
+                .await
+                .map(|()| IngestOutcome::Applied),
+            ExecutionEvent::TestResult(observation) => self
+                .ingest_result(ctx, run_id, observation)
+                .await
+                .map(|()| IngestOutcome::Applied),
             ExecutionEvent::Finished {
                 outcome,
                 nodes,
@@ -1336,7 +1402,7 @@ where
         outcome: ExecutorOutcome,
         nodes: NodeOutcome,
         message: Option<String>,
-    ) -> Result<(), DomainError> {
+    ) -> Result<IngestOutcome, DomainError> {
         let finished_at = OffsetDateTime::now_utc();
 
         // Scopes are derived before the transaction opens: they are policy
@@ -1483,7 +1549,17 @@ where
         }
 
         Self::announce(&run, completion);
-        Ok(())
+        // `Duplicate` rather than `Applied` for the retry branch: `Completion`
+        // already draws exactly this line, and folding the two together is what
+        // would hide a stuck executor — see [`IngestOutcome::Duplicate`]. The
+        // recorded branch is classified by
+        // `crate::domain::state_machine::is_terminal` through Task 36's
+        // `From<RunState>` bridge, not by a list of terminal states written
+        // here.
+        Ok(match completion {
+            Completion::AlreadyRecorded => IngestOutcome::Duplicate,
+            Completion::Recorded { state, .. } => IngestOutcome::from(state),
+        })
     }
 
     /// Log the side effect a completion owes, outside its transaction.

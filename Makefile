@@ -618,16 +618,18 @@ test-qa-platform-features: install-tools
 ##
 ## Only test_no_system_gear_changes.py is pytest-shaped (it defines a
 ## `test_*` function); `test_chart_file_sync.py`, `test_features.py`,
-## `test_no_environment_hardcode.py` and `test_pins.py` are standalone scripts
-## -- a `main()` run via `if __name__ == "__main__"` -- so
-## `python3 -m pytest tests/` collects zero items from them and would silently
-## skip four of the six guards. Each is invoked directly so all six actually
-## run; a non-zero exit from any of them fails this target.
+## `test_metrics_config.py`, `test_no_environment_hardcode.py` and
+## `test_pins.py` are standalone scripts -- a `main()` run via
+## `if __name__ == "__main__"` -- so `python3 -m pytest tests/` collects zero
+## items from them and would silently skip five of the seven guards. Each is
+## invoked directly so all seven actually run; a non-zero exit from any of them
+## fails this target.
 helm-tests:
 	@command -v helm >/dev/null || (echo "helm is required for helm-tests" && exit 1)
 	cd gears/qa-platform/deploy/helm && python3 -m pytest tests/ -q
 	python3 gears/qa-platform/deploy/helm/tests/test_chart_file_sync.py
 	python3 gears/qa-platform/deploy/helm/tests/test_features.py
+	python3 gears/qa-platform/deploy/helm/tests/test_metrics_config.py
 	python3 gears/qa-platform/deploy/helm/tests/test_no_environment_hardcode.py
 	python3 gears/qa-platform/deploy/helm/tests/test_pins.py
 	bash gears/qa-platform/deploy/helm/tests/test_nginx_template.sh

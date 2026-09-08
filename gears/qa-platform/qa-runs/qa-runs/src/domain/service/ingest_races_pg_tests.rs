@@ -219,6 +219,10 @@ async fn fixture() -> Fixture {
         logs: Arc::new(RunLogBroadcaster::new(8)),
         archive: Arc::clone(&archive) as Arc<dyn LogArchive>,
         policy_enforcer: enforcer,
+        // This tier is about the isolation level, not about telemetry: the
+        // no-op port emits everything a wired one does and lets nothing
+        // observe it.
+        metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
     }));
 
     Fixture {

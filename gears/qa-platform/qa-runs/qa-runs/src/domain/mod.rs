@@ -12,6 +12,7 @@ pub mod error;
 pub mod error_attribution;
 pub mod exclusivity;
 pub mod local_client;
+pub mod metrics;
 pub mod naming;
 pub mod params;
 pub mod ports;

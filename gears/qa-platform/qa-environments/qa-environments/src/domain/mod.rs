@@ -1,6 +1,10 @@
 pub mod error;
 pub mod lease;
 pub mod local_client;
+/// The observability metric catalog: the full, literal Prometheus series
+/// names this gear exports, and the naming rules that keep them queryable.
+/// The traits that emit into them are [`ports::metrics`].
+pub mod metrics;
 // `pub mod observation;` was deleted at branch close.
 //
 // It held this gear's own copy of the VHP detection rules --

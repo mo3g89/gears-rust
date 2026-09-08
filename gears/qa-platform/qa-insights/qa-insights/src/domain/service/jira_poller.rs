@@ -146,6 +146,8 @@
 //! reason.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use qa_insights_sdk::JiraBug;
 use time::OffsetDateTime;
@@ -154,8 +156,12 @@ use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::jira_client::StatusCategory;
+use crate::domain::ports::metrics::{
+    JiraBugOutcome, JiraPollMetrics, JiraPollOutcome, NoopMetrics,
+};
 use crate::domain::ports::{CatalogReader, EnvironmentReader, RunsLauncher};
 use crate::domain::repos::{JiraRepository, ResultsRepository};
+use crate::domain::service::emit;
 use crate::domain::service::jira::JiraService;
 
 /// One tenant-scoped pass over every open bug, plus the auto-rerun it may
@@ -165,6 +171,15 @@ pub struct JiraPollerService<J, R> {
     catalog: Arc<dyn CatalogReader>,
     platforms: Arc<dyn EnvironmentReader>,
     launcher: Arc<dyn RunsLauncher>,
+    /// Where this service's telemetry goes. Never `Option`: [`NoopMetrics`]
+    /// is the default a caller that wires nothing gets, so every emission
+    /// below is unconditional and the "silent when no adapter is installed"
+    /// promise is structural rather than a branch somebody has to remember.
+    metrics: Arc<dyn JiraPollMetrics>,
+    /// Latched by [`emit`] the first time an emission panics, after which this
+    /// service stops calling its adapter. Per service, not global — see
+    /// [`emit`]'s own doc.
+    metrics_silenced: AtomicBool,
 }
 
 impl<J, R> JiraPollerService<J, R>
@@ -172,19 +187,43 @@ where
     J: JiraRepository,
     R: ResultsRepository,
 {
+    /// `metrics` is `None` for a caller that does not measure this service,
+    /// and resolves to [`NoopMetrics`]. See
+    /// [`crate::domain::service::collect::CollectService::new`] for why the
+    /// parameter is an `Option` rather than a required port.
     #[must_use]
     pub fn new(
         jira: Arc<JiraService<J, R>>,
         catalog: Arc<dyn CatalogReader>,
         platforms: Arc<dyn EnvironmentReader>,
         launcher: Arc<dyn RunsLauncher>,
+        metrics: Option<Arc<dyn JiraPollMetrics>>,
     ) -> Self {
         Self {
             jira,
             catalog,
             platforms,
             launcher,
+            metrics: metrics.unwrap_or_else(|| Arc::new(NoopMetrics)),
+            metrics_silenced: AtomicBool::new(false),
         }
+    }
+
+    /// Emit one per-bug outcome, guarded by this service's own latch.
+    ///
+    /// **One call site, deliberately**: [`Self::run_pass`]'s loop, on the
+    /// outcome [`Self::poll_one_bug`] returned. Nothing inside that chain
+    /// emits — every one of its classification points *returns* its label, and
+    /// the emission happens once above them all. That is what makes "exactly
+    /// one increment per bug per pass" a property of the shape rather than of
+    /// a dozen return sites each remembering to fire exactly once, and that
+    /// invariant is what lets a sum over the family be the denominator every
+    /// per-class rate is read against.
+    ///
+    /// A named method rather than the [`emit`] call spelled out at that loop,
+    /// so this service's latch is named in one place.
+    fn record_bug(&self, outcome: JiraBugOutcome) {
+        emit(&self.metrics_silenced, || self.metrics.bug(outcome));
     }
 
     /// One pass: check every open bug, resolve what JIRA reports done, and
@@ -215,8 +254,33 @@ where
     /// either. Nothing else propagates: every per-bug failure downstream of
     /// the open-bugs read is swallowed, by design.
     pub async fn poll_once(&self, ctx: &SecurityContext) -> Result<(), DomainError> {
+        let started = Instant::now();
+        let result = self.run_pass(ctx).await;
+        let outcome = match &result {
+            Ok(PassEnd::Skipped) => JiraPollOutcome::Skipped,
+            Ok(PassEnd::Completed) => JiraPollOutcome::Completed,
+            Err(error) => JiraPollOutcome::from(error),
+        };
+        // Read before the emission, so a slow adapter cannot inflate the
+        // duration it is being handed.
+        let elapsed = started.elapsed();
+        emit(&self.metrics_silenced, || {
+            self.metrics.poll_pass(outcome, elapsed);
+        });
+        result.map(|_| ())
+    }
+
+    /// [`Self::poll_once`]'s body, unmeasured, and saying which of the two
+    /// successful ends it reached.
+    ///
+    /// `Result<(), _>` cannot carry that: a tenant with no JIRA configuration
+    /// and a tenant whose every bug was processed both answer `Ok(())`, and
+    /// folding them into one label would make a deployment where the
+    /// integration is switched off everywhere indistinguishable from one where
+    /// it is working. See [`JiraPollOutcome::Skipped`].
+    async fn run_pass(&self, ctx: &SecurityContext) -> Result<PassEnd, DomainError> {
         if self.jira.active_config(ctx).await?.is_none() {
-            return Ok(());
+            return Ok(PassEnd::Skipped);
         }
 
         let poller_config = self.jira.poller_config(ctx).await?;
@@ -228,11 +292,18 @@ where
         let resolved_at = OffsetDateTime::now_utc();
 
         for bug in &open_bugs {
-            self.poll_one_bug(ctx, bug, poller_config.auto_rerun_on_resolve, resolved_at)
+            let outcome = self
+                .poll_one_bug(ctx, bug, poller_config.auto_rerun_on_resolve, resolved_at)
                 .await;
+            // The emission is here rather than inside `poll_one_bug` so that
+            // there is exactly one per bug however many ways that chain can
+            // end. An emission at each classification site would be a dozen
+            // returns to keep in step, and the end added by the next person to
+            // touch that chain would emit nothing at all.
+            self.record_bug(outcome);
         }
 
-        Ok(())
+        Ok(PassEnd::Completed)
     }
 
     /// One bug's status check, resolution and (conditional) rerun.
@@ -242,27 +313,58 @@ where
     /// (`jira_poller.rs:83-85` for the status check; `trigger_auto_rerun`'s
     /// own `tracing::warn!`-and-return arms for the rest, `:126-132`,
     /// `:151-162`, `:211-220`).
+    ///
+    /// # The return value is the only record a caller gets
+    ///
+    /// Nothing above this function can see what happened to one bug — that is
+    /// the design, and it is the defect [`JiraBugOutcome`] exists to make
+    /// visible. The value returned here is what
+    /// [`crate::domain::metrics::QA_INSIGHTS_JIRA_BUG`] counts; the logs
+    /// remain the only place the individual error text lives.
     async fn poll_one_bug(
         &self,
         ctx: &SecurityContext,
         bug: &JiraBug,
         auto_rerun_on_resolve: bool,
         resolved_at: OffsetDateTime,
-    ) {
+    ) -> JiraBugOutcome {
         let Some(status) = self.checked_status(ctx, bug).await else {
-            return;
+            return JiraBugOutcome::StatusCheckFailed;
         };
         if !status.is_resolved() {
-            return;
+            return JiraBugOutcome::Unresolved;
         }
 
-        self.mark_resolved(ctx, bug, resolved_at).await;
+        let resolved = self.mark_resolved(ctx, bug, resolved_at).await;
 
         if !auto_rerun_on_resolve {
-            return;
+            return Self::classify(resolved, JiraBugOutcome::Resolved);
         }
 
-        self.maybe_rerun(ctx, bug).await;
+        let rerun = self.maybe_rerun(ctx, bug).await;
+        Self::classify(resolved, rerun)
+    }
+
+    /// A failed local resolve write outranks whatever the rerun chain then
+    /// reported.
+    ///
+    /// The write failing does **not** stop the chain — `mark_resolved` is
+    /// best-effort by design and the rerun decision runs regardless, which
+    /// this task did not change — so a bug can both fail the write and launch
+    /// a rerun. This picks which of the two facts the bug's single increment
+    /// records, and it picks the write, because the write is the one with a
+    /// consequence for the *next* pass: the bug stays open in this gear's
+    /// table while JIRA keeps reporting it done, so the next pass resolves it
+    /// again and reruns it again, and the pass after that. A persistently
+    /// failing resolve write is a rerun-storm generator, which is precisely
+    /// what [`crate::domain::metrics::QA_INSIGHTS_JIRA_RERUN`] is read beside
+    /// this family to catch.
+    const fn classify(resolved: bool, otherwise: JiraBugOutcome) -> JiraBugOutcome {
+        if resolved {
+            otherwise
+        } else {
+            JiraBugOutcome::ResolveWriteFailed
+        }
     }
 
     /// `bug`'s status category, or `None` when the check itself failed —
@@ -288,12 +390,16 @@ where
     /// is attempted regardless of what happens next, and its failure does not
     /// gate the auto-rerun decision that follows it — the two are
     /// independent, per this task's Step 0, point 3.
+    ///
+    /// Returns whether the write landed. The value is not a control-flow
+    /// signal — the caller proceeds either way, exactly as before — only a
+    /// classification for [`Self::classify`].
     async fn mark_resolved(
         &self,
         ctx: &SecurityContext,
         bug: &JiraBug,
         resolved_at: OffsetDateTime,
-    ) {
+    ) -> bool {
         tracing::info!(jira_key = %bug.jira_key, "bug resolved in JIRA, marking as resolved");
         if let Err(error) = self.jira.resolve_bug(ctx, &bug.jira_key, resolved_at).await {
             tracing::warn!(
@@ -302,16 +408,25 @@ where
                 "failed to record the bug as resolved locally; the next pass will retry it \
                  while JIRA still reports it done",
             );
+            return false;
         }
+        true
     }
 
     /// D8: a resolved bug reruns only when a new build has appeared since the
     /// version it was filed against (`manager/src/services/jira_poller.rs:60-70`).
-    async fn maybe_rerun(&self, ctx: &SecurityContext, bug: &JiraBug) {
+    ///
+    /// The three no-op paths below all answer [`JiraBugOutcome::Resolved`]:
+    /// each is a decision *not* to rerun, taken deliberately and on purpose,
+    /// and none of them dropped anything. (The fourth such decision, the
+    /// auto-rerun switch being off, is [`Self::poll_one_bug`]'s and never
+    /// reaches this function.) Only the plan-version read can fail here, and
+    /// that one did drop a rerun.
+    async fn maybe_rerun(&self, ctx: &SecurityContext, bug: &JiraBug) -> JiraBugOutcome {
         // Legacy's own early return (`jira_poller.rs:226-229`): a bug with no
         // recorded version can never have "a new one" by comparison.
         let Some(bug_version) = bug.app_version.as_deref() else {
-            return;
+            return JiraBugOutcome::Resolved;
         };
 
         let latest_version = match self.jira.latest_version_for_plan(ctx, &bug.plan_path).await {
@@ -324,21 +439,21 @@ where
                     "failed to read the plan's latest build; the bug is already resolved, so \
                      this rerun will not be retried",
                 );
-                return;
+                return JiraBugOutcome::PlanVersionUnreadable;
             }
         };
         // No versioned run recorded for this plan at all — legacy's `None`
         // arm (`jira_poller.rs:241`), not "a new build was found".
         let Some(latest_version) = latest_version else {
-            return;
+            return JiraBugOutcome::Resolved;
         };
         if latest_version == bug_version {
             // The very build that already failed. Reprising it proves
             // nothing and costs a platform slot — the whole reason D8 exists.
-            return;
+            return JiraBugOutcome::Resolved;
         }
 
-        self.rerun(ctx, bug).await;
+        self.rerun(ctx, bug).await
     }
 
     /// Launch the auto-rerun through the normal admission path.
@@ -347,9 +462,9 @@ where
     /// same value for both [`Self::find_plan_test_file`] and the launch — see
     /// this module's header for why resolving it twice, or resolving the
     /// lookup against a different default, silently drops the rerun.
-    async fn rerun(&self, ctx: &SecurityContext, bug: &JiraBug) {
+    async fn rerun(&self, ctx: &SecurityContext, bug: &JiraBug) -> JiraBugOutcome {
         let Some(branch) = self.resolve_branch(ctx, bug).await else {
-            return;
+            return JiraBugOutcome::BranchUnresolved;
         };
 
         let Some(test_file) = self
@@ -365,10 +480,10 @@ where
                  catalog universe; the bug is already resolved, so this rerun will not be \
                  retried",
             );
-            return;
+            return JiraBugOutcome::TestFileUnresolved;
         };
 
-        self.launch(ctx, bug, &test_file, branch.as_deref()).await;
+        self.launch(ctx, bug, &test_file, branch.as_deref()).await
     }
 
     /// `bug.platform_id`'s default-branch override, or `None` when there is
@@ -400,13 +515,26 @@ where
 
     /// The launch itself, once a `test_file` and a `branch` have been
     /// resolved.
+    ///
+    /// # The rerun counter is incremented here, before the call
+    ///
+    /// [`crate::domain::metrics::QA_INSIGHTS_JIRA_RERUN`] counts **attempts**,
+    /// and this is the one place an attempt exists: every path above this one
+    /// decided not to rerun or could not work out what to rerun, and none of
+    /// them reached qa-runs. Incrementing before the `await` rather than in
+    /// the `Ok` arm is what makes the series a measure of the load this
+    /// poller puts on the admission path — a storm of launches qa-runs refuses
+    /// costs the same calls as a storm it accepts, and is the same incident.
+    /// How each one went is this function's return value, on the per-bug
+    /// family.
     async fn launch(
         &self,
         ctx: &SecurityContext,
         bug: &JiraBug,
         test_file: &str,
         branch: Option<&str>,
-    ) {
+    ) -> JiraBugOutcome {
+        emit(&self.metrics_silenced, || self.metrics.auto_rerun());
         match self
             .launcher
             .launch_test(
@@ -419,19 +547,25 @@ where
             )
             .await
         {
-            Ok(()) => tracing::info!(
-                jira_key = %bug.jira_key,
-                test_name = %bug.test_name,
-                test_file,
-                "auto-triggered a re-run",
-            ),
-            Err(error) => tracing::error!(
-                jira_key = %bug.jira_key,
-                test_name = %bug.test_name,
-                %error,
-                "failed to auto-trigger a re-run; the bug is already resolved, so this rerun \
-                 will not be retried",
-            ),
+            Ok(()) => {
+                tracing::info!(
+                    jira_key = %bug.jira_key,
+                    test_name = %bug.test_name,
+                    test_file,
+                    "auto-triggered a re-run",
+                );
+                JiraBugOutcome::Resolved
+            }
+            Err(error) => {
+                tracing::error!(
+                    jira_key = %bug.jira_key,
+                    test_name = %bug.test_name,
+                    %error,
+                    "failed to auto-trigger a re-run; the bug is already resolved, so this \
+                     rerun will not be retried",
+                );
+                JiraBugOutcome::LaunchFailed
+            }
         }
     }
 
@@ -471,6 +605,20 @@ where
             .find(|entry| entry.repo_id == repo_id && entry.test_name == test_name)
             .map(|entry| entry.test_file)
     }
+}
+
+/// Which of [`JiraPollerService::run_pass`]'s two successful ends a pass
+/// reached.
+///
+/// A type rather than a `bool` for the reason `run_pass`' own doc gives: the
+/// two are different operational events, and the one thing a `bool` return
+/// would not survive is somebody reading it the wrong way round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PassEnd {
+    /// The tenant has no active JIRA configuration; no bug was looked at.
+    Skipped,
+    /// Every open bug this tenant has was processed.
+    Completed,
 }
 
 #[cfg(test)]

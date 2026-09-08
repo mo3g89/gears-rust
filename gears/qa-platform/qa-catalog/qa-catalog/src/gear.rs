@@ -32,6 +32,7 @@ use crate::domain::system_actor;
 use crate::infra::bundle_store::LocalFsBundleStore;
 use crate::infra::fs::create_private_dir_all;
 use crate::infra::git::GixSyncEngine;
+use crate::infra::metrics::build_default_adapter;
 use crate::infra::storage::{
     OrmBundlesRepository, OrmCustomPlansRepository, OrmProductsRepository, OrmSshKeysRepository,
     OrmTestReposRepository,
@@ -178,11 +179,21 @@ impl Gear for QaCatalog {
         // Task 12 built this outside the container and said so, because at
         // that point nothing in this gear's REST layer touched a plugin.
         // Task 13's catalogue endpoint is what changed it.
+        // Unconditionally, with no `metrics.enabled` branch of our own to get
+        // wrong: `build_default_adapter` reads the process-global meter
+        // provider, which `toolkit`'s telemetry init leaves as the built-in
+        // no-op when metrics are switched off or never configured. So a
+        // deployment with no pipeline builds every instrument and emits into
+        // nothing, which is exactly the "silent with no adapter" posture the
+        // observability constraints ask for. See `infra::metrics`' header.
+        let metrics = build_default_adapter();
+
         let plugin_registry = Arc::new(QaProductRegistry::new(
             Arc::clone(&db),
             Arc::new(OrmProductsRepository),
             PolicyEnforcer::new(Arc::clone(&authz)),
             ctx.client_hub(),
+            Some(metrics),
         ));
 
         let services = Arc::new(AppServices::new(
@@ -659,5 +670,100 @@ mod tests {
         for configured in [MIN_BRANCH_REFRESH_INTERVAL_SECONDS, 900, 86_400] {
             assert_eq!(effective_branch_refresh_interval(configured), configured);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // What `init` wires, asserted against `init`'s own source
+    // -----------------------------------------------------------------------
+    //
+    // A source scan rather than a call, and for the reason the sibling gears'
+    // equivalents exist: `init` needs a database, a `ClientHub` and two
+    // resolved cross-gear clients, so standing one up here would be an
+    // integration harness for a two-line property. What has to be true is
+    // textual anyway -- *one* adapter is built, it reaches the registry, and no
+    // runtime switch guards it.
+
+    /// The body of `Gear::init`, comments stripped.
+    ///
+    /// # Two hazards, both handled rather than hoped away
+    ///
+    /// * **Comments are stripped first**, because `init`'s own justification
+    ///   for not consulting a metrics switch says the words `metrics.enabled`,
+    ///   and a naive scan would trip on the comment explaining why the thing it
+    ///   looks for is absent. `no_api_in_domain_tests` documents the same trap
+    ///   and solves it the same way.
+    /// * **The slice ends at the first method-closing brace**, not at the end
+    ///   of the file. The assertions below include a *negative* one, and an
+    ///   absence assertion is only as narrow as the text it is made over: a
+    ///   slice that ran on into the rest of the file would start answering
+    ///   questions about code `init` does not contain.
+    fn init_source() -> String {
+        let source = include_str!("gear.rs");
+        let start = source
+            .find("async fn init(&self, ctx: &GearCtx)")
+            .expect("gear.rs must declare Gear::init");
+        let body = &source[start..];
+        let end = body
+            .find("\n    }\n")
+            .expect("init must be closed by a brace at method indentation");
+        body[..end]
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **`init` builds exactly one metrics adapter and hands it to the plugin
+    /// registry, with no switch of its own.**
+    ///
+    /// Three claims, and the third is the one that is easy to get wrong later.
+    /// `build_default_adapter` reads the process-global meter provider, which
+    /// `toolkit`'s telemetry init leaves as the built-in no-op when metrics are
+    /// off or were never configured — so a `metrics.enabled` branch here would
+    /// be a second, independent switch that can disagree with the first, and
+    /// the disagreement's symptom is a gear that exports nothing while the
+    /// deployment believes telemetry is on.
+    ///
+    /// The registry is the only thing in this gear that emits, which is why
+    /// there is one wiring assertion and not two: `AppServices::new` takes the
+    /// same `Arc` by clone.
+    #[test]
+    fn init_installs_exactly_one_metrics_adapter_into_the_plugin_registry() {
+        let init = init_source();
+
+        assert_eq!(
+            init.matches("build_default_adapter()").count(),
+            1,
+            "init must build the adapter once and share the Arc"
+        );
+        assert!(
+            init.contains("Some(metrics)"),
+            "the adapter init built must reach QaProductRegistry::new, or nothing in this \
+             gear emits anything"
+        );
+        assert!(
+            !init.contains("metrics.enabled"),
+            "init must not carry a metrics switch of its own: the global meter provider is \
+             already the no-op when telemetry is off, and a second switch is a second thing \
+             that can disagree"
+        );
+    }
+
+    /// **The slice above covers exactly one method.**
+    ///
+    /// Pins the width by the property rather than by a length, so a rewritten
+    /// `init` cannot silently widen the negative assertion above. `impl Gear
+    /// for QaCatalog` is a *trait* impl, so no ad-hoc method can be added to
+    /// it — only a method the `Gear` trait itself grows and this gear
+    /// implements after `init` would widen the old slice — but that is a fact
+    /// about today's trait, not a guarantee, and this is the assertion that
+    /// survives it changing.
+    #[test]
+    fn the_init_slice_covers_exactly_one_method() {
+        assert_eq!(
+            init_source().matches(" fn ").count(),
+            1,
+            "init_source must not reach a second method declaration"
+        );
     }
 }

@@ -26,6 +26,7 @@
 //! business parameters only.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use authz_resolver_sdk::AuthZResolverClient;
 use authz_resolver_sdk::PolicyEnforcer;
@@ -34,6 +35,7 @@ use credstore_sdk::CredStoreClientV1;
 use toolkit_db::{DBProvider, DbError};
 use toolkit_macros::domain_model;
 
+use crate::domain::ports::metrics::{ObservationMetrics, PluginMetrics};
 use crate::domain::ports::{ProductPluginPort, RunnerSecretWriter};
 use crate::domain::repos::{EnvironmentsRepository, LeasesRepository, VariablesRepository};
 
@@ -69,6 +71,11 @@ mod environments_credentials_tests;
 #[cfg(test)]
 mod environments_observation_tests;
 
+/// Task 39's own tests: what the observation cycle reports about itself, read
+/// back through a real `OpenTelemetry` pipeline.
+#[cfg(test)]
+mod environments_metrics_tests;
+
 /// Task 15's own tests: what reaches the product plugin, and what its answer
 /// writes into both column sets.
 #[cfg(test)]
@@ -91,6 +98,103 @@ mod unscoped_read_guard_tests;
 
 #[cfg(test)]
 mod resources_tests;
+
+/// The one thing this gear's copy of [`emit`] owes the two gears it was copied
+/// from: that it is still the same guard.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "emit_tests.rs"]
+mod emit_tests;
+
+/// Run one metric emission so that it cannot fail the path it is measuring.
+///
+/// **Copied verbatim, body for body, from qa-runs' and qa-insights'
+/// `domain::service::emit`.** This is the third copy, and
+/// `emit_tests::the_guard_is_byte_for_byte_the_guard_the_sibling_gears_run` is
+/// what stops it becoming a third *variant*: it lifts the body out of all
+/// three files and asserts the three are identical, so a fix applied to one is
+/// visible as a failure in the other two. The docs are deliberately not
+/// compared -- each gear's argument is about its own paths, and a whole-file
+/// hash (the parity shape Phase 7 used for the permission catalog) would
+/// therefore fail on prose rather than on behaviour.
+///
+/// # Why this exists when the port's contract already forbids failing
+///
+/// [`crate::domain::ports::metrics`] states the contract -- an implementation
+/// must not panic, must not block, and has no error to propagate by
+/// construction -- and [`crate::infra::metrics::QaEnvironmentsMetricsMeter`]
+/// satisfies it structurally: every method is one `add` or one `record` on an
+/// instrument it already holds, with no `?`, no fallible lookup and no panic
+/// path.
+///
+/// Neither of those covers the call site.
+/// [`EnvironmentsService`] takes an `Arc<dyn ObservationMetrics>`, so what it
+/// holds is whatever was injected: a later adapter, a different gear's adapter
+/// copied across, a `debug_assert!` somebody adds inside one. "Metrics must not
+/// change behaviour" is a property of *the observation cycle*, and a property
+/// of that path cannot be discharged by a promise written in another module --
+/// a promise is exactly what a defect breaks. So the emission is guarded here,
+/// where the path is, and
+/// `a_broken_metrics_adapter_does_not_fail_an_observation_cycle` drives a
+/// deliberately panicking port through it.
+///
+/// # It is silent
+///
+/// A caught panic is dropped rather than logged. Logging here would be a log
+/// line **per emission**, and on the per-environment path that is one line per
+/// registered environment per cycle -- the failure mode the observability
+/// constraints name explicitly, arriving exactly when the process can least
+/// absorb it. The panic hook has already run by the time control returns here,
+/// so the panic itself is not invisible: it reaches stderr like any other.
+///
+/// [`std::panic::AssertUnwindSafe`] is sound for the reason it is normally
+/// unsound: the state a panicking emission may have left inconsistent is that
+/// implementation's own instrument state, and nothing in this crate ever reads
+/// it back. A metric this gear cannot record is a metric this gear drops.
+///
+/// # It latches off, and that is the half the guard alone does not give
+///
+/// Catching is not enough on its own. A *persistently* broken adapter -- a
+/// poisoned instrument lock is the realistic shape -- panics on **every** call,
+/// and the default panic hook writes a line to stderr each time before control
+/// returns here. So the first caught panic latches `silenced`, and every later
+/// emission through that latch returns without calling anything. Deliberately
+/// permanent: an emission that panicked once has no claim on being retried, the
+/// alternatives (a rate limit, a backoff) are state and policy on a path whose
+/// whole contract is that it changes nothing, and a metric that stops is a
+/// visibly flat series -- a better failure than a log flood. Nothing resets it;
+/// a restart does.
+///
+/// **The latch is the caller's, not a global**, and the one service that emits
+/// owns one. Per service rather than process-wide because a global would make
+/// the broken-adapter test silence every other metric test in the binary under
+/// a threaded `cargo test`, where this crate's suites share a process; every
+/// gate in this repository runs this crate through nextest, which is
+/// process-per-test, so that would not have been caught here.
+///
+/// # Precondition: this crate unwinds
+///
+/// `catch_unwind` catches nothing under `panic = "abort"`, where the first
+/// panicking emission would take the process instead. The workspace sets
+/// `panic = "unwind"` explicitly in `[profile.release]`, and the dev and test
+/// profiles inherit the same default, so the guard is live in every profile
+/// this gear is built under today. **Changing that setting silently disables
+/// everything documented above**: the broken-adapter test would abort rather
+/// than fail, so the suite would report a crashed binary rather than a
+/// regression here.
+///
+/// `Relaxed` on both accesses: the latch orders nothing and guards no data. The
+/// whole cost of the weakest ordering is that a racing thread may read `false`
+/// once more and produce one more panic, against paying for a fence on a path
+/// whose contract is that it costs nothing.
+pub(in crate::domain::service) fn emit(silenced: &AtomicBool, record: impl FnOnce()) {
+    if silenced.load(Ordering::Relaxed) {
+        return;
+    }
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(record)).is_err() {
+        silenced.store(true, Ordering::Relaxed);
+    }
+}
 
 /// `DB` provider alias (mirrors users-info).
 pub type DbProvider = DBProvider<DbError>;
@@ -188,10 +292,10 @@ where
         clippy::too_many_arguments,
         reason = "the DI container's constructor takes one argument per collaborator it wires \
                   (three repositories, the db provider, authz, credstore, the observation \
-                  port, the product-plugin port, and the one scalar knob). Grouping them into \
-                  a parameter struct would move the same nine names one indirection away \
-                  without removing any of them, and `AppServices::new` has exactly one caller \
-                  (`gear.rs`'s `init`)."
+                  port, the product-plugin port, the two metrics ports, and the one scalar \
+                  knob). Grouping them into a parameter struct would move the same eleven \
+                  names one indirection away without removing any of them, and \
+                  `AppServices::new` has exactly one caller (`gear.rs`'s `init`)."
     )]
     pub fn new(
         environments_repo: Arc<P>,
@@ -202,6 +306,8 @@ where
         credstore: Arc<dyn CredStoreClientV1>,
         observer: Arc<dyn RunnerSecretWriter>,
         product_plugins: Arc<dyn ProductPluginPort>,
+        metrics: Option<Arc<dyn ObservationMetrics>>,
+        plugin_metrics: Option<Arc<dyn PluginMetrics>>,
         max_variables: usize,
     ) -> Self {
         let enforcer = PolicyEnforcer::new(authz);
@@ -214,6 +320,8 @@ where
                 credstore,
                 observer,
                 product_plugins,
+                metrics,
+                plugin_metrics,
                 enforcer.clone(),
             ),
             variables: VariablesService::new(

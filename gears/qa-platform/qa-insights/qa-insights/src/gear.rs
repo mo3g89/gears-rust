@@ -96,6 +96,7 @@ use crate::api::rest::routes;
 use crate::config::QaInsightsConfig;
 use crate::domain::error::DomainError;
 use crate::domain::local_client::QaInsightsLocalClient;
+use crate::domain::ports::metrics::{CollectMetrics, JiraPollMetrics};
 use crate::domain::ports::{MailClient, RunsLauncher, RunsReader, SlackClient};
 use crate::domain::service::reconcile::ReconcileOutcome;
 use crate::domain::service::{AppServices, ServiceDeps};
@@ -528,6 +529,21 @@ impl Gear for QaInsights {
         // struct's own header for why this is one adapter and not two.
         let qa_runs_reader = Arc::new(QaRunsReader::new(qa_runs));
 
+        // Built unconditionally, and there is deliberately no "metrics
+        // enabled" branch: `build_default_adapter` reads the process-global
+        // meter provider, which `toolkit`'s `telemetry::init_metrics_provider`
+        // leaves as the built-in `NoopMeterProvider` whenever metrics are
+        // disabled or no pipeline is configured at all. A branch here would be
+        // a second, weaker copy of that rule, and the failure it invites is
+        // silent in both directions — a configured pipeline with nothing
+        // emitting into it, or one port wired and the other dark.
+        //
+        // One adapter, two ports: the collect service and the JIRA poller
+        // report through the same instruments, so the two halves of this
+        // gear's background story cannot disagree about which meter they are
+        // on.
+        let metrics = crate::infra::metrics::build_default_adapter();
+
         let services = Arc::new(AppServices::new(
             OrmResultsRepository,
             OrmWatermarkRepository,
@@ -595,6 +611,9 @@ impl Gear for QaInsights {
                 // Task 30 fix round 1's: the HMAC key that authenticates the
                 // callback's tenant claim.
                 collect_report_signing_secret: cfg.collect_report_signing_secret.clone(),
+                // Task 38 of the observability plan.
+                collect_metrics: Some(Arc::clone(&metrics) as Arc<dyn CollectMetrics>),
+                jira_poll_metrics: Some(metrics as Arc<dyn JiraPollMetrics>),
             },
         ));
 
@@ -1709,6 +1728,125 @@ mod tests {
         assert_eq!(
             cadence.interval_seconds, MIN_COLLECT_INTERVAL_SECONDS,
             "the raw 1 must never reach serve"
+        );
+    }
+
+    /// `Gear::init`'s own source, isolated so a wiring assertion can be made
+    /// against it without booting the gear.
+    ///
+    /// A source scan, and the reason is the same one every other composition
+    /// assertion in this file gives: `init` needs a database, a `ClientHub` and
+    /// five resolved cross-gear clients before it will run a single line, and
+    /// the harness that supplies those is `tests/ingest_idempotence.rs`, which
+    /// cannot see whether a *field* was wired.
+    ///
+    /// # The slice really is `init` and nothing after it
+    ///
+    /// It ends at the first line that is exactly four spaces and a closing
+    /// brace, which is the method's own closing brace: everything inside the
+    /// body is indented at least eight.
+    ///
+    /// The alternative this replaced — slicing to the enclosing block's
+    /// `\n}\n` — returns the same text today, because `init` is the only item
+    /// in that block. **Its risk is narrow rather than absent**, and worth
+    /// naming precisely: the block is `impl Gear for QaInsights`, a *trait*
+    /// impl, so no ad-hoc method can be added to it — only a method the `Gear`
+    /// trait itself grows and this gear implements after `init` would widen
+    /// the slice. That is unlikely and not impossible, and the cost of ruling
+    /// it out is one different call to `find`.
+    ///
+    /// It is worth ruling out because
+    /// `init_installs_one_metrics_adapter_into_both_ports` asserts something is
+    /// **absent**, and an absence assertion is only as narrow as its slice: a
+    /// slice that quietly grew would start reporting on code `init` does not
+    /// contain. [`the_init_slice_covers_exactly_one_method`] is what pins the
+    /// width; widening this function fails both tests, measured.
+    fn init_source() -> &'static str {
+        let src = include_str!("gear.rs");
+        let start = src
+            .find("    async fn init(")
+            .expect("gear.rs declares Gear::init");
+        let tail = &src[start..];
+        let end = tail
+            .find("\n    }\n")
+            .expect("init's body is closed at its own indentation");
+        &tail[..end]
+    }
+
+    /// **The slice `init_source` returns stops at the end of `init`.**
+    ///
+    /// `init_installs_one_metrics_adapter_into_both_ports` is a source-text
+    /// assertion, so the width of [`init_source`]'s slice is part of what it
+    /// asserts: a slice that ran past `init` would make its `metrics.enabled`
+    /// check report on somebody else's method. This pins the width by the
+    /// property that makes it narrow — one method declaration — rather than by
+    /// a length, which would need updating every time `init` gained a line.
+    #[test]
+    fn the_init_slice_covers_exactly_one_method() {
+        let body = init_source();
+        assert_eq!(
+            body.matches("\n    async fn ").count() + body.matches("\n    fn ").count(),
+            0,
+            "init_source must not reach a second method declaration: {body}"
+        );
+        assert!(
+            body.starts_with("    async fn init("),
+            "and it must start at init's own declaration: {body}"
+        );
+    }
+
+    /// **The metrics adapter is installed unconditionally, into both ports.**
+    ///
+    /// The two defects this guards are opposite and both silent. Wrapping the
+    /// construction in a "metrics enabled" branch would leave the gear with a
+    /// pipeline configured and nothing emitting into it; passing the adapter to
+    /// one field and not the other would leave one of the two measured paths
+    /// dark while the dashboard for the other looked healthy. Neither is a
+    /// compile error — both `ServiceDeps` fields are `Option`, so omitting one
+    /// is legal, and every test in this crate would still pass.
+    ///
+    /// **Nothing here needs a "metrics off" branch**, which is why the absence
+    /// of one is assertable at all: `infra::metrics::build_default_adapter`
+    /// reads the process-global meter provider, which `toolkit`'s
+    /// `telemetry::init_metrics_provider` leaves as the built-in
+    /// `NoopMeterProvider` when metrics are disabled — and never replaces at
+    /// all when no pipeline is configured. That the resulting adapter is safe
+    /// to build and emit through is
+    /// `infra::metrics::tests::the_default_adapter_emits_silently_with_no_pipeline_configured`.
+    ///
+    /// The no-branch half reads **code only**, with comments stripped first:
+    /// `init` legitimately explains in prose why it does not consult that
+    /// config key, and a scan of the raw text would flag its own justification
+    /// the moment somebody wrote one. `no_api_in_domain_tests` documents the
+    /// same trap and strips comments for the same reason.
+    ///
+    /// Every assertion message below is one unbroken literal: a
+    /// `\\`-continued string collapses to a run of spaces once rustfmt has
+    /// re-indented it, which is how such a message reads on failure.
+    #[test]
+    fn init_installs_one_metrics_adapter_into_both_ports() {
+        let body = init_source();
+        assert_eq!(
+            body.matches("build_default_adapter()").count(),
+            1,
+            "init must build the adapter once and share the Arc: {body}"
+        );
+        assert!(
+            body.contains("collect_metrics: Some("),
+            "premise: the collect port must be wired, or nothing measures the collect cycle or its signed callback in production while every test still passes: {body}"
+        );
+        assert!(
+            body.contains("jira_poll_metrics: Some("),
+            "premise: the poller port must be wired, or the per-bug failures this gear swallows stay invisible in production: {body}"
+        );
+        let code: String = body
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("metrics.enabled"),
+            "init must not branch on whether a pipeline is configured: an uninstalled provider already makes every instrument a no-op, and a branch here would be a second, weaker copy of that rule: {code}"
         );
     }
 }

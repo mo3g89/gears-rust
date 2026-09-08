@@ -2707,6 +2707,10 @@ async fn the_di_container_assembles_a_working_launch_service() {
                 queue_ttl_seconds: 7200,
             },
             orphan_timeout_seconds: 600,
+            // `None` is the production default: `NoopMetrics`, which emits
+            // everything a wired gear emits and lets nothing observe it.
+            dispatch_metrics: None,
+            ingest_metrics: None,
         },
     );
 

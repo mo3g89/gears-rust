@@ -2178,6 +2178,11 @@ impl Fleet {
                     queue_ttl_seconds: 7200,
                 },
                 orphan_timeout_seconds: 600,
+                // The production default for a fixture that reads no metrics:
+                // `None` installs `NoopMetrics`, which emits everything the
+                // wired gear emits and lets nothing observe it.
+                dispatch_metrics: None,
+                ingest_metrics: None,
             },
         ))
     }

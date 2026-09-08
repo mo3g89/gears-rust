@@ -172,6 +172,13 @@ serde = { workspace = true }
 # encode and decode sides cannot silently drift onto two different escaping
 # rules for the branch-in-a-query-parameter decision that module's header
 # argues for.
+# Task 38 of the observability plan: the metric instruments
+# `infra::metrics::QaInsightsMetricsMeter` holds, and the process-global meter
+# provider `build_default_adapter` reads. Only the `Counter`/`Histogram`/`Meter`
+# surface and `global::meter_with_scope` are used; the SDK itself
+# (`opentelemetry_sdk`) is a dev-dependency, because a gear emits into whatever
+# pipeline `toolkit`'s telemetry init installed and never builds one.
+opentelemetry = { workspace = true }
 serde_urlencoded = { workspace = true }
 # Task 12: the two `JSONB` columns cross `infra::storage::mapper` as
 # `sea_orm`'s `Json` (i.e. `serde_json::Value`) on one side and a plain
@@ -414,3 +421,13 @@ testcontainers-modules = { workspace = true, optional = true }
 # `tower` — and the same crate `axum` already builds on, so it adds no new
 # dependency tree.
 tower = { workspace = true }
+# Task 38 of the observability plan: `InMemoryMetricExporter` and
+# `SdkMeterProvider`, which `infra::metrics::probe` builds a private pipeline
+# out of so an adapter test can read back the series a dashboard would query.
+#
+# **The `testing` feature is declared here rather than relied on from another
+# crate's declaration.** Cargo unifies features across a workspace build, so
+# qa-runs' identical entry would silence a missing one on a default `cargo
+# test` — and `cargo hack --each-feature`, which is a green gate, builds this
+# package on its own, where it would not.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
