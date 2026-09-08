@@ -33,7 +33,7 @@
 use std::sync::Arc;
 
 use crate::domain::service::DbProvider;
-use qa_runs_sdk::{LaunchRequest, RunSource, RunState, RunTarget};
+use qa_runs_sdk::{Exclusivity, LaunchRequest, RunSource, RunState, RunTarget};
 use toolkit_db::DBProvider;
 use toolkit_odata::ODataQuery;
 use uuid::Uuid;
@@ -44,7 +44,7 @@ use super::{AppServices, LogArchive, QueueLimits, ServiceDeps};
 use crate::domain::error::DomainError;
 use crate::domain::ports::run_executor::RunExecutor;
 use crate::domain::repos::RunsRepository;
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 use crate::infra::executor::mock::MockRunExecutor;
 use crate::infra::logs::RunLogBroadcaster;
 use crate::infra::storage::test_db::{inmem_db, scope};
@@ -73,7 +73,7 @@ async fn services() -> (Arc<ConcreteAppServices>, Arc<DbProvider>) {
 async fn services_with(
     catalog: Arc<FakeCatalog>,
     environments: Arc<FakeEnvironments>,
-    authz: Arc<dyn authz_resolver_sdk::AuthZResolverClient>,
+    authz: Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
 ) -> (Arc<ConcreteAppServices>, Arc<DbProvider>) {
     let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
     let services = Arc::new(AppServices::new(
@@ -96,6 +96,7 @@ async fn services_with(
             // `None` wires the real watcher, which is what these tests want: the
             // point is that a production wiring stays tenant-scoped.
             watcher: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
             default_timeout_seconds: 3600,
             limits: QueueLimits {
                 queue_max_depth: 20,
@@ -103,6 +104,10 @@ async fn services_with(
                 queue_ttl_seconds: 7200,
             },
             orphan_timeout_seconds: 600,
+            // `None` is the production default: `NoopMetrics`, which emits
+            // everything a wired gear emits and lets nothing observe it.
+            dispatch_metrics: None,
+            ingest_metrics: None,
         },
     ));
     (services, db)
@@ -120,7 +125,7 @@ fn launch_against(platform: Option<Uuid>) -> LaunchRequest {
         include_tags: vec![],
         exclude_tags: vec![],
         parameters: vec![],
-        exclusive: None,
+        exclusive: Exclusivity::Inherit,
         timeout_seconds: None,
         source: RunSource::Manual,
         schedule_id: None,
@@ -484,7 +489,7 @@ async fn the_reconciler_reads_are_invisible_to_another_tenant() {
         toolkit::api::canonical_prelude::Problem::from_error(&problem)
             .expect("a problem must serialize")
             .status,
-        404,
+        Some(404),
         "and it must be indistinguishable from a run that does not exist, \
          which is what closes the cross-tenant existence oracle: {problem}"
     );

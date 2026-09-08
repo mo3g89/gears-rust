@@ -139,24 +139,18 @@ impl ODataFieldMapping<RunFilterField> for RunODataMapper {
 
     fn extract_cursor_value(model: &RunModel, field: RunFilterField) -> Value {
         match field {
-            RunFilterField::Id => Value::Uuid(Some(Box::new(model.id))),
-            RunFilterField::Name => Value::String(Some(Box::new(model.name.clone()))),
-            RunFilterField::State => Value::String(Some(Box::new(model.state.clone()))),
-            RunFilterField::RunKind => Value::String(Some(Box::new(model.run_kind.clone()))),
-            RunFilterField::EnvironmentId => Value::Uuid(model.environment_id.map(Box::new)),
-            RunFilterField::Source => Value::String(Some(Box::new(model.source.clone()))),
-            RunFilterField::ScheduleId => Value::Uuid(model.schedule_id.map(Box::new)),
+            RunFilterField::Id => Value::Uuid(Some(model.id)),
+            RunFilterField::Name => Value::String(Some(model.name.clone())),
+            RunFilterField::State => Value::String(Some(model.state.clone())),
+            RunFilterField::RunKind => Value::String(Some(model.run_kind.clone())),
+            RunFilterField::EnvironmentId => Value::Uuid(model.environment_id),
+            RunFilterField::Source => Value::String(Some(model.source.clone())),
+            RunFilterField::ScheduleId => Value::Uuid(model.schedule_id),
             RunFilterField::ResolvedExclusive => Value::Bool(Some(model.resolved_exclusive)),
             RunFilterField::IsValidation => Value::Bool(Some(model.is_validation)),
-            RunFilterField::CreatedAt => {
-                Value::TimeDateTimeWithTimeZone(Some(Box::new(model.created_at)))
-            }
-            RunFilterField::StartedAt => {
-                Value::TimeDateTimeWithTimeZone(model.started_at.map(Box::new))
-            }
-            RunFilterField::FinishedAt => {
-                Value::TimeDateTimeWithTimeZone(model.finished_at.map(Box::new))
-            }
+            RunFilterField::CreatedAt => Value::TimeDateTimeWithTimeZone(Some(model.created_at)),
+            RunFilterField::StartedAt => Value::TimeDateTimeWithTimeZone(model.started_at),
+            RunFilterField::FinishedAt => Value::TimeDateTimeWithTimeZone(model.finished_at),
         }
     }
 }
@@ -258,22 +252,18 @@ impl ODataFieldMapping<QueueFilterField> for QueueODataMapper {
 
     fn extract_cursor_value(model: &QueueModel, field: QueueFilterField) -> Value {
         match field {
-            QueueFilterField::Id => Value::Uuid(Some(Box::new(model.id))),
-            QueueFilterField::RunId => Value::Uuid(Some(Box::new(model.run_id))),
-            QueueFilterField::EnvironmentId => Value::Uuid(Some(Box::new(model.environment_id))),
-            QueueFilterField::State => Value::String(Some(Box::new(model.state.clone()))),
-            QueueFilterField::RunKind => Value::String(Some(Box::new(model.run_kind.clone()))),
-            QueueFilterField::Source => Value::String(Some(Box::new(model.source.clone()))),
+            QueueFilterField::Id => Value::Uuid(Some(model.id)),
+            QueueFilterField::RunId => Value::Uuid(Some(model.run_id)),
+            QueueFilterField::EnvironmentId => Value::Uuid(Some(model.environment_id)),
+            QueueFilterField::State => Value::String(Some(model.state.clone())),
+            QueueFilterField::RunKind => Value::String(Some(model.run_kind.clone())),
+            QueueFilterField::Source => Value::String(Some(model.source.clone())),
             QueueFilterField::Exclusive => Value::Bool(Some(model.exclusive)),
             QueueFilterField::EnqueuedAt => {
-                Value::TimeDateTimeWithTimeZone(Some(Box::new(model.enqueued_at)))
+                Value::TimeDateTimeWithTimeZone(Some(model.enqueued_at))
             }
-            QueueFilterField::DispatchedAt => {
-                Value::TimeDateTimeWithTimeZone(model.dispatched_at.map(Box::new))
-            }
-            QueueFilterField::FinishedAt => {
-                Value::TimeDateTimeWithTimeZone(model.finished_at.map(Box::new))
-            }
+            QueueFilterField::DispatchedAt => Value::TimeDateTimeWithTimeZone(model.dispatched_at),
+            QueueFilterField::FinishedAt => Value::TimeDateTimeWithTimeZone(model.finished_at),
         }
     }
 }

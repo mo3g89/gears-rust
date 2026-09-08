@@ -15,27 +15,26 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
 use qa_catalog_sdk::{
     CustomPlanEntry, NewCustomPlan, NewCustomPlanEntry, NewProduct, NewTestRepository,
-    ProductUpdate, TestBundle, TestRepositoryUpdate,
+    ProductUpdate, TestRepositoryUpdate,
 };
-use time::OffsetDateTime;
-use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::repos::BundlesRepository;
 use crate::domain::system_actor;
-use crate::infra::storage::OrmBundlesRepository;
 use crate::test_support::{
     DenyAllAuthZ, all_branch_rows, build_services, build_services_tenant_scoped,
     build_services_tenant_scoped_at, build_services_tenant_scoped_with_credstore,
-    build_services_with_branch_listing, ctx, inmem_db, seed_product, seed_raw_custom_plan_row,
+    build_services_with_branch_listing, ctx, inmem_db, seed_expired_bundle, seed_product,
+    seed_raw_custom_plan_row,
 };
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 fn new_repo(name: &str, product_id: Uuid) -> NewTestRepository {
     NewTestRepository {
@@ -1019,7 +1018,7 @@ async fn refreshed_branch_rows_carry_their_own_repo_tenant() {
     );
 }
 
-/// [`AuthZResolverClient`] double that records every request it is asked to
+/// [`AuthZResolverApi`] double that records every request it is asked to
 /// decide and always grants tenant-scoped access — the harness for
 /// [`branch_refresh_enumeration_does_not_consult_the_policy_engine`]: a
 /// request that slipped through to `evaluate` is recorded here regardless of
@@ -1036,11 +1035,12 @@ impl RecordingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for RecordingAuthZ {
+impl AuthZResolverApi for RecordingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.requests
             .lock()
             .unwrap()
@@ -1095,32 +1095,6 @@ async fn branch_refresh_enumeration_does_not_consult_the_policy_engine() {
         0,
         "the branch-cache enumeration must elevate through domain::elevated, not the PEP"
     );
-}
-
-/// A bundle descriptor expired at `offset` from now, seeded straight through
-/// [`OrmBundlesRepository`] under [`AccessScope::allow_all`] — ground truth,
-/// bypassing `BundlesService::create_bundle` entirely, since that method
-/// always sets `expires_at` from the configured TTL and can never produce an
-/// already-expired row.
-async fn seed_expired_bundle(db: &toolkit_db::Db, tenant_id: Uuid, offset: time::Duration) {
-    let conn = db.conn().expect("conn");
-    let now = OffsetDateTime::now_utc();
-    OrmBundlesRepository
-        .create(
-            &conn,
-            &AccessScope::allow_all(),
-            tenant_id,
-            TestBundle {
-                id: Uuid::new_v4(),
-                storage_ref: format!("mem:{tenant_id}"),
-                checksum_sha256: "0".repeat(64),
-                size_bytes: 1,
-                expires_at: now + offset,
-                created_at: now - time::Duration::hours(2),
-            },
-        )
-        .await
-        .expect("seed expired bundle");
 }
 
 /// The bundle GC's full split, against the real `SeaORM` repository: the

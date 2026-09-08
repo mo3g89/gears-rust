@@ -108,9 +108,8 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use authz_resolver_sdk::AuthZResolverClient;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
-use authz_resolver_sdk::error::AuthZResolverError;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
@@ -123,6 +122,8 @@ use toolkit::api::{OpenApiInfo, OpenApiRegistryImpl};
 use toolkit::config::ConfigProvider;
 use toolkit::lifecycle::Runnable;
 use toolkit::{ClientHub, Gear, GearCtx, RestApiCapability};
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 use toolkit_security::{SecurityContext, pep_properties};
 
 use qa_insights::QaInsights;
@@ -159,11 +160,12 @@ const APP_VERSION: &str = "9.1.0";
 struct TenantScopedAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for TenantScopedAuthZ {
+impl AuthZResolverApi for TenantScopedAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let root_id = request
             .context
             .tenant_context
@@ -1006,7 +1008,7 @@ async fn boot(results: &[(&str, &str, &str)], enable_tickers: bool) -> BootedGea
 
     let finished_at = OffsetDateTime::now_utc();
     let hub = Arc::new(ClientHub::new());
-    hub.register::<dyn AuthZResolverClient>(Arc::new(TenantScopedAuthZ));
+    hub.register::<dyn AuthZResolverApi>(Arc::new(TenantScopedAuthZ));
     hub.register::<dyn QaRunsClientV1>(Arc::new(FakeQaRuns {
         run: fixture_run(finished_at),
         rows: results

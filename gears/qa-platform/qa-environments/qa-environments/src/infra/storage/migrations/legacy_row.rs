@@ -34,7 +34,7 @@ pub(super) async fn insert(conn: &DatabaseConnection, table: &str, columns: &[(&
         .map(|(_, value)| value.clone())
         .collect::<Vec<_>>()
         .join(", ");
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         conn.get_database_backend(),
         format!("INSERT INTO {table} ({names}) VALUES ({values});"),
     ))

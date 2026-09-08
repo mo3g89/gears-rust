@@ -75,6 +75,11 @@ CREATE TABLE IF NOT EXISTS credstore_plugin_values (
             sea_orm::DatabaseBackend::MySql => {
                 return Err(DbErr::Custom(MYSQL_NOT_SUPPORTED.to_owned()));
             }
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         };
 
         let statements = [

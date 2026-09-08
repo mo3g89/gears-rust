@@ -19,6 +19,13 @@ use crate::domain::parsing::plan_yaml::DEFAULT_TIMEOUT_SECONDS;
 const VALID_PLAN_A: &str = "name: smoke\ntests:\n  - tests/test_a.py\n";
 const VALID_PLAN_B: &str =
     "name: upgrade\ntags: [e2e]\nexclusive: true\ntests:\n  - tests/test_b.py\n";
+/// An explicit `exclusive: false` plan: distinct from `VALID_PLAN_A`'s absent
+/// key. A conversion that only checked `Some(true)` and defaulted everything
+/// else to `Inherit` would pass with `VALID_PLAN_A` and `VALID_PLAN_B` alone —
+/// this is what `list_plans_parses_fixtures_and_skips_invalid` needs to catch
+/// that collapse at `to_sdk_plan`, the boundary that reads a stored
+/// `plan.yaml`.
+const VALID_PLAN_C: &str = "name: parallel\nexclusive: false\ntests:\n  - tests/test_c.py\n";
 const BROKEN_PLAN: &str = "name: broken\ntests: {not-a-list: true\n";
 /// A test file the on-disk derivation must keep (it carries a `TEST_META` block).
 const META: &str = "TEST_META = {'title': 'T'}\n\ndef test_x():\n    pass\n";
@@ -36,6 +43,57 @@ async fn build_service(
     let enforcer = PolicyEnforcer::new(Arc::new(PermissiveAuthZ));
     let db = test_db_provider().await;
     PlansService::new(db, repos, repos_dir, enforcer)
+}
+
+/// Whether mode bits actually deny access on this host.
+///
+/// Task 11 needs a reliable non-`NotFound` IO error (`PermissionDenied` on a
+/// `chmod 000` file) to prove an unreadable-but-present file is `Internal`,
+/// not "absent". Root cannot be denied by mode bits, so tests that need this
+/// probe first and skip rather than looking up the uid: creating the file,
+/// attempting the read, and checking whether it *succeeded* tests the
+/// property the test actually depends on ("can mode bits deny this
+/// process?"), not a proxy for it, and needs no `libc`/`nix` dependency.
+fn permissions_are_enforced() -> bool {
+    let probe = tempfile::NamedTempFile::new().unwrap();
+    std::fs::set_permissions(
+        probe.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+    let enforced = std::fs::read(probe.path()).is_err();
+    if !enforced {
+        // Silent skips here would make a root CI run report e.g. "8/8
+        // passed" while only 4 of the 8 permission-gated tests actually ran
+        // their EACCES path -- say so on stderr so that isn't mistaken for
+        // full coverage.
+        eprintln!(
+            "permissions_are_enforced: mode bits did not deny access (running as root?) \
+             -- skipping permission-gated test"
+        );
+    }
+    enforced
+}
+
+/// Restores a path's permissions on drop, including through a panicking
+/// assertion. Without this, a test that `chmod 000`s a directory and then
+/// panics on `unwrap_err()`/`assert!` (as one of these did during this
+/// task's own RED run) leaves an undeletable directory behind for
+/// `TempDir::drop` to trip over.
+struct RestorePermsOnDrop<'a> {
+    path: &'a Path,
+    mode: u32,
+}
+
+impl Drop for RestorePermsOnDrop<'_> {
+    fn drop(&mut self) {
+        // Best-effort: there is nothing sensible to do with a failure inside
+        // a destructor, and this only ever runs in tests.
+        drop(std::fs::set_permissions(
+            self.path,
+            std::os::unix::fs::PermissionsExt::from_mode(self.mode),
+        ));
+    }
 }
 
 /// Tempdir + synced repo fixture whose `main` branch snapshot exists under
@@ -56,10 +114,11 @@ async fn list_plans_parses_fixtures_and_skips_invalid() {
     let repo_id = Uuid::new_v4();
     let (tmp, repos, workdir) = synced_fixture(repo_id);
 
-    // 2 valid + 1 broken in the file-based `plans/` layout → 2 plans; the
+    // 3 valid + 1 broken in the file-based `plans/` layout → 3 plans; the
     // broken one is skipped without hiding the rest.
     write(&workdir, "plans/smoke.yaml", VALID_PLAN_A);
     write(&workdir, "plans/upgrade.yaml", VALID_PLAN_B);
+    write(&workdir, "plans/parallel.yaml", VALID_PLAN_C);
     write(&workdir, "plans/broken.yaml", BROKEN_PLAN);
 
     let svc = build_service(repos, tmp.path().to_path_buf()).await;
@@ -69,22 +128,30 @@ async fn list_plans_parses_fixtures_and_skips_invalid() {
         .unwrap();
     plans.sort_by(|a, b| a.path.cmp(&b.path));
 
-    assert_eq!(plans.len(), 2, "the broken plan must be skipped, not fatal");
-    assert_eq!(plans[0].path, "plans/smoke.yaml");
-    assert_eq!(plans[0].name, "smoke");
-    assert_eq!(plans[0].repo_id, repo_id);
-    assert_eq!(plans[0].branch, "main");
+    assert_eq!(plans.len(), 3, "the broken plan must be skipped, not fatal");
+    assert_eq!(plans[0].path, "plans/parallel.yaml");
     assert_eq!(
-        plans[0].exclusive, None,
-        "absent exclusive stays None (inherit)"
+        plans[0].exclusive,
+        qa_catalog_sdk::Exclusivity::Shared,
+        "an on-disk `exclusive: false` must arrive as Shared, not collapse to Inherit \
+         the way a conversion checking only `Some(true)` would"
+    );
+    assert_eq!(plans[1].path, "plans/smoke.yaml");
+    assert_eq!(plans[1].name, "smoke");
+    assert_eq!(plans[1].repo_id, repo_id);
+    assert_eq!(plans[1].branch, "main");
+    assert_eq!(
+        plans[1].exclusive,
+        qa_catalog_sdk::Exclusivity::Inherit,
+        "absent exclusive stays Inherit"
     );
     assert!(
-        !plans[0].validation,
+        !plans[1].validation,
         "a plan with neither the bool nor a `validation` tag is not a validation run"
     );
-    assert_eq!(plans[1].path, "plans/upgrade.yaml");
-    assert_eq!(plans[1].exclusive, Some(true));
-    assert_eq!(plans[1].tags, vec!["e2e".to_owned()]);
+    assert_eq!(plans[2].path, "plans/upgrade.yaml");
+    assert_eq!(plans[2].exclusive, qa_catalog_sdk::Exclusivity::Exclusive);
+    assert_eq!(plans[2].tags, vec!["e2e".to_owned()]);
 }
 
 #[tokio::test]
@@ -481,6 +548,121 @@ fn require_synced_rejects_a_never_synced_repo() {
     ));
 }
 
+/// A working directory that exists but cannot be resolved is not "never
+/// synced". `content_root_dir` mapped every `canonicalize` failure on the
+/// workdir or the content root to `RepoNotSynced`, which is right when the
+/// path is absent and wrong otherwise. Review finding #26.
+///
+/// `EACCES` on `canonicalize` needs a directory with its execute bit
+/// removed somewhere *inside* the path being resolved (denying traversal),
+/// not just on the leaf: stat-ing an entry only needs search permission on
+/// its containing directory, not on the entry itself. So this chmods the
+/// `branches` directory that contains the branch workdir, not the workdir
+/// itself. Skipped when running as root, which cannot be denied this way.
+#[test]
+fn content_root_dir_reports_internal_not_not_synced_on_a_permission_failure() {
+    if !permissions_are_enforced() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_id = Uuid::new_v4();
+    let repo = repo_fixture(repo_id, true);
+    let workdir = crate::infra::git::layout::branch_workdir(tmp.path(), repo_id, "main");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let branches_dir = workdir.parent().unwrap();
+    std::fs::set_permissions(
+        branches_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+    // Runs on drop even if the assertions below panic, so a failing
+    // assertion can never leave a `0o000` directory for `tmp`'s own
+    // `TempDir::drop` to trip over.
+    let _restore = RestorePermsOnDrop {
+        path: branches_dir,
+        mode: 0o755,
+    };
+
+    let err = super::plans::content_root_dir(tmp.path(), &repo, "main").unwrap_err();
+
+    let DomainError::Internal(message) = &err else {
+        panic!("an EACCES resolving the workdir must not read as RepoNotSynced; got {err:?}");
+    };
+    assert!(
+        message.contains("working directory exists but could not be resolved"),
+        "expected the working-directory message, got {message:?}"
+    );
+}
+
+/// The other half: a genuinely never-materialized branch is still
+/// `RepoNotSynced`.
+#[test]
+fn content_root_dir_still_reports_not_synced_when_genuinely_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_id = Uuid::new_v4();
+    let repo = repo_fixture(repo_id, true);
+    // No workdir created at all: this branch was never materialized.
+    let err = super::plans::content_root_dir(tmp.path(), &repo, "main").unwrap_err();
+    assert!(
+        matches!(err, DomainError::RepoNotSynced { .. }),
+        "got {err:?}"
+    );
+}
+
+/// A path that cannot be resolved (EACCES on a directory in the middle of
+/// it) is not the same as a path that does not exist. `resolve_under_root`
+/// answered both with `Ok(None)`, which callers turn into a 404 (`get_plan`,
+/// `get_test_meta`) or a silently dropped exclusivity vote
+/// (`walk_repo_universe`). Review finding #8.
+///
+/// Skipped when running as root, which cannot be denied by mode bits.
+#[test]
+fn resolve_under_root_reports_internal_not_absent_on_a_permission_failure() {
+    if !permissions_are_enforced() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let locked_dir = root.join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    std::fs::write(locked_dir.join("file.py"), "pass\n").unwrap();
+    std::fs::set_permissions(
+        &locked_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+    // Runs on drop even if the assertions below panic, so a failing
+    // assertion can never leave a `0o000` directory for `tmp`'s own
+    // `TempDir::drop` to trip over.
+    let _restore = RestorePermsOnDrop {
+        path: &locked_dir,
+        mode: 0o755,
+    };
+
+    let err = super::plans::resolve_under_root(root, "locked/file.py").unwrap_err();
+
+    let DomainError::Internal(message) = &err else {
+        panic!("an EACCES resolving a path must not silently read as absent; got {err:?}");
+    };
+    assert!(
+        message.contains("could not be resolved"),
+        "expected the path-resolution message, got {message:?}"
+    );
+}
+
+/// The other half: a genuinely missing path still resolves to `Ok(None)`.
+/// Without this, the fix above could regress every "does not exist" answer
+/// into an `Internal` error and still pass.
+#[test]
+fn resolve_under_root_still_reports_ok_none_when_genuinely_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolved = super::plans::resolve_under_root(tmp.path(), "nope.py").unwrap();
+    assert_eq!(
+        resolved, None,
+        "a genuinely missing path must stay Ok(None)"
+    );
+}
+
 #[tokio::test]
 async fn get_plan_returns_single_plan_by_path() {
     let tenant_id = Uuid::new_v4();
@@ -507,6 +689,68 @@ async fn get_plan_returns_single_plan_by_path() {
     );
 }
 
+/// A file that exists but cannot be read is not a missing plan.
+///
+/// `get_plan` mapped every `read_to_string` failure to `PlanNotFound`, which
+/// the REST layer renders 404. An operator whose snapshot directory has
+/// wrong permissions was told the plan does not exist, and went looking in
+/// the repository instead of at the filesystem. `domain::service::repos`
+/// already draws this line correctly at `:297` and `:336`; this file did
+/// not. Review finding #6.
+///
+/// Skipped when running as root, which cannot be denied by mode bits.
+#[tokio::test]
+async fn an_unreadable_plan_file_is_internal_not_not_found() {
+    if !permissions_are_enforced() {
+        return;
+    }
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, workdir) = synced_fixture(repo_id);
+    write(&workdir, "plans/locked.yaml", "name: x\n");
+    std::fs::set_permissions(
+        workdir.join("plans/locked.yaml"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+    let err = svc
+        .get_plan(&ctx(tenant_id), repo_id, "main", "plans/locked.yaml")
+        .await
+        .unwrap_err();
+
+    // Not just `Internal`: pin the message to `get_plan`'s own site so this
+    // test cannot pass on an `Internal` raised by some other call inside it
+    // (e.g. `resolve_under_root`).
+    let DomainError::Internal(message) = &err else {
+        panic!("an EACCES on an existing plan must not be PlanNotFound; got {err:?}");
+    };
+    assert!(
+        message.contains("could not be read"),
+        "expected get_plan's read-failure message, got {message:?}"
+    );
+}
+
+/// The other half: a genuinely absent plan is still a 404. Without this,
+/// the fix above could regress every 404 into a 500 and still pass.
+#[tokio::test]
+async fn a_genuinely_absent_plan_is_still_not_found() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _workdir) = synced_fixture(repo_id);
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+
+    let err = svc
+        .get_plan(&ctx(tenant_id), repo_id, "main", "plans/nope.yaml")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::PlanNotFound { .. }),
+        "got {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn get_test_meta_attaches_paths() {
     let tenant_id = Uuid::new_v4();
@@ -523,28 +767,46 @@ async fn get_test_meta_attaches_paths() {
         "tests/test_plain.py",
         "def test_plain():\n    pass\n",
     );
+    // Distinct from `test_plain.py`'s absent key: an explicit `False`. A
+    // conversion that only checked for `True` and defaulted everything else
+    // to `Inherit` would pass with the other two files alone — this is what
+    // catches that collapse at the `ParsedTestMeta` -> `TestFileMeta` boundary
+    // in `PlansService::get_test_meta`.
+    write(
+        &workdir,
+        "tests/test_parallel.py",
+        "TEST_META = {\n    'exclusive': False,\n}\n",
+    );
 
     let svc = build_service(repos, tmp.path().to_path_buf()).await;
     let files = vec![
         "tests/test_exclusive.py".to_owned(),
         "tests/test_plain.py".to_owned(),
+        "tests/test_parallel.py".to_owned(),
     ];
     let metas = svc
         .get_test_meta(&ctx(tenant_id), repo_id, "main", &files)
         .await
         .unwrap();
 
-    assert_eq!(metas.len(), 2);
+    assert_eq!(metas.len(), 3);
     assert_eq!(
         metas[0].path, "tests/test_exclusive.py",
         "meta order must follow the requested file order"
     );
     assert_eq!(metas[0].title.as_deref(), Some("Exclusive test"));
     assert_eq!(metas[0].tags, vec!["ha".to_owned()]);
-    assert_eq!(metas[0].exclusive, Some(true));
+    assert_eq!(metas[0].exclusive, qa_catalog_sdk::Exclusivity::Exclusive);
     assert_eq!(metas[0].bugs, vec!["VHP-123".to_owned()]);
     assert_eq!(metas[1].path, "tests/test_plain.py");
-    assert_eq!(metas[1].exclusive, None);
+    assert_eq!(metas[1].exclusive, qa_catalog_sdk::Exclusivity::Inherit);
+    assert_eq!(metas[2].path, "tests/test_parallel.py");
+    assert_eq!(
+        metas[2].exclusive,
+        qa_catalog_sdk::Exclusivity::Shared,
+        "an on-disk TEST_META `\"exclusive\": False` must arrive as Shared, not collapse \
+         to Inherit the way a conversion checking only for True would"
+    );
 }
 
 #[tokio::test]
@@ -568,6 +830,74 @@ async fn get_test_meta_rejects_path_traversal() {
             "expected traversal rejection for {escape:?}, got {err:?}"
         );
     }
+}
+
+/// A file that exists but cannot be read is not a missing test file.
+///
+/// `get_test_meta` mapped every `read_to_string` failure to `FileNotFound`,
+/// silently dropping the file's exclusivity vote instead of surfacing the
+/// permission problem. Review finding #7.
+///
+/// Skipped when running as root, which cannot be denied by mode bits.
+#[tokio::test]
+async fn an_unreadable_test_file_is_internal_not_file_not_found() {
+    if !permissions_are_enforced() {
+        return;
+    }
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, workdir) = synced_fixture(repo_id);
+    write(&workdir, "tests/test_locked.py", META);
+    std::fs::set_permissions(
+        workdir.join("tests/test_locked.py"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+    let err = svc
+        .get_test_meta(
+            &ctx(tenant_id),
+            repo_id,
+            "main",
+            &["tests/test_locked.py".to_owned()],
+        )
+        .await
+        .unwrap_err();
+
+    // Not just `Internal`: pin the message to `get_test_meta`'s own site so
+    // this test cannot pass on an `Internal` raised by some other call
+    // inside it (e.g. `resolve_under_root`).
+    let DomainError::Internal(message) = &err else {
+        panic!("an EACCES on an existing test file must not be FileNotFound; got {err:?}");
+    };
+    assert!(
+        message.contains("could not be read"),
+        "expected get_test_meta's read-failure message, got {message:?}"
+    );
+}
+
+/// The other half: a genuinely absent test file is still `FileNotFound`.
+#[tokio::test]
+async fn a_genuinely_absent_test_file_is_still_file_not_found() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _workdir) = synced_fixture(repo_id);
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+
+    let err = svc
+        .get_test_meta(
+            &ctx(tenant_id),
+            repo_id,
+            "main",
+            &["tests/nope.py".to_owned()],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::FileNotFound { .. }),
+        "got {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

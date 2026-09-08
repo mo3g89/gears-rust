@@ -1091,6 +1091,210 @@ case " $uris " in
         exit 1 ;;
 esac
 
+step "17: the gears' rendered config carries the OpenTelemetry metrics block"
+# THE ONLY SWITCH THAT DECIDES WHETHER 22 METRIC FAMILIES LEAVE THIS STACK,
+# and its failure mode is silence. The four qa-platform gears declare their
+# series in `domain::metrics` and obtain every instrument from the
+# process-global meter provider; with `opentelemetry.metrics.enabled` false
+# -- or with the block missing from the rendered config altogether -- that
+# provider stays the built-in no-op, every instrument is a no-op, and the
+# gears serve normally while nothing is observable. There is NO error, no log
+# line and no failed probe to notice, which is exactly why this is a check.
+#
+# THERE IS NOTHING TO CURL. Metrics here are PUSHED over OTLP by a periodic
+# reader (libs/toolkit's `init_metrics_provider` builds an
+# `opentelemetry_otlp::MetricExporter`); no gear serves a `/metrics` route and
+# no chart in this repository carries a scrape annotation. So the observable
+# fact on the node is the rendered CONFIG, not an endpoint.
+#
+# READ FROM /var/lib/cf-gears/.rendered-*, not from the ConfigMap: that
+# rendered file is what the server actually loaded (entrypoint.sh writes it and
+# then rewrites its own `--config` argument to it before exec'ing), which is the
+# same reason checks 3, 4 and 7 read it rather than the ConfigMap.
+#
+# THAT ALONE DOES NOT PROVE THE ConfigMap WAS MOUNTED, and an earlier revision
+# of this comment claimed it did. qa-platform.Dockerfile BAKES
+# gears/qa-platform/config/qa-platform-stack.yaml into the image at
+# /etc/cf-gears/qa-platform-stack.yaml -- exactly the path entrypoint.sh reads
+# as GEARS_CONFIG_FILE. With the ConfigMap absent, or mounted somewhere else,
+# entrypoint.sh renders the BAKED copy instead: the rendered file still exists,
+# still carries a well-formed `opentelemetry:` block, and the committed value of
+# the metrics flag is `false` -- so the else branch below would print
+# "PASS: ... metrics are DISABLED (the chart default)" to an operator who ran
+# `--set opentelemetry.metrics.enabled=true`, and the FAIL text about an
+# unmounted ConfigMap could never be reached for that cause. A false green on
+# the exact defect this step exists for.
+#
+# SO THE MOUNT IS PROVEN FIRST, from the rendered file itself, before the flag
+# is read at all. The discriminator is `discovery_url`, and it is the only
+# clean one: gears-config-configmap.yaml rewrites the committed
+# `https://keycloak:8443/realms/qa-platform` to `$PUBLIC_ORIGIN/...` in ITS
+# render, unconditionally and on every install (deploy-k8s.sh passes the same
+# origin to `--set publicOrigin=`), and entrypoint.sh does NOT touch that key --
+# it rewrites `issuer_pattern`, which is a different setting, and leaves
+# `discovery_url` alone by design (see that template's own comment on why the
+# two differ). So the rewritten value can only have come through the ConfigMap,
+# and the committed literal can only have come from the baked image copy.
+#
+# ASYMMETRIC, like check 2: PASS needs the rewritten form PRESENT and the
+# committed literal ABSENT. Presence alone would not catch a partial render, and
+# absence alone is what an unreadable exec fakes -- which is why both halves go
+# through grep_count() rather than through `${n:-0}`.
+#
+# ABSENCE IS A FAIL, DISABLED IS A NOTE. `enabled: false` is the chart's
+# default and a legitimate deployment state -- an operator who has no
+# collector has nothing to point at. A MISSING block is different: it means
+# the committed config or the chart's transform lost it, and the operator who
+# later sets opentelemetry.metrics.enabled=true would get a successful helm
+# upgrade and no metrics.
+
+# ---- the mount, proven before anything is read out of the block ----------
+# PUBLIC_ORIGIN is validated above as `scheme://host[:port]`, so the only BRE
+# metacharacter it can contain is `.`; escaping it keeps this a literal match
+# rather than one where `10.136.20.200` would also match `10x136x20x200`.
+origin_re="${PUBLIC_ORIGIN//./\\.}"
+if ! grep_count deploy/qa-platform-gears "discovery_url: \"$origin_re/realms/qa-platform\"" \
+    /var/lib/cf-gears/.rendered-qa-platform-stack.yaml \
+    "rendered config: ConfigMap-rewritten discovery_url count"; then
+    exit 1
+fi
+n_cm="$GREP_COUNT_VAL"
+if ! grep_count deploy/qa-platform-gears 'discovery_url: "https://keycloak:8443/realms/qa-platform"' \
+    /var/lib/cf-gears/.rendered-qa-platform-stack.yaml \
+    "rendered config: committed placeholder discovery_url count"; then
+    exit 1
+fi
+n_baked="$GREP_COUNT_VAL"
+if [ "$n_cm" -ge 1 ] && [ "$n_baked" -eq 0 ]; then
+    echo "PASS: the rendered config came from ConfigMap qa-platform-gears-config, not from the copy baked into the image (rewritten discovery_url lines=$n_cm, committed-placeholder lines=$n_baked)"
+else
+    echo "FAIL: the gears rendered their config from the copy BAKED INTO THE IMAGE, not from ConfigMap qa-platform-gears-config (rewritten discovery_url lines=$n_cm, committed-placeholder lines=$n_baked; wanted >=1 and 0). entrypoint.sh reads /etc/cf-gears/qa-platform-stack.yaml, which qa-platform.Dockerfile also bakes in, so an absent or misplaced ConfigMap mount is silent -- the pod starts and serves. Everything this step would report about opentelemetry below would then be the COMMITTED defaults rather than what this release asked for, and every OIDC token would fail validation besides. Check 'kubectl -n $NAMESPACE get deploy qa-platform-gears -o jsonpath={.spec.template.spec.volumes}' and that the volumeMount lands on /etc/cf-gears." >&2
+    exit 1
+fi
+
+rc=0
+kubectl exec -n "$NAMESPACE" deploy/qa-platform-gears -- \
+    sed -n '/^opentelemetry:/,/^[^ #]/p' /var/lib/cf-gears/.rendered-qa-platform-stack.yaml \
+    > "$WORKDIR/otel.block" 2>"$WORKDIR/otel.err" || rc=$?
+if [ "$rc" -ne 0 ] || [ ! -s "$WORKDIR/otel.block" ]; then
+    echo "FAIL: the gears' rendered /var/lib/cf-gears/.rendered-qa-platform-stack.yaml carries no 'opentelemetry:' block (exit $rc): $(cat "$WORKDIR/otel.err" 2>/dev/null). Every one of the 22 metric families in DESIGN 3.9 is then unreachable, silently -- the gears report nothing about it. The mount itself is already proven above, so this is the committed config or the chart's transform having lost the block: check gears/qa-platform/config/qa-platform-stack.yaml and gears-config-configmap.yaml's fourth transform." >&2
+    exit 1
+fi
+otel_service="$(sed -n 's/^    service_name: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$WORKDIR/otel.block" | head -1)"
+otel_endpoint="$(sed -n 's/^      endpoint: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$WORKDIR/otel.block" | head -1)"
+# The LAST `enabled:` in the block is the metrics one; tracing's comes first.
+# Both are read, and BOTH ARE ASSERTED BELOW -- reading tracing without
+# checking it would make this comment a claim the step does not perform, which
+# is the defect class this whole phase kept producing.
+otel_tracing="$(sed -n 's/^    enabled: *\(.*\)$/\1/p' "$WORKDIR/otel.block" | head -1)"
+otel_metrics="$(sed -n 's/^    enabled: *\(.*\)$/\1/p' "$WORKDIR/otel.block" | sed -n '2p')"
+if [ -z "$otel_metrics" ]; then
+    echo "FAIL: the rendered opentelemetry block has no metrics 'enabled:' line -- found only [$(tr '\n' ' ' < "$WORKDIR/otel.block")]. The block's shape changed and this check can no longer tell enabled from disabled; fix the config or this check, but do not leave it reporting on a shape that is gone." >&2
+    exit 1
+fi
+# TRACING MUST STILL BE OFF, and this is the assertion the comment above
+# promises. Nothing in this chart turns tracing on: `values.yaml` exposes only
+# `opentelemetry.metrics`, and the configmap's fourth transform rewrites the
+# two-line `  metrics:\n    enabled: false` sentinel. So a rendered config with
+# tracing enabled means either the metrics transform matched the TRACING block
+# -- both carry the identical line `    enabled: false`, which is exactly why
+# the sentinel is two lines -- or someone hand-edited the committed config.
+#
+# Checked in BOTH states of the metrics flag, deliberately. The failure this
+# catches is loudest in the disabled branch: a transform that rewrote tracing
+# instead of metrics leaves metrics reading `false`, and without this check the
+# step would print its cheerful "metrics are DISABLED (the chart default)" PASS
+# over a stack whose operator asked for metrics and got a tracing pipeline.
+# `test_metrics_config.py`'s `check_enabled` holds the same property at render
+# time; this holds it against what the server actually loaded.
+if [ "$otel_tracing" != "false" ]; then
+    echo "FAIL: opentelemetry.tracing.enabled is '$otel_tracing', expected 'false'. No value in this chart turns tracing on, so either the metrics transform in gears-config-configmap.yaml matched the tracing block (both blocks carry the identical line '    enabled: false' -- that is why the metrics sentinel is two lines), or the committed config was hand-edited. Either way the metrics flag read from this file ('$otel_metrics') cannot be trusted to mean what it says." >&2
+    exit 1
+fi
+if [ "$otel_service" != "qa-platform" ]; then
+    echo "FAIL: opentelemetry.resource.service_name is '$otel_service', expected 'qa-platform'. Unset, the toolkit attributes every data point to 'cf-gears' and two stacks pushing into one collector are indistinguishable in every query." >&2
+    exit 1
+fi
+if [ "$otel_metrics" = "true" ]; then
+    case "$otel_endpoint" in
+        ""|http://127.0.0.1:*|http://localhost:*)
+            echo "FAIL: metrics are enabled but the exporter endpoint is '$otel_endpoint' -- a pod's own loopback address, where nothing is listening. The reader will push into itself every interval and log an export failure forever while every dashboard stays empty. Re-run helm with --set opentelemetry.metrics.endpoint=<collector>." >&2
+            exit 1 ;;
+    esac
+    echo "PASS: metrics are ENABLED and push to '$otel_endpoint' (service_name=$otel_service, tracing=$otel_tracing)"
+else
+    echo "PASS: the metrics block is present and correctly shaped, in a config proven above to have come from the ConfigMap; metrics are DISABLED (the chart default). NOTE: nothing from DESIGN 3.9 leaves this stack. Turn it on with --set opentelemetry.metrics.enabled=true --set opentelemetry.metrics.endpoint=<collector>."
+fi
+
+step "18: the deployed binary carries exactly the metric catalog, name for name"
+# THE PHASE'S CENTRAL NAMING RISK, checked against the artifact that is
+# actually running. A series exported under a name nobody queries is
+# indistinguishable, from inside the process, from a series that works: the
+# gears emit, the collector accepts, and the dashboard is empty. The
+# constants in each gear's `domain::metrics` are the full literal Prometheus
+# names (no `.with_unit()` anywhere, so no suffix is added in translation),
+# and each gear's `every_catalog_family_is_exported_under_its_catalog_name`
+# is what ties constant to exported name -- in-process. This check closes the
+# other half: that the binary on this node carries those exact strings and no
+# others.
+#
+# A SET COMPARISON, NOT A COUNT. A count passes when one name is misspelt and
+# another is duplicated. The expected list below is the catalog; a name that
+# drifts shows up as a diff naming both sides.
+#
+# grep -oa OVER THE BINARY is the same technique check 2 and check 9 already
+# use to read a build's own content. It proves the string is compiled in, not
+# that an instrument was built with it -- which is precisely the half the
+# in-process tests already hold. Neither alone is the whole property.
+cat > "$WORKDIR/metrics.want" <<'CATALOG'
+qa_catalog_plugin_resolution_duration_seconds
+qa_catalog_plugin_resolution_total
+qa_environments_observation_cycle_duration_seconds
+qa_environments_observation_cycle_total
+qa_environments_observation_duration_seconds
+qa_environments_observation_total
+qa_environments_plugin_call_duration_seconds
+qa_environments_plugin_call_total
+qa_insights_collect_duration_seconds
+qa_insights_collect_report_total
+qa_insights_collect_total
+qa_insights_jira_bug_total
+qa_insights_jira_poll_duration_seconds
+qa_insights_jira_poll_total
+qa_insights_jira_rerun_total
+qa_runs_dispatch_decision_total
+qa_runs_dispatch_duration_seconds
+qa_runs_dispatch_total
+qa_runs_ingest_duration_seconds
+qa_runs_ingest_total
+qa_runs_queue_wait_duration_seconds
+qa_runs_queue_wait_total
+CATALOG
+rc=0
+kubectl exec -n "$NAMESPACE" deploy/qa-platform-gears -- \
+    grep -oaE 'qa_(runs|insights|environments|catalog)_[a-z_]+(_total|_duration_seconds)' \
+    /usr/local/bin/cf-gears-example-server \
+    > "$WORKDIR/metrics.raw" 2>"$WORKDIR/metrics.err" || rc=$?
+# grep exits 1 on no matches, which is a legitimate answer here (an old image)
+# and is caught by the emptiness test below, not by rc. Any other exit is the
+# exec itself failing, which must never be read as "no metrics".
+if [ "$rc" -gt 1 ]; then
+    echo "FAIL: could not read the metric names out of the deployed binary (exit $rc): $(cat "$WORKDIR/metrics.err" 2>/dev/null). An unreadable result is UNVERIFIED, not empty." >&2
+    exit 1
+fi
+sort -u "$WORKDIR/metrics.raw" > "$WORKDIR/metrics.have"
+if [ ! -s "$WORKDIR/metrics.have" ]; then
+    echo "FAIL: the deployed gears binary carries NONE of the 22 catalog series names. The running image predates the observability work, or the metric modules were compiled out. Rebuild and redeploy: deploy/remote/deploy-k8s.sh builds the image the tag in images.gears.tag names." >&2
+    exit 1
+fi
+if diff -u "$WORKDIR/metrics.want" "$WORKDIR/metrics.have" > "$WORKDIR/metrics.diff" 2>&1; then
+    echo "PASS: the deployed binary carries exactly the $(grep -c '' "$WORKDIR/metrics.want") catalog series names (DESIGN 3.9)"
+else
+    echo "FAIL: the deployed binary's metric names are not the catalog. '-' lines are names DESIGN 3.9 documents and the binary does not carry; '+' lines are names the binary carries and the catalog does not document. Either is the defect this check exists for -- an operator's query names one of the '-' lines and gets nothing back, forever, with no error anywhere." >&2
+    cat "$WORKDIR/metrics.diff" >&2
+    exit 1
+fi
+
 # ========================================================= new for k8s ====
 # The four checks Task 12's brief specifies by name -- nothing here exists
 # for the compose stack because nothing here has a compose analogue: Helm's

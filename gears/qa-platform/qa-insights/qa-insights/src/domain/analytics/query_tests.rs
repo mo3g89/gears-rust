@@ -20,7 +20,7 @@
 //! canonical variant the REST tier maps it to. The second assertion is what makes
 //! "400" a tested claim rather than a comment, and it is done once over all six
 //! rather than six times because the mapping is one arm in
-//! [`crate::api::rest::error`] and not per-rule.
+//! [`crate::domain::error`] and not per-rule.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -223,8 +223,9 @@ fn a_blank_build_is_refused_with_legacys_message() {
 /// on the wire — `Internal` is an opaque 500, `Forbidden` a 403 — with the tests
 /// above still passing, because they only look at the message.
 ///
-/// `CanonicalError::InvalidArgument` is the variant `api::rest::error` maps
-/// `Validation` to, and `a_refused_window_is_400_invalid_argument` there is what
+/// `CanonicalError::InvalidArgument` is the variant `domain::error` maps
+/// `Validation` to, and `api::rest::error`'s own
+/// `a_refused_window_is_400_invalid_argument` is what
 /// ties that variant to the status code. Asserted once over all six rather than
 /// six times, because the mapping is one arm and not per-rule.
 ///

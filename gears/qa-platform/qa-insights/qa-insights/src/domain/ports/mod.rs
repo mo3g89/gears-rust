@@ -18,6 +18,15 @@
 //!   collect-only run (Task 30; its adapter lands in the same commit, on the
 //!   same struct as [`runs_reader`]'s).
 //!
+//! * [`metrics`] — the typed metric-emission traits the collect cycle, the
+//!   collect callback and the JIRA poller emit through. The one port here
+//!   whose *purpose* is that its production adapter may be absent: a service
+//!   holding `metrics::NoopMetrics` emits every signal a wired one does and
+//!   nothing observes, which is what keeps "metrics must not change
+//!   behaviour" structural rather than documented. Its adapter,
+//!   [`crate::infra::metrics::QaInsightsMetricsMeter`], and both call sites
+//!   land in the same commit.
+//!
 //! * [`jira_client`] — the three outbound JIRA calls (Task 32; its adapter,
 //!   [`crate::infra::jira::OagwJiraClient`], lands in the same commit, and so
 //!   does its first call site, [`crate::domain::service::jira::JiraService`]).
@@ -84,6 +93,7 @@ pub mod clock;
 pub mod environment_reader;
 pub mod jira_client;
 pub mod mail_client;
+pub mod metrics;
 pub mod runs_launcher;
 pub mod runs_reader;
 pub mod slack_client;
@@ -98,7 +108,7 @@ pub use jira_client::{
 pub use mail_client::{MailClient, MailMessage};
 pub use runs_launcher::RunsLauncher;
 pub use runs_reader::RunsReader;
-pub use slack_client::{SlackClient, SlackMessage};
+pub use slack_client::{SlackBlock, SlackClient, SlackMessage};
 
 /// What one egress attempt settled on — shared by [`SlackClient::send`] and
 /// [`MailClient::send`] rather than declared per port, since the two ports'

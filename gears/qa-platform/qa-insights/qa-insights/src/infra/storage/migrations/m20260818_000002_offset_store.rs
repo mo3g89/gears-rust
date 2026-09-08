@@ -126,6 +126,9 @@ fn up_ddl(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
              \"MySQL key-width budget\"."
                 .to_owned(),
         )),
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 

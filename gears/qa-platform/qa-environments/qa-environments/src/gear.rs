@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 use tracing::{error, warn};
 
-use authz_resolver_sdk::AuthZResolverClient;
+use authz_resolver_sdk::AuthZResolverApi;
 use credstore_sdk::CredStoreClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
 
@@ -28,8 +28,10 @@ use crate::config::QaEnvironmentsConfig;
 use crate::domain::local_client::QaEnvironmentsLocalClient;
 #[cfg(not(feature = "runner-secret"))]
 use crate::domain::ports::NoopRunnerSecretWriter;
+use crate::domain::ports::metrics::ObservationMetrics;
 use crate::domain::ports::{ProductPluginPort, RunnerSecretWriter};
 use crate::domain::service::AppServices;
+use crate::infra::metrics::build_default_adapter;
 use crate::infra::product_plugin::HubProductPluginResolver;
 use crate::infra::storage::{
     OrmEnvironmentsRepository, OrmLeasesRepository, OrmVariablesRepository,
@@ -109,7 +111,7 @@ impl Gear for QaEnvironments {
         // Cross-gear clients from ClientHub.
         let authz = ctx
             .client_hub()
-            .get::<dyn AuthZResolverClient>()
+            .get::<dyn AuthZResolverApi>()
             .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
         // A pasted kubeconfig is written here before any row is created, so
         // credstore is a hard dependency of the create/update paths — declared
@@ -137,6 +139,21 @@ impl Gear for QaEnvironments {
             .set(cfg.observation.clone())
             .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
 
+        // Unconditionally, with no `metrics.enabled` branch of our own to get
+        // wrong: `build_default_adapter` reads the process-global meter
+        // provider, which `toolkit`'s telemetry init leaves as the built-in
+        // no-op when metrics are switched off or never configured. So a
+        // deployment with no pipeline builds every instrument and emits into
+        // nothing, which is exactly the "silent with no adapter" posture the
+        // observability constraints ask for. See `infra::metrics`' header.
+        // One adapter, two ports. `QaEnvironmentsMetricsMeter` implements both
+        // `ObservationMetrics` and `PluginMetrics`, and the same `Arc` is
+        // coerced into each: the observation cycle and the plugin boundary
+        // report through one object, so their series cannot come from two
+        // differently-configured meters.
+        let metrics = build_default_adapter();
+        let observation_metrics: Arc<dyn ObservationMetrics> = metrics.clone();
+
         let services = Arc::new(AppServices::new(
             Arc::new(OrmEnvironmentsRepository),
             Arc::new(OrmVariablesRepository),
@@ -146,6 +163,8 @@ impl Gear for QaEnvironments {
             credstore,
             observer,
             product_plugins,
+            Some(observation_metrics),
+            Some(metrics),
             cfg.max_variables,
         ));
 
@@ -302,8 +321,11 @@ impl QaEnvironments {
     /// cancelled. The cycle's body
     /// ([`crate::domain::service::EnvironmentsService::run_observation_cycle`],
     /// reached through `services.environments`) owns "one environment's failure
-    /// never aborts the cycle for the others"; this loop owns only the
-    /// timing and the shutdown path.
+    /// never aborts the cycle for the others" *and* stopping early between
+    /// environments once `cancel` fires — it is handed the same token this
+    /// loop holds, because it is the one paying for the round trips a
+    /// shutdown wants to cut off. This loop owns only the tick timing and the
+    /// outer shutdown path, between cycles rather than within one.
     ///
     /// No leader election, unlike `qa-runs`' and `qa-insights`' tickers: every
     /// unit of work here is idempotent by construction —
@@ -341,7 +363,7 @@ impl QaEnvironments {
                         return;
                     }
                     _ = ticker.tick() => {
-                        let report = services.environments.run_observation_cycle().await;
+                        let report = services.environments.run_observation_cycle(&cancel).await;
                         debug!(
                             attempted = report.attempted,
                             observed = report.observed,
@@ -475,5 +497,111 @@ async fn supervise(
         Err(join_err) => Err(anyhow::anyhow!(
             "qa-environments {role} task panicked or was aborted: {join_err}"
         )),
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    //! What `init` wires, asserted against `init`'s own source.
+    //!
+    //! A source scan rather than a call, and for the reason
+    //! `init_constructs_..`-style guards exist in the sibling gears: `init`
+    //! needs a database, a `ClientHub` and two resolved cross-gear clients, so
+    //! standing one up here would be an integration harness for a two-line
+    //! property. What has to be true is textual anyway — *one* adapter is built,
+    //! it is handed to the container, and no runtime switch guards it.
+
+    /// The body of `Gear::init`, comments stripped.
+    ///
+    /// # Two hazards, both handled rather than hoped away
+    ///
+    /// * **Comments are stripped first**, because `init`'s own justification for
+    ///   not consulting a metrics switch says the words `metrics.enabled`, and a
+    ///   naive scan would trip on the comment explaining why the thing it looks
+    ///   for is absent. `no_api_in_domain_tests` documents the same trap and
+    ///   solves it the same way.
+    /// * **The slice ends at the first method-closing brace**, not at the end of
+    ///   the file. The assertions below include a *negative* one, and an absence
+    ///   assertion is only as narrow as the text it is made over: a slice that
+    ///   ran on into the rest of the file would start answering questions about
+    ///   code `init` does not contain.
+    fn init_source() -> String {
+        let source = include_str!("gear.rs");
+        let start = source
+            .find("async fn init(&self, ctx: &GearCtx)")
+            .expect("gear.rs must declare Gear::init");
+        let body = &source[start..];
+        let end = body
+            .find("\n    }\n")
+            .expect("init must be closed by a brace at method indentation");
+        body[..end]
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **`init` builds exactly one metrics adapter and hands it to the
+    /// container's two metric ports, with no switch of its own.**
+    ///
+    /// Four claims, and the last is the one that is easy to get wrong later.
+    /// `build_default_adapter` reads the process-global meter provider, which
+    /// `toolkit`'s telemetry init leaves as the built-in no-op when metrics are
+    /// off or were never configured — so a `metrics.enabled` branch here would
+    /// be a second, independent switch that can disagree with the first, and the
+    /// disagreement's symptom is a gear that exports nothing while the
+    /// deployment believes telemetry is on.
+    ///
+    /// The **two** wirings matter as much as the one construction: the
+    /// observation cycle and the plugin boundary are separate ports on one
+    /// adapter, and an `init` that filled only the first would leave the plugin
+    /// families with no production emitter while every other test in this crate
+    /// stayed green.
+    #[test]
+    fn init_installs_exactly_one_metrics_adapter_into_the_container() {
+        let init = init_source();
+
+        assert_eq!(
+            init.matches("build_default_adapter()").count(),
+            1,
+            "init must build the adapter once and share the Arc"
+        );
+        assert!(
+            init.contains("Some(metrics)"),
+            "the adapter init built must reach AppServices::new, or nothing in this gear \
+             emits anything"
+        );
+        assert!(
+            init.contains("Some(observation_metrics)"),
+            "and it must reach BOTH metric ports: one adapter object behind the observation \
+             cycle and behind the plugin boundary, or one of the two families has no \
+             production emitter"
+        );
+        assert!(
+            !init.contains("metrics.enabled"),
+            "init must not carry a metrics switch of its own: the global meter provider is \
+             already the no-op when telemetry is off, and a second switch is a second thing \
+             that can disagree"
+        );
+    }
+
+    /// **The slice above covers exactly one method.**
+    ///
+    /// Pins the width by the property rather than by a length, so a rewritten
+    /// `init` cannot silently widen the negative assertion above. `impl Gear for
+    /// QaEnvironments` is a *trait* impl, so no ad-hoc method can be added to
+    /// it — only a method the `Gear` trait itself grows and this gear implements
+    /// after `init` would widen the old slice — but that is a fact about today's
+    /// trait, not a guarantee, and this is the assertion that survives it
+    /// changing.
+    #[test]
+    fn the_init_slice_covers_exactly_one_method() {
+        assert_eq!(
+            init_source().matches(" fn ").count(),
+            1,
+            "init_source must not reach a second method declaration"
+        );
     }
 }

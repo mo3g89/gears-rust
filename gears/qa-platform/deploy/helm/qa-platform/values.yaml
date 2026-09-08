@@ -41,6 +41,15 @@ argo:
   # gears-argo-configmaps.yaml.
   workflowTtlSeconds: 3600
   statusPollSeconds: 3
+  # `ArgoExecutorConfig::log_follow_idle_seconds`'s own default (`config.rs`) --
+  # 600, not the 8 hours an earlier round of Task 17 shipped: see that field's
+  # doc for why 600 (anchored on `orphan_timeout_seconds`, this codebase's own
+  # "how long is silence long enough to call it dead") replaced the SSE
+  # constant's number this adapter's own follow loop is not actually bound by
+  # the same way. Without a row here the deployment default IS this value with
+  # no operator override -- a deployment whose pods legitimately go quieter
+  # than 600s needs to raise this, not just live with the shipped number.
+  logFollowIdleSeconds: 600
   # Must equal whatever provisions the workflow pod's bundle-download
   # credential (deploy/argo/provision-workflow-secret.sh's own defaults, or
   # its in-cluster equivalent) -- the adapter only ever emits a
@@ -48,6 +57,38 @@ argo:
   workflowSecretName: qa-platform-workflow-oidc
   workflowSecretKey: client_secret
   workflowClientId: qa-platform-workflow
+
+# qa-runs' own gear config -- `QaRunsConfig`, not `ArgoExecutorConfig`. Rendered
+# into the SAME fragment as the `argo:` block above (see
+# gears-argo-configmaps.yaml), because that fragment is the only insertion point
+# this chart has into `gears.qa-runs.config` and this chart always inserts it:
+# gears/qa-platform/config/qa-platform-stack.yaml is embedded VERBATIM by
+# gears-config-configmap.yaml (`.Files.Get`, one transform, byte-pinned by
+# tests/test_chart_file_sync.py), so a key that is not in that committed file
+# cannot be templated into it.
+#
+# `${VAR:-default}` in the committed file is NOT an alternative here, and this
+# was checked rather than assumed: `${VAR}` expansion is opt-in per config
+# struct and runs AFTER deserialization on `String` fields marked
+# `#[expand_vars]` (libs/toolkit/src/context.rs, `config_expanded_or_default`);
+# `QaRunsConfig` derives neither, qa-runs loads through plain
+# `ctx.config_or_default()` (`qa-runs/src/gear.rs`), and
+# `max_concurrent_runs` is a `u32` -- so a placeholder written there would fail
+# to deserialize, not expand. entrypoint.sh does targeted `sed` on named
+# anchors, not an envsubst pass, so it does not reach it either.
+qaRuns:
+  # `QaRunsConfig::max_concurrent_runs` -- the cluster-wide concurrent-run cap,
+  # 50 by default (`cpt-cf-qa-nfr-scale`'s own number; see that field's doc).
+  #
+  # **`0` is the explicit "unbounded" opt-out, and this row is what makes it
+  # reachable.** Without it the shipped 50 was the only value any deployment
+  # could have -- whole-branch review I1 -- which mattered because enabling the
+  # cap also puts a cross-plane `executor.list_active()` call on the front of
+  # every launch, whose failure direction is to REFUSE the launch. A deployment
+  # that relied on unlimited concurrency, or that would rather over-commit than
+  # fail a launch during an Argo outage, sets this to 0:
+  #   --set qaRuns.maxConcurrentRuns=0
+  maxConcurrentRuns: 50
 
 images:
   gears:
@@ -148,3 +189,31 @@ collectReportSigningSecret: ""
 # measured the pod->node hostPort hairpin as broken). deploy-k8s.sh resolves the
 # ui Service's ClusterIP and passes it with --set.
 uiServiceClusterIP: ""
+
+# WHETHER THE 22 METRIC FAMILIES LEAVE THE PROCESS AT ALL, and where they go.
+# The catalog -- series name, type, labels, and what each supports -- is
+# docs/DESIGN.md 3.9.
+#
+# METRICS ARE PUSHED OVER OTLP, NOT SCRAPED, so there is no port to open and no
+# scrape annotation to add: libs/toolkit's `init_metrics_provider` builds an
+# OTLP exporter behind a periodic reader, and nothing in this repository serves
+# a `/metrics` route. `endpoint` is where that reader pushes.
+#
+# OFF BY DEFAULT, and off is a working state rather than a broken one: with
+# `enabled: false` the process-global meter provider stays the built-in no-op,
+# every instrument is a no-op, and the gears behave identically. Nothing is
+# observable, and nothing misbehaves.
+#
+# `endpoint` IS REQUIRED WHEN `enabled` IS TRUE -- gears-config-configmap.yaml
+# refuses to render the pair otherwise. The committed config's value is the
+# loopback address, which is right under `cargo run` beside a local collector
+# and wrong in a pod, whose 127.0.0.1 is itself; enabling without re-pointing
+# it produces a stack that looks instrumented, logs an export failure every
+# interval and fills no dashboard.
+#
+#   --set opentelemetry.metrics.enabled=true \
+#   --set opentelemetry.metrics.endpoint=http://otel-collector.observability.svc.cluster.local:4317
+opentelemetry:
+  metrics:
+    enabled: false
+    endpoint: ""

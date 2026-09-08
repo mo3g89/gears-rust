@@ -53,15 +53,18 @@ const SENTINEL: &str = "SENTINEL-SECRET-9d41c7f2e8b6a350-DO-NOT-LOG";
 /// it into SQL would be far worse), and `sea-orm` offers no hook to redact a
 /// span field.
 ///
-/// So the claim this module proves is the one that is actually true and
-/// actually matters: **at `DEBUG` and below — the most verbose setting any
-/// shipped config selects, `logging.sqlx.console_level: debug` in
-/// `qa-platform-stack.yaml` — no secret byte reaches a log line.** The
-/// `TRACE`-level exposure is pinned by `tests/sea_orm_trace_exposure.rs`
-/// instead of being quietly tolerated (it needs its own process: a global
-/// `DEBUG` subscriber caps `LevelFilter::current()` and would stop `sea-orm`'s
-/// trace spans from ever opening), and is called out in the crate `README`.
-const CAPTURE_LEVEL: tracing::Level = tracing::Level::DEBUG;
+/// So the claim this module proves is now the strongest one available: **at
+/// `TRACE` and below — more verbose than any shipped config selects — no
+/// secret byte reaches a log line.**
+///
+/// Widened from `DEBUG` on the SeaORM 2.0 upgrade. Under 1.1 the driver's
+/// `#[instrument(level = "trace")]` span carried the whole `Statement` as a
+/// `Debug` field, bound values included, so `TRACE` genuinely leaked and this
+/// net had to stop at `DEBUG`. 2.0 renders the SQL with placeholders and no
+/// values, which `tests/sea_orm_trace_exposure.rs` verifies directly -- that
+/// test was written as a characterization of the leak precisely so this
+/// upgrade would surface as a failure rather than a silent shift, and it did.
+const CAPTURE_LEVEL: tracing::Level = tracing::Level::TRACE;
 
 /// A `Write` sink appending to a shared buffer.
 #[derive(Clone)]

@@ -92,6 +92,19 @@ integration = ["dep:testcontainers", "dep:testcontainers-modules"]
 # * `regex` — the runner's log-marker grammar
 #   (`manager/src/services/argo.rs:2736-2996`).
 # * `base64` — `=== TEST_CASE: <base64-json> ===` markers (`argo.rs:2921`).
+#
+# `tower`, `http-body` and `bytes` — `watch`'s own `#[cfg(test)]` module's
+# loopback `kube::Client` doubles (Task 17, review findings #20/#21; see that
+# module's doc for what they build and why `qa-plugin-k8s`'s own stub server
+# could not be reused as-is) — are **not** here. Fix round 1 moved them to
+# `[dev-dependencies]` below: a dev-dependency never ships, so it does not
+# need to be optional or named in this feature at all, and every real use of
+# all three is confined to `argo/watch.rs`'s `#[cfg(test)] mod tests` (the
+# module itself gated on this same `argo` feature). The first version put
+# them here on the reasoning "Cargo does not allow optional dev-dependencies"
+# — true, but the wrong conclusion: that rule only bites a dependency that
+# *needs* to be optional, and a dev-dependency's whole point is that it never
+# ships, so there was nothing to make optional in the first place.
 argo = ["dep:kube", "dep:k8s-openapi", "dep:regex", "dep:base64"]
 
 [dependencies]
@@ -160,6 +173,15 @@ url = { workspace = true }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
 
+# The metric instruments `infra::metrics` holds — `Counter`, `Histogram`, the
+# `Meter` they are built from, and the process-global meter provider
+# `build_default_adapter` reads. Only the API crate: the SDK (providers,
+# exporters, readers) is the *pipeline's* concern and `libs/toolkit`'s
+# `telemetry::init` owns it, so a gear that never configures a pipeline is
+# still fully instrumented and every instrument it builds is a no-op. Same
+# split `account-management`'s Cargo.toml makes.
+opentelemetry = { workspace = true }
+
 toolkit = { workspace = true }
 toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
 toolkit-db-macros = { workspace = true }
@@ -170,6 +192,14 @@ toolkit-macros = { workspace = true }
 # (`infra::storage::odata`). `with-utoipa` is what gives `Page<T>` a schema, so
 # a paginated response can be registered with `json_response_with_schema`.
 toolkit-odata = { workspace = true, features = ["with-utoipa"] }
+# Link-time GTS permission catalog (`src/gts/permissions.rs`): declares
+# AuthzPermissionV1 instances into the toolkit-gts inventory the
+# types-registry aggregates at boot.
+toolkit-gts = { workspace = true }
+# `gts_id!`'s upstream validation (`GtsIdPattern`) and `GTS_ID_PREFIX`, which
+# `toolkit-gts`'s macros delegate to. Same pairing qa-catalog's,
+# qa-environments' and qa-insights' Cargo.toml carry.
+gts = { workspace = true }
 
 # The real-Postgres integration tier's container bring-up
 # (`infra::storage::test_db::pg_db`).
@@ -209,6 +239,32 @@ regex = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 
 [dev-dependencies]
+# `Problem::from_error_debug` moved behind this feature in the new
+# toolkit-canonical-errors. `domain::error`'s drift guard asserts the debug
+# renderer leaks nothing either, so the test tier needs it -- and only the
+# test tier: a production build never enables it.
+toolkit-canonical-errors = { workspace = true, features = ["debug-problem"] }
+# The in-memory metric exporter (`InMemoryMetricExporter`) the adapter's tests
+# and the two call-site tests read their series back from — it lives behind
+# `opentelemetry_sdk`'s `testing` feature.
+#
+# **Declared here rather than inherited.** `libs/toolkit-http` enables the same
+# feature, and under a plain workspace build Cargo's feature unification would
+# hand it to this crate for free — but that unification does not hold under
+# `cargo build -p qa-runs` or under `cargo hack --each-feature`, both of which
+# are green gates on this branch. A dependency this crate's own tests name is a
+# dependency this crate declares.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+# For `infra::executor::argo::watch`'s own loopback `kube::Client` doubles
+# (Task 17, fix round 1) — see the `[features]` note's `argo` entry for why
+# these live here rather than as optional entries in `[dependencies]`. Never
+# ships: real use is confined to that module's `#[cfg(test)]`, itself gated on
+# the non-default `argo` feature, so a default `cargo test` builds neither the
+# module nor these three. `util` is the feature `tower::service_fn` lives
+# behind.
+tower = { workspace = true, features = ["util"] }
+http-body = { workspace = true }
+bytes = { workspace = true }
 # Log-output assertions. Several guarantees in this crate are discharged by a
 # `tracing` event and nothing else — the frozen guide's mandatory expiry alert,
 # `lease_occupancy`'s fail-closed ERROR, and the dispatcher's one-WARN-per-pass

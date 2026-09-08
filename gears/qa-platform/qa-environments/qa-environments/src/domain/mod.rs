@@ -1,6 +1,10 @@
 pub mod error;
 pub mod lease;
 pub mod local_client;
+/// The observability metric catalog: the full, literal Prometheus series
+/// names this gear exports, and the naming rules that keep them queryable.
+/// The traits that emit into them are [`ports::metrics`].
+pub mod metrics;
 // `pub mod observation;` was deleted at branch close.
 //
 // It held this gear's own copy of the VHP detection rules --
@@ -27,4 +31,4 @@ pub mod service;
 /// feature-gated any more. That keeps it — and its tests — in a default
 /// `cargo test` run, so the ADR-0001 property that this gear's domain is
 /// testable with no Kubernetes in the tree still covers it.
-pub(crate) mod system_actor;
+pub mod system_actor;

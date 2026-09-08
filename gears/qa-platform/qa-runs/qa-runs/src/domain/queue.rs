@@ -163,6 +163,17 @@ pub struct QueuedRow {
     pub id: Uuid,
     /// The run's resolved exclusivity flag.
     pub exclusive: bool,
+    /// When the row joined the queue — the query's own `ORDER BY` key, carried
+    /// through so the tick that drains the row can report how long it waited
+    /// (`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`).
+    ///
+    /// **Read by nothing in this module.** [`plan_dispatch_batch`] takes the
+    /// rows in the order the repository returned them and never compares
+    /// timestamps; ordering is the query's job, stated at
+    /// `QueueRepository::queued_rows`. The field is on this type rather than
+    /// re-read later because the drain has this snapshot in hand and a second
+    /// read would be a second query per claimed row.
+    pub enqueued_at: OffsetDateTime,
 }
 
 /// The cluster-wide concurrency limit, as named fields.
@@ -180,7 +191,10 @@ pub struct QueuedRow {
 pub struct GlobalCap {
     /// Runs already counted against the limit, cluster-wide.
     pub active: u32,
-    /// The limit itself. `0` disables it — the shipped default.
+    /// The limit itself. `0` disables it. **No longer the shipped default**
+    /// — `0` is kept as an explicit "unbounded" opt-out; see
+    /// `crate::config::QaRunsConfig::max_concurrent_runs` for the current
+    /// default and its derivation.
     pub max: u32,
 }
 
@@ -308,8 +322,9 @@ pub fn queue_is_full(queued_depth: usize, limit: Option<u32>) -> bool {
 }
 
 /// Normalise the global concurrency setting: `None` when disabled
-/// (`max_concurrent_runs == 0`, the shipped default), else the [`GlobalCap`]
-/// (`manager/src/services/run_queue.rs:714-722`).
+/// (`max_concurrent_runs == 0`, the explicit "unbounded" opt-out — no
+/// longer the shipped default, see `crate::config::QaRunsConfig`), else the
+/// [`GlobalCap`] (`manager/src/services/run_queue.rs:714-722`).
 #[must_use]
 pub fn global_cap_status(active: u32, max: u32) -> Option<GlobalCap> {
     if max == 0 {
@@ -492,6 +507,7 @@ mod tests {
         QueuedRow {
             id: id(n),
             exclusive,
+            enqueued_at: at(0),
         }
     }
 

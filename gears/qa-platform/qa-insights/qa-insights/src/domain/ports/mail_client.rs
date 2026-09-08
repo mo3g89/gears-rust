@@ -11,7 +11,7 @@
 //! config, routing and dedupe all ship for email exactly as they do for
 //! Slack, and only the socket is missing. **Task 39's adapter for this trait
 //! is the inert one** — its test asserts
-//! `UnsupportedMailClient.send(&message).await == Ok(SendOutcome::UnsupportedEgress)`,
+//! `UnsupportedMailClient.send(&ctx, &message).await == Ok(SendOutcome::UnsupportedEgress)`,
 //! never an `Err`, which is this module's second header point:
 //!
 //! # `send` never errors, and that is a property of the *port*, not a quirk
@@ -29,20 +29,38 @@
 //! for an address it could not resolve or a socket it could not open; only
 //! the inert adapter is guaranteed never to take the `Err` arm at all.
 //!
-//! # One method, no [`toolkit_security::SecurityContext`] parameter
+//! # One method, and it takes a `ctx` — review finding #37
 //!
-//! [`crate::domain::ports::slack_client::SlackClient::send`] gained a `ctx`
-//! parameter in fix round 1 (ruling R108), because its production adapter
-//! proxies through `oagw` and `oagw` requires a tenant identity. **That
-//! reasoning does not carry over here.** D10's inert adapter never reaches a
-//! network at all — there is no per-tenant resolution for a context to drive,
-//! and a future SMTP-backed adapter would authenticate to an SMTP relay from
-//! [`MailMessage`]'s own fields (`smtp_host`, `smtp_port`), not from a
-//! `SecurityContext`. Adding the parameter here would be exactly the unused
-//! one `domain::ports`' header warns against — a port with no caller for what
-//! it declares.
+//! [`MailClient::send`] takes `ctx: &SecurityContext`, the same as
+//! [`crate::domain::ports::slack_client::SlackClient::send`] (which gained it
+//! in fix round 1, ruling R108). **This module used to argue the opposite**,
+//! and the argument is recorded here because it is the kind a future reader
+//! will reconstruct and act on: D10's inert adapter never reaches a network,
+//! so there is no per-tenant resolution for a context to drive, and a future
+//! SMTP-backed adapter would authenticate to a relay from [`MailMessage`]'s
+//! own `smtp_host`/`smtp_port` rather than from an identity — therefore the
+//! parameter would be unused surface, which `domain::ports`' header warns
+//! against.
+//!
+//! What that argument misses is that these are **two egress ports of one
+//! notification service**, called from the same two methods, for the same
+//! event, under the same tenant's authority, and they returned different
+//! answers to "on whose behalf is this being sent?". A reader comparing them
+//! had to reconstruct the whole D10-inertness story to learn that the
+//! asymmetry was not an oversight — and *"currently unused"* is a property of
+//! today's one adapter, not of the port: the moment any deployment ships a
+//! real relay, "which tenant is this email for" is the first question an
+//! adapter has to answer, for tenant-scoped relay credentials and for the
+//! audit trail, and a port that never carried the identity would have to
+//! change shape to answer it. The two notification ports now have one
+//! authorization story. Both call sites
+//! ([`crate::domain::service::notify::NotifyService::send_test`] and
+//! `RunCompletedChannel::send`) already held the sending tenant's `ctx` where
+//! they build a [`MailMessage`]; neither had to acquire one it lacked, which
+//! is the same thing R108 found for Slack.
 
 use async_trait::async_trait;
+use toolkit_security::SecurityContext;
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::SendOutcome;
@@ -78,7 +96,14 @@ pub struct MailMessage {
 /// matching legacy's own two failure shapes at `notifications.rs:139-176`.
 #[async_trait]
 pub trait MailClient: Send + Sync {
-    /// Send `message`. `Ok(SendOutcome::UnsupportedEgress)` on every
-    /// deployment that ships only the inert adapter.
-    async fn send(&self, message: &MailMessage) -> Result<SendOutcome, DomainError>;
+    /// Send `message` as `ctx`'s subject. `ctx` is the sending tenant's
+    /// identity — see this module's header, "One method, and it takes a
+    /// `ctx`", for why it is required even though D10's inert adapter has
+    /// nothing to do with it. `Ok(SendOutcome::UnsupportedEgress)` on every
+    /// deployment that ships only that adapter.
+    async fn send(
+        &self,
+        ctx: &SecurityContext,
+        message: &MailMessage,
+    ) -> Result<SendOutcome, DomainError>;
 }

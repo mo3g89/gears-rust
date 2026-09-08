@@ -1,18 +1,20 @@
-//! Characterization test for a third-party exposure this plugin cannot fix.
+//! `sea-orm`'s driver trace spans must not render bound parameters.
 //!
-//! `sea-orm` annotates every driver entry point with
-//! `#[instrument(level = "trace")]` (`sea-orm-1.1.20/src/driver/sqlx_postgres.rs:61`
-//! and `.../sqlx_sqlite.rs:62`, and the same on every sibling method), and the
-//! span it opens carries the whole `sea_orm::Statement` as a `Debug` field —
-//! `values` included, i.e. every bound parameter. So with `TRACE` enabled for
-//! `sea_orm::driver::*`, a stored secret's bytes DO appear in log lines, as the
-//! decimal array `Vec<u8>`'s `Debug` produces.
+//! Under `sea-orm` 1.1 they did. Every driver entry point carries
+//! `#[instrument(level = "trace")]`, and the span it opened held the whole
+//! `sea_orm::Statement` as a `Debug` field -- `values` included -- so with
+//! `TRACE` enabled a stored secret's bytes appeared in log lines as the decimal
+//! array `Vec<u8>`'s `Debug` produces. The plugin could not suppress it: the
+//! value has to be bound as a parameter, and `sea-orm` offered no hook to
+//! redact a span field.
 //!
-//! This plugin cannot suppress that: the value must be bound as a parameter
-//! (inlining it into SQL would be strictly worse), and `sea-orm` offers no hook
-//! to redact a span field. Asserting the exposure here, rather than ignoring
-//! it, makes the boundary of the crate's no-leak guarantee explicit and turns a
-//! future `sea-orm` change into a test failure instead of a silent shift.
+//! This file was written as a *characterization* of that exposure -- asserting
+//! it rather than ignoring it -- so that a future `sea-orm` change would arrive
+//! as a test failure instead of a silent shift. On the 2.0 upgrade it did
+//! exactly that: 2.0 renders the SQL with placeholders and no values. The
+//! assertion is therefore inverted, and it is now a guarantee rather than a
+//! characterization. `leak_tests.rs`' `CAPTURE_LEVEL` widened from `DEBUG` to
+//! `TRACE` on the strength of it.
 //!
 //! Its own test binary because the guarantee test in
 //! `src/infra/storage/leak_tests.rs` installs a process-global `DEBUG`
@@ -56,7 +58,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedWriter {
 }
 
 #[tokio::test]
-async fn sea_orm_trace_spans_render_bound_parameters() {
+async fn sea_orm_trace_spans_do_not_render_bound_parameters() {
     let buf = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
         .with_writer(SharedWriter(Arc::clone(&buf)))
@@ -109,10 +111,15 @@ async fn sea_orm_trace_spans_render_bound_parameters() {
         .join(", ");
 
     assert!(
-        log.contains(&decimal),
-        "sea-orm no longer renders bound parameters in its trace spans. That is \
-         an improvement, not a regression — widen the guarantee: update \
-         CAPTURE_LEVEL in src/infra/storage/leak_tests.rs, this test, and the \
-         README.\n{log}"
+        !log.contains(&decimal),
+        "a bound parameter's bytes reached a TRACE log line: sea-orm is \
+         rendering values into its driver spans again. This is the regression \
+         `leak_tests.rs` widened CAPTURE_LEVEL to TRACE on the strength of -- \
+         narrow it back to DEBUG and restore the README's TRACE warning if this \
+         cannot be fixed upstream.\n{log}"
+    );
+    assert!(
+        !log.contains(SENTINEL),
+        "the sentinel reached a TRACE log line in some other encoding.\n{log}"
     );
 }

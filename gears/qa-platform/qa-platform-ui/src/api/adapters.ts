@@ -20,7 +20,6 @@ import type {
   AnalyticsOverview,
   AnalyticsSavedView,
   AnalyticsSavedViewPayload,
-  AnalyticsScope,
   BuildTestDetailItem,
   CreateCustomPlanForm,
   CreateEnvironmentForm,
@@ -217,7 +216,7 @@ function clampLimit(limit: number): number {
 }
 
 /**
- * The query string for `GET /qa/v1/test-results` behind `useTestRecentResults`.
+ * The query string for `GET /qa/v1/test-results`.
  *
  * Two things about the bound, both load-bearing:
  *
@@ -228,9 +227,7 @@ function clampLimit(limit: number): number {
  *  - `limit` itself is **undeclared in `/openapi.json`** (X2 — it is declared only on
  *    `/qa/v1/queue`). It does work, driven live, but because it is undeclared it is
  *    **not policed by `make ui-contract`**: regenerating the wire types will never tell
- *    us if it goes away. That is why the caller slices client-side as well
- *    (`sliceRecentResults`) — under X8 an ignored parameter is indistinguishable from an
- *    honoured one at 200, and the slice is the only thing that makes the bound real.
+ *    us if it goes away.
  *
  * `$filter` on this route allows only `id, run_id, test_file, test_name,
  * run_finished_at`, so the file is the one axis legacy's `?file=` maps onto. There is no
@@ -243,12 +240,6 @@ export function recentResultsQuery(args: { file: string; limit: number }): strin
   params.set('$filter', odataEq('test_file', args.file));
   params.set('limit', String(clampLimit(args.limit)));
   return params.toString();
-}
-
-/** The client-side half of `recentResultsQuery`'s bound — see the note there on why the
- *  `limit` parameter alone is not enough. */
-export function sliceRecentResults<T>(rows: T[], limit: number): T[] {
-  return rows.slice(0, clampLimit(limit));
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +609,10 @@ export function parseRunLogSse(body: string): string {
  * `state` is passed through **unchanged**, including `cancelled` with two `l`s: X4 records
  * that the queue row's spelling differs from the run's one-`l` `canceled` deliberately,
  * and legacy's own `RunQueueEntry.state` union already used the two-`l` form. Normalising
- * them together would be inventing a single vocabulary the gears do not have.
+ * them together would be inventing a single vocabulary the gears do not have. It no longer
+ * needs an `as` cast (Task 20): `QueueEntryDto.state` is a schema-level enum, and
+ * `RunQueueEntry['state']` is aliased onto it, so the assignment type-checks on its own and
+ * a gear-side change to the seven names fails `tsc` here rather than passing through a cast.
  *
  * `target_id` is a **documented substitution**, in the sense of §7.10. `QueueEntryDto`
  * has no target of any kind, and `target_id` is the queued row's primary label at
@@ -636,7 +630,7 @@ export function queueEntryFromDto(dto: QueueEntryDtoWithEnvironmentId): RunQueue
     target_id: dto.run_id,
     source: dto.source,
     exclusive: dto.exclusive,
-    state: dto.state as RunQueueEntry['state'],
+    state: dto.state,
     workflow_name: dto.run_id,
     error: dto.error ?? null,
     enqueued_at: dto.enqueued_at,
@@ -982,11 +976,20 @@ export function scheduleNotificationsReq(
 // Test repositories (CONTRACT-DIFF rows 29, 30, 33, 35, 37)
 // ---------------------------------------------------------------------------
 
-/** `TestRepositoryDto` -> `TestRepository`. `content_root` -> `tests_root`, and X7's one
- *  nullable `credential_ref` replaces legacy's `ssh_key_id` + `has_token` pair. The
- *  reference is surfaced through `ssh_key_id` because that is the field the edit form
- *  binds; `has_token` becomes "there is a credential", which is the one true bit legacy's
- *  boolean carried. `source_type` is `'git'` for the reason given on `planFromDto`. */
+/** `TestRepositoryDto` -> `TestRepository`. `content_root` -> `tests_root`.
+ *
+ *  **`ssh_key_id` is no longer derived from the DTO; `has_token` now comes from
+ *  `has_credential` instead of `credential_ref`.** The DTO used to publish the raw
+ *  `credential_ref` and this adapter forwarded it into `ssh_key_id` — the gear's read
+ *  DTO no longer does that (review finding #2: a LIST/GET caller could redeem the
+ *  credstore reference for the repository's git credentials), so deriving `ssh_key_id`
+ *  from it here would just re-open the leak the gear closed. `ssh_key_id` is hardcoded
+ *  `null` because nothing reads it: no component prefills an edit form from it. The
+ *  gear replaced the reference with a boolean, `has_credential` (a fact, not a
+ *  redeemable reference), specifically so `has_token` — which does have a live
+ *  consumer, `ProductDetailPage`'s "Auth" column — keeps reporting real state instead
+ *  of always reading "Public/none". `source_type` is `'git'` for the reason given on
+ *  `planFromDto`. */
 export function repoFromDto(dto: S['TestRepositoryDto']): TestRepository {
   return {
     id: dto.id,
@@ -997,9 +1000,9 @@ export function repoFromDto(dto: S['TestRepositoryDto']): TestRepository {
     product_id: dto.product_id,
     default_branch: dto.default_branch,
     tests_root: dto.content_root,
-    ssh_key_id: dto.credential_ref ?? null,
+    ssh_key_id: null,
     ssh_key_name: null,
-    has_token: !!dto.credential_ref,
+    has_token: dto.has_credential,
     last_synced_at: dto.last_synced_at ?? null,
     sync_error: dto.sync_error ?? null,
     created_at: dto.created_at,
@@ -1817,6 +1820,12 @@ function analyticsListItemFromDto(dto: AnalyticsListItemDtoWithEnvironment): Ana
  *    is null — an unresolved environment is still identifiable, and blanking it would
  *    silently merge every unnamed environment into one bar.
  *
+ * `scope` no longer needs an `as AnalyticsScope` cast (Task 20 fix round): the gear
+ * publishes the echoed scope as a two-value schema enum, and `AnalyticsScope` is aliased
+ * onto it, so a gear-side change to the pair fails `tsc` here instead of passing through
+ * a cast. `group_by` still needs its cast — `AnalyticsOverviewDto.group_by` is still a
+ * `String` on the wire.
+ *
  * §9 is about the *values* on this shape, not the shape: every execution-scoped counter
  * is 0 by construction in this deployment, and the decision recorded there is a banner in
  * `pages/AnalyticsPage.tsx` (Task 11's), not a number invented here.
@@ -1829,7 +1838,7 @@ export function analyticsOverviewFromDto(
     product_id: dto.product_id,
     product_key: '',
     version: dto.version,
-    scope: dto.scope as AnalyticsScope,
+    scope: dto.scope,
     // The DTO echoes back the *path* it was given (X6); the components hand this straight
     // back into `plan_id`-shaped props, so the caller's own opaque id is preserved when
     // there is one.
@@ -1882,12 +1891,18 @@ export function analyticsOverviewFromDto(
  *  opaque `plan_id` (X6). `query_json` is passed through untouched — the gear never
  *  inspects it, so a legacy `plan_id` buried inside one is **not** reconciled with the new
  *  vocabulary (row 73), which is a real and reported limitation rather than something to
- *  rewrite blindly. */
+ *  rewrite blindly.
+ *
+ *  `scope` no longer needs an `as AnalyticsScope` cast (Task 20): the gear publishes it as
+ *  a two-value schema enum (`SavedViewScopeDto`), so `"all" | "plan"` is what the generated
+ *  type already says. It is a *different* schema from `AnalyticsScopeDto`, which is what
+ *  `AnalyticsScope` is aliased onto — same value space, separate contracts — and the two
+ *  assign into each other because they are structurally identical. */
 export function savedViewFromDto(dto: S['SavedViewDto']): AnalyticsSavedView {
   return {
     id: dto.id,
     owner_id: dto.owner_id,
-    scope: dto.scope as AnalyticsScope,
+    scope: dto.scope,
     plan_id: dto.repo_id && dto.plan_path ? encodePlanId(dto.repo_id, dto.plan_path) : null,
     name: dto.name,
     query_json: (dto.query_json ?? {}) as Record<string, unknown>,

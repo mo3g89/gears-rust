@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::models::{EvaluationRequest, EvaluationResponse};
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_environments_sdk::{NewVariable, RESERVED_VARIABLE_NAMES, Variable};
 use toolkit_db::secure::DBRunner;
 use toolkit_security::AccessScope;
@@ -27,6 +27,8 @@ use super::test_support::{MockEnvironmentsRepository, ctx, permissive_response, 
 use super::{VariablesService, actions};
 use crate::domain::error::DomainError;
 use crate::domain::repos::VariablesRepository;
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -61,20 +63,22 @@ impl MockVariablesRepository {
 
 #[async_trait]
 impl VariablesRepository for MockVariablesRepository {
-    async fn list_pipeline<C: DBRunner>(
+    async fn list_pipeline_page<C: DBRunner>(
         &self,
         _runner: &C,
         _scope: &AccessScope,
-    ) -> Result<Vec<Variable>, DomainError> {
+        _query: &toolkit_odata::ODataQuery,
+    ) -> Result<toolkit_odata::Page<Variable>, DomainError> {
         unimplemented!("not exercised by the upsert-scope unit tests")
     }
 
-    async fn list_for_environment<C: DBRunner>(
+    async fn list_for_environment_page<C: DBRunner>(
         &self,
         _runner: &C,
         _scope: &AccessScope,
         _environment_id: Uuid,
-    ) -> Result<Vec<Variable>, DomainError> {
+        _query: &toolkit_odata::ODataQuery,
+    ) -> Result<toolkit_odata::Page<Variable>, DomainError> {
         unimplemented!("not exercised by the upsert-scope unit tests")
     }
 
@@ -139,11 +143,12 @@ impl RecordingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for RecordingAuthZ {
+impl AuthZResolverApi for RecordingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.requests
             .lock()
             .unwrap()

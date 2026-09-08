@@ -1,17 +1,18 @@
 use async_trait::async_trait;
 use qa_environments_sdk::{NewVariable, Variable};
-use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
+use toolkit_db::odata::sea_orm_filter::paginate_odata;
 use toolkit_db::secure::{
     DBRunner, SecureDeleteExt, SecureEntityExt, secure_insert, secure_update_with_scope,
 };
+use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::repos::VariablesRepository;
-use crate::infra::storage::db::db_err;
+use crate::infra::storage::db::{PAGE_LIMITS, db_err, odata_err};
 use crate::infra::storage::entity::environment_variable::{
     self, Column as EnvironmentVarColumn, Entity as EnvironmentVarEntity,
 };
@@ -19,6 +20,9 @@ use crate::infra::storage::entity::pipeline_variable::{
     self, Column as PipelineColumn, Entity as PipelineEntity,
 };
 use crate::infra::storage::mapper::{environment_var_to_sdk, pipeline_var_to_sdk};
+use crate::infra::storage::odata::{
+    EnvironmentVarODataMapper, NAME_TIEBREAKER, PipelineVarODataMapper, VariableFilterField,
+};
 
 /// ORM-based implementation of the `VariablesRepository` trait.
 #[derive(Clone, Default)]
@@ -26,37 +30,59 @@ pub struct OrmVariablesRepository;
 
 #[async_trait]
 impl VariablesRepository for OrmVariablesRepository {
-    async fn list_pipeline<C: DBRunner>(
+    async fn list_pipeline_page<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
-    ) -> Result<Vec<Variable>, DomainError> {
-        let rows = PipelineEntity::find()
-            .secure()
-            .scope_with(scope)
-            .all(runner)
-            .await
-            .map_err(db_err)?;
-        Ok(rows.into_iter().map(pipeline_var_to_sdk).collect())
+        query: &ODataQuery,
+    ) -> Result<Page<Variable>, DomainError> {
+        // Scoped select first — `paginate_odata` takes `SecureSelect<E, Scoped>`
+        // and nothing else, so the caller's `$filter` is `AND`ed onto the tenant
+        // predicate rather than substituted for it.
+        let scoped = PipelineEntity::find().secure().scope_with(scope);
+
+        paginate_odata::<VariableFilterField, PipelineVarODataMapper, _, _, _, _>(
+            scoped,
+            runner,
+            query,
+            NAME_TIEBREAKER,
+            PAGE_LIMITS,
+            pipeline_var_to_sdk,
+        )
+        .await
+        .map_err(|error| odata_err(&error))
     }
 
-    async fn list_for_environment<C: DBRunner>(
+    async fn list_for_environment_page<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
         environment_id: Uuid,
-    ) -> Result<Vec<Variable>, DomainError> {
-        let rows = EnvironmentVarEntity::find()
+        query: &ODataQuery,
+    ) -> Result<Page<Variable>, DomainError> {
+        // `EnvironmentVarColumn::EnvironmentId` is the SeaORM *variant*; the
+        // physical column it renders is `platform_id`
+        // (`entity/environment_variable.rs`'s `#[sea_orm(column_name = ...)]`).
+        // That is also why `environment_id` is pinned here rather than left to
+        // a `$filter` — see `VariableFilterField`'s doc.
+        let scoped = EnvironmentVarEntity::find()
             .filter(
                 sea_orm::Condition::all()
-                    .add(Expr::col(EnvironmentVarColumn::EnvironmentId).eq(environment_id)),
+                    .add(EnvironmentVarColumn::EnvironmentId.eq(environment_id)),
             )
             .secure()
-            .scope_with(scope)
-            .all(runner)
-            .await
-            .map_err(db_err)?;
-        Ok(rows.into_iter().map(environment_var_to_sdk).collect())
+            .scope_with(scope);
+
+        paginate_odata::<VariableFilterField, EnvironmentVarODataMapper, _, _, _, _>(
+            scoped,
+            runner,
+            query,
+            NAME_TIEBREAKER,
+            PAGE_LIMITS,
+            environment_var_to_sdk,
+        )
+        .await
+        .map_err(|error| odata_err(&error))
     }
 
     async fn find_by_natural_key<C: DBRunner>(
@@ -100,7 +126,7 @@ impl VariablesRepository for OrmVariablesRepository {
         id: Uuid,
     ) -> Result<bool, DomainError> {
         let environment_result = EnvironmentVarEntity::delete_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentVarColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentVarColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .exec(runner)
@@ -112,7 +138,7 @@ impl VariablesRepository for OrmVariablesRepository {
         }
 
         let pipeline_result = PipelineEntity::delete_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(PipelineColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(PipelineColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .exec(runner)
@@ -139,9 +165,9 @@ async fn find_environment_var<C: DBRunner>(
     EnvironmentVarEntity::find()
         .filter(
             sea_orm::Condition::all()
-                .add(Expr::col(EnvironmentVarColumn::TenantId).eq(tenant_id))
-                .add(Expr::col(EnvironmentVarColumn::EnvironmentId).eq(environment_id))
-                .add(Expr::col(EnvironmentVarColumn::Name).eq(name)),
+                .add(EnvironmentVarColumn::TenantId.eq(tenant_id))
+                .add(EnvironmentVarColumn::EnvironmentId.eq(environment_id))
+                .add(EnvironmentVarColumn::Name.eq(name)),
         )
         .secure()
         .scope_with(scope)
@@ -160,8 +186,8 @@ async fn find_pipeline_var<C: DBRunner>(
     PipelineEntity::find()
         .filter(
             sea_orm::Condition::all()
-                .add(Expr::col(PipelineColumn::TenantId).eq(tenant_id))
-                .add(Expr::col(PipelineColumn::Name).eq(name)),
+                .add(PipelineColumn::TenantId.eq(tenant_id))
+                .add(PipelineColumn::Name.eq(name)),
         )
         .secure()
         .scope_with(scope)

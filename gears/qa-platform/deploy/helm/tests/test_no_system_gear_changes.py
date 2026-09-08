@@ -57,7 +57,17 @@ from pathlib import Path
 #           change for this.
 #      Deleting this test is never the fix for a red run under case 2 --
 #      re-pinning preserves the property; deleting removes it.
-UPSTREAM_BASE = "db7660030"
+#
+# Re-pinned 2026-09-08, db7660030 -> 664c6fa1c, under case 2. The branch was
+# rebased onto current main, which carries two breaking upstream changes to
+# these gears: `feat(authz-resolver)!: migrate to toolkit contract with REST
+# projection` (7525b5094) and `feat(event-broker)!: model topics and event types
+# as derived GTS types` (8a8ef23ad). Step (b) was performed: the 12,562-line
+# diff between the two pins was searched for qa-platform couplings -- a
+# `system_grants` entry, a qa-platform consumer-group key, any qa gear name, any
+# `qa.*` PEP resource string -- and contains none. Against the new pin the
+# guarded paths show no diff at all.
+UPSTREAM_BASE = "664c6fa1c"
 GUARDED = [
     "gears/system/authz-resolver",
     "gears/system/event-broker",

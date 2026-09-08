@@ -16,7 +16,7 @@ use toolkit::{DatabaseCapability, Gear, GearCtx, RestApiCapability};
 use toolkit_db::DBProvider;
 use tracing::{debug, error, info, warn};
 
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use credstore_sdk::CredStoreClientV1;
 use qa_catalog_sdk::{QaCatalogClientV1, QaProductPluginResolverV1};
 use uuid::Uuid;
@@ -32,6 +32,7 @@ use crate::domain::system_actor;
 use crate::infra::bundle_store::LocalFsBundleStore;
 use crate::infra::fs::create_private_dir_all;
 use crate::infra::git::GixSyncEngine;
+use crate::infra::metrics::build_default_adapter;
 use crate::infra::storage::{
     OrmBundlesRepository, OrmCustomPlansRepository, OrmProductsRepository, OrmSshKeysRepository,
     OrmTestReposRepository,
@@ -132,7 +133,7 @@ impl Gear for QaCatalog {
         // Cross-gear clients from ClientHub.
         let authz = ctx
             .client_hub()
-            .get::<dyn AuthZResolverClient>()
+            .get::<dyn AuthZResolverApi>()
             .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
         let credstore = ctx
             .client_hub()
@@ -178,11 +179,21 @@ impl Gear for QaCatalog {
         // Task 12 built this outside the container and said so, because at
         // that point nothing in this gear's REST layer touched a plugin.
         // Task 13's catalogue endpoint is what changed it.
+        // Unconditionally, with no `metrics.enabled` branch of our own to get
+        // wrong: `build_default_adapter` reads the process-global meter
+        // provider, which `toolkit`'s telemetry init leaves as the built-in
+        // no-op when metrics are switched off or never configured. So a
+        // deployment with no pipeline builds every instrument and emits into
+        // nothing, which is exactly the "silent with no adapter" posture the
+        // observability constraints ask for. See `infra::metrics`' header.
+        let metrics = build_default_adapter();
+
         let plugin_registry = Arc::new(QaProductRegistry::new(
             Arc::clone(&db),
             Arc::new(OrmProductsRepository),
             PolicyEnforcer::new(Arc::clone(&authz)),
             ctx.client_hub(),
+            Some(metrics),
         ));
 
         let services = Arc::new(AppServices::new(
@@ -415,7 +426,7 @@ impl QaCatalog {
                 tokio::select! {
                     biased;
                     () = token.cancelled() => break,
-                    _ = iv.tick() => Self::run_bundle_gc(&rt).await,
+                    _ = iv.tick() => Self::run_bundle_gc(&rt, &token).await,
                 }
             }
         })
@@ -437,7 +448,12 @@ impl QaCatalog {
     /// considered and rejected: it would widen a *write* across every tenant
     /// in one transaction, which is exactly the escape `domain::elevated`'s
     /// "read paths only" contract exists to close.
-    async fn run_bundle_gc(rt: &QaCatalogRuntime) {
+    ///
+    /// Also mirrors [`Self::refresh_branch_caches`] in stopping between
+    /// tenants once `token` fires, rather than after the pass: a purge is a
+    /// database round trip per tenant, so checking only at the end would have
+    /// already paid for every one of them.
+    async fn run_bundle_gc(rt: &QaCatalogRuntime, token: &CancellationToken) {
         let enumeration_ctx = system_actor::for_bundle_gc();
         let tenants = match rt
             .services
@@ -455,6 +471,9 @@ impl QaCatalog {
         debug!(tenants = tenants.len(), "qa-catalog: bundle GC pass");
         let mut total_purged = 0usize;
         for tenant_id in tenants {
+            if token.is_cancelled() {
+                return;
+            }
             total_purged += Self::purge_one_tenants_bundles(rt, tenant_id).await;
         }
 
@@ -576,7 +595,55 @@ fn log_ticker_exit(name: &str, res: Result<(), tokio::task::JoinError>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_BRANCH_REFRESH_INTERVAL_SECONDS, effective_branch_refresh_interval};
+    use super::{
+        MIN_BRANCH_REFRESH_INTERVAL_SECONDS, QaCatalog, QaCatalogRuntime,
+        effective_branch_refresh_interval,
+    };
+    use crate::domain::system_actor;
+    use crate::test_support::{build_services_tenant_scoped, inmem_db, seed_expired_bundle};
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    /// A pre-cancelled bundle GC pass purges nothing.
+    ///
+    /// This is the discriminating case for the check `run_bundle_gc` added
+    /// (Task 18, review finding #31): with the token already cancelled
+    /// *before* the loop is ever entered, a check at the top of the
+    /// per-tenant loop skips the one seeded tenant with zero purges, while a
+    /// check placed after `purge_one_tenants_bundles` would still purge that
+    /// tenant once before ever consulting the token. A token cancelled mid-loop
+    /// (as a side effect of the first purge) cannot tell the two placements
+    /// apart -- see qa-environments' `a_cancelled_observation_cycle_stops_between_environments`
+    /// for the same distinction, made explicit there.
+    #[tokio::test]
+    async fn a_pre_cancelled_bundle_gc_purges_nothing() {
+        let db = inmem_db().await;
+        let tenant = Uuid::new_v4();
+        seed_expired_bundle(&db, tenant, -time::Duration::seconds(1)).await;
+
+        let services = build_services_tenant_scoped(db);
+        let rt = QaCatalogRuntime {
+            services: services.clone(),
+            branch_refresh_interval_seconds: 0,
+        };
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        QaCatalog::run_bundle_gc(&rt, &cancel).await;
+
+        let tenants = services
+            .bundles
+            .tenants_with_expired_bundles(&system_actor::for_bundle_gc())
+            .await
+            .expect("enumeration");
+        assert_eq!(
+            tenants,
+            vec![tenant],
+            "a pre-cancelled pass must purge nothing -- the seeded expired bundle must still be \
+             there"
+        );
+    }
 
     #[test]
     fn zero_still_disables_the_refresher() {
@@ -603,5 +670,100 @@ mod tests {
         for configured in [MIN_BRANCH_REFRESH_INTERVAL_SECONDS, 900, 86_400] {
             assert_eq!(effective_branch_refresh_interval(configured), configured);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // What `init` wires, asserted against `init`'s own source
+    // -----------------------------------------------------------------------
+    //
+    // A source scan rather than a call, and for the reason the sibling gears'
+    // equivalents exist: `init` needs a database, a `ClientHub` and two
+    // resolved cross-gear clients, so standing one up here would be an
+    // integration harness for a two-line property. What has to be true is
+    // textual anyway -- *one* adapter is built, it reaches the registry, and no
+    // runtime switch guards it.
+
+    /// The body of `Gear::init`, comments stripped.
+    ///
+    /// # Two hazards, both handled rather than hoped away
+    ///
+    /// * **Comments are stripped first**, because `init`'s own justification
+    ///   for not consulting a metrics switch says the words `metrics.enabled`,
+    ///   and a naive scan would trip on the comment explaining why the thing it
+    ///   looks for is absent. `no_api_in_domain_tests` documents the same trap
+    ///   and solves it the same way.
+    /// * **The slice ends at the first method-closing brace**, not at the end
+    ///   of the file. The assertions below include a *negative* one, and an
+    ///   absence assertion is only as narrow as the text it is made over: a
+    ///   slice that ran on into the rest of the file would start answering
+    ///   questions about code `init` does not contain.
+    fn init_source() -> String {
+        let source = include_str!("gear.rs");
+        let start = source
+            .find("async fn init(&self, ctx: &GearCtx)")
+            .expect("gear.rs must declare Gear::init");
+        let body = &source[start..];
+        let end = body
+            .find("\n    }\n")
+            .expect("init must be closed by a brace at method indentation");
+        body[..end]
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **`init` builds exactly one metrics adapter and hands it to the plugin
+    /// registry, with no switch of its own.**
+    ///
+    /// Three claims, and the third is the one that is easy to get wrong later.
+    /// `build_default_adapter` reads the process-global meter provider, which
+    /// `toolkit`'s telemetry init leaves as the built-in no-op when metrics are
+    /// off or were never configured — so a `metrics.enabled` branch here would
+    /// be a second, independent switch that can disagree with the first, and
+    /// the disagreement's symptom is a gear that exports nothing while the
+    /// deployment believes telemetry is on.
+    ///
+    /// The registry is the only thing in this gear that emits, which is why
+    /// there is one wiring assertion and not two: `AppServices::new` takes the
+    /// same `Arc` by clone.
+    #[test]
+    fn init_installs_exactly_one_metrics_adapter_into_the_plugin_registry() {
+        let init = init_source();
+
+        assert_eq!(
+            init.matches("build_default_adapter()").count(),
+            1,
+            "init must build the adapter once and share the Arc"
+        );
+        assert!(
+            init.contains("Some(metrics)"),
+            "the adapter init built must reach QaProductRegistry::new, or nothing in this \
+             gear emits anything"
+        );
+        assert!(
+            !init.contains("metrics.enabled"),
+            "init must not carry a metrics switch of its own: the global meter provider is \
+             already the no-op when telemetry is off, and a second switch is a second thing \
+             that can disagree"
+        );
+    }
+
+    /// **The slice above covers exactly one method.**
+    ///
+    /// Pins the width by the property rather than by a length, so a rewritten
+    /// `init` cannot silently widen the negative assertion above. `impl Gear
+    /// for QaCatalog` is a *trait* impl, so no ad-hoc method can be added to
+    /// it — only a method the `Gear` trait itself grows and this gear
+    /// implements after `init` would widen the old slice — but that is a fact
+    /// about today's trait, not a guarantee, and this is the assertion that
+    /// survives it changing.
+    #[test]
+    fn the_init_slice_covers_exactly_one_method() {
+        assert_eq!(
+            init_source().matches(" fn ").count(),
+            1,
+            "init_source must not reach a second method declaration"
+        );
     }
 }

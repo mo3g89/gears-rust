@@ -18,7 +18,7 @@ use toolkit_db::DBProvider;
 use tracing::warn;
 use tracing::{debug, error, info};
 
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_catalog_sdk::QaCatalogClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
 use qa_runs_sdk::QaRunsClientV1;
@@ -28,14 +28,46 @@ use crate::api::rest::routes;
 use crate::config::{ArgoExecutorConfig, ExecutorKind, QaRunsConfig};
 use crate::domain::error::DomainError;
 use crate::domain::local_client::QaRunsLocalClient;
+use crate::domain::ports::metrics::{DispatchMetrics, IngestMetrics};
 use crate::domain::ports::run_executor::RunExecutor;
 use crate::domain::service::{AppServices, LogArchive, LogFanout, QueueLimits, ServiceDeps};
-use crate::infra::ConcreteAppServices;
 use crate::infra::executor::mock::MockRunExecutor;
 use crate::infra::leader::{LeaderElector, elector, work_fn};
 use crate::infra::logs::{RunLogArchive, RunLogBroadcaster};
 use crate::infra::product_plugin::HubProductPluginResolver;
 use crate::infra::storage::{OrmQueueRepository, OrmRunsRepository, OrmSchedulesRepository};
+
+/// The generic `AppServices<R, Q, S>` container bound to the `SeaORM`
+/// repositories - the type the REST handlers extract and the gear bootstrap
+/// builds.
+///
+/// # Why it lives here, in the composition root
+///
+/// It lived in `infra/mod.rs` until Task 21, whose review finding #39 is what
+/// moved it: `domain::local_client` holds one and so had
+/// `use crate::infra::ConcreteAppServices;` — a production domain module
+/// naming an infrastructure module. `domain::service::watch`'s header records
+/// that contradiction at length, including the earlier, false claim that no
+/// production module under `domain/` did any such thing.
+///
+/// The composition root is where an alias for *the domain services bound to
+/// the concrete repositories* belongs: binding them is exactly what this
+/// module does, and both sibling gears declare their equivalent here
+/// (`qa-insights/src/gear.rs`, `qa-environments/src/gear.rs`). The plan's Step
+/// 5 said so from the start; the alias went to `infra/` only because the REST
+/// handlers needed it a stage before this file existed, and that reason has
+/// been spent since Task 17.
+///
+/// The old home's argument that *"the domain layer could not hold it — it
+/// would have to name `OrmRunsRepository`"* is unaffected and still true: the
+/// alias is not declared in `domain`, it is declared here and named by one
+/// domain module that is itself a composition-root adapter.
+///
+/// **Nothing may declare its own second alias.** Two aliases for the same
+/// instantiation would compile and would silently allow the handlers and the
+/// lifecycle tasks to be wired to different repository types.
+pub(crate) type ConcreteAppServices =
+    AppServices<OrmRunsRepository, OrmQueueRepository, OrmSchedulesRepository>;
 
 /// The role name the dispatcher ticker holds.
 ///
@@ -200,6 +232,21 @@ struct QaRunsRuntime {
     /// Both already clamped and both folded, so `serve` asks the config nothing.
     dispatcher: Cadence,
     scheduler: Cadence,
+    /// The gear's own shutdown signal, handed to `AppServices::new` (via
+    /// `ServiceDeps::cancel`) so the production result watcher can be built
+    /// with it — see `domain::service::watch::SpawningRunWatcher`'s header on
+    /// why the observer needs a third lifetime beside the caller's and the
+    /// run's.
+    ///
+    /// **Created here, in `init`, rather than derived from `serve`'s own
+    /// `cancel` parameter — the two cannot be the same token.** `init` runs
+    /// before `serve`, and the watcher is built during `init`
+    /// (`AppServices::new`, called from here), so whatever token it holds has
+    /// to exist before `serve`'s framework-supplied `CancellationToken` does.
+    /// `serve` bridges the two: it forwards its own `cancel` into this one the
+    /// first time it runs, which is the only place the framework's signal and
+    /// this stored one can be joined.
+    shutdown: CancellationToken,
 }
 
 /// Main gear struct.
@@ -267,7 +314,7 @@ impl Gear for QaRuns {
 
         let authz = ctx
             .client_hub()
-            .get::<dyn AuthZResolverClient>()
+            .get::<dyn AuthZResolverApi>()
             .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
         let catalog = ctx
             .client_hub()
@@ -283,6 +330,20 @@ impl Gear for QaRuns {
         let dispatcher = Cadence::dispatcher(&cfg);
         let scheduler = Cadence::scheduler(&cfg);
 
+        // Minted here rather than borrowed from `serve`'s own token, because
+        // `serve` (and the framework-supplied `CancellationToken` it receives)
+        // does not exist yet at this point in the gear's lifecycle - see
+        // `QaRunsRuntime::shutdown`'s doc for how `serve` bridges the two.
+        //
+        // **Created before the executor, not after** — moved up from its
+        // original spot below `archive` (Task 17, review findings #20/#21) so
+        // a child of it can be handed to `argo_executor`: the Argo watcher's
+        // own cancellation is wired from this same shutdown signal, not a
+        // second token, and `ArgoRunExecutor::connect` needs one at
+        // construction. Nothing between the old position and this one reads
+        // `shutdown`, so the move changes no other ordering.
+        let shutdown = CancellationToken::new();
+
         let logs = LogWiring::new(cfg.log_buffer_lines);
         let executor: Arc<dyn RunExecutor> = match cfg.executor {
             ExecutorKind::Mock => {
@@ -293,7 +354,7 @@ impl Gear for QaRuns {
                 );
                 Arc::new(MockRunExecutor::new())
             }
-            ExecutorKind::Argo => Self::argo_executor(&cfg.argo).await?,
+            ExecutorKind::Argo => Self::argo_executor(&cfg.argo, shutdown.child_token()).await?,
         };
 
         // Built once, here, and shared by `ServiceDeps::archive` (for
@@ -314,6 +375,17 @@ impl Gear for QaRuns {
             Arc::clone(&runs_repo),
             policy_enforcer,
         ));
+
+        // Built unconditionally, and there is deliberately no "metrics enabled"
+        // branch here to get wrong. `build_default_adapter` reads the
+        // process-global meter provider, which `toolkit`'s
+        // `telemetry::init_metrics_provider` leaves as the built-in
+        // `NoopMeterProvider` whenever metrics are disabled or no pipeline is
+        // configured at all — so every instrument it builds is a no-op and every
+        // emission through it is silent. One adapter, coerced into the two
+        // per-trait views the services take, so the dispatcher and the ingest
+        // path report into the same instruments.
+        let metrics = crate::infra::metrics::build_default_adapter();
 
         let services = Arc::new(AppServices::new(
             runs_repo,
@@ -341,6 +413,7 @@ impl Gear for QaRuns {
                 // `None` wires the real watcher over the same `IngestService`
                 // this container builds - the only place both halves exist.
                 watcher: None,
+                cancel: shutdown.clone(),
                 default_timeout_seconds: cfg.default_timeout_seconds,
                 limits: QueueLimits {
                     queue_max_depth: cfg.queue_max_depth,
@@ -348,6 +421,8 @@ impl Gear for QaRuns {
                     queue_ttl_seconds: cfg.queue_ttl_seconds,
                 },
                 orphan_timeout_seconds: cfg.effective_orphan_timeout_seconds(),
+                dispatch_metrics: Some(Arc::clone(&metrics) as Arc<dyn DispatchMetrics>),
+                ingest_metrics: Some(metrics as Arc<dyn IngestMetrics>),
             },
         ));
 
@@ -360,6 +435,7 @@ impl Gear for QaRuns {
                 elector: elector(),
                 dispatcher,
                 scheduler,
+                shutdown,
             }))
             .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
 
@@ -375,6 +451,11 @@ impl Gear for QaRuns {
 impl QaRuns {
     /// The Argo executor, when this binary was built with the `argo` feature.
     ///
+    /// `cancel` is [`QaRunsRuntime::shutdown`]'s child — see
+    /// `infra::executor::argo::ArgoRunExecutor::cancel`'s doc for why the
+    /// gear's shutdown signal is wired in here, at construction, rather than
+    /// threaded through `RunExecutor::watch` itself.
+    ///
     /// # Errors
     /// When the API server cannot be reached, the `argoproj.io` CRDs are absent,
     /// this process' credentials do not allow listing `Workflow`, or
@@ -382,7 +463,10 @@ impl QaRuns {
     /// purpose: an executor that constructs happily and fails on first dispatch
     /// turns a misconfiguration into a failed run hours later.
     #[cfg(feature = "argo")]
-    async fn argo_executor(cfg: &ArgoExecutorConfig) -> anyhow::Result<Arc<dyn RunExecutor>> {
+    async fn argo_executor(
+        cfg: &ArgoExecutorConfig,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<Arc<dyn RunExecutor>> {
         warn!(
             executor = "argo",
             namespace = %cfg.namespace,
@@ -392,7 +476,7 @@ impl QaRuns {
              2026-08-27 waiver permits only behind this non-default feature"
         );
         Ok(Arc::new(
-            crate::infra::executor::argo::ArgoRunExecutor::connect(cfg.clone()).await?,
+            crate::infra::executor::argo::ArgoRunExecutor::connect(cfg.clone(), cancel).await?,
         ))
     }
 
@@ -408,7 +492,10 @@ impl QaRuns {
     /// Always.
     #[cfg(not(feature = "argo"))]
     #[allow(clippy::unused_async)]
-    async fn argo_executor(_cfg: &ArgoExecutorConfig) -> anyhow::Result<Arc<dyn RunExecutor>> {
+    async fn argo_executor(
+        _cfg: &ArgoExecutorConfig,
+        _cancel: CancellationToken,
+    ) -> anyhow::Result<Arc<dyn RunExecutor>> {
         anyhow::bail!(
             "qa-runs.executor is `argo`, but this binary was built without the \
              `argo` cargo feature. Rebuild with `--features argo`, or set \
@@ -486,6 +573,29 @@ impl QaRuns {
         // A child token so the supervisor can stop the tickers on its own
         // terms, and so a shutdown of the runtime reaches them either way.
         let tasks = cancel.child_token();
+
+        // Bridge into the token the result watcher was already built with,
+        // back in `init` - see `QaRunsRuntime::shutdown`'s doc for why the two
+        // cannot be one token from the start. Bridged from `tasks`, not
+        // `cancel`, and that distinction is load-bearing: `tasks` is what
+        // `supervise` cancels unconditionally, on *both* of its exit paths —
+        // a cooperative shutdown (where `cancel` firing cancels `tasks` too,
+        // since it is `cancel`'s child) and a ticker panicking or exiting
+        // before `cancel` ever fires (where `supervise` cancels `tasks`
+        // directly and `cancel` stays live). Bridging from `cancel` instead
+        // would leave the watcher's token — and so `rt.services.shutdown()`
+        // below — waiting forever on exactly the premature-failure path this
+        // function's own doc says it returns `Err` for. This has to be a
+        // spawned task rather than an inline `select!` arm because nothing
+        // else here polls `tasks` again after handing it to the tickers.
+        tokio::spawn({
+            let shutdown = rt.shutdown.clone();
+            let tasks = tasks.clone();
+            async move {
+                tasks.cancelled().await;
+                shutdown.cancel();
+            }
+        });
         let mut tickers = Tickers::default();
 
         if rt.dispatcher.runs {
@@ -526,10 +636,43 @@ impl QaRuns {
         if tickers.is_empty() {
             info!("qa-runs: no lifecycle ticker is enabled; idling until cancelled");
             cancel.cancelled().await;
+            // No ticker ever called `attach` on this replica (only
+            // `DispatchService::reattach_watchers`, driven by the dispatcher
+            // ticker, does), so there is nothing for this to wait on - but
+            // calling it uniformly, rather than only on the path below, means
+            // "does shutdown wait for observers" has one answer instead of two.
+            rt.services.shutdown().await;
             return Ok(());
         }
 
-        supervise(cancel, &tasks, tickers).await
+        let result = supervise(cancel, &tasks, tickers).await;
+        // Awaited once the tickers have stopped or `supervise` has given up on
+        // them, not raced against them - `reattach_watchers` only runs from
+        // inside the dispatcher tick, and `tasks` (which gates it) is
+        // cancelled before this line runs either way.
+        //
+        // **Not a claim that every observer has necessarily been spawned by
+        // now**, and an earlier version of this comment said so. On the
+        // premature-failure path - one ticker panics or exits before `cancel`
+        // ever fires - `supervise` cancels `tasks` and returns `Err` without
+        // waiting for a *surviving* ticker's in-flight tick to notice and
+        // stop (`supervise`'s own body: it returns as soon as the first
+        // ticker joins, rather than looping `tickers.join_next()` on that
+        // path). A tick already past its own cancellation check when that
+        // happens could still call `attach` after this line has started
+        // running. That is exactly the race `WatchRegistry::shutdown`'s doc
+        // already names and narrows rather than closes: `tasks` (and so the
+        // watcher's own token, bridged above) is already cancelled by the
+        // time any such attach could happen, so the new observer's
+        // `tokio::select!` sees it on the first poll and ends immediately
+        // rather than doing any work.
+        //
+        // Bounded by the framework's own `stop_timeout` racing this whole
+        // function either way, not by anything in this method - see
+        // `AppServices::shutdown`'s doc for what else can make it take a
+        // while regardless.
+        rt.services.shutdown().await;
+        result
     }
 
     /// Spawn the leader-gated dispatcher ticker.
@@ -1132,6 +1275,89 @@ mod tests {
         &tail[..end]
     }
 
+    /// `QaRuns::serve`'s own source, isolated the same way [`init_source`]
+    /// isolates `init`'s — nothing can drive `serve` either, without a real
+    /// runtime and a real ticker, so reading it is what is left for the two
+    /// properties below.
+    fn serve_source() -> &'static str {
+        let src = include_str!("gear.rs");
+        let start = src
+            .find("    pub(crate) async fn serve(")
+            .expect("gear.rs declares serve");
+        let tail = &src[start..];
+        let end = tail
+            .find("\n    /// Spawn the leader-gated dispatcher ticker.")
+            .expect("dispatcher_ticker still follows serve");
+        &tail[..end]
+    }
+
+    /// **`serve` bridges the framework's `cancel` into the token the watcher
+    /// was built with, and waits for the watcher's shutdown before
+    /// returning.** Review finding #18: an observer's cancellation source has
+    /// to reach it from *somewhere*, and `init` builds the watcher before
+    /// `serve`'s own token exists at all — see `QaRunsRuntime::shutdown`'s
+    /// doc. Nothing exercises this end to end (that needs the framework's own
+    /// runtime), so this is the tripwire: a `serve` that stopped bridging or
+    /// stopped awaiting the shutdown would still compile, still pass every
+    /// other test in this file, and would silently restore "a dropped runtime
+    /// is the only thing that ends an observer" — which is the exact defect
+    /// this task closes.
+    #[test]
+    fn serve_bridges_shutdown_to_the_watcher_and_awaits_it() {
+        let body = serve_source();
+
+        assert!(
+            body.contains("rt.shutdown"),
+            "serve must reach the token the watcher was built with in init: {body}"
+        );
+        assert!(
+            body.contains(".cancel()"),
+            "and actually cancel it once the framework's own signal fires, not just \
+             read it"
+        );
+        assert!(
+            body.contains("rt.services.shutdown()"),
+            "and await the production watcher's shutdown before returning, or a \
+             caller has no way to know an observer might still be unwinding: {body}"
+        );
+
+        // The bridge specifically, isolated from every other `cancel.cancelled()`
+        // in this function (the two idle-until-cancelled early returns
+        // legitimately await `cancel` directly). Fix round 1, Important 3:
+        // the first version of this test passed with the bridge wired to
+        // `cancel.cancelled()` instead of `tasks.cancelled()` - precisely the
+        // bug self-review caught, and re-introducing it leaves the other
+        // three assertions above green because `rt.shutdown`, `.cancel()` and
+        // `rt.services.shutdown()` are all still present. Only this pins the
+        // fix itself: `tasks`, not `cancel`, is what `supervise` cancels
+        // unconditionally on every exit path, including a ticker panicking
+        // before `cancel` ever fires - see the bridge's own comment.
+        let spawn_start = body
+            .find("tokio::spawn({")
+            .expect("serve still spawns the bridge task");
+        let bridge = &body[spawn_start..];
+        let spawn_end = bridge
+            .find("});")
+            .expect("the bridge's tokio::spawn block is closed");
+        let bridge = &bridge[..spawn_end];
+
+        assert!(
+            bridge.contains("tasks.cancelled()"),
+            "the bridge must await `tasks`, not `cancel` directly, or the \
+             premature-ticker-failure path never wakes it: {bridge}"
+        );
+        assert!(
+            !bridge.contains("cancel.cancelled()"),
+            "the bridge awaiting `cancel` directly is the exact regression this \
+             test exists to catch: {bridge}"
+        );
+        assert!(
+            bridge.contains("shutdown.cancel()"),
+            "and it must actually cancel the watcher's token, not just observe \
+             `tasks`: {bridge}"
+        );
+    }
+
     /// **`init` allocates exactly one broadcaster, and takes both views from
     /// it.**
     ///
@@ -1215,6 +1441,68 @@ mod tests {
             body.contains("archive,\n"),
             "premise: `QaRunsRuntime` must take the same binding, or the dispatcher \
              tick is draining an instance nothing buffers into: {body}"
+        );
+    }
+
+    /// **The metrics adapter is installed unconditionally, into both ports.**
+    ///
+    /// The two defects this guards are opposite and both silent. Wrapping the
+    /// construction in a "metrics enabled" branch would leave the gear with a
+    /// pipeline configured and nothing emitting into it; passing the adapter to
+    /// one field and not the other would leave one of the two measured paths
+    /// dark while the dashboard for the other looked healthy. Neither is a
+    /// compile error — both `ServiceDeps` fields are `Option`, so omitting one
+    /// is legal.
+    ///
+    /// A source scan for the reason its two siblings above are: `init` needs a
+    /// database, a `ClientHub` and four resolved cross-gear clients before it
+    /// will run.
+    ///
+    /// **Nothing here needs a "metrics off" branch**, which is why the absence
+    /// of one is assertable at all:
+    /// `infra::metrics::build_default_adapter` reads the process-global meter
+    /// provider, which `toolkit`'s `telemetry::init_metrics_provider` leaves as
+    /// the built-in `NoopMeterProvider` when metrics are disabled — and never
+    /// replaces at all when no pipeline is configured. That the resulting
+    /// adapter is safe to build and emit through is
+    /// `infra::metrics::tests::the_default_adapter_emits_silently_with_no_pipeline_configured`;
+    /// that a service driven through one behaves identically to one holding
+    /// `NoopMetrics` is
+    /// `dispatch::tests::a_tick_with_no_pipeline_configured_behaves_exactly_as_an_unmetered_one`.
+    ///
+    /// The no-branch half reads **code only**, with comments stripped first:
+    /// `init` legitimately explains in prose why it does not consult that
+    /// config key, and a scan of the raw text would flag its own justification
+    /// the moment somebody wrote one. `no_api_in_domain_tests` documents the
+    /// same trap and strips comments for the same reason.
+    ///
+    /// Every message below is one unbroken string. A `\`-continued literal
+    /// collapses to a run of spaces once rustfmt has re-indented it, which is
+    /// how the first version of this test read on failure.
+    #[test]
+    fn init_installs_one_metrics_adapter_into_both_ports() {
+        let body = init_source();
+        assert_eq!(
+            body.matches("build_default_adapter()").count(),
+            1,
+            "init must build the adapter once and share the Arc: {body}"
+        );
+        assert!(
+            body.contains("dispatch_metrics: Some("),
+            "premise: the dispatcher port must be wired, or nothing measures the dispatch path in production while every test still passes: {body}"
+        );
+        assert!(
+            body.contains("ingest_metrics: Some("),
+            "premise: the ingest port must be wired, or nothing measures the ingest path in production: {body}"
+        );
+        let code: String = body
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("metrics.enabled"),
+            "init must not branch on whether a pipeline is configured: an uninstalled provider already makes every instrument a no-op, and a branch here would be a second, weaker copy of that rule: {code}"
         );
     }
 

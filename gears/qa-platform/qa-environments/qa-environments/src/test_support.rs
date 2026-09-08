@@ -15,8 +15,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use authz_resolver_sdk::AuthZResolverClient;
-use authz_resolver_sdk::AuthZResolverError;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
@@ -26,8 +25,11 @@ use credstore_sdk::{
     SharingMode, TenantId, WriteOptions, WritePrecondition,
 };
 use sea_orm_migration::MigratorTrait;
+use tokio_util::sync::CancellationToken;
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::{ConnectOpts, DBProvider, Db, DbError, connect_db};
+use toolkit_security::PlatformSecurityContext;
 use toolkit_security::{SecurityContext, pep_properties};
 use uuid::Uuid;
 
@@ -38,6 +40,7 @@ use qa_product_sdk::plugin::{
     CredentialClassification, CredentialInput, EnvironmentHandle, QaProductPluginV1,
 };
 
+use crate::domain::ports::metrics::{ObservationMetrics, PluginMetrics};
 use crate::domain::ports::{
     NoopRunnerSecretWriter, PluginUnavailable, ProductPluginPort, RunnerSecretWriter,
 };
@@ -146,11 +149,12 @@ pub fn permissive_response(request: &EvaluationRequest) -> EvaluationResponse {
 pub struct TenantScopedAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for TenantScopedAuthZ {
+impl AuthZResolverApi for TenantScopedAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(permissive_response(&request))
     }
 }
@@ -186,11 +190,12 @@ impl RecordingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for RecordingAuthZ {
+impl AuthZResolverApi for RecordingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.requests
             .lock()
             .unwrap()
@@ -205,11 +210,12 @@ impl AuthZResolverClient for RecordingAuthZ {
 pub struct DenyAllAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for DenyAllAuthZ {
+impl AuthZResolverApi for DenyAllAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: false,
             context: EvaluationResponseContext::default(),
@@ -516,7 +522,7 @@ impl RunnerSecretWriter for FailingSecretObserver {
 /// Build the real `ConcreteAppServices` DI container — `SeaORM`-backed
 /// repositories, not mocks — wired to `db` and `authz`, using the gear's
 /// configured default `max_variables` cap (see `QaEnvironmentsConfig`).
-pub fn build_services(db: Db, authz: Arc<dyn AuthZResolverClient>) -> Arc<ConcreteAppServices> {
+pub fn build_services(db: Db, authz: Arc<dyn AuthZResolverApi>) -> Arc<ConcreteAppServices> {
     build_services_with_limit(
         db,
         authz,
@@ -529,7 +535,7 @@ pub fn build_services(db: Db, authz: Arc<dyn AuthZResolverClient>) -> Arc<Concre
 /// `list_for_env` truncation behavior.
 pub fn build_services_with_limit(
     db: Db,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
     max_variables: usize,
 ) -> Arc<ConcreteAppServices> {
     build_services_full(
@@ -545,7 +551,7 @@ pub fn build_services_with_limit(
 /// and assert against it (and, now, to supply a [`RunnerSecretWriter`] double).
 pub fn build_services_full(
     db: Db,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
     credstore: Arc<dyn CredStoreClientV1>,
     observer: Arc<dyn RunnerSecretWriter>,
     max_variables: usize,
@@ -565,10 +571,47 @@ pub fn build_services_full(
 /// [`no_plugin_port`].
 pub fn build_services_with_plugin_port(
     db: Db,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
     credstore: Arc<dyn CredStoreClientV1>,
     observer: Arc<dyn RunnerSecretWriter>,
     product_plugins: Arc<dyn ProductPluginPort>,
+    max_variables: usize,
+) -> Arc<ConcreteAppServices> {
+    build_services_with_plugin_port_and_metrics(
+        db,
+        authz,
+        credstore,
+        observer,
+        product_plugins,
+        None,
+        None,
+        max_variables,
+    )
+}
+
+/// [`build_services_with_plugin_port`] plus the metrics port, for the handful
+/// of tests that assert on what the observation cycle reported.
+///
+/// A separate funnel rather than a widened one: every other helper here wants
+/// `None`, and threading a seventh argument through five call sites to say "no
+/// metrics" five times would make the absence of an adapter something a test
+/// states rather than something it inherits. `None` is not "metrics off" — the
+/// service substitutes `NoopMetrics`, so an unmetered service emits every
+/// signal a metered one does.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one argument per collaborator `AppServices::new` wires, plus the one scalar \
+              knob; the container's own constructor carries the same allowance for the same \
+              reason"
+)]
+pub fn build_services_with_plugin_port_and_metrics(
+    db: Db,
+    authz: Arc<dyn AuthZResolverApi>,
+    credstore: Arc<dyn CredStoreClientV1>,
+    observer: Arc<dyn RunnerSecretWriter>,
+    product_plugins: Arc<dyn ProductPluginPort>,
+    metrics: Option<Arc<dyn ObservationMetrics>>,
+    plugin_metrics: Option<Arc<dyn PluginMetrics>>,
     max_variables: usize,
 ) -> Arc<ConcreteAppServices> {
     let db: Arc<DBProvider<DbError>> = Arc::new(DBProvider::new(db));
@@ -582,8 +625,55 @@ pub fn build_services_with_plugin_port(
         credstore,
         observer,
         product_plugins,
+        metrics,
+        plugin_metrics,
         max_variables,
     ))
+}
+
+/// Services wired with [`TenantScopedAuthZ`], a caller-supplied product-plugin
+/// port **and** a caller-supplied metrics adapter — the shape the observation
+/// cycle's own metric tests want.
+pub fn build_services_tenant_scoped_with_plugin_and_metrics(
+    db: Db,
+    product_plugins: Arc<dyn ProductPluginPort>,
+    metrics: Arc<dyn ObservationMetrics>,
+) -> Arc<ConcreteAppServices> {
+    build_services_with_plugin_port_and_metrics(
+        db,
+        Arc::new(TenantScopedAuthZ),
+        Arc::new(RecordingCredStore::new()),
+        Arc::new(NoopRunnerSecretWriter),
+        product_plugins,
+        Some(metrics),
+        None,
+        crate::config::QaEnvironmentsConfig::default().max_variables,
+    )
+}
+
+/// Services wired with [`TenantScopedAuthZ`], a caller-supplied product-plugin
+/// port and a caller-supplied **plugin-boundary** metrics adapter -- the shape
+/// Task 40's plugin-call tests want.
+///
+/// A sibling of [`build_services_tenant_scoped_with_plugin_and_metrics`] rather
+/// than a widening of it, for the reason that funnel's own doc gives: the
+/// observation-cycle tests want `None` here and these want `None` there, and a
+/// helper taking both would make every call site state an absence.
+pub fn build_services_tenant_scoped_with_plugin_and_plugin_metrics(
+    db: Db,
+    product_plugins: Arc<dyn ProductPluginPort>,
+    plugin_metrics: Arc<dyn PluginMetrics>,
+) -> Arc<ConcreteAppServices> {
+    build_services_with_plugin_port_and_metrics(
+        db,
+        Arc::new(TenantScopedAuthZ),
+        Arc::new(RecordingCredStore::new()),
+        Arc::new(NoopRunnerSecretWriter),
+        product_plugins,
+        None,
+        Some(plugin_metrics),
+        crate::config::QaEnvironmentsConfig::default().max_variables,
+    )
 }
 
 /// Services wired with [`TenantScopedAuthZ`], a fresh [`RecordingCredStore`]
@@ -692,6 +782,12 @@ pub struct ScriptedPlugin {
     /// **Keys only, never values** — recording submitted credential bytes in
     /// a test double is the 2026-08-28 leak with a shorter blast radius.
     validated: Mutex<Vec<Vec<String>>>,
+    /// Fired from inside `observe`, once, on the call after which it should
+    /// take effect — how a test pins that a cancelled observation cycle stops
+    /// *between* environments rather than running the whole pass and checking
+    /// only at the end. `Mutex<Option<_>>` rather than a plain field so
+    /// `observe` (which takes `&self`) can `take()` it and fire exactly once.
+    cancel_after_first_observe: Mutex<Option<CancellationToken>>,
 }
 
 /// One `CredentialSlot` as a test can compare it: the key, the reference,
@@ -724,6 +820,7 @@ impl ScriptedPlugin {
             credential_rejection: None,
             extra_classification: None,
             validated: Mutex::new(Vec::new()),
+            cancel_after_first_observe: Mutex::new(None),
         }
     }
 
@@ -771,6 +868,13 @@ impl ScriptedPlugin {
     #[must_use]
     pub fn handles(&self) -> Vec<RecordedHandle> {
         self.handles.lock().unwrap().clone()
+    }
+
+    /// Cancel `cancel` once this plugin's next `observe` call returns —
+    /// simulating a shutdown that lands mid-cycle, between two environments,
+    /// rather than before the cycle starts or after it finishes.
+    pub fn cancel_after_first_observe(&self, cancel: CancellationToken) {
+        *self.cancel_after_first_observe.lock().unwrap() = Some(cancel);
     }
 
     /// The handle from the most recent `observe` call.
@@ -909,6 +1013,9 @@ impl QaProductPluginV1 for ScriptedPlugin {
             config: env.config.clone(),
             observed: env.observed.cloned(),
         });
+        if let Some(cancel) = self.cancel_after_first_observe.lock().unwrap().take() {
+            cancel.cancel();
+        }
         self.outcome.lock().unwrap().clone()
     }
 
@@ -1224,4 +1331,69 @@ pub async fn set_config(db: &Db, tenant: Uuid, id: Uuid, config: serde_json::Val
     )
     .await
     .expect("the config seed must apply");
+}
+
+// ---------------------------------------------------------------------------
+// The security keystone
+// ---------------------------------------------------------------------------
+
+/// Collects the raw bytes a `tracing` subscriber writes, so a test can assert
+/// against **everything that was emitted** rather than a filtered view of it.
+///
+/// This exists instead of `tracing-test` (used elsewhere in this workspace)
+/// because of a hole that a break-test found: `tracing-test` keeps only the
+/// captured lines containing the test's span name, so a **multi-line** field
+/// value survives capture as its first line only. A kubeconfig is multi-line
+/// and its private key is not on line one, so a deliberate
+/// `info!(document = %material.expose())` planted in `write_generated_secret`
+/// left a `tracing-test` assertion on the canary **passing**. Against this
+/// buffer the same plant fails, which is the whole point of the test.
+///
+/// Originally private to `environments_kubeconfig_tests`; moved here (review
+/// finding #29-followup) so `infra::storage::environments_sea_repo`'s tests
+/// can assert `attrs_or_skip`'s `warn!` line too, instead of leaving the
+/// `_and_warns` half of a test's name unverified. Two hazards apply to every
+/// caller, not just the original one:
+///
+/// 1. `tracing` caches each callsite's `Interest` **globally**, decided by
+///    whichever thread reaches it first. A callsite exercised only by one
+///    test is safe by construction; a callsite other tests can also reach
+///    needs the warm-up-then-clear dance
+///    `the_document_never_reaches_a_log_line_a_debug_rendering_or_a_response_body`
+///    uses below.
+/// 2. A thread-local `tracing::subscriber::set_default` guard only covers
+///    work done on the thread that installed it. A synchronous callsite is
+///    fine on a plain `#[test]`; an `async` one needs a current-thread
+///    runtime (`#[tokio::test]`'s default) so every `.await` stays on that
+///    thread.
+#[derive(Clone, Default)]
+pub struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+
+    pub fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+}
+
+pub struct CapturedLogsWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogsWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogsWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogsWriter(Arc::clone(&self.0))
+    }
 }

@@ -41,8 +41,9 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use authz_resolver_sdk::AuthZResolverClient;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::ResourceType;
 use credstore_sdk::CredStoreClientV1;
@@ -57,6 +58,10 @@ use crate::domain::repos::{
     TestReposRepository,
 };
 
+/// The `(resource_type, action)` pairs this gear's PEP enforces, and the
+/// distinct resource types among them. The source side of the permission
+/// catalog's anti-drift test - review finding #1.
+pub mod authz_surface;
 mod bundles;
 mod custom_plans;
 mod plans;
@@ -64,21 +69,22 @@ mod plugin_registry;
 mod products;
 mod repos;
 mod ssh_keys;
-// Public (unlike its siblings): the multi-branch integration suite in
-// `tests/multi_branch.rs` drives the real engine through the same two-tier
-// locks the service uses.
-pub mod sync_cache;
+// Private, like its siblings. It was `pub mod` so that
+// `tests/multi_branch.rs` could name `domain::service::sync_cache`; review
+// finding #38 made `domain` itself `pub(crate)`, so that path stopped working
+// and the test now reaches the type through `qa_catalog::SyncCache` (see
+// `lib.rs`). Nothing outside this module names the module any more -- only the
+// `pub use` below.
+mod sync_cache;
 mod validation;
 
-pub(crate) use bundles::BundlesService;
-pub(crate) use custom_plans::CustomPlansService;
-pub(crate) use plans::PlansService;
-pub(crate) use plugin_registry::{
-    ProductPluginPresence, QaProductRegistry, RegisteredProductPlugin,
-};
-pub(crate) use products::ProductsService;
-pub(crate) use repos::ReposService;
-pub(crate) use ssh_keys::SshKeysService;
+pub use bundles::BundlesService;
+pub use custom_plans::CustomPlansService;
+pub use plans::PlansService;
+pub use plugin_registry::{ProductPluginPresence, QaProductRegistry, RegisteredProductPlugin};
+pub use products::ProductsService;
+pub use repos::ReposService;
+pub use ssh_keys::SshKeysService;
 pub use sync_cache::SyncCache;
 
 #[cfg(test)]
@@ -108,6 +114,112 @@ mod tests_tenant_scoping;
 #[cfg(test)]
 mod unscoped_read_guard_tests;
 
+#[cfg(test)]
+mod resources_tests;
+
+/// Run one metric emission so that it cannot fail the path it is measuring.
+///
+/// **Copied verbatim, body for body, from qa-runs', qa-insights' and
+/// qa-environments' `domain::service::emit`.** This is the fourth copy, and
+/// qa-environments'
+/// `emit_tests::the_guard_is_byte_for_byte_the_guard_the_sibling_gears_run` is
+/// what stops it becoming a fourth *variant*: it lifts the body out of all four
+/// files and asserts they are identical, so a fix applied to one is visible as
+/// a failure in the other three. The docs are deliberately not compared -- each
+/// gear's argument is about its own paths, and a whole-file hash (the parity
+/// shape Phase 7 used for the permission catalog) would therefore fail on prose
+/// rather than on behaviour.
+///
+/// The parity test lives in qa-environments rather than here because that is
+/// where it was written, and one host reading four files is cheaper than four
+/// hosts reading four files each. A shared crate is the structural answer and
+/// is out of this task's scope; the observability plan puts one there.
+///
+/// # Why this exists when the port's contract already forbids failing
+///
+/// [`crate::domain::ports::metrics`] states the contract -- an implementation
+/// must not panic, must not block, and has no error to propagate by
+/// construction -- and [`crate::infra::metrics::QaCatalogMetricsMeter`]
+/// satisfies it structurally: every method is one `add` or one `record` on an
+/// instrument it already holds, with no `?`, no fallible lookup and no panic
+/// path.
+///
+/// Neither of those covers the call site. [`QaProductRegistry`] takes an
+/// `Arc<dyn PluginResolutionMetrics>`, so what it holds is whatever was
+/// injected: a later adapter, a different gear's adapter copied across, a
+/// `debug_assert!` somebody adds inside one. "Metrics must not change
+/// behaviour" is a property of *plugin resolution*, and a property of that path
+/// cannot be discharged by a promise written in another module -- a promise is
+/// exactly what a defect breaks. So the emission is guarded here, where the
+/// path is, and `a_broken_metrics_adapter_does_not_fail_a_resolution` drives a
+/// deliberately panicking port through it.
+///
+/// **What this path costs if it is not guarded is larger here than the call
+/// count suggests.** Resolution is on the critical path of every observation
+/// qa-environments performs and every product dispatch qa-runs makes, and it is
+/// reached across the `ClientHub` from another gear's background ticker. A
+/// panic raised here does not merely lose a metric: it unwinds into a caller
+/// that is holding a database connection and a loop over every registered
+/// environment.
+///
+/// # It is silent
+///
+/// A caught panic is dropped rather than logged. Logging here would be a log
+/// line **per emission**, which on the observation path is one line per
+/// registered environment per cycle -- the failure mode the observability
+/// constraints name explicitly, arriving exactly when the process can least
+/// absorb it. The panic hook has already run by the time control returns here,
+/// so the panic itself is not invisible: it reaches stderr like any other.
+///
+/// [`std::panic::AssertUnwindSafe`] is sound for the reason it is normally
+/// unsound: the state a panicking emission may have left inconsistent is that
+/// implementation's own instrument state, and nothing in this crate ever reads
+/// it back. A metric this gear cannot record is a metric this gear drops.
+///
+/// # It latches off, and that is the half the guard alone does not give
+///
+/// Catching is not enough on its own. A *persistently* broken adapter -- a
+/// poisoned instrument lock is the realistic shape -- panics on **every** call,
+/// and the default panic hook writes a line to stderr each time before control
+/// returns here. So the first caught panic latches `silenced`, and every later
+/// emission through that latch returns without calling anything. Deliberately
+/// permanent: an emission that panicked once has no claim on being retried, the
+/// alternatives (a rate limit, a backoff) are state and policy on a path whose
+/// whole contract is that it changes nothing, and a metric that stops is a
+/// visibly flat series -- a better failure than a log flood. Nothing resets it;
+/// a restart does.
+///
+/// **The latch is the caller's, not a global**, and the one type that emits
+/// owns one. Per service rather than process-wide because a global would make
+/// the broken-adapter test silence every other metric test in the binary under
+/// a threaded `cargo test`, where this crate's suites share a process; every
+/// gate in this repository runs this crate through nextest, which is
+/// process-per-test, so that would not have been caught here.
+///
+/// # Precondition: this crate unwinds
+///
+/// `catch_unwind` catches nothing under `panic = "abort"`, where the first
+/// panicking emission would take the process instead. The workspace sets
+/// `panic = "unwind"` explicitly in `[profile.release]`, and the dev and test
+/// profiles inherit the same default, so the guard is live in every profile
+/// this gear is built under today. **Changing that setting silently disables
+/// everything documented above**: the broken-adapter test would abort rather
+/// than fail, so the suite would report a crashed binary rather than a
+/// regression here.
+///
+/// `Relaxed` on both accesses: the latch orders nothing and guards no data. The
+/// whole cost of the weakest ordering is that a racing thread may read `false`
+/// once more and produce one more panic, against paying for a fence on a path
+/// whose contract is that it costs nothing.
+pub(in crate::domain::service) fn emit(silenced: &AtomicBool, record: impl FnOnce()) {
+    if silenced.load(Ordering::Relaxed) {
+        return;
+    }
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(record)).is_err() {
+        silenced.store(true, Ordering::Relaxed);
+    }
+}
+
 /// `DB` provider alias.
 ///
 /// Unlike qa-environments (which aliases `DBProvider<DbError>` and has no
@@ -116,45 +228,76 @@ mod unscoped_read_guard_tests;
 /// calls (which return `DomainError`) as-is, and any `Err` rolls the
 /// transaction back while preserving the domain variant (e.g.
 /// `BranchCacheConflict`) instead of flattening it to a database error.
-pub(crate) type DbProvider = DBProvider<DomainError>;
+pub type DbProvider = DBProvider<DomainError>;
 
 /// Authorization resource types and their PEP-supported properties.
-pub(crate) mod resources {
+///
+/// Each descriptor is built from a sibling `*_NAME` `&str` const rather than
+/// from an inline literal, so the PDP resource string has one declaration and
+/// two consumers: the descriptor the PEP is called with, and
+/// [`authz_surface::ENFORCED`]. qa-insights' `resources::TEST_RESULT_NAME` -
+/// its own doc, in that gear's `domain/service/mod.rs` - is the precedent and
+/// carries the reason the descriptor cannot supply the string itself. Cited by
+/// name rather than by line: nothing validates a `:N` in this repository, and
+/// this citation had already drifted twice as a line range.
+pub mod resources {
     use super::ResourceType;
     use toolkit_security::pep_properties;
 
     pub const TEST_REPO: ResourceType = ResourceType::from_static(
-        "qa.test_repo",
+        TEST_REPO_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
-    pub const PLAN: ResourceType = ResourceType::from_static(
-        "qa.plan",
-        &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
-    );
+    /// [`TEST_REPO`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const TEST_REPO_NAME: &str = "qa.test_repo";
+
+    pub const PLAN: ResourceType =
+        ResourceType::from_static(PLAN_NAME, &[pep_properties::OWNER_TENANT_ID]);
+
+    /// [`PLAN`]'s name as a `&'static str`, for the reason this module's header
+    /// cites.
+    pub const PLAN_NAME: &str = "qa.plan";
 
     pub const CUSTOM_PLAN: ResourceType = ResourceType::from_static(
-        "qa.custom_plan",
+        CUSTOM_PLAN_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`CUSTOM_PLAN`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const CUSTOM_PLAN_NAME: &str = "qa.custom_plan";
 
     pub const PRODUCT: ResourceType = ResourceType::from_static(
-        "qa.product",
+        PRODUCT_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`PRODUCT`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const PRODUCT_NAME: &str = "qa.product";
 
     pub const SSH_KEY: ResourceType = ResourceType::from_static(
-        "qa.ssh_key",
+        SSH_KEY_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`SSH_KEY`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const SSH_KEY_NAME: &str = "qa.ssh_key";
 
     pub const BUNDLE: ResourceType = ResourceType::from_static(
-        "qa.bundle",
+        BUNDLE_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`BUNDLE`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const BUNDLE_NAME: &str = "qa.bundle";
 }
 
-pub(crate) mod actions {
+pub mod actions {
     pub const GET: &str = "get";
     pub const LIST: &str = "list";
     pub const CREATE: &str = "create";
@@ -171,7 +314,7 @@ pub(crate) mod actions {
 // do NOT touch database objects - they call service methods with business
 // parameters only.
 #[domain_model]
-pub(crate) struct AppServices<R, C, P, K, B>
+pub struct AppServices<R, C, P, K, B>
 where
     R: TestReposRepository,
     C: CustomPlansRepository,
@@ -197,9 +340,9 @@ where
 
 /// Everything `AppServices::new` needs beyond the repositories: shared
 /// infrastructure handles plus the typed config values the services enforce.
-pub(crate) struct ServiceDeps {
+pub struct ServiceDeps {
     pub(crate) db: Arc<DbProvider>,
-    pub(crate) authz: Arc<dyn AuthZResolverClient>,
+    pub(crate) authz: Arc<dyn AuthZResolverApi>,
     pub(crate) credstore: Arc<dyn CredStoreClientV1>,
     pub(crate) sync_engine: Arc<dyn RepoSyncPort>,
     pub(crate) bundle_store: Arc<dyn BundleStore>,
@@ -283,5 +426,27 @@ where
             ),
             plugin_registry,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resources;
+    use toolkit_security::pep_properties;
+
+    /// **A declared PEP property that no call site supplies is a constraint
+    /// nothing can satisfy.**
+    ///
+    /// `qa.plan` declared `RESOURCE_ID` while every `resources::PLAN` call passes
+    /// `None` -- plans are addressed by (repo, branch, path), not by a row id, so
+    /// there is no id to supply. `qa.jira_config` already dropped its for the same
+    /// reason. Review finding #27.
+    #[test]
+    fn qa_plan_declares_only_the_properties_its_call_sites_supply() {
+        assert_eq!(
+            resources::PLAN.supported_properties(),
+            &[pep_properties::OWNER_TENANT_ID],
+            "qa.plan has no row id to constrain on"
+        );
     }
 }

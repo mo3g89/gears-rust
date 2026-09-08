@@ -92,6 +92,9 @@ pub(in crate::domain::service) mod fakes {
     //! qa-environments and qa-catalog, plus the wiring that assembles an
     //! admission and a dispatch service over them.
 
+    use toolkit_canonical_errors::CanonicalError;
+    use toolkit_security::PlatformSecurityContext;
+
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
@@ -100,11 +103,11 @@ pub(in crate::domain::service) mod fakes {
     use authz_resolver_sdk::models::{
         EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
     };
-    use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
+    use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
     use qa_catalog_sdk::{
-        BundleRequest, CustomPlan, CustomPlanEntry, NewCustomPlan, NewTestRepository, Plan,
-        Product, QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle, TestFileMeta,
-        TestRepository, TestRepositoryUpdate, UniverseTest,
+        BundleRequest, CustomPlan, CustomPlanEntry, Exclusivity, NewCustomPlan, NewTestRepository,
+        Plan, Product, QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle,
+        TestFileMeta, TestRepository, TestRepositoryUpdate, UniverseTest,
     };
     use qa_environments_sdk::{
         AcquireOutcome, Environment, EnvironmentPatch, LeaseMode, LeaseState, NewEnvironment,
@@ -120,6 +123,7 @@ pub(in crate::domain::service) mod fakes {
     use uuid::Uuid;
 
     use crate::domain::error::DomainError;
+    use crate::domain::ports::metrics::{DispatchMetrics, NoopMetrics};
     use crate::domain::ports::product_plugin::{PluginUnavailable, ProductPluginPort};
     use crate::domain::ports::run_executor::{
         ExecutionRef, ExecutionStream, RunAccess, RunExecutor, RunSpec, RunnerSpec,
@@ -286,7 +290,7 @@ pub(in crate::domain::service) mod fakes {
     ///
     /// A real `AccessScope` does not expose the resource type it was compiled for,
     /// and `PolicyEnforcer` is not a seam these tests can reach behind — so the
-    /// marker is injected where the type *is* visible: the `AuthZResolverClient`
+    /// marker is injected where the type *is* visible: the `AuthZResolverApi`
     /// double sees `request.resource.resource_type`. Each repository double then
     /// asserts the marker matches its own table. That is a property of the test
     /// harness rather than of production, and it is stated as such: what it
@@ -396,11 +400,12 @@ pub(in crate::domain::service) mod fakes {
     }
 
     #[async_trait]
-    impl AuthZResolverClient for SystemGrantingAuthZ {
+    impl AuthZResolverApi for SystemGrantingAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             let constraints = match tenant_of(&request) {
                 Some(id) => constraint_for(&[id], &request.resource.resource_type),
                 // The covering grant for `qa_runs.system`.
@@ -450,11 +455,12 @@ pub(in crate::domain::service) mod fakes {
     }
 
     #[async_trait]
-    impl AuthZResolverClient for RecordingAuthZ {
+    impl AuthZResolverApi for RecordingAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             let tenant = tenant_of(&request);
             if tenant.is_none() {
                 self.nil_tenant_requests.lock().unwrap().push((
@@ -577,11 +583,12 @@ pub(in crate::domain::service) mod fakes {
     }
 
     #[async_trait]
-    impl AuthZResolverClient for CoveringSystemAuthZ {
+    impl AuthZResolverApi for CoveringSystemAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             self.asked
                 .lock()
                 .unwrap()
@@ -611,11 +618,12 @@ pub(in crate::domain::service) mod fakes {
     pub(in crate::domain::service) struct DenyingAuthZ;
 
     #[async_trait]
-    impl AuthZResolverClient for DenyingAuthZ {
+    impl AuthZResolverApi for DenyingAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             _request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             Ok(EvaluationResponse {
                 decision: false,
                 context: EvaluationResponseContext::default(),
@@ -634,11 +642,12 @@ pub(in crate::domain::service) mod fakes {
     }
 
     #[async_trait]
-    impl AuthZResolverClient for DenyingActionAuthZ {
+    impl AuthZResolverApi for DenyingActionAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             if request.action.name == self.action {
                 return Ok(EvaluationResponse {
                     decision: false,
@@ -1128,8 +1137,8 @@ pub(in crate::domain::service) mod fakes {
         ) -> Result<bool, DomainError> {
             assert_scope_is_for(scope, "qa.run", "set_execution_ref");
             if *self.fail_execution_ref.lock().unwrap() {
-                return Err(DomainError::Database(
-                    "the execution reference could not be written".to_owned(),
+                return Err(DomainError::database(
+                    "the execution reference could not be written",
                 ));
             }
             let mut rows = self.rows.lock().unwrap();
@@ -1610,6 +1619,7 @@ pub(in crate::domain::service) mod fakes {
                 .map(|row| QueuedRow {
                     id: row.id,
                     exclusive: row.exclusive,
+                    enqueued_at: row.enqueued_at,
                 })
                 .collect())
         }
@@ -2796,7 +2806,7 @@ pub(in crate::domain::service) mod fakes {
                 timeout_seconds: Some(300),
                 tags: Vec::new(),
                 validation: false,
-                exclusive: None,
+                exclusive: Exclusivity::Inherit,
             };
             Ok(vec![
                 plan("smoke", self.test_files.lock().unwrap().clone()),
@@ -2821,7 +2831,7 @@ pub(in crate::domain::service) mod fakes {
                 timeout_seconds: Some(300),
                 tags: Vec::new(),
                 validation: false,
-                exclusive: None,
+                exclusive: Exclusivity::Inherit,
             })
         }
 
@@ -3048,8 +3058,9 @@ pub(in crate::domain::service) mod fakes {
         async fn watch(
             &self,
             execution_ref: &ExecutionRef,
+            resume: crate::domain::repos::LogResume,
         ) -> Result<ExecutionStream, DomainError> {
-            self.inner.watch(execution_ref).await
+            self.inner.watch(execution_ref, resume).await
         }
 
         async fn cancel(&self, _execution_ref: &ExecutionRef) -> Result<(), DomainError> {
@@ -3100,9 +3111,14 @@ pub(in crate::domain::service) mod fakes {
         catalog: Arc<FakeCatalog>,
         product_plugins: Arc<FakeProductPlugins>,
         executor: Option<Arc<dyn RunExecutor>>,
-        authz: Option<Arc<dyn AuthZResolverClient>>,
+        authz: Option<Arc<dyn AuthZResolverApi>>,
         limits: QueueLimits,
         orphan_timeout_seconds: u64,
+        /// The dispatcher's emission port. `None` builds the same
+        /// `NoopMetrics` production gets when no adapter was installed, so the
+        /// several hundred tests that do not read metrics see the pre-adapter
+        /// behaviour exactly.
+        metrics: Option<Arc<dyn DispatchMetrics>>,
     }
 
     impl Builder {
@@ -3121,6 +3137,7 @@ pub(in crate::domain::service) mod fakes {
                     queue_ttl_seconds: 7200,
                 },
                 orphan_timeout_seconds: 600,
+                metrics: None,
             }
         }
 
@@ -3165,7 +3182,7 @@ pub(in crate::domain::service) mod fakes {
 
         pub(in crate::domain::service) fn authz(
             mut self,
-            authz: Arc<dyn AuthZResolverClient>,
+            authz: Arc<dyn AuthZResolverApi>,
         ) -> Self {
             self.authz = Some(authz);
             self
@@ -3181,6 +3198,18 @@ pub(in crate::domain::service) mod fakes {
             self
         }
 
+        /// Install a dispatcher emission port — the real
+        /// `infra::metrics::QaRunsMetricsMeter` in the metric tests, a
+        /// deliberately panicking double in the one that pins that a broken
+        /// adapter cannot fail a tick.
+        pub(in crate::domain::service) fn metrics(
+            mut self,
+            metrics: Arc<dyn DispatchMetrics>,
+        ) -> Self {
+            self.metrics = Some(metrics);
+            self
+        }
+
         pub(in crate::domain::service) async fn build(self) -> Fakes {
             let db: Arc<DbProvider> = test_db_provider().await;
             let logs = Arc::new(crate::domain::service::ingest::tests::RecordingLogs::default());
@@ -3189,9 +3218,12 @@ pub(in crate::domain::service) mod fakes {
                 .unwrap_or_else(|| Arc::new(crate::infra::executor::mock::MockRunExecutor::new()));
             let authz = self
                 .authz
-                .unwrap_or_else(|| Arc::new(SystemGrantingAuthZ) as Arc<dyn AuthZResolverClient>);
+                .unwrap_or_else(|| Arc::new(SystemGrantingAuthZ) as Arc<dyn AuthZResolverApi>);
             let enforcer = PolicyEnforcer::new(authz);
             let locks = PlatformLocks::default();
+            let metrics: Arc<dyn DispatchMetrics> = self
+                .metrics
+                .unwrap_or_else(|| Arc::new(NoopMetrics) as Arc<dyn DispatchMetrics>);
 
             let admission = AdmissionService::new(AdmissionDeps {
                 db: Arc::clone(&db),
@@ -3202,6 +3234,11 @@ pub(in crate::domain::service) mod fakes {
                 locks: locks.clone(),
                 limits: self.limits,
                 policy_enforcer: enforcer.clone(),
+                // The same port the dispatch service below is given, which is
+                // what `AppServices::new` does — so a test that installs one
+                // sees admission's decisions and the tick's cycles in one
+                // exporter, as production does.
+                metrics: Arc::clone(&metrics),
             });
             let watcher = Arc::new(RecordingWatcher::new());
             let dispatch = DispatchService::new(DispatchDeps {
@@ -3219,6 +3256,7 @@ pub(in crate::domain::service) mod fakes {
                 orphan_timeout_seconds: self.orphan_timeout_seconds,
                 policy_enforcer: enforcer,
                 watcher: Arc::clone(&watcher) as Arc<dyn crate::domain::service::watch::RunWatcher>,
+                metrics,
             });
 
             Fakes {
@@ -3586,8 +3624,10 @@ async fn a_reached_concurrency_cap_refuses_the_launch_before_the_lock() {
 
 /// A disabled cap costs no executor call at all — legacy returns before listing
 /// anything when `max_concurrent_runs == 0` (`run_queue.rs:856-858`), which is
-/// the shipped default. Proven by injecting a listing failure that would
-/// otherwise fail the launch.
+/// an explicit opt-out rather than this gear's shipped default (`0` was the
+/// default until review finding #19; see
+/// `crate::config::QaRunsConfig::max_concurrent_runs`). Proven by injecting a
+/// listing failure that would otherwise fail the launch.
 #[tokio::test]
 async fn a_disabled_cap_never_calls_the_executor() {
     let run = run_fixture(
@@ -3791,7 +3831,7 @@ async fn a_failed_insert_releases_the_lease_it_took() {
             run.clone(),
         )])))
         .queue(Arc::new(fakes::FakeQueue::failing_insert(
-            DomainError::Database("the row could not be written".to_owned()),
+            DomainError::database("the row could not be written"),
         )))
         .build()
         .await;
@@ -3801,7 +3841,7 @@ async fn a_failed_insert_releases_the_lease_it_took() {
         .admit_decision(&ctx(OWNER_TENANT), &run)
         .await
         .expect_err("the insert failed");
-    assert!(matches!(error, DomainError::Database(_)));
+    assert!(matches!(error, DomainError::Database { .. }));
     assert_eq!(
         fakes.environments.released(),
         vec![(PLATFORM_A, run.id)],
@@ -4078,8 +4118,9 @@ impl RunExecutor for YieldingListing {
     async fn watch(
         &self,
         reference: &crate::domain::ports::run_executor::ExecutionRef,
+        resume: crate::domain::repos::LogResume,
     ) -> Result<crate::domain::ports::run_executor::ExecutionStream, DomainError> {
-        self.0.watch(reference).await
+        self.0.watch(reference, resume).await
     }
 
     async fn list_active(
@@ -4447,4 +4488,145 @@ async fn the_platform_lock_does_not_outlive_admit() {
     .await
     .expect("a second admission blocked while the first caller was submitting");
     assert!(second_admission.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry: what admission decided
+// ---------------------------------------------------------------------------
+
+/// Ids for the telemetry fixtures below, so a failure names something.
+const DECISION_INLINE: Uuid = Uuid::from_u128(0x0D01);
+const DECISION_QUEUED: Uuid = Uuid::from_u128(0x0D02);
+const DECISION_UNQUEUED: Uuid = Uuid::from_u128(0x0D03);
+
+/// **Every admission outcome is counted, each under its own decision label.**
+///
+/// Sweeps the three outcomes through the three code paths that produce them
+/// rather than asserting on one: a free platform admits `Dispatch`, a leased
+/// one admits `Queue`, and a platformless run is `Unqueued`. A call site that
+/// recorded a fixed label would satisfy any single-outcome test.
+///
+/// This is the family that answers *why* a queue is growing — every launch
+/// being queued is a different incident from dispatch being slow — and until
+/// this call site existed nothing emitted into it at all.
+#[tokio::test]
+async fn every_admission_outcome_reaches_the_decision_counter() {
+    let probe = crate::infra::metrics::probe::MetricsProbe::new();
+    let inline = run_fixture(DECISION_INLINE, Some(PLATFORM_A), false, RunState::Queued);
+    let queued = run_fixture(DECISION_QUEUED, Some(PLATFORM_B), false, RunState::Queued);
+    let unqueued = run_fixture(DECISION_UNQUEUED, None, false, RunState::Queued);
+    let fakes = fakes::Builder::new()
+        .runs(Arc::new(fakes::FakeRuns::with(vec![
+            (OWNER_TENANT, inline.clone()),
+            (OWNER_TENANT, queued.clone()),
+            (OWNER_TENANT, unqueued.clone()),
+        ])))
+        // `PLATFORM_B` is leased, so its admission must queue; `PLATFORM_A` is
+        // free, so its admission dispatches inline.
+        .environments(Arc::new(fakes::FakeEnvironments::holding(
+            PLATFORM_B,
+            LeaseState::HeldExclusive {
+                holder: Uuid::from_u128(0xBEEF),
+            },
+        )))
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    for run in [&inline, &queued, &unqueued] {
+        fakes
+            .admission
+            .admit(&ctx(OWNER_TENANT), run)
+            .await
+            .expect("each of the three admissions succeeds");
+    }
+
+    let series = probe.collect();
+    for label in ["inline", "queued", "unqueued"] {
+        assert_eq!(
+            series.counter_with(
+                crate::domain::metrics::QA_RUNS_DISPATCH_DECISION,
+                &[("decision", label)]
+            ),
+            1,
+            "no series was exported for decision {label}; the exported names were {:?}",
+            series.names()
+        );
+    }
+}
+
+/// **The bypass seam is an admission decision too.**
+///
+/// `Admitter::bypass` is how a collect run reaches an execution, and it is the
+/// one outcome that takes no lock, no lease and no queue row. Leaving it
+/// uncounted would make this counter disagree with the launch rate by exactly
+/// the collect traffic.
+#[tokio::test]
+async fn the_bypass_seam_counts_as_an_unqueued_decision() {
+    let probe = crate::infra::metrics::probe::MetricsProbe::new();
+    let fakes = fakes::Builder::new().metrics(probe.adapter()).build().await;
+
+    fakes
+        .admission
+        .bypass(&ctx(OWNER_TENANT))
+        .await
+        .expect("the bypass never fails");
+
+    assert_eq!(
+        probe.collect().counter_with(
+            crate::domain::metrics::QA_RUNS_DISPATCH_DECISION,
+            &[("decision", "unqueued")]
+        ),
+        1
+    );
+}
+
+/// **A refused admission is not a decision.**
+///
+/// A launch the queue-depth limit rejects writes no row and produces no
+/// `Admitted`, so it must not appear in this family: the counter's rate is
+/// "launches this gear admitted", and inflating it with 429s would make it
+/// disagree with the queue it is read beside.
+#[tokio::test]
+async fn a_refused_admission_records_no_decision() {
+    let probe = crate::infra::metrics::probe::MetricsProbe::new();
+    let run = run_fixture(DECISION_INLINE, Some(PLATFORM_A), false, RunState::Queued);
+    let fakes = fakes::Builder::new()
+        .runs(Arc::new(fakes::FakeRuns::with(vec![(
+            OWNER_TENANT,
+            run.clone(),
+        )])))
+        // One row already queued against a depth limit of one.
+        .queue(Arc::new(fakes::FakeQueue::with(vec![queued_row(
+            Uuid::from_u128(0x0DFF),
+            OWNER_TENANT,
+            DECISION_QUEUED,
+            PLATFORM_A,
+            false,
+            QueueState::Queued,
+        )])))
+        .limits(QueueLimits {
+            queue_max_depth: 1,
+            max_concurrent_runs: 0,
+            queue_ttl_seconds: 7200,
+        })
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let refused = fakes.admission.admit(&ctx(OWNER_TENANT), &run).await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(crate::domain::error::DomainError::QueueFull { .. })
+        ),
+        "premise: the fixture must actually be refused"
+    );
+    assert_eq!(
+        probe
+            .collect()
+            .counter(crate::domain::metrics::QA_RUNS_DISPATCH_DECISION),
+        0
+    );
 }

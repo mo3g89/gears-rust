@@ -47,6 +47,8 @@
 //! `GET /qa/v1/product-plugins` is the caller that changed it.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use authz_resolver_sdk::PolicyEnforcer;
 use gts::GtsSchema;
@@ -59,8 +61,11 @@ use uuid::Uuid;
 
 use types_registry_sdk::{InstanceQuery, TypesRegistryClient};
 
-use super::{DbProvider, actions, resources};
+use super::{DbProvider, actions, emit, resources};
 use crate::domain::error::DomainError;
+use crate::domain::ports::metrics::{
+    NoopMetrics, PluginResolutionMetrics, PluginResolutionOutcome,
+};
 use crate::domain::repos::ProductsRepository;
 
 /// Whether a GTS instance id names a product plugin **this process
@@ -110,6 +115,17 @@ pub struct QaProductRegistry<P: ProductsRepository> {
     repo: Arc<P>,
     policy_enforcer: PolicyEnforcer,
     client_hub: Arc<ClientHub>,
+    /// Where [`Self::plugin_for`] reports itself. [`NoopMetrics`] when no
+    /// adapter was installed, never `None`: a registry built without one emits
+    /// every signal a wired one does and nothing observes, which is what makes
+    /// "silent with no adapter" a property of the type rather than of a branch
+    /// somebody remembered to write. See [`crate::domain::ports::metrics`].
+    metrics: Arc<dyn PluginResolutionMetrics>,
+    /// Latched by the first metric emission that panics, after which this
+    /// registry emits nothing. Per service, not global -- `domain::service`'s
+    /// [`emit`] carries the argument, and the test that drives a panicking
+    /// adapter is why it matters.
+    metrics_silenced: AtomicBool,
 }
 
 /// One product plugin this deployment has, as
@@ -145,17 +161,27 @@ impl<P: ProductsRepository> ProductPluginPresence for QaProductRegistry<P> {
 }
 
 impl<P: ProductsRepository> QaProductRegistry<P> {
-    pub(crate) fn new(
+    /// `metrics` is `None` for every construction site that does not measure
+    /// this registry, which is every one but `gear.rs`'s `init`. `None` is not
+    /// "metrics off": the field becomes [`NoopMetrics`], so an unmetered
+    /// registry runs every emission a metered one does and nothing observes. An
+    /// `Option` parameter rather than a `with_metrics` builder for that reason
+    /// — "no adapter" is a state a construction site says, not one it reaches
+    /// by forgetting.
+    pub fn new(
         db: Arc<DbProvider>,
         repo: Arc<P>,
         policy_enforcer: PolicyEnforcer,
         client_hub: Arc<ClientHub>,
+        metrics: Option<Arc<dyn PluginResolutionMetrics>>,
     ) -> Self {
         Self {
             db,
             repo,
             policy_enforcer,
             client_hub,
+            metrics: metrics.unwrap_or_else(|| Arc::new(NoopMetrics)),
+            metrics_silenced: AtomicBool::new(false),
         }
     }
 
@@ -179,8 +205,72 @@ impl<P: ProductsRepository> QaProductRegistry<P> {
     ///   finding IMPORTANT-4: this list said otherwise while the comment 25
     ///   lines below said the opposite, in the same function).
     /// - [`DomainError::Forbidden`] when policy denies the product read.
+    ///
+    /// # It is measured
+    ///
+    /// One sample per call on the two families in [`crate::domain::metrics`],
+    /// labelled by how the resolution ended.
+    ///
+    /// **What the span contains, exactly.** The whole of
+    /// [`Self::resolve_plugin`] — the policy check, the connection, the product
+    /// read, the `ClientHub` probe, **and that method's own `debug!`/`warn!`
+    /// line**, which is inside it and therefore inside the measurement. The
+    /// clock stops the instant `resolve_plugin` returns, which is before the
+    /// classification and before the emission; those two are the only things
+    /// this method does that are not charged to the sample. The logging is a
+    /// formatted line rather than a round trip and the bias is negligible, but
+    /// the span is stated as what it is rather than as an exactness the code
+    /// does not deliver.
+    ///
+    /// **This measurement is nested inside two of qa-environments'.** A
+    /// resolution driven from that gear's observation cycle sits inside its
+    /// per-environment observation duration, which sits inside its cycle
+    /// duration; it is *beside*, never inside, that gear's plugin-call
+    /// duration, which starts after this method has returned. Adding this
+    /// family to either of those durations counts the same seconds twice. The
+    /// same relationship is written down at all three constants.
     #[instrument(skip(self, ctx), fields(product_id = %product_id))]
-    pub(crate) async fn plugin_for(
+    pub async fn plugin_for(
+        &self,
+        ctx: &SecurityContext,
+        product_id: Uuid,
+    ) -> Result<Arc<dyn QaProductPluginV1>, DomainError> {
+        let started = Instant::now();
+        let resolved = self.resolve_plugin(ctx, product_id).await;
+        // Read the instant this call returns, before the classification and
+        // before the emission: neither is work this deployment's PDP, database
+        // or ClientHub did, and charging them to the sample would bias it in
+        // one direction on every path.
+        let elapsed = started.elapsed();
+
+        let outcome = match &resolved {
+            Ok(_) => PluginResolutionOutcome::Resolved,
+            Err(error) => PluginResolutionOutcome::from(error),
+        };
+        emit(&self.metrics_silenced, || {
+            self.metrics.plugin_resolution(outcome, elapsed);
+        });
+
+        resolved
+    }
+
+    /// [`Self::plugin_for`]'s body, so that the public method above is the
+    /// measured wrapper and this is the work.
+    ///
+    /// Split rather than measured in place because the body below has **six**
+    /// exits — four `?`s (the policy check, the connection, the product read,
+    /// and the `ok_or` that turns an absent row into a not-found), one early
+    /// `return` for the unregistered plugin, and the tail. Wrapping is the
+    /// shape that makes "exactly one sample per call, whichever exit was taken"
+    /// a property of the code rather than of six remembered emissions.
+    /// qa-runs' `run_tick` and qa-environments' `observe_every_environment` are
+    /// the same split for the same reason.
+    ///
+    /// It carries no `#[instrument]` of its own: this future is awaited inside
+    /// the wrapper's span, so every log line below is filed under the
+    /// `plugin_for` span it has always been filed under, and the split does not
+    /// rename a span.
+    async fn resolve_plugin(
         &self,
         ctx: &SecurityContext,
         product_id: Uuid,
@@ -270,7 +360,7 @@ impl<P: ProductsRepository> QaProductRegistry<P> {
     ///   plugins" are different facts, and answering the first with the
     ///   second would tell an operator their plugins are gone.
     #[instrument(skip(self, ctx))]
-    pub(crate) async fn list_registered_plugins(
+    pub async fn list_registered_plugins(
         &self,
         ctx: &SecurityContext,
     ) -> Result<Vec<RegisteredProductPlugin>, DomainError> {

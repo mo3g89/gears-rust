@@ -5,7 +5,9 @@
 use async_trait::async_trait;
 use qa_runs_sdk::QueueState;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+    ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+};
 use time::OffsetDateTime;
 use toolkit_db::odata::sea_orm_filter::{PaginateOdataTryError, paginate_odata_try};
 use toolkit_db::secure::{DBRunner, SecureEntityExt, SecureUpdateExt, secure_insert};
@@ -34,7 +36,7 @@ pub struct OrmQueueRepository;
 
 /// `WHERE id = $1`.
 fn by_id(id: Uuid) -> Condition {
-    Condition::all().add(Expr::col(QueueColumn::Id).eq(id))
+    Condition::all().add(QueueColumn::Id.eq(id))
 }
 
 /// The window size [`QueueRepository::list_for_read`] will actually use.
@@ -62,15 +64,15 @@ struct QueuedPlatformRow {
 
 /// `WHERE state = 'queued'`.
 fn queued() -> Condition {
-    Condition::all().add(Expr::col(QueueColumn::State).eq(QueueState::Queued.as_str()))
+    Condition::all().add(QueueColumn::State.eq(QueueState::Queued.as_str()))
 }
 
 /// The two states that hold a claim on a platform — legacy's `CLAIM_STATES`
 /// (`manager/src/services/run_queue.rs:104`).
 fn claim_states() -> Condition {
     Condition::any()
-        .add(Expr::col(QueueColumn::State).eq(QueueState::Dispatching.as_str()))
-        .add(Expr::col(QueueColumn::State).eq(QueueState::Running.as_str()))
+        .add(QueueColumn::State.eq(QueueState::Dispatching.as_str()))
+        .add(QueueColumn::State.eq(QueueState::Running.as_str()))
 }
 
 /// A guarded transition on one row, returning whether it matched.
@@ -205,7 +207,7 @@ impl QueueRepository for OrmQueueRepository {
         let count = QueueEntity::find()
             .filter(
                 Condition::all()
-                    .add(Expr::col(QueueColumn::EnvironmentId).eq(platform_id))
+                    .add(QueueColumn::EnvironmentId.eq(platform_id))
                     .add(queued()),
             )
             .secure()
@@ -227,7 +229,7 @@ impl QueueRepository for OrmQueueRepository {
         let rows = QueueEntity::find()
             .filter(
                 Condition::all()
-                    .add(Expr::col(QueueColumn::EnvironmentId).eq(platform_id))
+                    .add(QueueColumn::EnvironmentId.eq(platform_id))
                     .add(queued()),
             )
             .secure()
@@ -262,6 +264,7 @@ impl QueueRepository for OrmQueueRepository {
             .map(|m| QueuedRow {
                 id: m.id,
                 exclusive: m.exclusive,
+                enqueued_at: m.enqueued_at,
             })
             .collect())
     }
@@ -275,7 +278,7 @@ impl QueueRepository for OrmQueueRepository {
         let rows = QueueEntity::find()
             .filter(
                 Condition::all()
-                    .add(Expr::col(QueueColumn::EnvironmentId).eq(platform_id))
+                    .add(QueueColumn::EnvironmentId.eq(platform_id))
                     .add(claim_states()),
             )
             .secure()
@@ -299,6 +302,7 @@ impl QueueRepository for OrmQueueRepository {
         runner: &C,
         scope: &AccessScope,
     ) -> Result<Vec<QueuedPlatform>, DomainError> {
+        use sea_orm::ExprTrait;
         // De-duplicated **in SQL**, by `GROUP BY (platform_id, tenant_id)`.
         //
         // This used to fetch every queued row in scope and fold them in
@@ -382,8 +386,7 @@ impl QueueRepository for OrmQueueRepository {
             scope,
             id,
             QueueState::Queued,
-            Condition::all()
-                .add(Expr::col(QueueColumn::State).eq(QueueState::Dispatching.as_str())),
+            Condition::all().add(QueueColumn::State.eq(QueueState::Dispatching.as_str())),
             vec![(
                 QueueColumn::DispatchedAt,
                 Expr::value(None::<OffsetDateTime>),
@@ -513,9 +516,7 @@ impl QueueRepository for OrmQueueRepository {
             // The rotation. `id` is the only column here that nothing a row
             // does can change, which is exactly why it is the sort key - see
             // the trait doc on what happened when this ordered by `enqueued_at`.
-            filter = Condition::all()
-                .add(filter)
-                .add(Expr::col(QueueColumn::Id).gt(after));
+            filter = Condition::all().add(filter).add(QueueColumn::Id.gt(after));
         }
         let rows = QueueEntity::find()
             .filter(filter)
@@ -552,7 +553,7 @@ impl QueueRepository for OrmQueueRepository {
             .filter(
                 Condition::all()
                     .add(queued())
-                    .add(Expr::col(QueueColumn::EnqueuedAt).lt(cutoff)),
+                    .add(QueueColumn::EnqueuedAt.lt(cutoff)),
             )
             .secure()
             .scope_with(scope)
@@ -631,11 +632,11 @@ impl QueueRepository for OrmQueueRepository {
         let result = QueueEntity::update_many()
             .filter(
                 Condition::all()
-                    .add(Expr::col(QueueColumn::Id).is_in(ids.iter().copied()))
+                    .add(QueueColumn::Id.is_in(ids.iter().copied()))
                     // The half only SQL can enforce: a row that started
                     // running between the caller's read and this write keeps
                     // its claim.
-                    .add(Expr::col(QueueColumn::State).eq(QueueState::Dispatching.as_str())),
+                    .add(QueueColumn::State.eq(QueueState::Dispatching.as_str())),
             )
             .secure()
             .scope_with(scope)
@@ -663,9 +664,7 @@ impl QueueRepository for OrmQueueRepository {
         limit: u64,
     ) -> Result<Vec<QueueRowRecord>, DomainError> {
         let filter = match platform_id {
-            Some(platform_id) => {
-                Condition::all().add(Expr::col(QueueColumn::EnvironmentId).eq(platform_id))
-            }
+            Some(platform_id) => Condition::all().add(QueueColumn::EnvironmentId.eq(platform_id)),
             None => Condition::all(),
         };
 
@@ -697,9 +696,7 @@ impl QueueRepository for OrmQueueRepository {
         query: &ODataQuery,
     ) -> Result<Page<QueueRowRecord>, DomainError> {
         let filter = match platform_id {
-            Some(platform_id) => {
-                Condition::all().add(Expr::col(QueueColumn::EnvironmentId).eq(platform_id))
-            }
+            Some(platform_id) => Condition::all().add(QueueColumn::EnvironmentId.eq(platform_id)),
             None => Condition::all(),
         };
         // Filter-first, then scope: `paginate_odata_try` takes a
@@ -809,7 +806,7 @@ mod tests {
                             .cancel_queued(tx, &scope(tenant), row.id, "operator")
                             .await?
                     );
-                    Err(DomainError::Database("the connection dropped".to_owned()))
+                    Err(DomainError::database("the connection dropped"))
                 })
             })
             .await;

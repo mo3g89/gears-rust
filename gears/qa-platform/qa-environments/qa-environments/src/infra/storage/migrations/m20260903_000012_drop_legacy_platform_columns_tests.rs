@@ -46,7 +46,7 @@ async fn db_migrated_up_to_this_one() -> DatabaseConnection {
 }
 
 async fn scalar<T: TryGetable>(conn: &DatabaseConnection, sql: &str) -> T {
-    conn.query_one(Statement::from_string(
+    conn.query_one_raw(Statement::from_string(
         conn.get_database_backend(),
         sql.to_owned(),
     ))
@@ -74,7 +74,7 @@ async fn plant(
         || "NULL".to_owned(),
         |p| super::super::legacy_row::uuid_lit(Uuid::from_u128(p)),
     );
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         conn.get_database_backend(),
         format!(
             "INSERT INTO qa_environments \
@@ -377,7 +377,7 @@ async fn the_eight_legacy_columns_are_gone_afterwards() {
         "cluster_checked_at",
     ] {
         let probe = conn
-            .execute(Statement::from_string(
+            .execute_raw(Statement::from_string(
                 conn.get_database_backend(),
                 format!("SELECT {column} FROM qa_environments;"),
             ))
@@ -392,7 +392,7 @@ async fn the_eight_legacy_columns_are_gone_afterwards() {
         "observed_base_url",
         "health_state",
     ] {
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             conn.get_database_backend(),
             format!("SELECT {column} FROM qa_environments;"),
         ))

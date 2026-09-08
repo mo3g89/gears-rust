@@ -102,7 +102,6 @@ export function RunCustomPlanDialog({ plan, open, onOpenChange, trigger }: RunCu
       if (repoDefaultBranch?.trim()) return repoDefaultBranch.trim();
       return pickDefaultBranch(branchList);
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, repoDefaultBranch, branchList, selectedEnvironmentInfo?.default_branch]);
 
   const resetDialogState = () => {

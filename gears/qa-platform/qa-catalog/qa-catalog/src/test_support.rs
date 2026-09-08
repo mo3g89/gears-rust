@@ -15,8 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use authz_resolver_sdk::AuthZResolverClient;
-use authz_resolver_sdk::AuthZResolverError;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
@@ -28,14 +27,17 @@ use qa_product_sdk::QaProductPluginV1;
 use qa_product_sdk::observation::PluginFailure;
 use sea_orm_migration::MigratorTrait;
 use toolkit::client_hub::{ClientHub, ClientScope};
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::{ConnectOpts, DBProvider, Db, connect_db};
+use toolkit_security::PlatformSecurityContext;
 use toolkit_security::{SecurityContext, pep_properties};
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::bundle_store::BundleStore;
 use crate::domain::ports::repo_sync::{RepoSyncPort, SyncResult};
+use crate::domain::repos::BundlesRepository;
 use crate::domain::service::{AppServices, QaProductRegistry, ServiceDeps, SyncCache};
 use crate::gear::ConcreteAppServices;
 use crate::infra::storage::{
@@ -171,11 +173,12 @@ pub fn permissive_response(request: &EvaluationRequest) -> EvaluationResponse {
 pub struct TenantScopedAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for TenantScopedAuthZ {
+impl AuthZResolverApi for TenantScopedAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(permissive_response(&request))
     }
 }
@@ -207,11 +210,12 @@ pub struct SystemActorGrantAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for SystemActorGrantAuthZ {
+impl AuthZResolverApi for SystemActorGrantAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let is_system =
             request.subject.id == crate::domain::system_actor::QA_CATALOG_SYSTEM_ACTOR_UUID;
 
@@ -240,11 +244,12 @@ impl AuthZResolverClient for SystemActorGrantAuthZ {
 pub struct DenyAllAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for DenyAllAuthZ {
+impl AuthZResolverApi for DenyAllAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: false,
             context: EvaluationResponseContext::default(),
@@ -339,8 +344,41 @@ impl BundleStore for NoopBundleStore {
 /// repositories, not mocks — wired to `db` and `authz`, with inert
 /// sync-engine/bundle-store ports and the in-memory credstore double (the
 /// scoping tests exercise row-level DB isolation, not the git/blob planes).
-pub fn build_services(db: Db, authz: Arc<dyn AuthZResolverClient>) -> Arc<ConcreteAppServices> {
+pub fn build_services(db: Db, authz: Arc<dyn AuthZResolverApi>) -> Arc<ConcreteAppServices> {
     build_services_with_engine(db, authz, Arc::new(NoopSyncEngine), throwaway_repos_dir())
+}
+
+/// A bundle descriptor expired at `offset` from now, seeded straight through
+/// [`OrmBundlesRepository`] under [`AccessScope::allow_all`] — ground truth,
+/// bypassing `BundlesService::create_bundle` entirely, since that method
+/// always sets `expires_at` from the configured TTL and can never produce an
+/// already-expired row.
+///
+/// A copy of `domain::service::tests_tenant_scoping`'s private helper of the
+/// same name, made `pub` and moved to this exempt seam
+/// (`unscoped_read_guard_tests`'s module doc names both this file and that one
+/// as the crate's only `AccessScope::allow_all()` call sites outside
+/// `domain::elevated`) so `gear::tests` can seed the same ground truth without
+/// tripping `no_production_path_uses_allow_all`.
+pub async fn seed_expired_bundle(db: &Db, tenant_id: Uuid, offset: time::Duration) {
+    let conn = db.conn().expect("conn");
+    let now = time::OffsetDateTime::now_utc();
+    OrmBundlesRepository
+        .create(
+            &conn,
+            &toolkit_security::AccessScope::allow_all(),
+            tenant_id,
+            qa_catalog_sdk::TestBundle {
+                id: Uuid::new_v4(),
+                storage_ref: format!("mem:{tenant_id}"),
+                checksum_sha256: "0".repeat(64),
+                size_bytes: 1,
+                expires_at: now + offset,
+                created_at: now - time::Duration::hours(2),
+            },
+        )
+        .await
+        .expect("seed expired bundle");
 }
 
 /// A fresh, never-created path under the system temp dir. Suites that never
@@ -447,7 +485,7 @@ impl QaProductPluginV1 for FixturePlugin {
 /// catalogue endpoint's own tests build their own registry.
 fn fixture_plugin_registry(
     db: Arc<DBProvider<DomainError>>,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
 ) -> Arc<QaProductRegistry<OrmProductsRepository>> {
     let hub = Arc::new(ClientHub::new());
     for instance_id in [FIXTURE_PLUGIN_INSTANCE_ID, FIXTURE_PLUGIN_INSTANCE_ID_B] {
@@ -461,13 +499,14 @@ fn fixture_plugin_registry(
         Arc::new(OrmProductsRepository),
         PolicyEnforcer::new(authz),
         hub,
+        None,
     ))
 }
 
 /// Like [`build_services`] but with a caller-supplied [`RepoSyncPort`].
 fn build_services_with_engine(
     db: Db,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
     sync_engine: Arc<dyn RepoSyncPort>,
     repos_dir: PathBuf,
 ) -> Arc<ConcreteAppServices> {
@@ -517,6 +556,7 @@ pub fn build_plugin_registry_tenant_scoped(
         Arc::new(OrmProductsRepository),
         PolicyEnforcer::new(Arc::new(TenantScopedAuthZ)),
         client_hub,
+        None,
     )
 }
 

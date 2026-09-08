@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use qa_environments_sdk::LeaseState;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::secure::{DBRunner, SecureEntityExt, SecureUpdateExt, secure_insert};
 use toolkit_security::AccessScope;
@@ -28,10 +28,7 @@ impl LeasesRepository for OrmLeasesRepository {
         environment_id: Uuid,
     ) -> Result<VersionedLease, DomainError> {
         let found = LeaseEntity::find()
-            .filter(
-                sea_orm::Condition::all()
-                    .add(Expr::col(LeaseColumn::EnvironmentId).eq(environment_id)),
-            )
+            .filter(sea_orm::Condition::all().add(LeaseColumn::EnvironmentId.eq(environment_id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -88,8 +85,8 @@ impl LeasesRepository for OrmLeasesRepository {
         let result = LeaseEntity::update_many()
             .filter(
                 sea_orm::Condition::all()
-                    .add(Expr::col(LeaseColumn::EnvironmentId).eq(environment_id))
-                    .add(Expr::col(LeaseColumn::Version).eq(expected_version)),
+                    .add(LeaseColumn::EnvironmentId.eq(environment_id))
+                    .add(LeaseColumn::Version.eq(expected_version)),
             )
             .secure()
             .scope_with(scope)

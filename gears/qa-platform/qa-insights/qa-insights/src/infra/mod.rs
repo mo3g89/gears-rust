@@ -24,6 +24,14 @@
 //! two egress adapters it does name, and this is the same shape for an ingress
 //! one. See that module's header.
 //!
+//! * `metrics` — the `OpenTelemetry`-backed adapter behind
+//!   [`CollectMetrics`](crate::domain::ports::metrics::CollectMetrics) and
+//!   [`JiraPollMetrics`](crate::domain::ports::metrics::JiraPollMetrics). Egress
+//!   in the loosest sense of the three above: it writes into the process-global
+//!   meter provider, which a deployment's telemetry configuration may or may
+//!   not have pointed anywhere. That it is safe to build and emit through when
+//!   it has not is the whole of its module header's last section.
+//!
 //! * `notify` — the outbound Slack and email adapters behind
 //!   [`SlackClient`](crate::domain::ports::SlackClient) and
 //!   [`MailClient`](crate::domain::ports::MailClient), over `oagw` and D10's
@@ -33,5 +41,6 @@ pub mod clients;
 pub mod clock;
 pub mod jira;
 pub mod leader;
+pub mod metrics;
 pub mod notify;
 pub mod storage;

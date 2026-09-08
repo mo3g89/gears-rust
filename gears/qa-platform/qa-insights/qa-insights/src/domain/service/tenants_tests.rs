@@ -29,11 +29,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
-use authz_resolver_sdk::error::AuthZResolverError;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use time::OffsetDateTime;
 use toolkit_db::DBProvider;
 use toolkit_security::pep_properties;
@@ -46,6 +45,8 @@ use crate::domain::service::test_support::TenantScopedAuthZ;
 use crate::domain::system_actor::TenantBound;
 use crate::infra::storage::results_sea_repo::OrmResultsRepository;
 use crate::infra::storage::test_db::{inmem_db, scope};
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 /// Two tenants, and the **larger** UUID is deliberately not the interesting one:
 /// this test asserts on the whole set, so the ascending-index-order trap Task 33
@@ -59,11 +60,12 @@ const TENANT_B: Uuid = Uuid::from_u128(0xB0);
 struct CrossTenantAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for CrossTenantAuthZ {
+impl AuthZResolverApi for CrossTenantAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: true,
             context: EvaluationResponseContext {
@@ -83,11 +85,12 @@ impl AuthZResolverClient for CrossTenantAuthZ {
 struct OneTenantAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for OneTenantAuthZ {
+impl AuthZResolverApi for OneTenantAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: true,
             context: EvaluationResponseContext {
@@ -125,7 +128,7 @@ fn row(file: &str) -> NewTestResult {
 /// A directory over a database holding one projected run per listed tenant.
 async fn directory_over(
     tenants: &[Uuid],
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
 ) -> TenantDirectory<OrmResultsRepository> {
     let db = inmem_db().await;
     let conn = db.conn().unwrap();
@@ -245,7 +248,7 @@ async fn the_enumeration_no_longer_asks_a_pdp_that_would_deny_it() {
     );
 }
 
-/// [`AuthZResolverClient`] double that records every request it is asked to
+/// [`AuthZResolverApi`] double that records every request it is asked to
 /// decide and always grants — the harness for
 /// [`ticker_enumeration_does_not_consult_the_policy_engine`]: a request that
 /// slipped through to `evaluate` would be recorded here whether or not the
@@ -267,11 +270,12 @@ impl RecordingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for RecordingAuthZ {
+impl AuthZResolverApi for RecordingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.requests
             .lock()
             .unwrap()

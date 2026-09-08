@@ -277,6 +277,7 @@ async fn registry_with(
         Arc::new(StubProductsRepository { row }),
         PolicyEnforcer::new(Arc::new(PermissiveAuthZ)),
         hub,
+        None,
     )
 }
 
@@ -500,6 +501,7 @@ async fn catalogue_with(
         Arc::new(StubProductsRepository { row: None }),
         PolicyEnforcer::new(Arc::new(PermissiveAuthZ)),
         hub,
+        None,
     )
 }
 
@@ -633,6 +635,7 @@ async fn list_registered_plugins_errors_rather_than_claiming_there_are_none() {
         Arc::new(StubProductsRepository { row: None }),
         PolicyEnforcer::new(Arc::new(PermissiveAuthZ)),
         hub,
+        None,
     );
 
     let err = registry
@@ -668,5 +671,556 @@ async fn list_registered_plugins_takes_vendor_from_the_gts_instance() {
         Some("virtuozzo-vhp"),
         "vendor comes off the GTS instance object -- QaProductPluginV1 has no vendor \
          method, so this is the only source there is"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The plugin boundary's telemetry, from the side that owns the binding
+// ---------------------------------------------------------------------------
+//
+// These run against the REAL adapter through `infra::metrics::probe`, not a
+// mock of the port. The claim worth making is that a dashboard query finds the
+// series, and a mock could only prove that `plugin_for` called a method.
+//
+// They live in this file rather than in one of their own because the doubles
+// this resolver needs -- a stub products repository, a hub with known
+// registrations, a permissive PDP -- are already here, and a second file would
+// have had to copy all three or make them `pub(super)`. qa-runs and qa-insights
+// put their call-site metric tests in their existing call-site test files for
+// the same reason; qa-environments' are in a file of their own only because its
+// metric tests needed a different tier from its service tests.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::domain::metrics::{QA_CATALOG_PLUGIN_RESOLUTION, QA_CATALOG_PLUGIN_RESOLUTION_DURATION};
+use crate::domain::ports::metrics::{PluginResolutionMetrics, PluginResolutionOutcome};
+use crate::infra::metrics::probe::MetricsProbe;
+use crate::test_support::DenyAllAuthZ;
+
+/// [`registry_with`] with a caller-supplied metrics adapter and a
+/// caller-supplied PDP, which is the pair the assertions below vary.
+async fn metered_registry(
+    row: Option<Product>,
+    registered: &[(&str, &str)],
+    authz: Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
+    metrics: Arc<dyn PluginResolutionMetrics>,
+) -> QaProductRegistry<StubProductsRepository> {
+    let hub = Arc::new(ClientHub::new());
+    for (instance_id, marker) in registered {
+        hub.register_scoped::<dyn QaProductPluginV1>(
+            ClientScope::gts_id(instance_id),
+            MarkerPlugin::arc(marker),
+        );
+    }
+
+    QaProductRegistry::new(
+        test_db_provider().await,
+        Arc::new(StubProductsRepository { row }),
+        PolicyEnforcer::new(authz),
+        hub,
+        Some(metrics),
+    )
+}
+
+/// A products repository whose `get` always fails the way a real outage would.
+///
+/// The stub above cannot produce this: its `get` is infallible by construction,
+/// so `PluginResolutionOutcome::Failed` would otherwise have no call-site test
+/// at all and would rest on the catalog's classification alone. qa-insights'
+/// own review recorded exactly that gap for its two `Failed` values; this
+/// closes it here rather than inheriting it.
+struct BrokenProductsRepository;
+
+#[async_trait]
+impl ProductsRepository for BrokenProductsRepository {
+    async fn get<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        _id: Uuid,
+    ) -> Result<Option<Product>, DomainError> {
+        Err(DomainError::database("connection reset by peer"))
+    }
+
+    async fn list<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+    ) -> Result<Vec<Product>, DomainError> {
+        unimplemented!("the registry never lists products")
+    }
+
+    async fn create<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        _tenant_id: Uuid,
+        _new: NewProduct,
+    ) -> Result<Product, DomainError> {
+        unimplemented!("the registry never writes")
+    }
+
+    async fn update<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        _id: Uuid,
+        _update: qa_catalog_sdk::ProductUpdate,
+    ) -> Result<Option<Product>, DomainError> {
+        unimplemented!("the registry never writes")
+    }
+
+    async fn delete<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        _id: Uuid,
+    ) -> Result<bool, DomainError> {
+        unimplemented!("the registry never writes")
+    }
+}
+
+/// **One resolution is one observation on both instruments, under the outcome
+/// that resolution actually had.**
+///
+/// The first thing a missing or misplaced emission breaks. The exported names
+/// are printed on failure because an empty export is a different defect from a
+/// wrong count — it says the pipeline saw nothing at all.
+#[tokio::test]
+async fn a_resolution_records_one_observation() {
+    let probe = MetricsProbe::new();
+    let product_id = Uuid::new_v4();
+    let registry = metered_registry(
+        Some(product(product_id, PLUGIN_A)),
+        &[(PLUGIN_A, MARKER_KEY)],
+        Arc::new(PermissiveAuthZ),
+        probe.adapter(),
+    )
+    .await;
+
+    registry
+        .plugin_for(&ctx(Uuid::new_v4()), product_id)
+        .await
+        .expect("premise: the resolution must succeed, or this measures the wrong path");
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter(QA_CATALOG_PLUGIN_RESOLUTION),
+        1,
+        "one resolution, one increment; the exported names were {:?}",
+        series.names()
+    );
+    assert_eq!(
+        series.histogram_count(QA_CATALOG_PLUGIN_RESOLUTION_DURATION),
+        1,
+        "and the counter and its histogram move together"
+    );
+    assert_eq!(
+        series.counter_with(
+            QA_CATALOG_PLUGIN_RESOLUTION,
+            &[("outcome", PluginResolutionOutcome::Resolved.as_str())]
+        ),
+        1
+    );
+}
+
+/// **A deployment missing a plugin gear is its own series, not a refusal.**
+///
+/// The value this family was worth building for. Today the state is visible
+/// only as one `warn!` line per attempt, so a deployment whose products all
+/// name a plugin it does not carry observes nothing and looks healthy from
+/// every other angle. Folding it into `refused` would hide it behind the noise
+/// of ordinary policy denials, which are the caller's business and not the
+/// operator's.
+#[tokio::test]
+async fn a_product_naming_an_unregistered_plugin_is_counted_apart_from_a_refusal() {
+    let probe = MetricsProbe::new();
+    let product_id = Uuid::new_v4();
+    // The product names PLUGIN_B; the hub carries only PLUGIN_A.
+    let registry = metered_registry(
+        Some(product(product_id, PLUGIN_B)),
+        &[(PLUGIN_A, MARKER_KEY)],
+        Arc::new(PermissiveAuthZ),
+        probe.adapter(),
+    )
+    .await;
+
+    let error = err_of(registry.plugin_for(&ctx(Uuid::new_v4()), product_id).await);
+    assert!(
+        matches!(error, DomainError::ProductPluginUnavailable { .. }),
+        "premise: the resolution failed for the reason under test, not another one: {error:?}"
+    );
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter_with(
+            QA_CATALOG_PLUGIN_RESOLUTION,
+            &[("outcome", PluginResolutionOutcome::Unregistered.as_str())]
+        ),
+        1,
+        "the deployment is missing the gear that registers this plugin"
+    );
+    assert_eq!(
+        series.counter_with(
+            QA_CATALOG_PLUGIN_RESOLUTION,
+            &[("outcome", PluginResolutionOutcome::Refused.as_str())]
+        ),
+        0,
+        "and that is not a refusal: nobody denied anything, and no policy change fixes it"
+    );
+}
+
+/// **A product the caller cannot see is a refusal, and so is a denied read.**
+///
+/// Two paths, one value, and the pairing is the test: the product read is
+/// tenant-scoped, so "no such product" and "not yours" are deliberately the
+/// same answer (`plugin_for`'s own doc), and a PDP denial is the other way to
+/// reach the same conclusion. Both are facts about the caller, and neither is
+/// something an operator should be paged for.
+#[tokio::test]
+async fn a_product_that_cannot_be_read_is_a_refusal_not_a_failure() {
+    for (what, authz, row) in [
+        (
+            "a product outside the caller's tenant reads as absent",
+            Arc::new(PermissiveAuthZ) as Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
+            None,
+        ),
+        (
+            "and a denied product read is the same kind of answer",
+            Arc::new(DenyAllAuthZ) as Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
+            Some(product(Uuid::from_u128(0x5001), PLUGIN_A)),
+        ),
+    ] {
+        let probe = MetricsProbe::new();
+        let registry =
+            metered_registry(row, &[(PLUGIN_A, MARKER_KEY)], authz, probe.adapter()).await;
+
+        let error = err_of(
+            registry
+                .plugin_for(&ctx(Uuid::new_v4()), Uuid::from_u128(0x5001))
+                .await,
+        );
+        assert!(
+            matches!(error, DomainError::NotFound { .. } | DomainError::Forbidden),
+            "{what}: premise failed, the error was {error:?}"
+        );
+
+        let series = probe.collect();
+        assert_eq!(
+            series.counter_with(
+                QA_CATALOG_PLUGIN_RESOLUTION,
+                &[("outcome", PluginResolutionOutcome::Refused.as_str())]
+            ),
+            1,
+            "{what}"
+        );
+        assert_eq!(
+            series.counter_with(
+                QA_CATALOG_PLUGIN_RESOLUTION,
+                &[("outcome", PluginResolutionOutcome::Failed.as_str())]
+            ),
+            0,
+            "{what}: and it is not this gear's own failure, which is the series an alert \
+             fires on"
+        );
+    }
+}
+
+/// **A broken database is this gear's own failure, and it is timed like any
+/// other resolution.**
+///
+/// The one outcome that should wake somebody. The duration assertion is here
+/// rather than in the happy-path test because this is the arm where an
+/// implementation that emitted only on success would still pass everything
+/// else: the counter would be absent, and so would the sample the p95 of a
+/// failing deployment is read from.
+#[tokio::test]
+async fn a_broken_database_is_this_gears_own_failure() {
+    let probe = MetricsProbe::new();
+    let registry = QaProductRegistry::new(
+        test_db_provider().await,
+        Arc::new(BrokenProductsRepository),
+        PolicyEnforcer::new(Arc::new(PermissiveAuthZ)),
+        Arc::new(ClientHub::new()),
+        Some(probe.adapter()),
+    );
+
+    let error = err_of(
+        registry
+            .plugin_for(&ctx(Uuid::new_v4()), Uuid::new_v4())
+            .await,
+    );
+    assert!(
+        matches!(error, DomainError::Database { .. }),
+        "premise: the read really did fail: {error:?}"
+    );
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter_with(
+            QA_CATALOG_PLUGIN_RESOLUTION,
+            &[("outcome", PluginResolutionOutcome::Failed.as_str())]
+        ),
+        1
+    );
+    assert_eq!(
+        series.histogram_count_with(
+            QA_CATALOG_PLUGIN_RESOLUTION_DURATION,
+            &[("outcome", PluginResolutionOutcome::Failed.as_str())]
+        ),
+        1,
+        "a failed resolution is timed too: the seconds a broken PDP or database costs \
+         are the seconds an operator is looking for"
+    );
+}
+
+/// An adapter that panics on every call — the shape a poisoned instrument lock
+/// takes — plus a count of how many times it was reached.
+struct PanickingMetrics {
+    calls: Arc<AtomicUsize>,
+}
+
+impl PluginResolutionMetrics for PanickingMetrics {
+    fn plugin_resolution(&self, _outcome: PluginResolutionOutcome, _duration: std::time::Duration) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        panic!("the adapter is broken");
+    }
+}
+
+/// **A broken adapter neither fails a resolution nor is called twice.**
+///
+/// Both halves of `domain::service::emit`'s contract, in one test, because they
+/// fail in different ways: without `catch_unwind` the resolution panics
+/// outright — and it panics *into* qa-environments' observation loop, across
+/// the `ClientHub` — and without the latch every later emission panics again
+/// and the default panic hook writes a line to stderr each time, which is the
+/// log flood the "never log per emission" constraint is about arriving through
+/// the back door.
+///
+/// The premise assertion matters: a resolution that failed for its own reasons
+/// would satisfy "did not panic" while proving nothing about the guard.
+///
+/// This test prints a panic backtrace even when it passes. The default hook
+/// runs before `catch_unwind` returns, so the message reaches stderr; silencing
+/// it would mean installing a custom hook every other test in the process would
+/// then see.
+#[tokio::test]
+async fn a_broken_metrics_adapter_does_not_fail_a_resolution() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let product_id = Uuid::new_v4();
+    let registry = metered_registry(
+        Some(product(product_id, PLUGIN_A)),
+        &[(PLUGIN_A, MARKER_KEY)],
+        Arc::new(PermissiveAuthZ),
+        Arc::new(PanickingMetrics {
+            calls: Arc::clone(&calls),
+        }),
+    )
+    .await;
+
+    for attempt in 0..2 {
+        let plugin = registry
+            .plugin_for(&ctx(Uuid::new_v4()), product_id)
+            .await
+            .expect("a broken adapter must not fail the resolution it is measuring");
+        assert_eq!(
+            plugin.credential_schema()[0].key,
+            MARKER_KEY,
+            "attempt {attempt}: and it must resolve the right plugin, not merely survive"
+        );
+    }
+
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "the first panic latches the registry off; a second call is the log flood the \
+         latch exists to prevent"
+    );
+}
+
+/// **A gear with no metrics pipeline configured resolves exactly as an
+/// unmetered one.**
+///
+/// The constraint stated as an equality rather than as an absence: the same
+/// fixture is resolved twice, once through the real `build_default_adapter`
+/// (with no meter provider installed anywhere in the process, which is the
+/// production boot posture when telemetry is off) and once with no adapter at
+/// all, and the two answers must agree.
+#[tokio::test]
+async fn a_resolution_with_no_pipeline_configured_behaves_exactly_as_an_unmetered_one() {
+    async fn resolve(metrics: Option<Arc<dyn PluginResolutionMetrics>>) -> String {
+        let product_id = Uuid::from_u128(0x6001);
+        let hub = Arc::new(ClientHub::new());
+        hub.register_scoped::<dyn QaProductPluginV1>(
+            ClientScope::gts_id(PLUGIN_A),
+            MarkerPlugin::arc(MARKER_KEY),
+        );
+        let registry = QaProductRegistry::new(
+            test_db_provider().await,
+            Arc::new(StubProductsRepository {
+                row: Some(product(product_id, PLUGIN_A)),
+            }),
+            PolicyEnforcer::new(Arc::new(PermissiveAuthZ)),
+            hub,
+            metrics,
+        );
+        registry
+            .plugin_for(&ctx(Uuid::new_v4()), product_id)
+            .await
+            .expect("premise: the resolution really did produce a plugin")
+            .credential_schema()[0]
+            .key
+            .clone()
+    }
+
+    let metered = resolve(Some(crate::infra::metrics::build_default_adapter())).await;
+    let unmetered = resolve(None).await;
+
+    assert_eq!(
+        metered, MARKER_KEY,
+        "premise: the plugin really was resolved"
+    );
+    assert_eq!(
+        metered, unmetered,
+        "measuring a path must not change it, and the only way to state that is as an \
+         equality between the measured and unmeasured answers"
+    );
+}
+
+/// A products repository whose `get` takes a known, non-trivial amount of
+/// wall-clock time.
+///
+/// Its only job is to make the *magnitude* of the recorded sample assertable:
+/// every other double here answers instantly, so a call site that recorded a
+/// constant — or an `Instant` taken in the wrong place — would produce a
+/// plausible sample and no count-based assertion could tell.
+struct SlowProductsRepository {
+    row: Option<Product>,
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl ProductsRepository for SlowProductsRepository {
+    async fn get<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<Product>, DomainError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(self.row.as_ref().filter(|p| p.id == id).cloned())
+    }
+
+    async fn list<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+    ) -> Result<Vec<Product>, DomainError> {
+        unimplemented!("the registry never lists products")
+    }
+
+    async fn create<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        _tenant_id: Uuid,
+        _new: NewProduct,
+    ) -> Result<Product, DomainError> {
+        unimplemented!("the registry never writes")
+    }
+
+    async fn update<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        _id: Uuid,
+        _update: qa_catalog_sdk::ProductUpdate,
+    ) -> Result<Option<Product>, DomainError> {
+        unimplemented!("the registry never writes")
+    }
+
+    async fn delete<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        _id: Uuid,
+    ) -> Result<bool, DomainError> {
+        unimplemented!("the registry never writes")
+    }
+}
+
+/// **The recorded duration really is the clock around the resolution.**
+///
+/// Every other assertion here is about counts and labels, and counts cannot
+/// see a *value*: a call site that recorded `Duration::ZERO`, or a constant, or
+/// an `Instant` taken after the work rather than before it would satisfy all of
+/// them and hand a dashboard a fabricated distribution. Measured — a mutation
+/// that moved the `Instant::now()` below the awaited call passed the whole
+/// suite before this test existed.
+///
+/// Written as **two bracketing assertions rather than one equality**, because
+/// an equality would be a timing test:
+///
+/// * the product read sleeps 150 ms, so the sample cannot be in the 10 ms
+///   bucket or below — that direction is deterministic, since a sleep can only
+///   overrun;
+/// * and it must not be in the `(5 s, 10 s]` bucket, which an in-memory double
+///   cannot honestly reach.
+///
+/// Between them they pin that the value tracks the call, and no more tightly
+/// than that: a narrower window would start failing on a loaded machine, which
+/// is how a timing assertion gets deleted.
+#[tokio::test]
+async fn the_recorded_resolution_duration_tracks_the_call_it_measures() {
+    let delay = std::time::Duration::from_millis(150);
+    let product_id = Uuid::new_v4();
+    let probe = MetricsProbe::new();
+    let hub = Arc::new(ClientHub::new());
+    hub.register_scoped::<dyn QaProductPluginV1>(
+        ClientScope::gts_id(PLUGIN_A),
+        MarkerPlugin::arc(MARKER_KEY),
+    );
+    let registry = QaProductRegistry::new(
+        test_db_provider().await,
+        Arc::new(SlowProductsRepository {
+            row: Some(product(product_id, PLUGIN_A)),
+            delay,
+        }),
+        PolicyEnforcer::new(Arc::new(PermissiveAuthZ)),
+        hub,
+        Some(probe.adapter()),
+    );
+
+    registry
+        .plugin_for(&ctx(Uuid::new_v4()), product_id)
+        .await
+        .expect("premise: the resolution must succeed");
+
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count(QA_CATALOG_PLUGIN_RESOLUTION_DURATION),
+        1,
+        "premise: exactly one resolution was timed"
+    );
+    // Every bucket whose upper edge is at or below 100 ms must be empty. Probed
+    // edge by edge rather than through one call: `histogram_bucket_of` answers
+    // for the single bucket a value falls in, so asking about one edge says
+    // nothing about the buckets below it -- which is how the first version of
+    // this assertion let a zero-duration mutation through. Measured.
+    for edge in [0.001_f64, 0.005, 0.01, 0.025, 0.05, 0.1] {
+        assert_eq!(
+            series.histogram_bucket_of(QA_CATALOG_PLUGIN_RESOLUTION_DURATION, edge),
+            Some(0),
+            "a resolution whose product read slept for {delay:?} cannot have been measured \
+             at {edge} s or less, so that bucket must be empty -- a zero or a near-zero \
+             here means the clock is not around the work"
+        );
+    }
+    assert_eq!(
+        series.histogram_bucket_of(QA_CATALOG_PLUGIN_RESOLUTION_DURATION, 6.0),
+        Some(0),
+        "and it cannot have taken between five and ten seconds either: an in-memory \
+         double does not, so a sample there is a fabricated or stale duration rather \
+         than a measured one"
     );
 }

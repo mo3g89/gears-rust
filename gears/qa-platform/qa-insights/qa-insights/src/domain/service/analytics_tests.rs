@@ -24,7 +24,7 @@
 
 use std::sync::Arc;
 
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_catalog_sdk::UniverseTest;
 use qa_insights_sdk::CollectCount;
 use time::Duration;
@@ -462,7 +462,7 @@ async fn a_denied_caller_reads_nothing_and_does_not_reach_qa_catalog() {
 #[tokio::test]
 async fn the_overview_authorizes_under_test_result_list() {
     let authz = Arc::new(RecordingAuthZ::default());
-    let f = Fixture::with_authz(Arc::clone(&authz) as Arc<dyn AuthZResolverClient>).await;
+    let f = Fixture::with_authz(Arc::clone(&authz) as Arc<dyn AuthZResolverApi>).await;
     f.seed_universe();
 
     f.service
@@ -1186,7 +1186,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn with_authz(authz: Arc<dyn AuthZResolverClient>) -> Self {
+    async fn with_authz(authz: Arc<dyn AuthZResolverApi>) -> Self {
         let db = inmem_db().await;
         let provider = Arc::new(DBProvider::<DomainError>::new(db.clone()));
         let catalog = Arc::new(FakeCatalog::default());

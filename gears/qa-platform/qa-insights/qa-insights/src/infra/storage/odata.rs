@@ -384,10 +384,10 @@ impl ODataFieldMapping<TestResultsField> for TestResultsODataMapper {
 
     fn extract_cursor_value(model: &ResultModel, field: TestResultsField) -> Value {
         match field {
-            TestResultsField::Id => Value::Uuid(Some(Box::new(model.id))),
-            TestResultsField::RunId => Value::Uuid(Some(Box::new(model.run_id))),
-            TestResultsField::TestFile => Value::String(Some(Box::new(model.test_file.clone()))),
-            TestResultsField::TestName => Value::String(Some(Box::new(model.test_name.clone()))),
+            TestResultsField::Id => Value::Uuid(Some(model.id)),
+            TestResultsField::RunId => Value::Uuid(Some(model.run_id)),
+            TestResultsField::TestFile => Value::String(Some(model.test_file.clone())),
+            TestResultsField::TestName => Value::String(Some(model.test_name.clone())),
             // Unreachable through the pager, which rejects a non-orderable
             // field before it composes the effective order
             // (`sea_orm_filter.rs:699-705`), and populated anyway rather than
@@ -395,7 +395,7 @@ impl ODataFieldMapping<TestResultsField> for TestResultsODataMapper {
             // later task that makes the field orderable must find a cursor
             // value here rather than a panic.
             TestResultsField::RunFinishedAt => {
-                Value::TimeDateTimeWithTimeZone(model.run_finished_at.map(Box::new))
+                Value::TimeDateTimeWithTimeZone(model.run_finished_at)
             }
         }
     }
@@ -504,12 +504,10 @@ impl ODataFieldMapping<TestCaseResultsField> for TestCaseResultsODataMapper {
 
     fn extract_cursor_value(model: &CaseModel, field: TestCaseResultsField) -> Value {
         match field {
-            TestCaseResultsField::Id => Value::Uuid(Some(Box::new(model.id))),
-            TestCaseResultsField::RunId => Value::Uuid(Some(Box::new(model.run_id))),
-            TestCaseResultsField::TestFile => {
-                Value::String(Some(Box::new(model.test_file.clone())))
-            }
-            TestCaseResultsField::Status => Value::String(Some(Box::new(model.status.clone()))),
+            TestCaseResultsField::Id => Value::Uuid(Some(model.id)),
+            TestCaseResultsField::RunId => Value::Uuid(Some(model.run_id)),
+            TestCaseResultsField::TestFile => Value::String(Some(model.test_file.clone())),
+            TestCaseResultsField::Status => Value::String(Some(model.status.clone())),
         }
     }
 }
@@ -752,7 +750,7 @@ mod tests {
         let present = time::macros::datetime!(2026-08-18 00:00:00 UTC);
         assert!(
             encode_cursor_value(
-                &Value::TimeDateTimeWithTimeZone(Some(Box::new(present))),
+                &Value::TimeDateTimeWithTimeZone(Some(present)),
                 FieldKind::DateTimeUtc,
             )
             .is_ok(),

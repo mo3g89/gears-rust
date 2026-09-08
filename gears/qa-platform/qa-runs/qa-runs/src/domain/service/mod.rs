@@ -57,17 +57,25 @@
 //! parameters only.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::pep::ResourceType;
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_catalog_sdk::QaCatalogClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
+use tokio_util::sync::CancellationToken;
 use toolkit_db::DBProvider;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::repos::RunsRepository;
+use crate::domain::system_actor;
+
+/// The `(resource_type, action)` pairs this gear's PEP enforces, and the
+/// distinct resource types among them. The source side of the permission
+/// catalog's anti-drift test - review finding #1.
+pub mod authz_surface;
 
 /// `pub(crate)` rather than private-plus-re-export (qa-catalog's idiom): Tasks
 /// 14 and 15 name [`Admission`](launch::Admission) and the two seam traits, and
@@ -104,6 +112,9 @@ mod tenant_scoping_tests;
 
 #[cfg(test)]
 pub(crate) mod test_support;
+
+#[cfg(test)]
+mod resources_tests;
 
 /// The golden `RunSpec` — product-plugin plan Task 16's hard gate. In-lib
 /// rather than in `tests/`, because `build_spec` is private on a `pub(crate)`
@@ -190,10 +201,19 @@ pub struct FlushReport {
 /// acquiring a database transaction. Keeping the archive separate keeps each
 /// port's purpose answerable in one sentence.
 ///
-/// # Why there is no `read`
+/// # Why there is no `read`, and the one method that is not one
 ///
 /// The read path needs the repository, not the accumulator — the same reason
-/// `LogFanout` deliberately has no `subscribe`.
+/// `LogFanout` deliberately has no `subscribe`. [`Self::resume_positions`]
+/// (Task 13, Finding #50) does not reopen that: as of fix-round 2 it answers
+/// counts and two per-node anchor lines (never the whole archived text) —
+/// the same restraint [`crate::domain::repos::ArchivedLog`]'s hand-written
+/// `Debug` argues for, and [`crate::domain::repos::LogPosition`] now argues
+/// for identically, since its two anchors are themselves archived line text.
+/// The repository round trip this section is really about — a connection
+/// and a resolved `AccessScope` — still happens on
+/// [`crate::infra::logs::RunLogArchive`], mirroring how [`Self::flush`]
+/// resolves both, not on this trait.
 ///
 /// # One `flush` per run at a time — the hazard, and who closes it
 ///
@@ -247,6 +267,28 @@ pub trait LogArchive: Send + Sync {
     /// run's failure must not stop the others, so failures are counted in the
     /// report and logged.
     async fn flush_due(&self) -> FlushReport;
+
+    /// Where `run_id`'s archive currently ends, per node. See this trait's
+    /// header for why this exists despite "no read", and
+    /// [`crate::domain::repos::LogResume`] for what the answer means.
+    ///
+    /// `tenant` rather than a raw `Uuid`: the implementation resolves its own
+    /// [`AccessScope`](toolkit_security::AccessScope) for the read, the same
+    /// way [`Self::flush`]'s `write` half does, and a nil tenant must not
+    /// reach that resolution any more than it may reach a write — see
+    /// `domain::system_actor::TenantBound`'s own doc.
+    ///
+    /// `domain::service::watch`'s `drain` is the one caller, and treats a
+    /// failure here as "resume position unknown" rather than as a reason to
+    /// abandon the attach: it falls back to
+    /// [`crate::domain::repos::LogResume::default`], which is exactly what a
+    /// first attach already does, so a transient failure degrades to the old
+    /// replay-from-the-beginning behaviour rather than blocking observation.
+    async fn resume_positions(
+        &self,
+        tenant: system_actor::TenantBound,
+        run_id: Uuid,
+    ) -> Result<crate::domain::repos::LogResume, DomainError>;
 }
 
 /// `DB` provider alias.
@@ -269,6 +311,90 @@ mod serialized_db;
 
 pub(in crate::domain::service) use serialized_db::SerializedDb;
 
+/// Run one metric emission so that it cannot fail the path it is measuring.
+///
+/// # Why this exists when the port's contract already forbids failing
+///
+/// `domain::ports::metrics` states the contract — an implementation must not
+/// panic, must not block, and has no error to propagate by construction — and
+/// [`crate::infra::metrics::QaRunsMetricsMeter`] satisfies it structurally:
+/// every method is one `add` or one `record` on an instrument it already holds,
+/// with no `?`, no fallible lookup and no panic path.
+///
+/// Neither of those covers the call site. Both services take
+/// `Arc<dyn DispatchMetrics>` / `Arc<dyn IngestMetrics>`, so what they hold is
+/// whatever was injected: a later adapter, a different gear's adapter copied
+/// across, a `debug_assert!` somebody adds inside one. "Metrics must not change
+/// behaviour" is a property of the *dispatch and ingest paths*, and a property
+/// of those paths cannot be discharged by a promise written in another module —
+/// a promise is exactly what a defect breaks. So the emission is guarded here,
+/// where the path is, and `dispatch_tests`'
+/// `a_broken_metrics_adapter_does_not_fail_the_pass` drives a deliberately
+/// panicking port through it. Without this function that test panics; with a
+/// doc-only contract, so does production.
+///
+/// # It is silent
+///
+/// A caught panic is dropped rather than logged. Logging here would be a log
+/// line **per emission** on the two highest-volume paths in the gear, which is
+/// the failure mode the observability constraints name explicitly, and it would
+/// be emitted at exactly the moment the process is least able to absorb it. The
+/// panic hook has already run by the time control returns here, so the panic
+/// itself is not invisible — it reaches stderr like any other.
+///
+/// [`std::panic::AssertUnwindSafe`] is sound for the reason it is normally
+/// unsound: the state a panicking emission may have left inconsistent is that
+/// implementation's own instrument state, and nothing in this crate ever reads
+/// it back. A metric this gear cannot record is a metric this gear drops.
+///
+/// # It latches off, and that is the half the guard alone does not give
+///
+/// Catching is not enough on its own. A *persistently* broken adapter — a
+/// poisoned instrument lock is the realistic shape — panics on **every** call,
+/// and the default panic hook writes a line to stderr each time before control
+/// returns here. On the ingest path that is one line per log line, which is
+/// precisely the "never logs per-emission" failure the observability
+/// constraints name, arriving exactly when the process can least absorb it.
+///
+/// So the first caught panic latches `silenced`, and every later emission
+/// through that latch returns without calling anything. Deliberately permanent:
+/// an emission that panicked once has no claim on being retried, the
+/// alternatives (a rate limit, a backoff) are state and policy on a path whose
+/// whole contract is that it changes nothing, and a metric that stops is a
+/// visibly flat series — a better failure than a log flood. Nothing resets it;
+/// a restart does.
+///
+/// **The latch is the caller's, not a global**, and each service owns one. A
+/// broken `ingest_batch` then silences ingest and leaves the dispatcher
+/// reporting, which is both the more useful production behaviour and what keeps
+/// the two `a_broken_metrics_adapter_..` tests from silencing every other
+/// metric test in the binary — a global would make them do exactly that under a
+/// threaded `cargo test`, where this crate's suites share a process.
+///
+/// # Precondition: this crate unwinds
+///
+/// `catch_unwind` catches nothing under `panic = "abort"`, where the first
+/// panicking emission would take the process instead. The workspace sets
+/// `panic = "unwind"` explicitly in `[profile.release]`, and the dev and test
+/// profiles inherit the same default, so the guard is live in every profile
+/// this gear is built under today. **Changing that setting silently disables
+/// everything documented above**: `dispatch_tests`'
+/// `a_broken_metrics_adapter_does_not_fail_the_pass` would abort rather than
+/// fail, so the suite would report it as a crashed binary rather than as a
+/// regression here.
+/// `Relaxed` on both accesses: the latch orders nothing and guards no data. The
+/// whole cost of the weakest ordering is that a racing thread may read `false`
+/// once more and produce one more panic, against paying for a fence on the two
+/// hottest paths in the gear.
+pub(in crate::domain::service) fn emit(silenced: &AtomicBool, record: impl FnOnce()) {
+    if silenced.load(Ordering::Relaxed) {
+        return;
+    }
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(record)).is_err() {
+        silenced.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Authorization resource types and their PEP-supported properties.
 ///
 /// **Only the types this crate currently queries are declared.** The plan lists
@@ -289,21 +415,38 @@ pub(in crate::domain::service) use serialized_db::SerializedDb;
 /// (`resolve_owned` on `qa.run`, then `insert` on `qa.queue_entry`), which is
 /// exactly the place a hoisted scope would be reused across types. Both scopes
 /// are derived immediately before their own call.
+///
+/// **Each descriptor is built from a sibling `*_NAME` `&str` const** rather
+/// than from an inline literal, so the PDP resource string has one declaration
+/// and two consumers: the descriptor the PEP is called with, and
+/// [`authz_surface::ENFORCED`]. qa-insights' `resources::TEST_RESULT_NAME` -
+/// its own doc, in that gear's `domain/service/mod.rs` - is the precedent and
+/// carries the reason the descriptor cannot supply the string itself. Cited by
+/// name rather than by line: nothing validates a `:N` in this repository, and
+/// this citation had already drifted twice as a line range.
 pub(crate) mod resources {
     use super::ResourceType;
     use toolkit_security::pep_properties;
 
     pub const RUN: ResourceType = ResourceType::from_static(
-        "qa.run",
+        RUN_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`RUN`]'s name as a `&'static str`, for the reason this module's header
+    /// cites.
+    pub const RUN_NAME: &str = "qa.run";
 
     /// `qa_run_queue`. The same two properties as [`RUN`]: rows are
     /// tenant-owned and addressed by id.
     pub const QUEUE_ENTRY: ResourceType = ResourceType::from_static(
-        "qa.queue_entry",
+        QUEUE_ENTRY_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`QUEUE_ENTRY`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const QUEUE_ENTRY_NAME: &str = "qa.queue_entry";
 
     /// `qa_schedules` **and** `qa_schedule_ticks`.
     ///
@@ -314,9 +457,13 @@ pub(crate) mod resources {
     /// addresses. Every method on that repository takes exactly one scope, and
     /// this is the type it is compiled for.
     pub const SCHEDULE: ResourceType = ResourceType::from_static(
-        "qa.schedule",
+        SCHEDULE_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
+
+    /// [`SCHEDULE`]'s name as a `&'static str`, for the reason this module's
+    /// header cites.
+    pub const SCHEDULE_NAME: &str = "qa.schedule";
 }
 
 /// Authorization actions.
@@ -557,7 +704,7 @@ pub(crate) struct QueueLimits {
 /// infrastructure handles plus the typed config values the services enforce.
 pub(crate) struct ServiceDeps {
     pub(crate) db: Arc<DbProvider>,
-    pub(crate) authz: Arc<dyn AuthZResolverClient>,
+    pub(crate) authz: Arc<dyn AuthZResolverApi>,
     pub(crate) catalog: Arc<dyn QaCatalogClientV1>,
     pub(crate) environments: Arc<dyn QaEnvironmentsClientV1>,
     /// The product-plugin resolver, consumed by [`dispatch::DispatchService`]
@@ -627,6 +774,20 @@ pub(crate) struct ServiceDeps {
     /// spawned task, and a test that had to drive it through the production
     /// watcher would be asserting on a `tokio::spawn` it does not control.
     pub(crate) watcher: Option<Arc<dyn watch::RunWatcher>>,
+    /// The gear's own shutdown signal — the third lifetime
+    /// [`watch::SpawningRunWatcher`]'s header describes, beside the caller's
+    /// and the observed run's.
+    ///
+    /// **Not an override like [`Self::admitter`]/[`Self::dispatcher`]/[`Self::watcher`]
+    /// — always required, whichever wiring is chosen.** Even when
+    /// [`Self::watcher`] is `Some(..)` and this constructor never builds a
+    /// [`watch::SpawningRunWatcher`] at all, the field must still be supplied:
+    /// `new` cannot conditionally require an argument, and a struct with a
+    /// field that "doesn't matter sometimes" is exactly the kind of ambiguity
+    /// this crate's constructors are written to not have. A caller that does
+    /// not care passes `CancellationToken::new()`, which nothing ever
+    /// cancels and which is then simply unused.
+    pub(crate) cancel: CancellationToken,
     /// `runner_defaults.default_timeout_seconds`, honoured only when non-zero
     /// (`manager/src/services/argo.rs:168-181`).
     pub(crate) default_timeout_seconds: u64,
@@ -636,6 +797,25 @@ pub(crate) struct ServiceDeps {
     /// it — see [`dispatch::DispatchService`] and
     /// `crate::domain::state_machine::reconcile_claim`. Minutes, not seconds.
     pub(crate) orphan_timeout_seconds: u64,
+    /// Where the dispatcher tick reports what it did, and how long it took.
+    ///
+    /// **An override with a silent default, like
+    /// [`Self::admitter`]/[`Self::dispatcher`]/[`Self::watcher`] — not a
+    /// mandatory field like [`Self::archive`].** `None` installs
+    /// [`crate::domain::ports::metrics::NoopMetrics`], which is the whole of
+    /// "metrics must not change behaviour": a service built without an adapter
+    /// emits every signal a wired one does and nothing observes, so no code
+    /// path anywhere branches on whether metrics are configured.
+    ///
+    /// `gear.rs` always passes `Some(..)`, because there is nothing to decide:
+    /// `infra::metrics::build_default_adapter` reads the process-global meter
+    /// provider, which is the built-in no-op until a pipeline installs one.
+    pub(crate) dispatch_metrics: Option<Arc<dyn crate::domain::ports::metrics::DispatchMetrics>>,
+    /// The ingest path's half of [`Self::dispatch_metrics`], with the same
+    /// default and for the same reason. Two fields rather than one, because
+    /// the two services take two different traits — see
+    /// `domain::ports::metrics`'s note on trait segregation.
+    pub(crate) ingest_metrics: Option<Arc<dyn crate::domain::ports::metrics::IngestMetrics>>,
 }
 
 /// # Why the services are `pub`, not `pub(crate)`
@@ -768,6 +948,15 @@ where
                   watch::tests::a_run_reaches_a_terminal_state_from_its_finished_event"
     )]
     pub(crate) ingest: Arc<ingest::IngestService<R, Q>>,
+    /// The production watcher, held concretely so [`Self::shutdown`] can await
+    /// its `JoinHandle`s — [`watch::RunWatcher`] has no `shutdown` of its own,
+    /// deliberately: the trait's two methods are the ones a dispatcher pass
+    /// needs, and lifecycle plumbing is not one of them. `None` when
+    /// [`ServiceDeps::watcher`] overrode the production wiring: a test double
+    /// spawns no task, so there is nothing for a shutdown to await, and this
+    /// container has no concrete [`watch::SpawningRunWatcher`] to hold in that
+    /// case.
+    watcher_lifecycle: Option<Arc<watch::SpawningRunWatcher<R, Q>>>,
     /// Reads, cancel, re-run, and the queue operator actions.
     pub(crate) runs: Arc<runs::RunsService<R, Q>>,
     /// Schedule CRUD, and the firing tick `gear.rs`'s second ticker drives.
@@ -779,6 +968,16 @@ where
     /// `Arc` into the scheduler.
     pub(crate) schedules: Arc<schedules::ScheduleService<S, R>>,
 }
+
+/// The trait-object handle [`launch::LaunchService`] and friends consume,
+/// paired with the concrete instance [`AppServices::shutdown`] needs back —
+/// see the comment at its one call site in [`AppServices::new`]. Named so
+/// clippy's `type_complexity` has one thing to point at instead of an inline
+/// tuple type repeating both generics.
+type WatcherPair<R, Q> = (
+    Arc<dyn watch::RunWatcher>,
+    Option<Arc<watch::SpawningRunWatcher<R, Q>>>,
+);
 
 impl<R, Q, S> AppServices<R, Q, S>
 where
@@ -795,6 +994,12 @@ where
         let enforcer = PolicyEnforcer::new(deps.authz);
         let locks = admission::PlatformLocks::default();
 
+        // Resolved once, here, because two services take it: admission counts
+        // what it decided and dispatch counts its own cycles.
+        let dispatch_metrics: Arc<dyn crate::domain::ports::metrics::DispatchMetrics> = deps
+            .dispatch_metrics
+            .unwrap_or_else(|| Arc::new(crate::domain::ports::metrics::NoopMetrics));
+
         let admission = Arc::new(admission::AdmissionService::new(admission::AdmissionDeps {
             db: Arc::clone(&deps.db),
             runs: Arc::clone(&runs_repo),
@@ -804,6 +1009,12 @@ where
             locks: locks.clone(),
             limits: deps.limits,
             policy_enforcer: enforcer.clone(),
+            // **The same `Arc` the dispatch service gets**, not a second
+            // adapter: admission's decision counter and the dispatcher's cycle
+            // counter are two halves of one dispatch story, and two adapters
+            // over one meter would still work but would make "one adapter per
+            // process" untrue the first time somebody adds per-adapter state.
+            metrics: Arc::clone(&dispatch_metrics),
         }));
         // **Built before the dispatch service, and that ordering is the wiring.**
         // The watcher drains `RunExecutor::watch` into *this* ingest service and
@@ -820,13 +1031,29 @@ where
             logs: Arc::clone(&deps.logs),
             archive: Arc::clone(&deps.archive),
             policy_enforcer: enforcer.clone(),
+            metrics: deps.ingest_metrics.unwrap_or_else(|| {
+                Arc::new(crate::domain::ports::metrics::NoopMetrics)
+                    as Arc<dyn crate::domain::ports::metrics::IngestMetrics>
+            }),
         }));
-        let watcher = deps.watcher.unwrap_or_else(|| {
-            Arc::new(watch::SpawningRunWatcher::new(
+        // Built together rather than through `unwrap_or_else` alone, because
+        // `AppServices::shutdown` needs the *concrete* type back and
+        // `Arc<dyn watch::RunWatcher>` has thrown that away. `None` when
+        // `deps.watcher` overrode the production wiring: there is then no
+        // real `SpawningRunWatcher` in the process for a shutdown to await.
+        let (watcher, watcher_lifecycle): WatcherPair<R, Q> = if let Some(watcher) = deps.watcher {
+            (watcher, None)
+        } else {
+            let watcher = Arc::new(watch::SpawningRunWatcher::new(
                 Arc::clone(&deps.executor),
                 Arc::clone(&ingest),
-            )) as Arc<dyn watch::RunWatcher>
-        });
+                deps.cancel.clone(),
+            ));
+            (
+                Arc::clone(&watcher) as Arc<dyn watch::RunWatcher>,
+                Some(watcher),
+            )
+        };
 
         let dispatch = Arc::new(dispatch::DispatchService::new(dispatch::DispatchDeps {
             db: Arc::clone(&deps.db),
@@ -842,6 +1069,7 @@ where
             orphan_timeout_seconds: deps.orphan_timeout_seconds,
             policy_enforcer: enforcer.clone(),
             watcher,
+            metrics: dispatch_metrics,
         }));
 
         let admitter = deps
@@ -895,8 +1123,25 @@ where
             admission,
             dispatch,
             ingest,
+            watcher_lifecycle,
             runs,
             schedules,
+        }
+    }
+
+    /// Wait for every observer the production watcher has spawned to end.
+    ///
+    /// A no-op when [`ServiceDeps::watcher`] overrode the production wiring —
+    /// see this container's `watcher_lifecycle` field. Forwards to
+    /// [`watch::SpawningRunWatcher::shutdown`], whose doc (and
+    /// [`watch::WatchRegistry::shutdown`]'s beneath it) carries what this does
+    /// and does not guarantee: it does not cancel anything by itself, and it
+    /// can hang on an observer blocked past its own cancellation check. The
+    /// framework's own `stop_timeout` is what bounds how long `gear.rs`'s
+    /// `serve` actually waits on this.
+    pub(crate) async fn shutdown(&self) {
+        if let Some(watcher) = &self.watcher_lifecycle {
+            watcher.shutdown().await;
         }
     }
 }

@@ -183,11 +183,75 @@ pub struct QaRunsConfig {
     /// [`DomainError::QueueFull`](crate::domain::error::DomainError::QueueFull).
     pub queue_max_depth: u32,
 
-    /// Cluster-wide concurrent-run cap. `0` = unlimited.
+    /// Cluster-wide concurrent-run cap.
     ///
-    /// This is also the only knob that bounds how many claims can exist at
-    /// once, which is what `QueueRepository::all_claims`' scan window has to
-    /// cope with when it is left at its default of `0`.
+    /// **Default is 50, not 0 — derived, not guessed.** `cpt-cf-qa-nfr-scale`
+    /// (`docs/PRD.md`, "Scale envelope") is a `p1` requirement that this
+    /// subsystem MUST handle "50 concurrently executing runs". Fifty is
+    /// therefore not a number picked because it looked safe; it is the
+    /// number the gear is already committed to sustaining, so admitting up to
+    /// it and refusing beyond it asks nothing of a deployment the NFR did not
+    /// already ask for.
+    ///
+    /// `0` **remains accepted as an explicit "unbounded" opt-out** — the
+    /// frozen guide's convention for this knob (guide lines 116-120) and the
+    /// behaviour every deployment got before this default changed.
+    ///
+    /// **Whole-branch review I1: that opt-out was, until this wave, not
+    /// reachable in the shipped image**, and this paragraph said "sets
+    /// `max_concurrent_runs: 0` and keeps it" without naming anywhere it could
+    /// be set. `gears/qa-platform/config/qa-platform-stack.yaml` had no such
+    /// key; the Helm chart embeds that file **verbatim** (`.Files.Get` in
+    /// `gears-config-configmap.yaml`, byte-pinned by
+    /// `deploy/helm/tests/test_chart_file_sync.py`), and the file's own comment
+    /// says it is baked into the image and cannot be edited per deployment. It
+    /// is now `--set qaRuns.maxConcurrentRuns=0` on the chart, rendered into
+    /// the fragment `entrypoint.sh` inserts at `QA_RUNS_ARGO_ANCHOR`, which the
+    /// chart sets unconditionally.
+    ///
+    /// **`${QA_RUNS_MAX_CONCURRENT_RUNS:-50}` in that file would not have
+    /// worked, and this was checked rather than reasoned about.** `${VAR}`
+    /// expansion is opt-in per config struct and runs *after* serde, on
+    /// `String` fields marked `#[expand_vars]`
+    /// (`libs/toolkit/src/context.rs`, `config_expanded_or_default`).
+    /// [`QaRunsConfig`] derives no `ExpandVars`, `gear.rs` loads through plain
+    /// `ctx.config_or_default()`, and this field is a `u32` — so a placeholder
+    /// there would fail to deserialize the whole `qa-runs` section rather than
+    /// expand. `entrypoint.sh` does targeted `sed` on named anchors, not an
+    /// envsubst pass, so it does not reach it either. Making the placeholder
+    /// route work means retyping this knob as a `String` and moving the gear
+    /// onto the expanded loader — a change to how the gear reads *all* of its
+    /// config, for one knob, and not this wave's.
+    ///
+    /// **This is a deployment-visible behaviour change, and the 429 is the
+    /// smaller half of it.** A deployment that leaves this knob unset moves
+    /// from "never rejected for concurrency" to "429 at launch past 50
+    /// concurrent runs" — but enabling the cap by default also puts a
+    /// cross-plane `executor.list_active()` call on the front of **every**
+    /// launch (`admission::GlobalCapGate::reserve`), where a disabled cap
+    /// (`max == 0`) short-circuits before that call is ever made. And that
+    /// call's failure direction is the strict one:
+    /// `AdmissionService::enforce_global_cap`'s own doc states the asymmetry
+    /// against the depth limit — over-committing is the worse outcome for
+    /// this cap, so **an unreadable executor now fails the launch**, where a
+    /// disabled cap or the depth limit alone would have let it through. In
+    /// concrete terms: a launch that today succeeds during an Argo outage can,
+    /// after this default takes effect, fail with a 500 instead. Also worth
+    /// stating plainly: the cap **refuses rather than queues** a burst past
+    /// the limit, so it does not buy back the queue as a buffer the way
+    /// `queue_max_depth` does — a deployment that saw bursts absorbed by the
+    /// queue before will see some of them rejected outright now. All of this
+    /// is the ruled trade-off, not a defect — a concurrency cap that cannot be
+    /// evaluated should fail closed, and the alternative is the gear staying
+    /// unbounded — but it belongs here rather than being discovered later.
+    ///
+    /// The knob is also the only one that transitively bounds how many result
+    /// observers a process can hold open at once — see
+    /// [`crate::domain::service::watch::SpawningRunWatcher`]'s header, "The
+    /// number of observers is bounded transitively, by admission — not by
+    /// this registry" — and it is the only knob that bounds how many claims
+    /// can exist at once, which is what `QueueRepository::all_claims`' scan
+    /// window has to cope with when the operator opts back into `0`.
     pub max_concurrent_runs: u32,
 
     /// Fallback run timeout when neither the launch request nor the plan
@@ -215,7 +279,7 @@ pub struct QaRunsConfig {
     /// **It bounds a line count, not bytes.** `RunLogBroadcaster`'s own doc
     /// carries the measurement: at this capacity the resident buffer is
     /// `log_buffer_lines x` the longest line the executor emits, and the byte
-    /// cap belongs to the read side - `api::rest::sse::MAX_LINE_BYTES`.
+    /// cap belongs to the read side - `domain::repos::MAX_LINE_BYTES`.
     ///
     /// The default is [`DEFAULT_LOG_CHANNEL_CAPACITY`] itself rather than a
     /// second number. **Deviation from the plan, which specified 1024**, and the
@@ -414,6 +478,175 @@ pub struct ArgoExecutorConfig {
     /// one opaque string with no key component, so there is nothing to derive
     /// a per-reference key from.
     pub secret_key: String,
+
+    /// How long a pod-log follow (`infra::executor::argo::watch::Watcher::follow`)
+    /// may go **without a single line** before giving up on that pod. Default
+    /// 600 (10 minutes). Review findings #20/#21: `follow: true` held a task
+    /// forever on a wedged API-server connection, because nothing bounded it.
+    /// Exposed to operators in the Helm chart (`argo.logFollowIdleSeconds`,
+    /// `gears-argo-configmaps.yaml`), beside its neighbours below.
+    ///
+    /// # This is an idle bound, not a lifetime bound — and the difference is the
+    /// # whole point
+    ///
+    /// `follow: true` on a *healthy* run is meant to stay open for as long as
+    /// the node runs, and a single long test within that run can legitimately
+    /// produce no log line for a while (a slow fixture, a network fetch, a
+    /// test that just doesn't print). A deadline on the *whole* follow would
+    /// cut that off mid-run and lose every line after it — trading the hang
+    /// this field fixes for a log-loss bug wearing its clothes, which is
+    /// exactly what the preceding three tasks on this file spent six fix
+    /// rounds preventing (see `LineSkip`'s own doc). So this resets on every
+    /// line: a fresh line resets the clock, and only a stretch of true
+    /// silence this long trips it.
+    ///
+    /// # Where 600 comes from, and why not `cpt-cf-qa-nfr-run-duration`'s eight hours
+    ///
+    /// **Fix round 1 corrected this derivation; read this section as the
+    /// correction, not the original reasoning.** The shipped version reused
+    /// `api::rest::sse::MAX_STREAM_DURATION`'s eight hours, on the argument
+    /// that `cpt-cf-qa-nfr-run-duration`'s longest contemplated run cannot
+    /// legitimately go silent longer than the run itself. That is true and
+    /// still the wrong bound for what this field gates: `MAX_STREAM_DURATION`
+    /// justifies itself as a *total* ceiling on a client-facing SSE
+    /// connection, and this crate's own numbers elsewhere never treat eight
+    /// hours as "how long is silence still plausible" — `default_timeout_seconds:
+    /// 3600`, `max_timeout_seconds: 86_400`, and
+    /// `domain::timeout::kind_timeout_fallback`'s per-kind defaults
+    /// (300/600/1800/3600) all put the *typical* run, and the *typical single
+    /// step within it*, at far less. Reusing the SSE constant's digits
+    /// imported its number without its reasoning.
+    ///
+    /// **The decisive problem: `run`'s whole loop is blocked for the entire
+    /// idle wait, not just this one pod.** `follow` is called from
+    /// `drain_pods`, synchronously, inside `run`'s own loop — never spawned
+    /// concurrently — and `drain_pods` iterates pods one at a time (this
+    /// module's own "Known limitation" header). So one wedged pod does not
+    /// merely leak a task: for as long as this field allows, it holds up
+    /// this run's `Finished` event *and every sibling pod's own follow*. Eight
+    /// hours here was not a generous safety margin, it was an eight-hour
+    /// stall on the whole observation, not a leaked task — a residual this
+    /// field's very first version underweighted.
+    ///
+    /// The right anchor is **the longest silence still plausible *inside* one
+    /// run**, not the longest run. A pod that is genuinely still executing has
+    /// its own silence already bounded by Argo's `activeDeadlineSeconds`
+    /// (`domain::timeout`'s whole module resolves this per run): once that
+    /// fires, Argo kills the pod, the log stream reaches end-of-file, and
+    /// `follow` returns on its own through its `Ok(Ok(None))` arm — the one
+    /// exit that is a completed read — no idle timeout needed for a pod that
+    /// is merely slow.
+    /// What is *not* already bounded that way is a wedged **connection** to an
+    /// otherwise-healthy pod, which is a transport failure, not a
+    /// test-duration one — the same class [`Self`]'s own note below on
+    /// `kube::Config::read_timeout` (295 s, connector-level, resets on any
+    /// byte) already partially covers.
+    ///
+    /// **600 seconds**, taken from `QaRunsConfig::orphan_timeout_seconds`'s
+    /// own default (`config.rs`, the claim reconciler's floor) — this
+    /// codebase's own existing answer to "how long is silence long enough to
+    /// call the thing on the other end dead" — and in the same order of
+    /// magnitude as `kube`'s own 295 s, not two orders of magnitude above it.
+    ///
+    /// # The trade this makes, and what whole-branch review C1 found wrong with it
+    ///
+    /// **The paragraph that stood here was false, and it is worth saying how it
+    /// was false rather than simply replacing it.** It said a pod quiet for
+    /// longer than this had its follow abandoned at "a loss of granularity, not
+    /// of correctness", because `run`'s loop resumed and Argo's eventual
+    /// terminal phase still produced a correct `Finished`; and that if
+    /// something later ended the whole observation, the dispatcher's 5 s
+    /// re-attach (`domain::service::dispatch::reattach_watchers`) reopened the
+    /// stream and `LogResume` suppressed the duplicate — "wasteful, not lossy".
+    ///
+    /// Both halves were right about the mechanism and wrong about the order.
+    /// The `Finished` was not the *consolation* for the abandoned follow, it
+    /// was what **prevented** the re-attach: `IngestService::finish` records
+    /// the terminal state, `runs_sea_repo::active_states` is `dispatching |
+    /// running` and nothing else, and `watch_candidates_query` filters on
+    /// exactly that — so the run stopped being a re-attach candidate at the
+    /// same moment its log stopped being read. The re-attach offered as the
+    /// safety net is real only when an observation ends *abnormally*; on this
+    /// path it ended by reporting a verdict.
+    ///
+    /// What was lost was the rest of that pod's log and, worse, every
+    /// `=== TEST_CASE: … ===` marker after the gap — those tests produced no
+    /// `TestResult` and no row, the five counters are tallied from stored rows,
+    /// and the verdict came from Argo's workflow phase regardless. A runner
+    /// exiting 0 despite failures therefore produced a run reported
+    /// **Succeeded with a truncated, all-passing result set**.
+    ///
+    /// **What the give-up does now**: it leaves that pod un-drained and
+    /// reports `FollowOutcome::Incomplete`, so the pass goes on to follow the
+    /// pod's siblings and `Watcher::run` then ends the observation without a
+    /// `Finished` — see
+    /// [`Watcher::follow`](crate::infra::executor::argo::watch::Watcher::follow)'s
+    /// own doc for the trace, for why end-of-file is the only exit that still
+    /// reports one, and for the two costs summarised below. The run stays in
+    /// `active_states`, `reattach_watchers` re-attaches on its next 5 s tick,
+    /// and `LogResume` suppresses whatever was already archived, so a pod that
+    /// was merely quiet resumes rather than duplicating its log — **unless that
+    /// node's log has rotated**, in which case `LineSkip`'s first-line guard
+    /// mismatches and that node's archive grows unbounded on every further
+    /// re-attach. Pre-existing, but reachable more often now that every reset
+    /// produces a re-attach where it used to produce none.
+    ///
+    /// **The cost this field now buys is a loop, not a truncation** — with two
+    /// qualifications that "bounded" and "loud" would otherwise paper over:
+    ///
+    /// * The loop terminates at the control-plane timeout sweep, **except** for
+    ///   a run whose `timeout_at` is NULL because an unclamped `plan.yaml`
+    ///   `timeout_seconds` saturated. `domain::service::launch` records that
+    ///   case and that `timeout_candidates_query` excludes it — *"a run the
+    ///   control-plane timeout sweep can never reclaim"* — so for those the
+    ///   loop has no terminator at all.
+    /// * Each pass logs a `warn!` naming the pod, the node and this deadline —
+    ///   **while the Argo workflow object still exists.** Once
+    ///   [`Self::workflow_ttl_seconds`] collects it, `run`'s `Ok(None)` arm
+    ///   returns immediately with no log line of its own and the period tightens
+    ///   from `this value + 5 s` to the bare 5 s tick, traced only by
+    ///   `service::watch`'s INFO. For a run whose timeout exceeds the workflow
+    ///   TTL that is the steady state.
+    ///
+    /// Lowering this value tightens the loop; raising it loosens the loop and
+    /// lengthens the window in which a wedged pod's siblings wait — the pods
+    /// are followed one at a time, so each wedged pod ahead of them costs
+    /// this many seconds on every pass.
+    ///
+    /// **That is a delay, and the version of this paragraph that stood here
+    /// called it an abort, correctly, about the code it was written
+    /// against.** C1's give-up returned the same `false` as "the observer has
+    /// gone away", `drain_pods` read every `false` as the second, and so it
+    /// returned at the first pod that gave up: with a stable `list` order and
+    /// a per-`Watcher` `drained` set, a persistently wedged pod that sorted
+    /// first meant its siblings' logs were never read for the life of the
+    /// run. `FollowOutcome` separates the two meanings and `drain_pods` now
+    /// walks past a give-up to the pods behind it — see `follow`'s own doc.
+    /// A long deadline against a short run can still have the timeout sweep
+    /// reclaim the run before a sibling is reached, so this is not a promise
+    /// that nothing is lost; what is gone is the permanence. Neither
+    /// direction silently reports a verdict over a log it did not read.
+    ///
+    /// Read through `.max(1)` at the call site (`Watcher::follow`), the same
+    /// guard [`Self::status_poll_seconds`] gets, so a misconfigured `0` cannot
+    /// produce a zero-duration timeout that fires between every single line.
+    ///
+    /// # This is not the first idle bound in the path, only the first explicit one
+    ///
+    /// `kube::Config`'s own `read_timeout` (295 s, unset by this adapter, so
+    /// its library default stands) already sits under every call this
+    /// `Watcher` makes, `follow`'s included — measured against `kube-client`
+    /// 3.1.0's source, not assumed: it is a connector-level socket read
+    /// timeout, not a per-request one, so it already bounds a connection that
+    /// goes **completely silent at the transport level**. What it does not
+    /// reach is the case this field is really for: bytes arriving (a
+    /// keep-alive, a partial chunk) without ever completing one more log
+    /// *line* — `kube`'s timeout resets on each such byte and never fires,
+    /// while this field's clock is line-granular and does not. This field is
+    /// also the one this codebase can see, name in a log line, change per
+    /// deployment (the Helm chart row above), and change without a `kube`
+    /// upgrade, where 295 s is presently none of those.
+    pub log_follow_idle_seconds: u64,
 }
 
 impl Default for ArgoExecutorConfig {
@@ -431,6 +664,7 @@ impl Default for ArgoExecutorConfig {
             bundle_auth: None,
             secret_name_prefix: "qa-platform-".to_owned(),
             secret_key: "value".to_owned(),
+            log_follow_idle_seconds: 600,
         }
     }
 }
@@ -511,7 +745,10 @@ impl Default for QaRunsConfig {
             orphan_timeout_seconds: 600,
             queue_ttl_seconds: 7200,
             queue_max_depth: 20,
-            max_concurrent_runs: 0,
+            // 50, not 0 - see the field's own doc for the derivation
+            // (`cpt-cf-qa-nfr-scale`'s "50 concurrently executing runs") and
+            // why `0` stays available as an explicit unbounded opt-out.
+            max_concurrent_runs: 50,
             default_timeout_seconds: 3600,
             max_timeout_seconds: 86_400,
             log_buffer_lines: DEFAULT_LOG_CHANNEL_CAPACITY,
@@ -669,12 +906,47 @@ mod tests {
         assert_eq!(config.orphan_timeout_seconds, 600);
         assert_eq!(config.queue_ttl_seconds, 7200);
         assert_eq!(config.queue_max_depth, 20);
-        assert_eq!(config.max_concurrent_runs, 0);
+        assert_eq!(
+            config.max_concurrent_runs, 50,
+            "review finding #19: the default moved off 0 - see the field's own doc \
+             for the derivation"
+        );
         assert_eq!(config.default_timeout_seconds, 3600);
         assert_eq!(config.max_timeout_seconds, 86_400);
         assert_eq!(
             config.log_buffer_lines, DEFAULT_LOG_CHANNEL_CAPACITY,
             "one quantity, one default - see the field's doc"
+        );
+    }
+
+    /// **Named for what this actually exercises, not for the property it
+    /// stands in for.** Fix round 1, Minor: this used to be named
+    /// "the default cap actually bounds concurrent runs", which is a claim
+    /// about `AdmissionService` that a test calling two pure functions does
+    /// not get to make on its own. What this *does* pin: the default plugged
+    /// into `domain::queue::global_cap_status` and `cap_reached` — the exact
+    /// pair `admission::GlobalCapGate::reserve` calls — reads as a real,
+    /// reached cap rather than as "disabled". Before this task the shipped
+    /// default was `0`, which `global_cap_status` reads as "disabled"
+    /// regardless of how many runs are active, so no deployment that left the
+    /// knob unset was ever refused for concurrency; a regression that
+    /// reverted the default to `0` (or any other value the pair never treats
+    /// as reached) fails here. Whether `GlobalCapGate` itself calls this pair
+    /// correctly is a different, already-covered claim —
+    /// `admission`'s own test suite owns that.
+    #[test]
+    fn the_default_reads_as_a_reached_cap_through_global_cap_status_and_cap_reached() {
+        use crate::domain::queue::{cap_reached, global_cap_status};
+
+        let max = QaRunsConfig::default().max_concurrent_runs;
+        assert!(
+            !cap_reached(global_cap_status(max - 1, max)),
+            "one below the default limit must still be admitted"
+        );
+        assert!(
+            cap_reached(global_cap_status(max, max)),
+            "at the default limit the next run must be refused - this is the cap \
+             that a `0` default made unreachable"
         );
     }
 

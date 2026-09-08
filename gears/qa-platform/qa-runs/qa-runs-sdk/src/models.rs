@@ -18,6 +18,7 @@
 //! (`cpt-cf-qa-principle-db-first-state`), so there is no live/persisted
 //! overlay to port — only the union of their fields.
 
+use qa_catalog_sdk::Exclusivity;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -201,10 +202,14 @@ pub struct LaunchRequest {
     pub include_tags: Vec<String>,
     pub exclude_tags: Vec<String>,
     pub parameters: Vec<RunParameter>,
-    /// The launch exclusivity tier: three-state. `None` means "inherit",
-    /// which is **not** `Some(false)` — that distinction is the whole reason
-    /// the upper tiers are `Option<bool>` (guide lines 35-45).
-    pub exclusive: Option<bool>,
+    /// The launch exclusivity tier: three-state. `Exclusivity::Inherit` means
+    /// "inherit", which is **not** `Exclusivity::Shared` — that distinction is
+    /// the whole reason this and the tiers below it are a closed three-state
+    /// type rather than `bool` (guide lines 35-45). Was `Option<bool>` behind
+    /// a `qa_catalog_sdk::ExclusiveFlag` alias; see [`Exclusivity`]'s doc for
+    /// why the type closes it and why the wire form does not move. Review
+    /// findings #10 and #11.
+    pub exclusive: Exclusivity,
     /// Per-run timeout override, seconds. `None` falls back to the plan's
     /// `timeout_seconds`, then the configured default — the source system's
     /// two `activeDeadlineSeconds` sites (`manager/src/services/argo.rs:539`
@@ -329,17 +334,22 @@ pub struct Run {
     /// line cannot answer once the log has rotated.
     ///
     /// **Named `resolved_exclusive`, not `exclusive`.** This is the *resolved*
-    /// decision, while [`LaunchRequest::exclusive`] is an `Option<bool>`
-    /// tri-state request. Under the short name the obvious re-run
-    /// transcription `exclusive: Some(run.exclusive)` type-checked and was
-    /// **wrong**: it pins a stored `false` onto the launch tier, which
-    /// outranks everything and suppresses a `TEST_META`/`plan.yaml`
+    /// decision, while [`LaunchRequest::exclusive`] is a closed three-state
+    /// [`Exclusivity`] tri-state request. Under the short name the obvious
+    /// re-run transcription — `exclusive: if run.exclusive { Exclusivity::Exclusive }
+    /// else { Exclusivity::Shared }` — type-checked and was **wrong**: it
+    /// pins a stored `false` onto the launch tier as `Exclusivity::Shared`,
+    /// which outranks everything and suppresses a `TEST_META`/`plan.yaml`
     /// declaration added since — relaunching a since-marked-destructive test
     /// in parallel on a shared platform. Legacy had no type barrier either and
     /// guarded it with the same prose comment three times
     /// (`manager/src/routes/runs.rs:958-967`, `:1008-1018`, `:1071-1081`); the
     /// distinct name is this port's structural replacement for it. The correct
-    /// transcription is `run.resolved_exclusive.then_some(true)`.
+    /// transcription is `if run.resolved_exclusive { Exclusivity::Exclusive }
+    /// else { Exclusivity::Inherit }` — **never** `Exclusivity::Shared`, so a
+    /// since-marked-destructive test is re-resolved rather than replayed
+    /// parallel (`domain::service::runs::replay` is where this is done; see
+    /// `replay_inherits_exclusivity_upward_only`).
     /// `DESIGN.md:582` already names the column `resolved_exclusive` — the SDK
     /// field was the outlier. [`QueueEntry::exclusive`] keeps the short name:
     /// DESIGN's `run_queue` column list spells it that way, and it is a

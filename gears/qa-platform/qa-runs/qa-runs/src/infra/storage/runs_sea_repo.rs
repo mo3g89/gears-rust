@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use qa_runs_sdk::{Run, RunResult, RunState};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, Condition, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::odata::sea_orm_filter::{PaginateOdataTryError, paginate_odata_try};
 use toolkit_db::secure::{
@@ -44,7 +44,7 @@ pub struct OrmRunsRepository;
 
 /// `WHERE id = $1`, as a condition the scoped chains can prepend.
 fn by_id(id: Uuid) -> Condition {
-    Condition::all().add(Expr::col(RunColumn::Id).eq(id))
+    Condition::all().add(RunColumn::Id.eq(id))
 }
 
 /// Every read on this repository that returns **more than one row**, as a
@@ -98,14 +98,14 @@ fn finished_since_query(
     RunEntity::find()
         .filter(
             Condition::all()
-                .add(Expr::col(RunColumn::FinishedAt).gte(since))
+                .add(RunColumn::FinishedAt.gte(since))
                 // Redundant against the comparison above under SQL's
                 // three-valued logic, and kept anyway: the trait contract
                 // says "not yet terminal is never returned", and a reader
                 // checking that claim against this query should be able to
                 // read it rather than derive it. It costs a planner-folded
                 // conjunct.
-                .add(Expr::col(RunColumn::FinishedAt).is_not_null()),
+                .add(RunColumn::FinishedAt.is_not_null()),
         )
         .secure()
         .scope_with(scope)
@@ -129,9 +129,9 @@ fn timeout_candidates_query(
         .add(active_states())
         // A NULL `timeout_at` compares NULL and is excluded, which is the
         // wanted reading: a run with no deadline never times out.
-        .add(Expr::col(RunColumn::TimeoutAt).lt(now));
+        .add(RunColumn::TimeoutAt.lt(now));
     if let Some(after) = after {
-        filter = filter.add(Expr::col(RunColumn::Id).gt(after));
+        filter = filter.add(RunColumn::Id.gt(after));
     }
     RunEntity::find()
         .filter(filter)
@@ -157,9 +157,9 @@ fn watch_candidates_query(
         // `set_execution_ref` is its only writer, so NULL is exactly "the
         // submit has not returned a handle yet" - a row boot recovery may
         // fail as orphaned, and one there is nothing to watch.
-        .add(Expr::col(RunColumn::ExecutionRef).is_not_null());
+        .add(RunColumn::ExecutionRef.is_not_null());
     if let Some(after) = after {
-        filter = filter.add(Expr::col(RunColumn::Id).gt(after));
+        filter = filter.add(RunColumn::Id.gt(after));
     }
     RunEntity::find()
         .filter(filter)
@@ -214,6 +214,7 @@ fn sweep_limit(requested: u32) -> u64 {
 /// many, and clamping the top would silently freeze a counter instead, which
 /// is the worse failure. Recorded rather than fixed.
 fn clamped_increment(column: RunColumn, delta: i32) -> sea_orm::sea_query::SimpleExpr {
+    use sea_orm::ExprTrait;
     let sum = Expr::col(column).add(delta);
     Expr::case(Expr::expr(sum.clone()).lt(0), Expr::value(0))
         .finally(sum)
@@ -225,8 +226,8 @@ fn clamped_increment(column: RunColumn, delta: i32) -> sea_orm::sea_query::Simpl
 /// same pair on the queue row.
 fn active_states() -> Condition {
     Condition::any()
-        .add(Expr::col(RunColumn::State).eq(RunState::Dispatching.as_str()))
-        .add(Expr::col(RunColumn::State).eq(RunState::Running.as_str()))
+        .add(RunColumn::State.eq(RunState::Dispatching.as_str()))
+        .add(RunColumn::State.eq(RunState::Running.as_str()))
 }
 
 /// Build the insert model for a run.
@@ -424,8 +425,8 @@ impl RunsRepository for OrmRunsRepository {
             // the state and the patch disagree.
             .filter(
                 Condition::all()
-                    .add(Expr::col(RunColumn::Id).eq(id))
-                    .add(Expr::col(RunColumn::State).eq(from.as_str())),
+                    .add(RunColumn::Id.eq(id))
+                    .add(RunColumn::State.eq(from.as_str())),
             )
             .secure()
             .scope_with(scope)
@@ -618,12 +619,12 @@ impl RunsRepository for OrmRunsRepository {
         ResultEntity::delete_many()
             .filter(
                 Condition::all()
-                    .add(Expr::col(ResultColumn::RunId).eq(run.get()))
-                    .add(Expr::col(ResultColumn::TestName).eq(result.test_name.as_str()))
+                    .add(ResultColumn::RunId.eq(run.get()))
+                    .add(ResultColumn::TestName.eq(result.test_name.as_str()))
                     // Plain equality, not legacy's `COALESCE(test_file, '')`:
                     // the column is `NOT NULL DEFAULT ''`, so "absent" has a
                     // single spelling.
-                    .add(Expr::col(ResultColumn::TestFile).eq(result.test_file.as_str())),
+                    .add(ResultColumn::TestFile.eq(result.test_file.as_str())),
             )
             .secure()
             .scope_with(results_scope)
@@ -699,7 +700,7 @@ impl RunsRepository for OrmRunsRepository {
         run: OwnedRunId,
     ) -> Result<Vec<TestResultRow>, DomainError> {
         let rows = ResultEntity::find()
-            .filter(Condition::all().add(Expr::col(ResultColumn::RunId).eq(run.get())))
+            .filter(Condition::all().add(ResultColumn::RunId.eq(run.get())))
             .secure()
             .scope_with(results_scope)
             .order_by(ResultColumn::TestFile, sea_orm::Order::Asc)
@@ -1898,7 +1899,7 @@ mod tests {
         .unwrap();
 
         let stored = ResultEntity::find()
-            .filter(Expr::col(ResultColumn::RunId).eq(run.id))
+            .filter(ResultColumn::RunId.eq(run.id))
             .secure()
             .scope_with(&scope(tenant))
             .order_by(ResultColumn::TestName, sea_orm::Order::Asc)

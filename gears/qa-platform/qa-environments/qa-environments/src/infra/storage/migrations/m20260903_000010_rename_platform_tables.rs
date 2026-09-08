@@ -242,6 +242,11 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::Postgres => POSTGRES_UP,
             sea_orm::DatabaseBackend::MySql => MYSQL_UP,
             sea_orm::DatabaseBackend::Sqlite => SQLITE_UP,
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         };
         manager.get_connection().execute_unprepared(sql).await?;
         Ok(())
@@ -257,6 +262,11 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::Postgres => POSTGRES_DOWN,
             sea_orm::DatabaseBackend::MySql => MYSQL_DOWN,
             sea_orm::DatabaseBackend::Sqlite => SQLITE_DOWN,
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         };
         manager.get_connection().execute_unprepared(sql).await?;
         Ok(())
@@ -312,7 +322,7 @@ mod tests {
     }
 
     async fn names_of(conn: &DatabaseConnection, kind: &str) -> Vec<String> {
-        conn.query_all(Statement::from_string(
+        conn.query_all_raw(Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             format!("SELECT name FROM sqlite_master WHERE type='{kind}'"),
         ))
@@ -490,7 +500,7 @@ mod tests {
     }
 
     async fn count(conn: &DatabaseConnection, table: &str) -> i64 {
-        conn.query_one(Statement::from_string(
+        conn.query_one_raw(Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             format!("SELECT COUNT(*) AS n FROM {table}"),
         ))

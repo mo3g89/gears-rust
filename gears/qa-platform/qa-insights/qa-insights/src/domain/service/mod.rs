@@ -105,9 +105,10 @@
 //! same value is exactly the shape a function must not hide.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use authz_resolver_sdk::pep::ResourceType;
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use time::Duration;
 use toolkit_db::DBProvider;
 use toolkit_macros::domain_model;
@@ -115,6 +116,7 @@ use toolkit_security::{AccessScope, ScopeConstraint, ScopeFilter, pep_properties
 use tracing::warn;
 
 use crate::domain::error::DomainError;
+use crate::domain::ports::metrics::{CollectMetrics, JiraPollMetrics};
 use crate::domain::ports::{
     CatalogReader, Clock, EnvironmentReader, JiraClient, MailClient, RunsLauncher, RunsReader,
     SlackClient,
@@ -125,6 +127,10 @@ use crate::domain::repos::{
 };
 
 pub mod analytics;
+/// The `(resource_type, action)` pairs this gear's PEP enforces, and the
+/// distinct resource types among them. The source side of the permission
+/// catalog's anti-drift test - review finding #1.
+pub mod authz_surface;
 pub mod collect;
 pub mod dashboard;
 pub mod ingest;
@@ -141,6 +147,91 @@ pub mod test_support;
 
 #[cfg(test)]
 mod unscoped_read_guard_tests;
+
+#[cfg(test)]
+mod resources_tests;
+
+/// Run one metric emission so that it cannot fail the path it is measuring.
+///
+/// Copied, contract and mechanism, from qa-runs' `domain::service::emit`.
+///
+/// # Why this exists when the port's contract already forbids failing
+///
+/// [`crate::domain::ports::metrics`] states the contract — an implementation
+/// must not panic, must not block, and has no error to propagate by
+/// construction — and [`crate::infra::metrics::QaInsightsMetricsMeter`]
+/// satisfies it structurally: every method is one `add` or one `record` on an
+/// instrument it already holds, with no `?`, no fallible lookup and no panic
+/// path.
+///
+/// Neither of those covers the call site. Both services take
+/// `Arc<dyn CollectMetrics>` / `Arc<dyn JiraPollMetrics>`, so what they hold is
+/// whatever was injected: a later adapter, a different gear's adapter copied
+/// across, a `debug_assert!` somebody adds inside one. "Metrics must not change
+/// behaviour" is a property of the *collect and poll paths*, and a property of
+/// those paths cannot be discharged by a promise written in another module — a
+/// promise is exactly what a defect breaks. So the emission is guarded here,
+/// where the paths are, and each call site's
+/// `a_broken_metrics_adapter_does_not_fail_..` test drives a deliberately
+/// panicking port through it.
+///
+/// # It is silent
+///
+/// A caught panic is dropped rather than logged. Logging here would be a log
+/// line **per emission**, and on the per-bug path that is one line per open bug
+/// per pass — the failure mode the observability constraints name explicitly,
+/// arriving exactly when the process can least absorb it. The panic hook has
+/// already run by the time control returns here, so the panic itself is not
+/// invisible: it reaches stderr like any other.
+///
+/// [`std::panic::AssertUnwindSafe`] is sound for the reason it is normally
+/// unsound: the state a panicking emission may have left inconsistent is that
+/// implementation's own instrument state, and nothing in this crate ever reads
+/// it back. A metric this gear cannot record is a metric this gear drops.
+///
+/// # It latches off, and that is the half the guard alone does not give
+///
+/// Catching is not enough on its own. A *persistently* broken adapter — a
+/// poisoned instrument lock is the realistic shape — panics on **every** call,
+/// and the default panic hook writes a line to stderr each time before control
+/// returns here. So the first caught panic latches `silenced`, and every later
+/// emission through that latch returns without calling anything. Deliberately
+/// permanent: an emission that panicked once has no claim on being retried, the
+/// alternatives (a rate limit, a backoff) are state and policy on a path whose
+/// whole contract is that it changes nothing, and a metric that stops is a
+/// visibly flat series — a better failure than a log flood. Nothing resets it;
+/// a restart does.
+///
+/// **The latch is the caller's, not a global**, and each service owns one. A
+/// broken `bug` emission then silences the poller and leaves the collect
+/// service reporting, which is both the more useful production behaviour and
+/// what keeps the `a_broken_metrics_adapter_..` tests from silencing every
+/// other metric test in the binary — a global would make them do exactly that
+/// under a threaded `cargo test`, where this crate's suites share a process.
+///
+/// # Precondition: this crate unwinds
+///
+/// `catch_unwind` catches nothing under `panic = "abort"`, where the first
+/// panicking emission would take the process instead. The workspace sets
+/// `panic = "unwind"` explicitly in `[profile.release]`, and the dev and test
+/// profiles inherit the same default, so the guard is live in every profile
+/// this gear is built under today. **Changing that setting silently disables
+/// everything documented above**: the two `a_broken_metrics_adapter_..` tests
+/// would abort rather than fail, so the suite would report a crashed binary
+/// rather than a regression here.
+///
+/// `Relaxed` on both accesses: the latch orders nothing and guards no data. The
+/// whole cost of the weakest ordering is that a racing thread may read `false`
+/// once more and produce one more panic, against paying for a fence on a path
+/// whose contract is that it costs nothing.
+pub(in crate::domain::service) fn emit(silenced: &AtomicBool, record: impl FnOnce()) {
+    if silenced.load(Ordering::Relaxed) {
+        return;
+    }
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(record)).is_err() {
+        silenced.store(true, Ordering::Relaxed);
+    }
+}
 
 /// `DB` provider alias.
 ///
@@ -624,8 +715,12 @@ pub(crate) mod actions {
 /// the compiler turns empty constraints into `ConstraintsRequiredButAbsent` and
 /// total compilation failure into `AllConstraintsFailed`
 /// (`authz-resolver-sdk/src/pep/compiler.rs:83-89`), both of which surface as
-/// `EnforcerError::CompileFailed` and become [`DomainError::Forbidden`] before
-/// reaching here. **Verified, not assumed** — and both are still refused below,
+/// `EnforcerError::CompileFailed` and error out — never producing an
+/// `AccessScope` — before reaching here: `ConstraintsRequiredButAbsent` as
+/// [`DomainError::Forbidden`] (a documented deny, not a fault — the PEP asked
+/// for row-level constraints and got none) and `AllConstraintsFailed` as
+/// [`DomainError::Internal`] (a policy this PEP cannot compile; review finding
+/// #3). **Verified, not assumed** — and both are still refused below,
 /// because `validate_tenant_in_scope` returns `Ok` for an unconstrained scope
 /// (`db_ops.rs:285-287`) while `scope_with` applies no filter to it, which would
 /// make the per-run delete cross **every tenant**. One
@@ -708,7 +803,7 @@ pub(crate) fn refuse_scope_beyond_tenant(
 /// measured.)
 pub(crate) struct ServiceDeps {
     pub(crate) db: Arc<DbProvider>,
-    pub(crate) authz: Arc<dyn AuthZResolverClient>,
+    pub(crate) authz: Arc<dyn AuthZResolverApi>,
     /// The qa-runs reads, behind [`RunsReader`]. `infra::clients::QaRunsReader`
     /// in production; a fake in this layer's tests.
     pub(crate) runs: Arc<dyn RunsReader>,
@@ -803,6 +898,25 @@ pub(crate) struct ServiceDeps {
     ///
     /// **Added by Task 30's fix round 1.**
     pub(crate) collect_report_signing_secret: String,
+    /// Where [`collect::CollectService`]'s telemetry goes.
+    /// `infra::metrics::QaInsightsMetricsMeter` in production; a probe's
+    /// adapter in the metric tests; `None` — which the service resolves to
+    /// `ports::metrics::NoopMetrics` — everywhere else.
+    ///
+    /// **`Option`, and that is what "silent when no adapter is installed"
+    /// means here.** It follows this struct's `runs`/`catalog` fields in kind
+    /// but not in shape: those are `Arc<dyn _>` because a service with no
+    /// qa-runs client cannot work, and this one is optional because a service
+    /// with no metrics adapter must work *identically*.
+    ///
+    /// **Added by Task 38 of the observability plan.**
+    pub(crate) collect_metrics: Option<Arc<dyn CollectMetrics>>,
+    /// Where [`jira_poller::JiraPollerService`]'s telemetry goes. See
+    /// [`Self::collect_metrics`]; `gear::init` builds one adapter and hands
+    /// the same `Arc` to both.
+    ///
+    /// **Added by Task 38 of the observability plan.**
+    pub(crate) jira_poll_metrics: Option<Arc<dyn JiraPollMetrics>>,
 }
 
 /// DI container: the services the transport layer and the background tasks
@@ -1011,7 +1125,7 @@ where
         // `deps.db` are moved into the reconciler.
         //
         // One `PolicyEnforcer` per service rather than one shared behind an
-        // `Arc`: it is a thin handle over the `Arc<dyn AuthZResolverClient>`
+        // `Arc`: it is a thin handle over the `Arc<dyn AuthZResolverApi>`
         // (`PolicyEnforcer::new` takes it by value), so a clone is a refcount
         // bump and not a second client.
         let reads = Arc::new(results::ResultsService::new(
@@ -1042,6 +1156,7 @@ where
             collect::DefaultCollectBranch(deps.default_collect_branch.clone()),
             collect::CollectReportBaseUrl(deps.collect_report_base_url),
             collect::CollectReportSigningSecret(deps.collect_report_signing_secret),
+            deps.collect_metrics,
         ));
         let analytics = Arc::new(analytics::AnalyticsService::new(
             Arc::clone(&deps.db),
@@ -1088,6 +1203,7 @@ where
             Arc::clone(&deps.catalog),
             deps.platforms,
             Arc::clone(&deps.runs_launcher),
+            deps.jira_poll_metrics,
         ));
         let tenants = Arc::new(tenants::TenantDirectory::new(
             Arc::clone(&deps.db),

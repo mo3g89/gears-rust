@@ -60,7 +60,6 @@
 //! forward the `ctx` they already have; neither had to acquire one it lacked.
 
 use async_trait::async_trait;
-use serde_json::Value;
 use toolkit_security::SecurityContext;
 
 use crate::domain::error::DomainError;
@@ -72,10 +71,11 @@ use crate::domain::ports::SendOutcome;
 /// Carries both shapes this gear renders: [`Event::RunCompleted`](
 /// crate::domain::notify::routing::Event::RunCompleted)'s plain text (
 /// [`Self::blocks`] empty) and [`Event::ScheduledRun`](
-/// crate::domain::notify::routing::Event::ScheduledRun)'s Block Kit layout.
+/// crate::domain::notify::routing::Event::ScheduledRun)'s sectioned layout.
 /// Legacy's `slack_webhook_payload` (`notifications.rs:880-904`) is the wire
 /// shape the adapter renders this into: `text` always, `channel` only when
-/// non-empty, `blocks` only when non-empty.
+/// non-empty, `blocks` only when non-empty — and the blocks themselves are
+/// encoded there too, not here (review finding #17, see [`SlackBlock`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlackMessage {
     /// A credential-store reference, never a URL. See this module's header.
@@ -87,8 +87,57 @@ pub struct SlackMessage {
     /// The fallback/plain text. Never empty for a message this gear builds,
     /// though the port does not enforce that.
     pub text: String,
-    /// Block Kit blocks; empty for a plain-text send.
-    pub blocks: Vec<Value>,
+    /// The message's layout, in this gear's own vocabulary; empty for a
+    /// plain-text send. Rendered into Slack's Block Kit wire format by the
+    /// adapter (`infra::notify::block_kit`), not here — see [`SlackBlock`].
+    pub blocks: Vec<SlackBlock>,
+}
+
+/// One block of a Slack notification.
+///
+/// # Why this is not opaque JSON any more — review finding #17
+///
+/// This field used to be `Vec<serde_json::Value>`, so the *domain* port
+/// carried Slack's Block Kit wire format: `{"type": "section", "text":
+/// {"type": "mrkdwn", "text": ...}}` objects, built by
+/// [`crate::domain::notify::render`] and passed through the adapter
+/// untouched. A port describing "a notification with a heading, a run summary
+/// and a footer" should say that and let the adapter speak Slack; with an
+/// opaque JSON value the domain owned the wire shape, and nothing in the type
+/// system stopped a renderer from emitting a block Slack would reject.
+///
+/// # Two variants, because the renderer only ever built two
+///
+/// This enum is deliberately not a model of Block Kit. It is exactly what
+/// `render_blocks` (`crate::domain::notify::render`) constructs, derived by
+/// reading every construction site: `header`, `summary`, `results` and `body`
+/// each become a `section` block carrying one `mrkdwn` text, and `footer`
+/// becomes a `context` block carrying a single `mrkdwn` element — legacy's
+/// `render_scheduled_run_slack_blocks`
+/// (`manager/src/services/notifications.rs:906-947`) builds those two shapes
+/// and no others. Adding a variant is a renderer change, not a completeness
+/// exercise: a variant no renderer emits is the unused port surface
+/// [`crate::domain::ports`]' own header warns against.
+///
+/// Both variants' text is Slack `mrkdwn`, which is *not* the wire format
+/// leaking back in: the markup comes from the tenant's own templates
+/// (`qa_insights_sdk::ScheduledRunSlackTemplate`), so it is content this gear
+/// carries rather than framing this gear chooses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SlackBlock {
+    /// A paragraph of the notification: `header`, `summary`, `results` or
+    /// `body`. The adapter renders it as Block Kit `section`.
+    Section {
+        /// Slack `mrkdwn`, already substituted. The renderer decides only
+        /// *whether* a section becomes a block, never rewrites its text.
+        text: String,
+    },
+    /// The footer line, which Slack renders smaller. The adapter renders it
+    /// as Block Kit `context` with one element.
+    Context {
+        /// Slack `mrkdwn`, as for [`Self::Section`].
+        text: String,
+    },
 }
 
 /// The outbound Slack egress, behind `infra::slack::SlackOagwClient` in

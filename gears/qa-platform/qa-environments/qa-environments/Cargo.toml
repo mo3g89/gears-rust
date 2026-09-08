@@ -86,12 +86,33 @@ thiserror = { workspace = true }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
 
+# The metric instruments `infra::metrics::QaEnvironmentsMetricsMeter` holds,
+# and the process-global meter provider `build_default_adapter` reads. Only the
+# `Counter`/`Histogram`/`Meter` surface and `global::meter_with_scope` are used;
+# the SDK itself (`opentelemetry_sdk`) is a dev-dependency, because a gear emits
+# into whatever pipeline `toolkit`'s telemetry init installed and never builds
+# one. Pulls no Kubernetes in, so ADR-0001's containment is unaffected
+# (`containment_tests` is the assertion).
+opentelemetry = { workspace = true }
+
 toolkit = { workspace = true }
 toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
 toolkit-db-macros = { workspace = true }
+# `Page`/`PageInfo` on the paginated collection reads, and the `FilterField`
+# allow-list `infra::storage::odata` implements. `with-utoipa` because the
+# routes register `Page<EnvironmentDto>` as an OpenAPI component -- same
+# feature qa-runs and qa-insights enable, for the same reason.
+toolkit-odata = { workspace = true, features = ["with-utoipa"] }
 toolkit-security = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
 toolkit-macros = { workspace = true }
+# Link-time GTS permission catalog (`src/gts/permissions.rs`): declares
+# AuthzPermissionV1 instances into the toolkit-gts inventory the
+# types-registry aggregates at boot.
+toolkit-gts = { workspace = true }
+# `gts_id!`'s upstream validation (`GtsIdPattern`) and `GTS_ID_PREFIX`, which
+# `toolkit-gts`'s macros delegate to.
+gts = { workspace = true }
 
 # ── The `runner-secret` feature's dependencies, all optional ──────────────────
 kube = { workspace = true, features = ["client", "rustls-tls", "aws-lc-rs"], optional = true }
@@ -108,6 +129,13 @@ hyper-util = { workspace = true, features = ["client-legacy"], optional = true }
 rustls = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The in-memory metric pipeline `infra::metrics::probe` builds: an adapter test
+# has to read back what was really exported, and the SDK is the only thing that
+# can produce that. Declared here rather than relied on through feature
+# unification with a sibling crate -- `cargo hack --each-feature` builds this
+# package on its own, where unification would not save it.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+
 # `Canary::vhp_shaped()` -- the three planted credential shapes the plugin
 # SDK's own leak harness uses. The observation tests plant it in the credential
 # material a fake plugin is handed and assert it reaches neither

@@ -1212,6 +1212,9 @@ fn up_ddl(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
              3072-byte key limit. See this module's header, \"MySQL key-width budget\"."
                 .to_owned(),
         )),
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 
@@ -1308,11 +1311,17 @@ mod tests {
     ///   needed. `event-broker-sdk` owned the table's shape; the gear owns the
     ///   DDL because the migration has already run on deployed databases and
     ///   cannot be edited out from under them (see that file's header).
+    /// * `qa_leader_claims` — `m20260907_000003_leader_claims`: the JIRA
+    ///   poller's single-holder claim row, and the one place in this gear
+    ///   where leadership is a correctness requirement rather than an
+    ///   optimisation. `crate::infra::leader`'s header says which of the
+    ///   three roles it covers and why the other two do not need it.
     ///
     /// A migration that adds a table adds a line here. That is deliberate
     /// friction: the alternative is filtering the inventory down to a prefix,
     /// which would stop these tests noticing a table nobody meant to create.
-    const TABLES_OWNED_BY_LATER_MIGRATIONS: [&str; 1] = ["evbk_consumer_offsets"];
+    const TABLES_OWNED_BY_LATER_MIGRATIONS: [&str; 2] =
+        ["evbk_consumer_offsets", "qa_leader_claims"];
 
     /// The eleven tables, in the order `up()` declares them.
     const TABLES: [&str; 11] = [
@@ -1565,7 +1574,7 @@ mod tests {
 
     /// Collect the `name` column of a one-column query.
     async fn name_column(conn: &DatabaseConnection, sql: String) -> Vec<String> {
-        conn.query_all(Statement::from_string(
+        conn.query_all_raw(Statement::from_string(
             sea_orm_migration::sea_orm::DatabaseBackend::Sqlite,
             sql,
         ))
@@ -1630,7 +1639,7 @@ mod tests {
     /// `key = 1` filters the trailing rowid/PK columns `index_xinfo` appends,
     /// which `index_info` does not list.
     async fn index_columns(conn: &DatabaseConnection, index: &str) -> Vec<String> {
-        conn.query_all(Statement::from_string(
+        conn.query_all_raw(Statement::from_string(
             sea_orm_migration::sea_orm::DatabaseBackend::Sqlite,
             format!(
                 "SELECT name || CASE desc WHEN 1 THEN ' DESC' ELSE '' END AS name \
@@ -1660,7 +1669,7 @@ mod tests {
 
     /// Read one scalar back as text, whatever its declared type.
     async fn scalar(conn: &DatabaseConnection, sql: &str) -> String {
-        conn.query_one(Statement::from_string(
+        conn.query_one_raw(Statement::from_string(
             sea_orm_migration::sea_orm::DatabaseBackend::Sqlite,
             sql.to_owned(),
         ))
@@ -2414,7 +2423,7 @@ mod tests {
 
         let pg_names = |sql: String| async {
             let sql = sql;
-            pg.query_all(Statement::from_string(DatabaseBackend::Postgres, sql))
+            pg.query_all_raw(Statement::from_string(DatabaseBackend::Postgres, sql))
                 .await
                 .unwrap()
                 .iter()

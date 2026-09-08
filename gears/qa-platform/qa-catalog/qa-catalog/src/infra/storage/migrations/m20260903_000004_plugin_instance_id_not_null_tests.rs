@@ -55,7 +55,7 @@ async fn db_migrated_up_to_this_one() -> DatabaseConnection {
 /// migration exists to refuse.
 async fn insert_product(conn: &DatabaseConnection, id: u128, name: &str, plugin: Option<&str>) {
     let plugin = plugin.map_or_else(|| "NULL".to_owned(), |value| format!("'{value}'"));
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         conn.get_database_backend(),
         format!(
             "INSERT INTO qa_products \
@@ -73,7 +73,7 @@ async fn insert_product(conn: &DatabaseConnection, id: u128, name: &str, plugin:
 }
 
 async fn scalar<T: TryGetable>(conn: &DatabaseConnection, sql: &str) -> T {
-    conn.query_one(Statement::from_string(
+    conn.query_one_raw(Statement::from_string(
         conn.get_database_backend(),
         sql.to_owned(),
     ))
@@ -107,7 +107,7 @@ async fn after_the_migration_a_product_cannot_omit_its_plugin() {
         .expect("the migration must apply to an empty table");
 
     let refused = conn
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "INSERT INTO qa_products \
@@ -182,7 +182,7 @@ async fn the_rebuild_preserves_every_row_verbatim() {
         .expect("the migration must apply to a populated table");
 
     let row = conn
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             conn.get_database_backend(),
             "SELECT tenant_id, name, product_key, description, folder, created_at, updated_at, \
              plugin_instance_id FROM qa_products;"
@@ -251,7 +251,7 @@ async fn the_rebuild_recreates_both_unique_indexes() {
 
     insert_product(&conn, 0x66, "dup", Some(BOUND)).await;
     let duplicate = conn
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "INSERT INTO qa_products \
@@ -293,7 +293,7 @@ async fn the_rebuild_recreates_both_unique_indexes() {
 async fn a_referencing_test_repository_survives_the_rebuild() {
     let conn = db_migrated_up_to_this_one().await;
     insert_product(&conn, 0x88, "owner", Some(BOUND)).await;
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         conn.get_database_backend(),
         format!(
             "INSERT INTO qa_test_repositories \
@@ -384,7 +384,7 @@ async fn the_rebuild_survives_a_referencing_row_inside_the_runners_transaction()
 
     let conn = db_migrated_up_to_this_one().await;
     insert_product(&conn, 0x88, "owner", Some(BOUND)).await;
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         conn.get_database_backend(),
         format!(
             "INSERT INTO qa_test_repositories \
@@ -425,7 +425,7 @@ async fn the_rebuild_survives_a_referencing_row_inside_the_runners_transaction()
 
     // And the constraint this migration exists for is in force afterwards.
     let unbound = conn
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "INSERT INTO qa_products \

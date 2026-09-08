@@ -24,7 +24,7 @@ use crate::gear::ConcreteAppServices;
 /// * It does not authorize. The service compiles its own scope from the PEP, as
 ///   every service in every sibling gear does.
 /// * It does not choose a status code. `?` resolves through
-///   [`crate::api::rest::error`].
+///   [`crate::domain::error`]'s boundary mapping.
 #[tracing::instrument(skip(svc, ctx, req), fields(rebuild.from = %req.from, rebuild.to = %req.to))]
 pub async fn rebuild(
     Extension(ctx): Extension<SecurityContext>,

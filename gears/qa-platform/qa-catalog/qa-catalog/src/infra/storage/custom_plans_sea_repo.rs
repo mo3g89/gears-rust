@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use qa_catalog_sdk::{CustomPlan, CustomPlanEntry, NewCustomPlan, NewCustomPlanEntry};
-use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::secure::{
     DBRunner, SecureDeleteExt, SecureEntityExt, secure_insert, secure_update_with_scope,
@@ -32,7 +31,7 @@ impl CustomPlansRepository for OrmCustomPlansRepository {
         id: Uuid,
     ) -> Result<Option<CustomPlan>, DomainError> {
         let found = PlanEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(PlanColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(PlanColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -101,7 +100,7 @@ impl CustomPlansRepository for OrmCustomPlansRepository {
         new: NewCustomPlan,
     ) -> Result<Option<CustomPlan>, DomainError> {
         let existing = PlanEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(PlanColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(PlanColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -147,7 +146,7 @@ impl CustomPlansRepository for OrmCustomPlansRepository {
         id: Uuid,
     ) -> Result<bool, DomainError> {
         let result = PlanEntity::delete_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(PlanColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(PlanColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .exec(runner)

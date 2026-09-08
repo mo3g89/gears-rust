@@ -27,15 +27,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
 use qa_catalog_sdk::{
-    BundleRequest, CustomPlan, CustomPlanEntry, NewCustomPlan, NewTestRepository, Plan, Product,
-    QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle, TestFileMeta,
-    TestRepository, TestRepositoryUpdate, UniverseTest,
+    BundleRequest, CustomPlan, CustomPlanEntry, Exclusivity, NewCustomPlan, NewTestRepository,
+    Plan, Product, QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle,
+    TestFileMeta, TestRepository, TestRepositoryUpdate, UniverseTest,
 };
 use qa_environments_sdk::{
     AcquireOutcome, Environment, EnvironmentPatch, LeaseMode, LeaseState, NewEnvironment,
@@ -59,18 +59,20 @@ use crate::domain::service::admission::CapSlot;
 use crate::domain::service::admission::tests::fakes::{FakeCatalog, FakeEnvironments};
 use crate::domain::service::launch::Admitted;
 use crate::domain::service::{AppServices, FlushReport, LogArchive, QueueLimits, ServiceDeps};
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 use crate::infra::executor::mock::MockRunExecutor;
 use crate::infra::logs::RunLogBroadcaster;
 use crate::infra::storage::entity::schedule_tick;
 use crate::infra::storage::test_db::{inmem_db, scope};
 use crate::infra::storage::{OrmQueueRepository, OrmRunsRepository, OrmSchedulesRepository};
 use sea_orm::EntityTrait;
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::secure::SecureEntityExt;
+use toolkit_security::PlatformSecurityContext;
 
 use crate::domain::repos::SchedulesRepository;
 use crate::domain::repos::{
-    ArchivedLog, NewRun, NewTestResult, OwnedRunId, RunLogsRepository, RunResultDelta,
+    ArchivedLog, LogResume, NewRun, NewTestResult, OwnedRunId, RunLogsRepository, RunResultDelta,
     RunStatePatch, RunWithResult, RunsRepository, TestResultRow, TimeoutCandidate, WatchCandidate,
     Windowed,
 };
@@ -182,11 +184,12 @@ fn permissive_response(request: &EvaluationRequest) -> EvaluationResponse {
 pub struct PermissiveAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for PermissiveAuthZ {
+impl AuthZResolverApi for PermissiveAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(permissive_response(&request))
     }
 }
@@ -751,6 +754,26 @@ impl RunLogsRepository for MockRunsRepository {
     ) -> Result<Option<ArchivedLog>, DomainError> {
         Ok(self.logs.lock().unwrap().get(&run_id).cloned())
     }
+
+    /// Calls the one shared implementation
+    /// (`domain::repos::LogResume::from_archived_text`) rather than stubbing
+    /// `unsupported`, so a test built over this double can exercise
+    /// `RunLogArchive::resume_positions` too.
+    async fn log_resume_positions<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        run_id: Uuid,
+    ) -> Result<LogResume, DomainError> {
+        Ok(self
+            .logs
+            .lock()
+            .unwrap()
+            .get(&run_id)
+            .map_or_else(LogResume::default, |log| {
+                LogResume::from_archived_text(&log.text)
+            }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -760,6 +783,33 @@ impl RunLogsRepository for MockRunsRepository {
 fn catalog_unsupported(method: &str) -> QaCatalogError {
     QaCatalogError::internal(format!("MockCatalog::{method} is not used by these tests")).create()
 }
+
+/// The resource type a per-file `TEST_META` failure maps through in the real
+/// gear (`qa-catalog/src/api/rest/error.rs`'s `CatalogResourceError`, shared by
+/// `DomainError::FileNotFound` and `DomainError::Forbidden`). Declared here so
+/// [`MockCatalog::get_test_meta`]'s `NotFound` and `PermissionDenied` carry the
+/// same *category* qa-catalog would produce -- the category
+/// `LaunchService::gather_group_meta` discriminates on (review finding #9) --
+/// rather than one double answering `internal` for every cause.
+#[toolkit::api::canonical_prelude::resource_error(toolkit_gts::gts_id!(
+    "cf.qa.catalog.entry.v1~"
+))]
+struct MockCatalogEntryError;
+
+/// The resource type a `get_plan` failure maps through in the real gear
+/// (`qa-catalog/src/api/rest/error.rs`'s `PlanResourceError` for
+/// `DomainError::PlanNotFound`, sharing `CatalogResourceError`'s
+/// `permission_denied` for `Forbidden` -- both `NotFound`-shaped errors here
+/// regardless, since [`MockCatalog::get_plan`]'s match does not look at
+/// `resource_type` any more than `gather_group_meta`'s does). Declared
+/// separately from [`MockCatalogEntryError`] so a `get_plan` failure and a
+/// `get_test_meta` failure are visibly two different calls in a test's
+/// fixture, matching qa-catalog's own split, even though both collapse to the
+/// same `CanonicalError` variants.
+#[toolkit::api::canonical_prelude::resource_error(toolkit_gts::gts_id!(
+    "cf.qa.catalog.plan.v1~"
+))]
+struct MockCatalogPlanError;
 
 /// In-memory `QaCatalogClientV1` serving one repository default branch, one
 /// discovered plan, one custom plan, and per-file `TEST_META`.
@@ -773,9 +823,17 @@ pub(super) struct MockCatalog {
     /// apart — and a test claiming "plan A declared exclusive, plan B did not"
     /// would be asserting against one fixture answering for both.
     pub(super) plans_by_path: Vec<((Uuid, String), Plan)>,
-    /// `(repo_id, plan_path)` pairs whose `get_plan` fails: legacy's
-    /// "nested plan not resolvable on this branch" case.
+    /// `(repo_id, plan_path)` pairs whose `get_plan` answers `NotFound`:
+    /// legacy's "nested plan not resolvable on this branch" case. Contributes
+    /// nothing and must not fail the launch.
     pub(super) unresolvable_plans: Vec<(Uuid, String)>,
+    /// `(repo_id, plan_path)` pairs whose `get_plan` answers `PermissionDenied`
+    /// — a policy that denies this gear's system actor the read, as opposed to
+    /// the plan simply not existing. Review finding #9's fix round 1: this
+    /// must fail the launch, never resolve it parallel. Checked before
+    /// [`Self::unresolvable_plans`], though a test should only ever put one
+    /// `(repo_id, plan_path)` in one of the two.
+    pub(super) denied_plans: Vec<(Uuid, String)>,
     /// Every `(repo_id, plan_path)` `get_plan` was asked for, in order.
     pub(super) plan_lookups: Mutex<Vec<(Uuid, String)>>,
     pub(super) custom_plan: Option<CustomPlan>,
@@ -785,6 +843,12 @@ pub(super) struct MockCatalog {
     /// When set, every `get_test_meta` call fails outright — the "catalog is
     /// down" case, as opposed to "one file is missing".
     pub(super) meta_unavailable: bool,
+    /// When set, every `get_test_meta` call answers `PermissionDenied` — a
+    /// policy that denies this gear's system actor the catalog read, as
+    /// opposed to a fault. Review finding #9: this must fail the launch, never
+    /// resolve it parallel. Checked before [`Self::meta_unavailable`], though
+    /// a test should only ever set one.
+    pub(super) meta_denied: bool,
     /// Branches `get_plan`/`get_test_meta` were asked for, in order.
     pub(super) branches_seen: Mutex<Vec<String>>,
     /// Number of `get_test_meta` calls, so a short-circuit can be proven by
@@ -801,10 +865,12 @@ impl MockCatalog {
             plan: None,
             plans_by_path: Vec::new(),
             unresolvable_plans: Vec::new(),
+            denied_plans: Vec::new(),
             plan_lookups: Mutex::new(Vec::new()),
             custom_plan: None,
             metas: Vec::new(),
             meta_unavailable: false,
+            meta_denied: false,
             branches_seen: Mutex::new(Vec::new()),
             meta_calls: Mutex::new(0),
             sync_calls: Mutex::new(0),
@@ -837,6 +903,16 @@ impl MockCatalog {
         self
     }
 
+    /// Make `(repo_id, plan_path)`'s `get_plan` answer `PermissionDenied`, as
+    /// it would if a policy denied this gear's system actor the read. Review
+    /// finding #9's fix-round-1 fixture: the plan this deployment cannot read
+    /// may still declare `exclusive: True`, and the point is that the launch
+    /// must fail rather than resolve as if the plan simply were not there.
+    pub(super) fn with_denied_plan(mut self, repo_id: Uuid, plan_path: &str) -> Self {
+        self.denied_plans.push((repo_id, plan_path.to_owned()));
+        self
+    }
+
     pub(super) fn plan_lookups(&self) -> Vec<(Uuid, String)> {
         self.plan_lookups.lock().unwrap().clone()
     }
@@ -853,6 +929,16 @@ impl MockCatalog {
 
     pub(super) fn meta_unavailable(mut self) -> Self {
         self.meta_unavailable = true;
+        self
+    }
+
+    /// Every `get_test_meta` call answers `PermissionDenied`, as it would if a
+    /// policy denied this gear's system actor the catalog read. Review finding
+    /// #9's fixture: the file this deployment cannot read may still declare
+    /// `exclusive: True`, and the point is that the launch must fail rather
+    /// than resolve as if nobody had an opinion.
+    pub(super) fn deny_test_meta(mut self) -> Self {
+        self.meta_denied = true;
         self
     }
 
@@ -881,12 +967,12 @@ pub(super) fn plan_fixture(name: &str, test_files: &[&str]) -> Plan {
         timeout_seconds: Some(300),
         tags: Vec::new(),
         validation: false,
-        exclusive: None,
+        exclusive: Exclusivity::Inherit,
     }
 }
 
 /// A `TEST_META` fixture.
-pub(super) fn meta_fixture(path: &str, tags: &[&str], exclusive: Option<bool>) -> TestFileMeta {
+pub(super) fn meta_fixture(path: &str, tags: &[&str], exclusive: Exclusivity) -> TestFileMeta {
     TestFileMeta {
         path: path.to_owned(),
         title: None,
@@ -1023,6 +1109,14 @@ impl QaCatalogClientV1 for MockCatalog {
         Err(catalog_unsupported("list_plans"))
     }
 
+    /// **The failure category matters here too, for the same reason it does in
+    /// [`Self::get_test_meta`] (review finding #9's fix round 1).** A
+    /// `(repo_id, plan_path)` in [`Self::unresolvable_plans`] answers
+    /// `NotFound` — a genuinely missing/unresolvable `plan.yaml` — and one in
+    /// [`Self::denied_plans`] answers `PermissionDenied`. Before that fix
+    /// round, both used `internal(...)`, indistinguishable from each other and
+    /// from a real fault; that is exactly the defect this double must not
+    /// reintroduce.
     async fn get_plan(
         &self,
         _ctx: &SecurityContext,
@@ -1037,11 +1131,22 @@ impl QaCatalogClientV1 for MockCatalog {
             .push((repo_id, path.to_owned()));
 
         if self
+            .denied_plans
+            .iter()
+            .any(|(r, p)| *r == repo_id && p == path)
+        {
+            return Err(MockCatalogPlanError::permission_denied()
+                .with_reason("ACCESS_DENIED")
+                .create());
+        }
+        if self
             .unresolvable_plans
             .iter()
             .any(|(r, p)| *r == repo_id && p == path)
         {
-            return Err(QaCatalogError::internal("plan not on this branch").create());
+            return Err(MockCatalogPlanError::not_found("plan not on this branch")
+                .with_resource(path.to_owned())
+                .create());
         }
         if let Some((_, plan)) = self
             .plans_by_path
@@ -1059,6 +1164,18 @@ impl QaCatalogClientV1 for MockCatalog {
     /// the first file it cannot read
     /// (`qa-catalog/src/domain/service/plans.rs`, the `read_to_string` arm).
     /// The launch path's per-file fallback exists because of this.
+    ///
+    /// **The failure category matters and is chosen deliberately, not just
+    /// its presence.** A path absent from `self.metas` answers `NotFound` --
+    /// what a genuinely missing file looks like through this SDK
+    /// (`qa-catalog/src/api/rest/error.rs`'s `DomainError::FileNotFound` ->
+    /// `CatalogResourceError::not_found`) -- and `gather_group_meta` omits it.
+    /// [`Self::meta_denied`] answers `PermissionDenied`, and
+    /// [`Self::meta_unavailable`] answers a plain `Internal`; `gather_group_meta`
+    /// must fail the launch on both, per review finding #9. Before that
+    /// finding, every one of these three cases used `internal(...)` and so
+    /// were indistinguishable -- which is exactly the defect this double must
+    /// not reintroduce.
     async fn get_test_meta(
         &self,
         _ctx: &SecurityContext,
@@ -1068,6 +1185,11 @@ impl QaCatalogClientV1 for MockCatalog {
     ) -> Result<Vec<TestFileMeta>, QaCatalogError> {
         *self.meta_calls.lock().unwrap() += 1;
         self.branches_seen.lock().unwrap().push(branch.to_owned());
+        if self.meta_denied {
+            return Err(MockCatalogEntryError::permission_denied()
+                .with_reason("ACCESS_DENIED")
+                .create());
+        }
         if self.meta_unavailable {
             return Err(QaCatalogError::internal("catalog unavailable").create());
         }
@@ -1081,9 +1203,11 @@ impl QaCatalogClientV1 for MockCatalog {
             match found {
                 Some(meta) => out.push(meta),
                 None => {
-                    return Err(
-                        QaCatalogError::internal(format!("file not found: {file}")).create()
-                    );
+                    return Err(MockCatalogEntryError::not_found(format!(
+                        "file not found: {file}"
+                    ))
+                    .with_resource(file.clone())
+                    .create());
                 }
             }
         }
@@ -1620,6 +1744,18 @@ impl LogArchive for NullLogArchive {
     async fn flush_due(&self) -> FlushReport {
         FlushReport::default()
     }
+
+    /// Nothing is ever archived under this double, so nothing is ever
+    /// resumable either — the empty map is exactly right, not a placeholder:
+    /// it is what makes a caller read from the beginning, which is correct
+    /// here because "the beginning" is the whole of what this double has.
+    async fn resume_positions(
+        &self,
+        _tenant: crate::domain::system_actor::TenantBound,
+        _run_id: Uuid,
+    ) -> Result<LogResume, DomainError> {
+        Ok(LogResume::default())
+    }
 }
 
 // ===========================================================================
@@ -1777,11 +1913,12 @@ fn subject_tenant(request: &EvaluationRequest) -> Option<Uuid> {
 }
 
 #[async_trait]
-impl AuthZResolverClient for SchedulerAuthZ {
+impl AuthZResolverApi for SchedulerAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.asked.lock().unwrap().push(Asked::new(
             &request.resource.resource_type,
             &request.action.name,
@@ -1928,7 +2065,7 @@ impl Fleet {
             path: "tests/a.py".to_owned(),
             title: None,
             tags: Vec::new(),
-            exclusive: Some(true),
+            exclusive: Exclusivity::Exclusive,
             bugs: Vec::new(),
         }];
         self
@@ -2021,7 +2158,7 @@ impl Fleet {
             Arc::new(OrmSchedulesRepository),
             ServiceDeps {
                 db: Arc::clone(&self.db),
-                authz: Arc::clone(&self.authz) as Arc<dyn AuthZResolverClient>,
+                authz: Arc::clone(&self.authz) as Arc<dyn AuthZResolverApi>,
                 catalog: Arc::clone(&self.catalog) as Arc<dyn qa_catalog_sdk::QaCatalogClientV1>,
                 environments: Arc::clone(&self.environments)
                     as Arc<dyn qa_environments_sdk::QaEnvironmentsClientV1>,
@@ -2037,6 +2174,7 @@ impl Fleet {
                 admitter: Some(Arc::clone(&self.admitter) as Arc<dyn Admitter>),
                 dispatcher: None,
                 watcher: None,
+                cancel: tokio_util::sync::CancellationToken::new(),
                 default_timeout_seconds: 3600,
                 limits: QueueLimits {
                     queue_max_depth: 20,
@@ -2044,6 +2182,11 @@ impl Fleet {
                     queue_ttl_seconds: 7200,
                 },
                 orphan_timeout_seconds: 600,
+                // The production default for a fixture that reads no metrics:
+                // `None` installs `NoopMetrics`, which emits everything the
+                // wired gear emits and lets nothing observe it.
+                dispatch_metrics: None,
+                ingest_metrics: None,
             },
         ))
     }

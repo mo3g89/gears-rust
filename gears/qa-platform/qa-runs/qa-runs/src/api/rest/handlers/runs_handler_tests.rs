@@ -16,7 +16,7 @@
 //!   executed; the second was a live cross-tenant disclosure.
 //! * **A run endpoint attributes its refusals to the run resource.** The
 //!   variant-to-status mapping is exhaustively checked by the compiler in
-//!   `api::rest::error`; the endpoint-to-resource-type pairing is checked by
+//!   `domain::error`; the endpoint-to-resource-type pairing is checked by
 //!   nothing but tests like these, which is how the same defect was found in
 //!   six places across three reviews. See `handlers::queue`'s `handler_tests` for
 //!   the same loop over the queue surface.
@@ -30,7 +30,7 @@ use uuid::Uuid;
 use super::{cancel_run, get_run, launch_run, rerun_run, stream_run_logs};
 use crate::api::rest::dto::{BoundaryLimits, LaunchRunReq, RunTargetDto};
 use crate::domain::service::test_support::{Fleet, ctx};
-use crate::infra::ConcreteAppServices;
+use crate::gear::ConcreteAppServices;
 use crate::infra::logs::{MAX_RETAINED_RUNS, MAX_SUBSCRIBERS_PER_RUN, RunLogBroadcaster};
 
 const TENANT: Uuid = Uuid::from_u128(0x0A11_0000_0000_0001);

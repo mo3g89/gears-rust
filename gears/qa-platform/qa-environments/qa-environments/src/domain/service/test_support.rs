@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::models::{EvaluationRequest, EvaluationResponse};
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
 use qa_environments_sdk::{Environment, EnvironmentPatch, NewEnvironment};
 use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
@@ -17,6 +17,8 @@ use uuid::Uuid;
 use super::DbProvider;
 use crate::domain::error::DomainError;
 use crate::domain::repos::{EnvironmentsRepository, PersistedCredentials};
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 /// Build a `SecurityContext` for `tenant_id` with a fresh random subject.
 pub(super) fn ctx(tenant_id: Uuid) -> SecurityContext {
@@ -104,11 +106,12 @@ impl EnvironmentsRepository for MockEnvironmentsRepository {
         Ok(self.environment.as_ref().filter(|p| p.id == id).cloned())
     }
 
-    async fn list<C: DBRunner>(
+    async fn list_page<C: DBRunner>(
         &self,
         _runner: &C,
         _scope: &AccessScope,
-    ) -> Result<Vec<Environment>, DomainError> {
+        _query: &toolkit_odata::ODataQuery,
+    ) -> Result<toolkit_odata::Page<Environment>, DomainError> {
         unimplemented!("not exercised by the service-layer unit tests")
     }
 
@@ -194,11 +197,12 @@ pub(super) use crate::test_support::permissive_response;
 pub(super) struct PermissiveAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for PermissiveAuthZ {
+impl AuthZResolverApi for PermissiveAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(permissive_response(&request))
     }
 }

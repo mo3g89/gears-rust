@@ -666,6 +666,11 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::Postgres => POSTGRES_UP,
             sea_orm::DatabaseBackend::MySql => MYSQL_UP,
             sea_orm::DatabaseBackend::Sqlite => SQLITE_UP,
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         };
 
         conn.execute_unprepared(sql).await?;
@@ -974,7 +979,7 @@ mod tests {
     /// Collect the `name` column of a one-column query.
     async fn name_column(conn: &DatabaseConnection, sql: String) -> Vec<String> {
         use sea_orm::{ConnectionTrait, Statement};
-        conn.query_all(Statement::from_string(
+        conn.query_all_raw(Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             sql,
         ))

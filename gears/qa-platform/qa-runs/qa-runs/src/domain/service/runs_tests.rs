@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use qa_catalog_sdk::TestFileMeta;
 use qa_environments_sdk::{LeaseMode, LeaseState, QaEnvironmentsClientV1};
 use qa_runs_sdk::{
-    ExclusiveTier, QueueState, RunKind, RunParameter, RunSource, RunState, RunTarget,
+    ExclusiveTier, Exclusivity, QueueState, RunKind, RunParameter, RunSource, RunState, RunTarget,
 };
 use time::OffsetDateTime;
 use time::macros::datetime;
@@ -32,7 +32,7 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use super::*;
-use crate::domain::repos::QueueRowRecord;
+use crate::domain::repos::{LogResume, QueueRowRecord};
 use crate::domain::service::LogFanout;
 use crate::domain::service::admission::tests::fakes::{
     FakeCatalog, FakeEnvironments, FakeQueue, FakeRuns, PLATFORM_A, REPO, SystemGrantingAuthZ,
@@ -138,8 +138,9 @@ impl RunExecutor for CountingExecutor {
     async fn watch(
         &self,
         execution_ref: &ExecutionRef,
+        resume: LogResume,
     ) -> Result<crate::domain::ports::run_executor::ExecutionStream, DomainError> {
-        self.inner.watch(execution_ref).await
+        self.inner.watch(execution_ref, resume).await
     }
 
     async fn cancel(&self, execution_ref: &ExecutionRef) -> Result<(), DomainError> {
@@ -258,6 +259,7 @@ impl Builder {
             locks: locks.clone(),
             limits: self.limits,
             policy_enforcer: enforcer.clone(),
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
         }));
         let launch = Arc::new(LaunchService::new(
             Arc::clone(&db),
@@ -392,7 +394,7 @@ async fn a_run_recorded_parallel_is_re_resolved_not_pinned_parallel() {
         title: None,
         tags: Vec::new(),
         // Marked destructive since the original run.
-        exclusive: Some(true),
+        exclusive: Exclusivity::Exclusive,
         bugs: Vec::new(),
     });
     let h = Builder::new()
@@ -1227,6 +1229,7 @@ async fn the_container_wires_ingest_and_the_operator_actions_to_the_same_halves(
             admitter: None,
             dispatcher: None,
             watcher: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
             default_timeout_seconds: 900,
             limits: QueueLimits {
                 queue_max_depth: 20,
@@ -1234,6 +1237,10 @@ async fn the_container_wires_ingest_and_the_operator_actions_to_the_same_halves(
                 queue_ttl_seconds: 7200,
             },
             orphan_timeout_seconds: 600,
+            // `None` is the production default: `NoopMetrics`, which emits
+            // everything a wired gear emits and lets nothing observe it.
+            dispatch_metrics: None,
+            ingest_metrics: None,
         },
     );
 
@@ -1294,12 +1301,13 @@ async fn the_container_wires_ingest_and_the_operator_actions_to_the_same_halves(
 #[test]
 fn replay_inherits_exclusivity_upward_only() {
     let exclusive = replay(&stored(RunState::Succeeded, true)).unwrap();
-    assert_eq!(exclusive.exclusive, Some(true));
+    assert_eq!(exclusive.exclusive, Exclusivity::Exclusive);
 
     let parallel = replay(&stored(RunState::Succeeded, false)).unwrap();
     assert_eq!(
-        parallel.exclusive, None,
-        "`None` means inherit; `Some(false)` would pin the launch tier and suppress a \
+        parallel.exclusive,
+        Exclusivity::Inherit,
+        "`Inherit` means inherit; `Shared` would pin the launch tier and suppress a \
          TEST_META declaration added since"
     );
 }

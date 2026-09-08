@@ -4,7 +4,7 @@
 //! These tests use a hand-rolled in-memory mock for `LeasesRepository` (it
 //! ignores the `DBRunner` argument entirely — the trait requires one, but the
 //! mock never touches a database) plus the shared `EnvironmentsRepository`/
-//! `AuthZResolverClient` test doubles in [`super::test_support`]. The real
+//! `AuthZResolverApi` test doubles in [`super::test_support`]. The real
 //! PEP flow (`PolicyEnforcer::access_scope`) runs unmodified; only the PDP
 //! backend is faked.
 

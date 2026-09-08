@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use qa_catalog_sdk::TestBundle;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, EntityTrait, FromQueryResult, Order, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+    ActiveValue, ColumnTrait, EntityTrait, FromQueryResult, Order, QueryFilter, QueryOrder,
+    QuerySelect,
+};
 use time::OffsetDateTime;
 use toolkit_db::secure::{DBRunner, SecureDeleteExt, SecureEntityExt, secure_insert};
 use toolkit_security::AccessScope;
@@ -59,7 +62,7 @@ impl BundlesRepository for OrmBundlesRepository {
         id: Uuid,
     ) -> Result<Option<TestBundle>, DomainError> {
         let found = BundleEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(BundleColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(BundleColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -76,7 +79,7 @@ impl BundlesRepository for OrmBundlesRepository {
         now: OffsetDateTime,
     ) -> Result<Vec<TestBundle>, DomainError> {
         let rows = BundleEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(BundleColumn::ExpiresAt).lte(now)))
+            .filter(sea_orm::Condition::all().add(BundleColumn::ExpiresAt.lte(now)))
             .secure()
             .scope_with(scope)
             .all(runner)
@@ -92,7 +95,7 @@ impl BundlesRepository for OrmBundlesRepository {
         // was removed and the caller never GCs a blob whose row survived.
         let ids: Vec<Uuid> = rows.iter().map(|m| m.id).collect();
         BundleEntity::delete_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(BundleColumn::Id).is_in(ids)))
+            .filter(sea_orm::Condition::all().add(BundleColumn::Id.is_in(ids)))
             .secure()
             .scope_with(scope)
             .exec(runner)
@@ -113,7 +116,7 @@ impl BundlesRepository for OrmBundlesRepository {
             .scope_with(scope)
             .project_all(runner, |query| {
                 query
-                    .filter(sea_orm::Condition::all().add(Expr::col(BundleColumn::ExpiresAt).lte(now)))
+                    .filter(sea_orm::Condition::all().add(BundleColumn::ExpiresAt.lte(now)))
                     .select_only()
                     .column(BundleColumn::TenantId)
                     .distinct()

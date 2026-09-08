@@ -85,7 +85,7 @@ use toolkit::{DatabaseCapability, Gear, GearCtx, RestApiCapability};
 use toolkit_db::DBProvider;
 use tracing::{debug, error, info, warn};
 
-use authz_resolver_sdk::AuthZResolverClient;
+use authz_resolver_sdk::AuthZResolverApi;
 use oagw_sdk::api::ServiceGatewayClientV1;
 use qa_catalog_sdk::QaCatalogClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
@@ -96,6 +96,7 @@ use crate::api::rest::routes;
 use crate::config::QaInsightsConfig;
 use crate::domain::error::DomainError;
 use crate::domain::local_client::QaInsightsLocalClient;
+use crate::domain::ports::metrics::{CollectMetrics, JiraPollMetrics};
 use crate::domain::ports::{MailClient, RunsLauncher, RunsReader, SlackClient};
 use crate::domain::service::reconcile::ReconcileOutcome;
 use crate::domain::service::{AppServices, ServiceDeps};
@@ -104,7 +105,8 @@ use crate::infra::clients::{QaCatalogReader, QaEnvironmentsReader, QaRunsReader}
 use crate::infra::clock::SystemClock;
 use crate::infra::jira::OagwJiraClient;
 use crate::infra::leader::{
-    LeaderElector, ROLE_COLLECT, ROLE_JIRA_POLLER, ROLE_RECONCILER, elector, work_fn,
+    LeaderElector, ROLE_COLLECT, ROLE_JIRA_POLLER, ROLE_RECONCILER, elector, jira_poller_elector,
+    work_fn,
 };
 use crate::infra::notify::{SlackOagwClient, UnsupportedMailClient};
 use crate::infra::storage::collect_sea_repo::OrmCollectRepository;
@@ -169,9 +171,21 @@ struct QaInsightsRuntime {
     /// (this file's header), and the three tickers reach the database only
     /// through the services they already hold.
     services: Arc<ConcreteAppServices>,
-    /// Leader election for the three ticker roles. `infra::leader`'s header is
-    /// explicit that this buys an *optimisation* here and not mutual exclusion.
+    /// Leader election for the reconcile and collect tickers.
+    /// `infra::leader`'s header is explicit that this buys an *optimisation*
+    /// for those two and not mutual exclusion: both replay writes that
+    /// converge under concurrency.
     elector: Arc<dyn LeaderElector>,
+    /// Leader election for the JIRA poller, and the one place in this gear
+    /// where it is a **correctness requirement**.
+    ///
+    /// A separate field rather than a second use of [`Self::elector`] because
+    /// the two are different implementations, not one implementation two
+    /// tickers share: `infra::leader::ClaimRowElector` takes a row in
+    /// `qa_leader_claims`, where the other keeps `NoopLeaderElector`. Review
+    /// finding #5, and `infra::leader`'s "The JIRA poller is the exception"
+    /// for why the asymmetry is deliberate.
+    jira_poller_elector: Arc<dyn LeaderElector>,
     /// The reconcile sweep's resolved cadence.
     reconciler: Cadence,
     /// The JIRA poller's resolved cadence.
@@ -440,7 +454,7 @@ impl Gear for QaInsights {
 
         let authz = ctx
             .client_hub()
-            .get::<dyn AuthZResolverClient>()
+            .get::<dyn AuthZResolverApi>()
             .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
 
         // `deps` above already orders qa-runs ahead of this gear, which is what
@@ -501,7 +515,7 @@ impl Gear for QaInsights {
         // every doc in this file discusses separately because it is consumed into
         // a `PolicyEnforcer` rather than held. There are therefore **four**
         // `deps` clients (qa-runs, qa-catalog, qa-environments, oagw) and
-        // **five** lookups (those four plus `AuthZResolverClient`), and a
+        // **five** lookups (those four plus `AuthZResolverApi`), and a
         // deployment that links this gear has to register all five: a fifth,
         // optional `event_broker` lookup lived here from Task 40 until it was
         // deleted, once it was established that no deployment ever registered
@@ -515,6 +529,21 @@ impl Gear for QaInsights {
         // struct's own header for why this is one adapter and not two.
         let qa_runs_reader = Arc::new(QaRunsReader::new(qa_runs));
 
+        // Built unconditionally, and there is deliberately no "metrics
+        // enabled" branch: `build_default_adapter` reads the process-global
+        // meter provider, which `toolkit`'s `telemetry::init_metrics_provider`
+        // leaves as the built-in `NoopMeterProvider` whenever metrics are
+        // disabled or no pipeline is configured at all. A branch here would be
+        // a second, weaker copy of that rule, and the failure it invites is
+        // silent in both directions — a configured pipeline with nothing
+        // emitting into it, or one port wired and the other dark.
+        //
+        // One adapter, two ports: the collect service and the JIRA poller
+        // report through the same instruments, so the two halves of this
+        // gear's background story cannot disagree about which meter they are
+        // on.
+        let metrics = crate::infra::metrics::build_default_adapter();
+
         let services = Arc::new(AppServices::new(
             OrmResultsRepository,
             OrmWatermarkRepository,
@@ -523,7 +552,10 @@ impl Gear for QaInsights {
             OrmJiraRepository,
             OrmNotifyRepository,
             ServiceDeps {
-                db,
+                // Cloned rather than moved: `jira_poller_elector` below takes
+                // the same handle, because the claim row it writes lives in
+                // this gear's own database.
+                db: Arc::clone(&db),
                 authz,
                 runs: Arc::clone(&qa_runs_reader) as Arc<dyn RunsReader>,
                 catalog: Arc::new(QaCatalogReader::new(qa_catalog)),
@@ -579,6 +611,9 @@ impl Gear for QaInsights {
                 // Task 30 fix round 1's: the HMAC key that authenticates the
                 // callback's tenant claim.
                 collect_report_signing_secret: cfg.collect_report_signing_secret.clone(),
+                // Task 38 of the observability plan.
+                collect_metrics: Some(Arc::clone(&metrics) as Arc<dyn CollectMetrics>),
+                jira_poll_metrics: Some(metrics as Arc<dyn JiraPollMetrics>),
             },
         ));
 
@@ -586,6 +621,10 @@ impl Gear for QaInsights {
             .set(Arc::new(QaInsightsRuntime {
                 services: Arc::clone(&services),
                 elector: elector(),
+                // The same `db` the services were built over — the claim row
+                // lives in this gear's own database, so there is nothing to
+                // configure and no second connection to hold.
+                jira_poller_elector: jira_poller_elector(Arc::clone(&db)),
                 reconciler: Cadence::reconciler(&cfg),
                 jira_poller: Cadence::jira_poller(&cfg),
                 collect: Cadence::collect(&cfg),
@@ -899,7 +938,7 @@ impl QaInsights {
                                 return Ok(());
                             }
                             _ = ticker.tick() => {
-                                reconcile_pass(&services, &mut wedged).await;
+                                reconcile_pass(&services, &mut wedged, &cancel).await;
                             }
                         }
                     }
@@ -926,22 +965,26 @@ impl QaInsights {
     /// each launch a rerun — legacy's `poll_resolved_bugs` has no guard against
     /// that because legacy runs one manager.
     ///
-    /// What actually bounds the damage today is the *local resolve write*: once
+    /// What used to bound the damage was the *local resolve write*: once
     /// `resolve_bug` has run, the bug leaves `open_bugs` and the next pass does
-    /// not see it. That is a race, not a lock, and under the shipped
-    /// `NoopLeaderElector` — where every replica is the leader — it is live.
-    /// Stated rather than implied, because `infra::leader`'s blanket
-    /// "optimisation" sentence would otherwise read as covering this ticker too.
-    /// Closing it needs a claim row of the kind
-    /// `idx_qa_run_notifications_claim` gives the notification path, which no
-    /// task owns.
+    /// not see it. That is a race, not a lock, and under `NoopLeaderElector` —
+    /// where every replica is the leader — it was live. **Review finding #5
+    /// closed it**: this ticker runs under
+    /// [`ClaimRowElector`](crate::infra::leader::ClaimRowElector), which takes
+    /// the claim row this paragraph used to ask for — "of the kind
+    /// `idx_qa_run_notifications_claim` gives the notification path" — in
+    /// `qa_leader_claims`. The other two tickers keep `NoopLeaderElector`,
+    /// which is why `rt` carries two electors and this function reaches for
+    /// the second.
     fn jira_poller_ticker(
         rt: &Arc<QaInsightsRuntime>,
         tasks: &CancellationToken,
     ) -> Ticker<impl Future<Output = ()> + Send + 'static> {
         // One binding, for the reason `reconcile_ticker` gives.
         let role = ROLE_JIRA_POLLER;
-        let elector = Arc::clone(&rt.elector);
+        // `jira_poller_elector`, not `elector`: this is the one role whose
+        // leadership is a correctness requirement. See this function's doc.
+        let elector = Arc::clone(&rt.jira_poller_elector);
         let services = Arc::clone(&rt.services);
         let period = std::time::Duration::from_secs(rt.jira_poller.interval_seconds);
         let cancel = tasks.clone();
@@ -959,7 +1002,7 @@ impl QaInsights {
                                 return Ok(());
                             }
                             _ = ticker.tick() => {
-                                jira_poll_pass(&services).await;
+                                jira_poll_pass(&services, &cancel).await;
                             }
                         }
                     }
@@ -1018,7 +1061,7 @@ impl QaInsights {
                                 return Ok(());
                             }
                             _ = ticker.tick() => {
-                                collect_pass(&services, &branch).await;
+                                collect_pass(&services, &branch, &cancel).await;
                             }
                         }
                     }
@@ -1062,9 +1105,17 @@ const WEDGED_PASSES_BEFORE_ERROR: u32 = 3;
 /// [`WEDGED_PASSES_BEFORE_ERROR`] exists to raise, which is the load-bearing half
 /// of the alert obligation. Found by review, not by the tests.
 ///
-/// The other two passes genuinely do not care, and they say so at their call
-/// sites by mapping `None` to an empty slice: with no tenants there is nothing to
-/// poll and nothing to collect, and neither keeps state between passes.
+/// The other two passes keep no state between passes either, so treating
+/// `None` as zero tenants costs them nothing behaviourally. **They used to say
+/// so by mapping it through `unwrap_or_default()`, and review finding #56 is
+/// why that changed**: folding a refused enumeration into an empty `Vec` at
+/// the call site made a ticker whose background work has silently stopped
+/// indistinguishable, by inspection, from one with nothing to do — the same
+/// shape of trap [`reconcile_pass`] was already fixed against, just without a
+/// wedge count to corrupt. Both call sites now match this `Option` explicitly
+/// and return without iterating on `None`, exactly as [`reconcile_pass`]
+/// already did; neither adds a second `warn!` of its own, since this function
+/// has already logged one by the time either sees `None`.
 ///
 /// Not fatal to the ticker either way. The enumeration no longer asks a PDP
 /// that could decline it — `domain::service::tenants::TenantDirectory::scope`
@@ -1127,9 +1178,16 @@ fn prune_wedged(
 /// A free function rather than a body inside the ticker's closure so the pass has
 /// somewhere to be documented and read; `wedged` is threaded in rather than
 /// captured so the closure stays the only owner of the term's state.
+///
+/// `cancel` is checked at the top of the per-tenant loop, before that
+/// tenant's reconcile call — not after, since the call is the round trip a
+/// shutdown is trying to cut off. Stopping early leaves `wedged` exactly as
+/// it stood after the last tenant this call reached; the next tick resumes
+/// from there, same as any other pass that ends partway through.
 async fn reconcile_pass(
     services: &Arc<ConcreteAppServices>,
     wedged: &mut std::collections::HashMap<uuid::Uuid, u32>,
+    cancel: &CancellationToken,
 ) {
     let tenants = tenants_for(services, ROLE_RECONCILER).await;
     prune_wedged(wedged, tenants.as_deref());
@@ -1139,6 +1197,9 @@ async fn reconcile_pass(
     };
 
     for tenant in tenants {
+        if cancel.is_cancelled() {
+            return;
+        }
         match services.reconcile.reconcile_once(tenant).await {
             Ok(outcome) => report_reconcile_outcome(tenant, &outcome, wedged),
             Err(error) => warn!(
@@ -1221,14 +1282,28 @@ fn report_reconcile_outcome(
 /// A tenant with no JIRA configuration, or a disabled one, costs one read:
 /// `poll_once` calls `JiraService::active_config` before it looks at any bug,
 /// which is legacy's own first step (`jira_poller.rs:40-43`).
-async fn jira_poll_pass(services: &Arc<ConcreteAppServices>) {
-    // `unwrap_or_default`, not a `return`: this pass keeps no state between
-    // passes, so a refused enumeration and an empty one really are the same to
-    // it. [`reconcile_pass`] is the one that cannot say that.
-    for tenant in tenants_for(services, ROLE_JIRA_POLLER)
-        .await
-        .unwrap_or_default()
-    {
+///
+/// `cancel` is checked at the top of the per-tenant loop, before that
+/// tenant's poll — not after, since `poll_once` is the round trip (JIRA
+/// itself, then qa-runs for a rerun) a shutdown is trying to cut off.
+/// Stopping early costs nothing beyond what any skipped tenant already
+/// costs: this pass is stateless between ticks, so the next one covers it.
+async fn jira_poll_pass(services: &Arc<ConcreteAppServices>, cancel: &CancellationToken) {
+    // A failed directory read is not "this deployment has no tenants".
+    // `unwrap_or_default()` used to fold the two together here, which made a
+    // stopped ticker indistinguishable from an idle one at this call site —
+    // even though [`tenants_for`] had already warned, nothing here said so.
+    // Matching instead, exactly as [`reconcile_pass`] already had to, costs
+    // this pass nothing: it keeps no state between passes, so returning
+    // before the loop and running it zero times come to the same thing.
+    // Review finding #56.
+    let Some(tenants) = tenants_for(services, ROLE_JIRA_POLLER).await else {
+        return;
+    };
+    for tenant in tenants {
+        if cancel.is_cancelled() {
+            return;
+        }
         let ctx = system_actor::for_jira_poll(tenant);
         match services.jira_poller.poll_once(&ctx).await {
             Ok(()) => debug!(tenant_id = %tenant.get(), "qa-insights JIRA poller pass"),
@@ -1245,13 +1320,26 @@ async fn jira_poll_pass(services: &Arc<ConcreteAppServices>) {
 }
 
 /// One collect cycle over every tenant, on the default branch.
-async fn collect_pass(services: &Arc<ConcreteAppServices>, branch: &str) {
+///
+/// `cancel` is checked at the top of the per-tenant loop, before that
+/// tenant's cycle — not after, matching [`jira_poll_pass`]:
+/// `run_collect_cycle` is itself a qa-catalog round trip plus a launch per
+/// repository, and a shutdown should not wait for it to finish before
+/// stopping.
+async fn collect_pass(
+    services: &Arc<ConcreteAppServices>,
+    branch: &str,
+    cancel: &CancellationToken,
+) {
     // Stateless between passes, exactly like [`jira_poll_pass`] — see its
-    // comment.
-    for tenant in tenants_for(services, ROLE_COLLECT)
-        .await
-        .unwrap_or_default()
-    {
+    // comment. Review finding #56.
+    let Some(tenants) = tenants_for(services, ROLE_COLLECT).await else {
+        return;
+    };
+    for tenant in tenants {
+        if cancel.is_cancelled() {
+            return;
+        }
         let ctx = system_actor::for_collect_cycle(tenant);
         match services.collect.run_collect_cycle(&ctx, branch).await {
             Ok(launched) => debug!(
@@ -1640,6 +1728,125 @@ mod tests {
         assert_eq!(
             cadence.interval_seconds, MIN_COLLECT_INTERVAL_SECONDS,
             "the raw 1 must never reach serve"
+        );
+    }
+
+    /// `Gear::init`'s own source, isolated so a wiring assertion can be made
+    /// against it without booting the gear.
+    ///
+    /// A source scan, and the reason is the same one every other composition
+    /// assertion in this file gives: `init` needs a database, a `ClientHub` and
+    /// five resolved cross-gear clients before it will run a single line, and
+    /// the harness that supplies those is `tests/ingest_idempotence.rs`, which
+    /// cannot see whether a *field* was wired.
+    ///
+    /// # The slice really is `init` and nothing after it
+    ///
+    /// It ends at the first line that is exactly four spaces and a closing
+    /// brace, which is the method's own closing brace: everything inside the
+    /// body is indented at least eight.
+    ///
+    /// The alternative this replaced — slicing to the enclosing block's
+    /// `\n}\n` — returns the same text today, because `init` is the only item
+    /// in that block. **Its risk is narrow rather than absent**, and worth
+    /// naming precisely: the block is `impl Gear for QaInsights`, a *trait*
+    /// impl, so no ad-hoc method can be added to it — only a method the `Gear`
+    /// trait itself grows and this gear implements after `init` would widen
+    /// the slice. That is unlikely and not impossible, and the cost of ruling
+    /// it out is one different call to `find`.
+    ///
+    /// It is worth ruling out because
+    /// `init_installs_one_metrics_adapter_into_both_ports` asserts something is
+    /// **absent**, and an absence assertion is only as narrow as its slice: a
+    /// slice that quietly grew would start reporting on code `init` does not
+    /// contain. [`the_init_slice_covers_exactly_one_method`] is what pins the
+    /// width; widening this function fails both tests, measured.
+    fn init_source() -> &'static str {
+        let src = include_str!("gear.rs");
+        let start = src
+            .find("    async fn init(")
+            .expect("gear.rs declares Gear::init");
+        let tail = &src[start..];
+        let end = tail
+            .find("\n    }\n")
+            .expect("init's body is closed at its own indentation");
+        &tail[..end]
+    }
+
+    /// **The slice `init_source` returns stops at the end of `init`.**
+    ///
+    /// `init_installs_one_metrics_adapter_into_both_ports` is a source-text
+    /// assertion, so the width of [`init_source`]'s slice is part of what it
+    /// asserts: a slice that ran past `init` would make its `metrics.enabled`
+    /// check report on somebody else's method. This pins the width by the
+    /// property that makes it narrow — one method declaration — rather than by
+    /// a length, which would need updating every time `init` gained a line.
+    #[test]
+    fn the_init_slice_covers_exactly_one_method() {
+        let body = init_source();
+        assert_eq!(
+            body.matches("\n    async fn ").count() + body.matches("\n    fn ").count(),
+            0,
+            "init_source must not reach a second method declaration: {body}"
+        );
+        assert!(
+            body.starts_with("    async fn init("),
+            "and it must start at init's own declaration: {body}"
+        );
+    }
+
+    /// **The metrics adapter is installed unconditionally, into both ports.**
+    ///
+    /// The two defects this guards are opposite and both silent. Wrapping the
+    /// construction in a "metrics enabled" branch would leave the gear with a
+    /// pipeline configured and nothing emitting into it; passing the adapter to
+    /// one field and not the other would leave one of the two measured paths
+    /// dark while the dashboard for the other looked healthy. Neither is a
+    /// compile error — both `ServiceDeps` fields are `Option`, so omitting one
+    /// is legal, and every test in this crate would still pass.
+    ///
+    /// **Nothing here needs a "metrics off" branch**, which is why the absence
+    /// of one is assertable at all: `infra::metrics::build_default_adapter`
+    /// reads the process-global meter provider, which `toolkit`'s
+    /// `telemetry::init_metrics_provider` leaves as the built-in
+    /// `NoopMeterProvider` when metrics are disabled — and never replaces at
+    /// all when no pipeline is configured. That the resulting adapter is safe
+    /// to build and emit through is
+    /// `infra::metrics::tests::the_default_adapter_emits_silently_with_no_pipeline_configured`.
+    ///
+    /// The no-branch half reads **code only**, with comments stripped first:
+    /// `init` legitimately explains in prose why it does not consult that
+    /// config key, and a scan of the raw text would flag its own justification
+    /// the moment somebody wrote one. `no_api_in_domain_tests` documents the
+    /// same trap and strips comments for the same reason.
+    ///
+    /// Every assertion message below is one unbroken literal: a
+    /// `\\`-continued string collapses to a run of spaces once rustfmt has
+    /// re-indented it, which is how such a message reads on failure.
+    #[test]
+    fn init_installs_one_metrics_adapter_into_both_ports() {
+        let body = init_source();
+        assert_eq!(
+            body.matches("build_default_adapter()").count(),
+            1,
+            "init must build the adapter once and share the Arc: {body}"
+        );
+        assert!(
+            body.contains("collect_metrics: Some("),
+            "premise: the collect port must be wired, or nothing measures the collect cycle or its signed callback in production while every test still passes: {body}"
+        );
+        assert!(
+            body.contains("jira_poll_metrics: Some("),
+            "premise: the poller port must be wired, or the per-bug failures this gear swallows stay invisible in production: {body}"
+        );
+        let code: String = body
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("metrics.enabled"),
+            "init must not branch on whether a pipeline is configured: an uninstalled provider already makes every instrument a no-op, and a branch here would be a second, weaker copy of that rule: {code}"
         );
     }
 }

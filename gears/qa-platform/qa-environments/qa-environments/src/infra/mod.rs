@@ -1,3 +1,11 @@
+/// The `OpenTelemetry`-backed adapter for `domain::ports::metrics` — one
+/// instrument per family in `domain::metrics`, built at gear init and handed
+/// to `EnvironmentsService` as an `Arc<dyn ObservationMetrics>`.
+///
+/// Not feature-gated: it pulls no Kubernetes client in, and a gear that
+/// configures no telemetry pipeline still builds it and still emits, into the
+/// process-global no-op provider. See the module's own header.
+pub mod metrics;
 pub mod product_plugin;
 pub mod storage;
 

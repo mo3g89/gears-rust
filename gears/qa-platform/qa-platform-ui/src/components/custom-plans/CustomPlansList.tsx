@@ -79,6 +79,10 @@ export function CustomPlansList({
       created: collect(plans.map((plan) => plan.created_at)),
       createdat: collect(plans.map((plan) => plan.created_at)),
     } as Record<string, string[]>;
+    // `effectiveTests` is a plain function of `effectiveTestsByPlanId` (already listed
+    // below) recreated every render; adding it here would defeat this memo instead of
+    // fixing anything.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plans, effectiveTestsByPlanId]);
 
   const compiled = useMemo(
@@ -115,6 +119,10 @@ export function CustomPlansList({
           ...effectiveTests(plan).flatMap((test) => [test.plan_id, test.test_file]),
         ].join(' ')
       ),
+    // `effectiveTests` is a plain function of `effectiveTestsByPlanId` (already listed
+    // below) recreated every render; adding it here would defeat this memo instead of
+    // fixing anything.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [query, effectiveTestsByPlanId]
   );
 

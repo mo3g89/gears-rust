@@ -56,7 +56,7 @@ The deepest architectural change from the source system is the execution plane: 
 |--------|-------------|--------------|-----------------|----------------------|
 | `cpt-cf-qa-nfr-run-duration` | 8 h runs surviving restarts | qa-runs domain + infra | DB-first run state; executor re-attach on startup (`watch(execution_id)` resumes); log archiving decoupled from control-plane process | Restart-during-run integration tests; soak test |
 | `cpt-cf-qa-nfr-result-latency` | Result visible ≤ 5 s p95 | qa-runs ingestion path | Event-driven ingestion (no polling); single-row upsert per event | Latency assertion in e2e harness |
-| `cpt-cf-qa-nfr-dispatch-latency` | Queued start ≤ 10 s p95 | qa-runs dispatcher | **Interval sweep at 5 s** (user decision 2026-08-14), giving p95 ≈ 4.75 s. The release-notification wake this row originally prescribed is **not built** — see DECOMPOSITION 2.3's tracked follow-ups | Queue-drain integration test with timing |
+| `cpt-cf-qa-nfr-dispatch-latency` | Queued start ≤ 10 s p95 | qa-runs dispatcher | **Interval sweep at 5 s** (user decision 2026-08-14), giving p95 ≈ 4.75 s. The release-notification wake this row originally prescribed is **not built** — see DECOMPOSITION 2.3's tracked follow-ups | **Observed by a proxy, not by this NFR's own quantity.** `qa_runs_queue_wait_duration_seconds` measures **queue residency** — the queue row's `enqueued_at` to the instant the drain recorded the execution as started. It **over-states** the requirement's window for a run enqueued while its platform was occupied (there an alert cannot miss a violation) and **under-states** it for a run enqueued while its platform was already free, which `decide_admission` makes ordinary (there an alert **can** miss one). Closing the gap needs a lease-release instant from qa-environments; §3.9 states both directions in full. No queue-drain timing test exists |
 | `cpt-cf-qa-nfr-log-latency` | Log line ≤ 2 s p95 | qa-runs + SseBroadcaster | Executor log stream bridged to `SseBroadcaster` without buffering thresholds | e2e streaming test |
 | `cpt-cf-qa-nfr-scale` | 100 environments / 50 concurrent runs / 5 M result rows | qa-runs + qa-insights (see note on qa-catalog below) | Indexed queue table (the **result** table is indexed on `(tenant_id, run_id)` only, while `upsert_test_result` deletes on the four-column tuple — corrected 2026-08-17, and see DECOMPOSITION 2.3 for the two unbounded queries no pagination reaches); OData filtering/paging on the qa-runs and qa-insights collections, where row counts grow without bound; insights schema separated from hot run path | Seeded load test |
 | `cpt-cf-qa-nfr-scheduler-exactly-once` | Exactly-once schedule firing | qa-runs scheduler | cluster-sdk leader election; due-tick claim recorded transactionally with launch creation | Multi-instance failover test |
@@ -1035,12 +1035,37 @@ reliable one (guide lines 179-184).
 Three admission limits also belong here and were absent from every spec
 document. All three are operator settings with `0` meaning "disabled":
 `max_concurrent_runs` (cluster-wide; 429 at admission, never a queued row —
-`run_queue.rs:34-54, 879-891`), `queue_ttl_seconds` (per queued row; default
+`run_queue.rs:34-54, 879-891`; **default changed, see the correction below**),
+`queue_ttl_seconds` (per queued row; default
 7200 — `models.rs:767-769`, arithmetic in `run_queue.rs:736-759`), and
 `queue_max_depth` (**per tenant scope, per platform** — see the correction below; default 20 — `models.rs:774-776`; the 429
 and its operator message at `run_dispatcher.rs:161-172`, the predicate at
 `run_queue.rs:830-832`). They are what make `cpt-cf-qa-fr-runs-launch`'s
 "rejected with the limit that was hit" a closed set of exactly two causes.
+
+**Correction, 2026-09-06 (qa-runs Task 16, review findings #18/#19).**
+`max_concurrent_runs`'s shipped default changed from `0` (no cap, the port's
+legacy value) to **50**, derived from `cpt-cf-qa-nfr-scale`'s own requirement
+that this subsystem handle 50 concurrently executing runs — the qa-runs port
+was, until this task, the one deployment that could exceed its own scale
+target with no operator having changed anything. `0` remains available as an
+explicit "unbounded" opt-out (`qa-runs/src/config.rs`,
+`QaRunsConfig::max_concurrent_runs`).
+
+The consequence is larger than the 429 alone: enabling the cap by default puts
+a cross-plane `executor.list_active()` call on the front of **every** launch,
+where a disabled cap short-circuits before that call is made
+(`admission::GlobalCapGate::reserve`), and that call's failure direction is the
+strict one this section's own `AdmissionService::enforce_global_cap` note
+already states — an unreadable executor now fails the launch, where the depth
+limit fails open. Concretely: a launch that would previously have succeeded
+during an Argo outage can now return 500 instead. The cap also **refuses
+rather than queues** a burst past the limit, so it does not restore the queue
+as a buffer the way `queue_max_depth` does. All three are the ruled trade-off
+for closing review finding #19 (an unbounded process-local resource — see
+`qa-runs`'s `domain::service::watch::SpawningRunWatcher` header), not a
+defect, but they are new operational surface an upgrading deployment will
+notice.
 
 **Correction, 2026-08-14 (qa-runs Task 14 security review).** `queue_max_depth` is
 enforced **per (tenant scope, platform)**, not per platform, because `queued_depth`
@@ -1127,6 +1152,128 @@ All five gears are libraries composed into host binaries (per `apps/cf-gears-exa
 **Packaging deliverables** (`cpt-cf-qa-fr-deploy-packaging`): reference host-app composition, Dockerfile(s) (source-build and prebuilt-binary variants), and the Helm chart live under `gears/qa-platform/deploy/`, following `gears/mini-chat/deploy/` as the structural precedent. The chart deliberately excludes what the legacy `charts/vhp-testrunner` had to carry: no Argo subchart, no UI deployment (embedded in the binary), no runner image wiring (runner is a serverless workload package owned by the execution feature).
 
 **Execution-plane packaging**: the migrated runner ships as a versioned Python workflow package registered with serverless-runtime (format per serverless-sdk), not as a standalone image referenced by the chart. Its distribution mechanics are defined by the serverless-runtime spec and consumed here; see `cpt-cf-qa-adr-serverless-execution`.
+
+### 3.9 Metric Catalog
+
+- [ ] `p2` - **ID**: `cpt-cf-qa-metrics`
+
+Twenty-two series, enumerated below **from the constants declared in each gear's
+`domain::metrics`** — not from a plan. An operator writing a dashboard query
+reads this table and nothing else.
+
+**The names below are the literal, full series names.** Each gear's constant
+carries its own `_total` / `_seconds` suffix and no instrument sets
+`.with_unit()`, so the OTel→Prometheus translation adds nothing: the constant is
+what a query names, whether or not the collector has `add_metric_suffixes` on.
+Each gear's `every_catalog_family_is_exported_under_its_catalog_name` is what
+ties constant to exported name, and the naming rules themselves (a counter ends
+`_total`, a duration carries the unit word, everything is namespaced to its
+gear) are asserted over the declared `COUNTERS` / `DURATIONS` lists in
+`domain::metrics::tests`.
+
+**Where that is measured and where it is argued**, because a series exported
+under a name nobody queries is indistinguishable, from inside the process, from
+a series that works — so it matters which link is which:
+
+1. **Constant → exported name. Measured, in-process.** Each gear's
+   `every_catalog_family_is_exported_under_its_catalog_name` builds a real
+   `SdkMeterProvider` over an in-memory exporter, emits once into every family,
+   collects, and asserts the exported name set contains every entry of
+   `COUNTERS` and `DURATIONS` under exactly one instrumentation scope. A real
+   round trip through the SDK's export path, not a string comparison.
+2. **Constant → the deployed artifact. Measured, on the stand.**
+   `deploy/remote/verify-k8s.sh`'s metric-catalog step reads the names out of
+   the running binary and set-compares them against this table — a diff naming
+   both sides, not a count, because a count passes when one name is misspelt and
+   another duplicated.
+3. **Exported name → the Prometheus series a query names. Argued, not
+   measured.** No deployment available to this work runs an OTLP collector, so
+   the OTel→Prometheus translation is exercised nowhere here. The argument that
+   it is a no-op is the paragraph above — the suffix is already in the constant
+   and no instrument sets `.with_unit()`. It is sound, and it is an argument.
+   Closing it needs a collector.
+
+**They are pushed, not scraped.** `libs/toolkit`'s `init_metrics_provider`
+builds an OTLP exporter behind a periodic reader; nothing in this repository
+serves a `/metrics` route and no chart carries a scrape annotation. Delivery is
+therefore configured, not exposed — `opentelemetry.metrics` in
+`config/qa-platform-stack.yaml`, off by default, with the chart rewriting the
+flag and the collector address from `.Values.opentelemetry.metrics`
+(`deploy/helm/tests/test_metrics_config.py` holds all of it). With it off the
+global meter provider stays the built-in no-op: every instrument is a no-op,
+every emission is silent, and the gears behave identically.
+
+Each gear reports under its own instrumentation scope (`qa-runs`,
+`qa-insights`, `qa-environments`, `qa-catalog`), and every data point carries
+`service.name = qa-platform` from the config's `opentelemetry.resource` block.
+
+| Series | Type | Labels | What it supports |
+|--------|------|--------|------------------|
+| `qa_runs_dispatch_total` | counter | `outcome` = completed / refused / failed | The dispatcher's cycle rate and how each cycle ended. One increment is one **tick**, not one submission — `dispatch_one` runs inside the drain and is not counted. `refused` has **three** producers and an alert must not read it as "we are at the cap": the concurrency cap doing its job, a **policy denial** the decision point raised on one of the tick's own passes, and an executor `list_active` failure whose error is disclosable. All three are `refused` because `DomainError::disclosable` is the split, and it answers *whose fault*, not *which rule*. `failed` is this gear's own fault, by the same split |
+| `qa_runs_dispatch_duration_seconds` | histogram | `outcome`, as above | How long one dispatcher cycle takes — the dispatcher's own RED duration. **Not `cpt-cf-qa-nfr-dispatch-latency`**: no measurement of a cycle's wall-clock duration can contain the interval between cycles, which is what that NFR is dominated by. Read beside the queue residency below: rising residency with a flat cycle duration is a queue backing up; rising cycle duration is the dispatcher itself slowing down |
+| `qa_runs_queue_wait_total` | counter | none | Queued runs leaving the queue **successfully**. Departures, not arrivals, and four populations are absent from it: a claimed row whose dispatch failed, a queued row the TTL sweep expired, a drained row whose queue row carries no `enqueued_at`, and a drained row whose stored instant is ahead of the drain's clock — `record_queue_wait` returns early on the last two rather than record a span it cannot compute. So it is not one per drained row, and it equals the enqueue rate only in steady state. The joinable arrival denominator is `qa_runs_dispatch_decision_total{decision="queued"}`, which counts admissions into the FIFO |
+| `qa_runs_queue_wait_duration_seconds` | histogram | none | **Queue residency** — the queue row's `enqueued_at` to the instant the drain recorded the execution as started. The nearest proxy the stored timestamps support for `cpt-cf-qa-nfr-dispatch-latency`, and **not that NFR**; see the two-sided caveat below the table before alerting on it. For departures against arrivals, read it beside `qa_runs_dispatch_decision_total{decision="queued"}` — the counter above is the departure side of that same pair |
+| `qa_runs_dispatch_decision_total` | counter | `decision` = inline / queued / unqueued | What admission decided for a launch, before any cycle ran. The signal read *before* queue depth: a queue growing because every launch is being queued is a different incident from a queue growing because dispatch is slow, and only this family tells them apart. Refusals are not counted — a 429 is not a decision |
+| `qa_runs_ingest_total` | counter | `outcome` = applied / completed / duplicate / refused / failed | Ingest pass rate. `duplicate` is its own value on purpose: executors retry, and a rising duplicate rate is the signal that one is stuck. The inert `Started` event is excluded, so this counts observations that did work |
+| `qa_runs_ingest_duration_seconds` | histogram | `outcome`, as above | The **gear-side half** of `cpt-cf-qa-nfr-result-latency`. The requirement is stated over runner emission → API visibility; this span opens when the event reaches `IngestService::apply` and closes when that pass returns, so it excludes the runner-to-gear transport and the read side. It is the half this gear can act on |
+| `qa_insights_collect_total` | counter | `outcome` = completed / refused / failed | Collect-cycle rate. Per-repository launch failures inside the cycle are logged and skipped, deliberately **not** folded in — a cycle whose launches were all refused is still `completed`, and that gap is disclosed at the loop in `collect_every_repository` |
+| `qa_insights_collect_duration_seconds` | histogram | `outcome`, as above | How long a collect cycle takes. Network-bound and serial — one qa-runs launch per repository — which is why this gear's buckets run to minutes rather than to qa-runs' one minute |
+| `qa_insights_collect_report_total` | counter | `outcome` = recorded / secret_unconfigured / signature_malformed / signature_invalid / invalid / failed | Per-request, on the anonymous collect-report route. The four refusal values are the distinction `verify_signature` deliberately destroys in its response (it folds all three HMAC refusals into one `Forbidden` so the reply is not an oracle) and that an operator needs: an unconfigured secret is a deployment mistake and must not read as an attack. `recorded` is the denominator every rate is read against |
+| `qa_insights_jira_poll_total` | counter | `outcome` = completed / skipped / refused / failed | JIRA poll-pass rate. `skipped` is a tenant with JIRA switched off, kept apart from `completed` so a deployment where every tenant has it off does not look identical to one where every pass is working |
+| `qa_insights_jira_poll_duration_seconds` | histogram | `outcome`, as above | How long a poll pass takes — one JIRA call per open bug, serially |
+| `qa_insights_jira_bug_total` | counter | `outcome` = resolved / unresolved / status_check_failed / resolve_write_failed / plan_version_unreadable / branch_unresolved / test_file_unresolved / launch_failed | Exactly one increment per bug per pass, so a sum over this family is the denominator every per-class rate uses. The six failure values are the per-bug failures the poller **swallows into a log line**, which is the blind spot this family exists to close. `resolve_write_failed` is a rerun-storm generator: the bug stays open locally while JIRA keeps reporting it done, so the next pass resolves and reruns it again |
+| `qa_insights_jira_rerun_total` | counter | none | Auto-rerun **attempts**, incremented before the launch call. Attempts rather than successes because a storm's cost is the calls; how each went is `launch_failed` on the family above |
+| `qa_environments_observation_cycle_total` | counter | `outcome` = completed / cancelled / unstarted | Observation-cycle rate. `unstarted` is the value worth having: a failed connection or a failed listing produces an all-zero report indistinguishable from a deployment with no registered environments, and nothing outside the log told them apart before |
+| `qa_environments_observation_cycle_duration_seconds` | histogram | `outcome`, as above | How long a whole cycle takes. Its boundaries are anchored on `ObservationConfig`'s own numbers — the 60 s poll-interval floor and the 300 s default — because a cycle crossing its own interval silently delays every later tick |
+| `qa_environments_observation_total` | counter | `outcome` = observed / failed | Environments per cycle, incremented by the report's own counts so the ticker's log line and the series cannot disagree. Both values are emitted every cycle **including at zero**, so a `failed` rate is zero rather than no-data before the first failure |
+| `qa_environments_observation_duration_seconds` | histogram | `class` = detected / unreachable / auth_rejected / not_found / malformed / timeout / internal / refused / failed | Per environment, over the whole of the classified observation: the policy check, the connection, the row read, the plugin resolution, the credential read, the plugin round trip, the write and the re-read. A different label key from the counter above **on purpose** — nine classes nest inside two outcomes, and different keys stop a dashboard summing two partitions of the same events. `refused` almost always means the deployment's PDP has no policy for this gear's system actor. Its `_count` per class is the per-class rate, which is why there is no separate counter |
+| `qa_environments_plugin_call_total` | counter | `class` = detected / unreachable / auth_rejected / not_found / malformed / timeout / internal | The product plugin's own round trip, isolated from everything around it. Seven values, not the nine above: `refused` and `failed` are ends the observation reaches **with no plugin call in it at all**, so on this family they would be series that can never move. **`internal` is a third such end and it is not excluded**, because the word means two things: `observe_through_plugin` returns `not_observed` before the round trip on an unresolvable plugin (any of the port's three causes — no product, no resolvable plugin, no resolver registered) and on an unreadable credential, and every one of those classifies as `internal` on the observation family while emitting nothing here. So this family's `internal` is *what a plugin said*; the observation family's `internal` is that plus every pre-call exit |
+| `qa_environments_plugin_call_duration_seconds` | histogram | `class`, as above | The plugin round trip alone. Subtracting it from the per-environment observation above gives this gear's own overhead **for the six classes that always contain a plugin call** — not for `class="internal"`, where the observation family also carries every observation that ended at a pre-call exit, so the difference is the overhead *plus the whole duration of each of those*. The two families are nested, never parallel: adding them double-counts |
+| `qa_catalog_plugin_resolution_total` | counter | `outcome` = resolved / unregistered / refused / failed | `unregistered` is what this family was built for: the product row is fine and the binary does not carry the gear that registers its plugin. Its only other report is one `warn!` per attempt, so a deployment in that state observes nothing through that product and looks healthy from every other angle. Split from `refused` because the two are fixed by different people — one by shipping a gear, the other by authoring policy |
+| `qa_catalog_plugin_resolution_duration_seconds` | histogram | `outcome`, as above | The resolution path: the policy check, the connection, the product read and the `ClientHub` probe |
+
+**Neither the plugin families nor the environment ones carry a plugin identity**, and the reason is **argued in the sense defined above, not measured** — no test asserts it: every product plugin in this platform composes its instance id from the *same* `QaProductPluginSpecV1` type id (`qa-product-sdk/src/gts.rs` declares exactly that one spec type), so a `type` label would be a dimension with one value, and the part that distinguishes two plugins is the instance tail — an operator-supplied `VARCHAR(512)` read out of a database column, which is bounded by nothing. The support is code reading, so it is only as current as the last reader: revisit when a second product-plugin spec type exists.
+
+**Bucket boundaries differ per gear and are part of each family's definition.** A p95 read off a histogram whose samples all land in one interval is that interval's edge, not an estimate. qa-runs uses `0.005 … 60`, qa-catalog `0.001 … 10`, and qa-insights and qa-environments both `0.01 … 300` because their measured paths are network-bound and serial. Two of qa-runs' three families can legitimately exceed 60 s — a residency behind a long predecessor, and a cycle whose drain is building bundles — and land in the overflow bucket where a quantile is again an edge.
+
+#### Reading the queue-residency series against the dispatch-latency NFR
+
+`cpt-cf-qa-nfr-dispatch-latency` is stated over *platform release → execution
+request*. `qa_runs_queue_wait_duration_seconds` shares neither endpoint, and the
+direction of the error depends on the state the platform was in when the run was
+enqueued:
+
+- **Enqueued while the platform was occupied** — the common case. The residency
+  contains the whole NFR window *plus* the predecessor's remaining runtime, so
+  the series **over-states** the requirement's quantity and an alert on it
+  cannot miss a violation. On a busy platform the bound is loose enough to be
+  dominated by the predecessor rather than by anything the dispatcher controls.
+- **Enqueued while the platform was already free** — ordinary, not exotic.
+  `decide_admission` queues any launch once `queued_depth > 0`, before occupancy
+  is consulted at all, because the FIFO is strict and a later arrival must not
+  overtake. The residency then starts *after* the release the NFR measures from,
+  so the series **under-states** the requirement's quantity and an alert on it
+  **can** miss a violation. Three ways it happens: a tick stopped at the
+  concurrency cap, a tick whose executor listing failed, and simply the gap
+  between sweeps.
+
+Nothing in qa-runs can do better today. The lease lives in qa-environments and
+this gear reads only free-or-held, never *since when*; closing the gap needs a
+release instant from that gear — a cross-gear change the observability phase
+put out of scope. The series is
+a narrowing of the gap, not a closure of it — see the NFR row in §1.2 and
+DECOMPOSITION 2.3.
+
+#### What no series measures
+
+Stated so a reader does not go looking. `cpt-cf-qa-nfr-log-latency`,
+`cpt-cf-qa-nfr-run-duration` and `cpt-cf-qa-nfr-scheduler-exactly-once` have no
+family here; `cpt-cf-qa-nfr-scale` is a capacity envelope whose only latency
+clause is scoped to collection endpoints, and none of these series is one. Two
+swallowed-failure paths are disclosed in code rather than measured:
+qa-insights' per-repository collect launch and qa-environments'
+`self_heal_kubeconfig_secret`, each with the shape of its fix written at the
+site.
 
 ## 4. Additional Context
 

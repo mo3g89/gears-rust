@@ -89,7 +89,8 @@ use std::sync::Arc;
 use authz_resolver_sdk::PolicyEnforcer;
 use qa_environments_sdk::{AcquireOutcome, LeaseMode, QaEnvironmentsClientV1};
 use qa_runs_sdk::{
-    LaunchOutcome, LaunchRequest, QueueEntry, QueueState, Run, RunResult, RunSource, RunState,
+    Exclusivity, LaunchOutcome, LaunchRequest, QueueEntry, QueueState, Run, RunResult, RunSource,
+    RunState,
 };
 use time::OffsetDateTime;
 use toolkit_odata::{ODataQuery, Page};
@@ -1080,9 +1081,19 @@ fn replay(run: &Run) -> Result<LaunchRequest, DomainError> {
         include_tags: run.include_tags.clone(),
         exclude_tags: run.exclude_tags.clone(),
         parameters: run.parameters.clone(),
-        // Upward only. See this module's header; `Some(run.resolved_exclusive)`
-        // is the transcription that type-checks and is wrong.
-        exclusive: run.resolved_exclusive.then_some(true),
+        // Upward only. See this module's header; `Exclusivity::from_option_bool
+        // (Some(run.resolved_exclusive))` -- the direct transcription of the
+        // old `Some(run.resolved_exclusive)` -- is the version that type-checks
+        // and is wrong: it would pin `Shared` on the launch tier for a run
+        // that ran parallel, suppressing a `TEST_META`/`plan.yaml` declaration
+        // added since. `Exclusive` when the original ran exclusive, `Inherit`
+        // (not `Shared`) otherwise, so a since-marked-destructive test is
+        // still re-resolved rather than replayed parallel.
+        exclusive: if run.resolved_exclusive {
+            Exclusivity::Exclusive
+        } else {
+            Exclusivity::Inherit
+        },
         // Re-resolved by `domain::timeout`'s three chains inside the launch, not
         // replayed from the old row's absolute `timeout_at`.
         timeout_seconds: None,

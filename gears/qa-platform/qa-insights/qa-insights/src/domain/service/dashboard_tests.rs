@@ -50,7 +50,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_insights_sdk::{
     DashboardRun, DashboardStats, PlatformsSummary, QualityVectorPassRate, RunTestTrendPoint,
     TestResultRecord,
@@ -994,7 +994,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn with_authz(authz: Arc<dyn AuthZResolverClient>) -> Self {
+    async fn with_authz(authz: Arc<dyn AuthZResolverApi>) -> Self {
         let db = inmem_db().await;
         let provider = Arc::new(DBProvider::<DomainError>::new(db.clone()));
         let runs = Arc::new(FakeRuns::default());

@@ -1,7 +1,7 @@
 //! Local adapter: `QaRunsClientV1` over `AppServices`.
 //!
 //! `DomainError` becomes `QaRunsError` (which *is* `CanonicalError`) through
-//! the `From` impl in `api::rest::error`, so an in-process caller and an HTTP
+//! the `From` impl in `domain::error`, so an in-process caller and an HTTP
 //! caller get the same status and the same redaction - the disclosure rule is
 //! applied once, at one seam, rather than twice.
 //!
@@ -33,8 +33,8 @@ use toolkit_odata::ODataQuery;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use crate::api::rest::error::{as_queue_error, as_schedule_error};
-use crate::infra::ConcreteAppServices;
+use crate::domain::error_attribution::{as_queue_error, as_schedule_error};
+use crate::gear::ConcreteAppServices;
 
 /// Local implementation of the object-safe `QaRunsClientV1`.
 pub struct QaRunsLocalClient {
@@ -347,7 +347,7 @@ mod tests {
 
     fn wire(error: &qa_runs_sdk::QaRunsError) -> (u16, String) {
         let problem = Problem::from_error(error).expect("a problem must serialize");
-        let status = problem.status;
+        let status = problem.status.expect("a problem always carries a status");
         (
             status,
             serde_json::to_string(&problem).expect("a problem must serialize"),

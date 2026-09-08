@@ -112,6 +112,11 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::Postgres => PG_UP,
             sea_orm::DatabaseBackend::MySql => MYSQL_UP,
             sea_orm::DatabaseBackend::Sqlite => SQLITE_UP,
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         };
 
         conn.execute_unprepared(sql).await?;
@@ -267,7 +272,7 @@ mod tests {
     /// Name, declared type and `NOT NULL` of each column, in declaration order.
     async fn column_specs(conn: &DatabaseConnection, table: &str) -> Vec<(String, String, bool)> {
         use sea_orm::Statement;
-        conn.query_all(Statement::from_string(
+        conn.query_all_raw(Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             format!("SELECT name, type, \"notnull\" FROM pragma_table_info('{table}')"),
         ))

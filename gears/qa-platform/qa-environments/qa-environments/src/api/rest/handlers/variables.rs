@@ -5,24 +5,40 @@ use axum::extract::{Path, Query};
 use uuid::Uuid;
 
 use toolkit::api::canonical_prelude::*;
+use toolkit::api::odata::OData;
 use toolkit_security::SecurityContext;
 
 use crate::api::rest::dto::{ListVariablesQuery, UpsertVariableReq, VariableDto};
 use crate::gear::ConcreteAppServices;
 
-/// List global pipeline variables, plus an environment's variables when
-/// `environment_id` is given.
-#[tracing::instrument(skip(svc, ctx))]
+/// `GET /qa/v1/variables`
+///
+/// One page of the global pipeline variables, plus an environment's variables
+/// when `environment_id` is given.
+///
+/// Two extractors, and they are not redundant. `environment_id` stays a plain
+/// query parameter because it carries an **authorization precheck** — the
+/// service resolves a PLATFORM/`GET` scope for it and answers 404 for an
+/// environment the caller cannot see — which an `OData` `$filter` on the same
+/// concept would skip. `OData` covers the general case (`$filter`, `$orderby`,
+/// `$top`, cursor). See `VariableFilterField`'s doc for the full argument, and
+/// `VariablesService::list_for_env` for why the `environment_id` case is
+/// bounded rather than cursored.
+///
+/// As on `list_environments`, the service resolves the caller's `AccessScope`
+/// before the filter is applied, so a `$filter` cannot widen the result.
+#[tracing::instrument(skip(svc, ctx, odata))]
 pub async fn list_variables(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteAppServices>>,
     Query(query): Query<ListVariablesQuery>,
-) -> ApiResult<Json<Vec<VariableDto>>> {
-    let vars = svc
+    OData(odata): OData,
+) -> ApiResult<JsonPage<VariableDto>> {
+    let page = svc
         .variables
-        .list_for_env(&ctx, query.environment_id)
+        .list_for_env(&ctx, query.environment_id, &odata)
         .await?;
-    Ok(Json(vars.into_iter().map(VariableDto::from).collect()))
+    Ok(Json(page.map_items(VariableDto::from)))
 }
 
 /// Insert or update a variable by natural key (`environment_id` + `name`, or

@@ -114,6 +114,8 @@
 //!   remain is reported `Succeeded`.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use authz_resolver_sdk::PolicyEnforcer;
 use qa_environments_sdk::QaEnvironmentsClientV1;
@@ -124,17 +126,27 @@ use toolkit_security::{AccessScope, SecurityContext};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use super::{LogArchive, LogFanout, SerializedDb, actions, resources};
+use super::{LogArchive, LogFanout, SerializedDb, actions, emit, resources};
 use crate::domain::error::DomainError;
+use crate::domain::ports::metrics::{IngestMetrics, IngestOutcome};
 use crate::domain::ports::run_executor::{
     ExecutionEvent, ExecutionStream, NodeOutcome, TestObservation,
 };
+// `ASSUMED_ARCHIVE_PREFIX_BYTES` came from `api::rest::sse` until Task 21 --
+// the layering complaint whole-branch review I2 recorded and deferred. It is
+// write-side policy, so it moved to `domain::repos::log_line` beside the
+// read-side cap it is derived from and beside `flatten_log_char`, the other
+// rule the archived text obeys. Imported rather than copied, for the same
+// reason as before: a second `256` here is the drift this crate keeps
+// re-discovering.
 use crate::domain::repos::{
-    NewTestResult, QueueRepository, RunResultDelta, RunStatePatch, RunsRepository, TestResultRow,
+    ASSUMED_ARCHIVE_PREFIX_BYTES, LogResume, NewTestResult, QueueRepository, RunResultDelta,
+    RunStatePatch, RunsRepository, TestResultRow, flatten_log_char,
 };
 use crate::domain::state_machine::{
     ExecutorOutcome, can_transition, derive_terminal_state, is_terminal, reconcile_recorded_state,
 };
+use crate::domain::system_actor;
 
 /// Trim a runner-supplied per-test status, and **do not change its case**.
 ///
@@ -608,6 +620,10 @@ pub struct IngestDeps<R, Q> {
     /// never reaches, such as a cancelled run's tail — see `finish`'s own doc.
     pub archive: Arc<dyn LogArchive>,
     pub policy_enforcer: PolicyEnforcer,
+    /// Where [`IngestService::apply`] reports how one observation landed and
+    /// how long it took. `NoopMetrics` when no adapter is installed — see
+    /// [`super::ServiceDeps::ingest_metrics`].
+    pub metrics: Arc<dyn IngestMetrics>,
 }
 
 /// Consumes one run's execution events.
@@ -622,6 +638,11 @@ pub struct IngestService<R, Q> {
     /// See [`IngestDeps::archive`].
     archive: Arc<dyn LogArchive>,
     policy_enforcer: PolicyEnforcer,
+    /// See [`IngestDeps::metrics`].
+    metrics: Arc<dyn IngestMetrics>,
+    /// This service's emission latch — see `super::emit`. Per service rather
+    /// than global, so a broken ingest adapter cannot silence the dispatcher.
+    metrics_silenced: AtomicBool,
 }
 
 impl<R, Q> IngestService<R, Q>
@@ -638,6 +659,8 @@ where
             logs: deps.logs,
             archive: deps.archive,
             policy_enforcer: deps.policy_enforcer,
+            metrics: deps.metrics,
+            metrics_silenced: AtomicBool::new(false),
         }
     }
 
@@ -680,6 +703,52 @@ where
             .get(&conn, &scope, run_id)
             .await?
             .ok_or(DomainError::RunNotFound { id: run_id })
+    }
+
+    /// Where `run_id`'s archive currently ends, per node — Task 13, review
+    /// finding #50.
+    ///
+    /// **Flushes before it reads, and that is not incidental.** `record`
+    /// buffers a line in memory; only a periodic `flush_due` tick or
+    /// `Self::finish` writes it to the row this reads. Without the flush
+    /// here, a re-attach whose previous observer queued lines but never got
+    /// to flush them — the ordinary case, since `gear.rs` runs `flush_due`
+    /// *after* the dispatcher tick that calls this — would read a position
+    /// that undercounts by up to a full tick's worth of this run's own
+    /// output, and the resuming executor would re-fetch and re-archive
+    /// exactly that tail. Flushing first closes the window (fix-round 1;
+    /// found by review, not covered by the original commit's test, which
+    /// force-flushed in its own polling loop and so could not see it).
+    ///
+    /// A flush failure here is not fatal to the read: `flush_due` and
+    /// `Self::finish` still own eventually writing this run's buffer, so a
+    /// transient failure here only means the position read is stale by
+    /// whatever is still pending — which re-duplicates that pending tail on
+    /// this resume, the direction this crate has always tolerated, not one
+    /// this method introduces.
+    ///
+    /// The rest is a thin delegation to `self.archive`, which is private to
+    /// this struct (`IngestDeps::archive`'s own doc: `get_log` must not sit
+    /// next to `list`, and the same reach argument applies to `archive`
+    /// itself — nothing outside this module should be able to call
+    /// `record`/`flush` directly). `domain::service::watch`'s `drain` is the
+    /// one caller: it reads this before calling
+    /// [`RunExecutor::watch`](crate::domain::ports::run_executor::RunExecutor::watch)
+    /// so the executor can resume rather than replay.
+    pub(in crate::domain::service) async fn resume_positions(
+        &self,
+        tenant: system_actor::TenantBound,
+        run_id: Uuid,
+    ) -> Result<LogResume, DomainError> {
+        if let Err(error) = self.archive.flush(run_id).await {
+            warn!(
+                %run_id,
+                %error,
+                "could not flush this run's log before reading its resume position; the \
+                 position may undercount a still-pending tail, which will be re-archived",
+            );
+        }
+        self.archive.resume_positions(tenant, run_id).await
     }
 }
 
@@ -750,13 +819,65 @@ where
         run_id: Uuid,
         event: ExecutionEvent,
     ) -> Result<(), DomainError> {
+        // `Started` is inert by design — the arm below returns `Ok` without
+        // reading or writing anything (see the module header). Counting it
+        // would put a no-op in the `applied` series and a near-zero sample in
+        // the histogram whose p95 is the point, so the measured population is
+        // the three events that do work. Decided before the move, because the
+        // event is consumed by the call.
+        let measured = !matches!(event, ExecutionEvent::Started);
+        let started = Instant::now();
+        let landed = self.apply_event(ctx, run_id, event).await;
+        // One observation is one measured pass: the event in hand here, the
+        // run row updated. That is the GEAR-SIDE HALF of
+        // `cpt-cf-qa-nfr-result-latency` and not the NFR's own span — the
+        // requirement is stated over runner emission -> API visibility, so this
+        // excludes the runner-to-gear transport ahead of it and the read side
+        // after it. `crate::domain::metrics::QA_RUNS_INGEST_DURATION`'s doc
+        // states the gap in full. `Self::ingest`'s loop is a driver over this,
+        // not a second unit — timing the loop would time the run.
+        //
+        // Guarded rather than called directly; see `super::emit`. It matters
+        // more here than on the dispatcher, because this path runs per log line.
+        if measured {
+            let outcome = match &landed {
+                Ok(outcome) => *outcome,
+                Err(error) => IngestOutcome::from(error),
+            };
+            emit(&self.metrics_silenced, || {
+                self.metrics.ingest_batch(outcome, started.elapsed());
+            });
+        }
+        landed.map(|_| ())
+    }
+
+    /// [`Self::apply`] without the measurement, returning **how** the
+    /// observation landed.
+    ///
+    /// The return value exists only for the label: `applied`, `completed` and
+    /// `duplicate` are three operationally different events that a caller does
+    /// not distinguish — [`Self::apply`] discards it — but that an operator
+    /// reading a rising duplicate rate very much does. See
+    /// [`IngestOutcome`]'s own doc.
+    async fn apply_event(
+        &self,
+        ctx: &SecurityContext,
+        run_id: Uuid,
+        event: ExecutionEvent,
+    ) -> Result<IngestOutcome, DomainError> {
         match event {
-            // Deliberately inert — see the module header.
-            ExecutionEvent::Started => Ok(()),
-            ExecutionEvent::Log { node, line } => self.fan_out_log(ctx, run_id, &node, &line).await,
-            ExecutionEvent::TestResult(observation) => {
-                self.ingest_result(ctx, run_id, observation).await
-            }
+            // Deliberately inert — see the module header. The value is never
+            // emitted: [`Self::apply`] excludes this arm from the measured
+            // population, and its comment says why.
+            ExecutionEvent::Started => Ok(IngestOutcome::Applied),
+            ExecutionEvent::Log { node, line } => self
+                .fan_out_log(ctx, run_id, &node, &line)
+                .await
+                .map(|()| IngestOutcome::Applied),
+            ExecutionEvent::TestResult(observation) => self
+                .ingest_result(ctx, run_id, observation)
+                .await
+                .map(|()| IngestOutcome::Applied),
             ExecutionEvent::Finished {
                 outcome,
                 nodes,
@@ -893,13 +1014,55 @@ where
         // flattened here rather than assumed. See this method's doc above.
         // Built in one pass rather than `format!(..)` followed by a second
         // scan over the whole prefixed string: the allocation is sized once
-        // and each half is copied exactly once.
-        let flatten = |c: char| if c == '\n' || c == '\r' { ' ' } else { c };
+        // and each half is copied exactly once. `flatten_log_char`
+        // (`domain::repos::run_logs_repo`) rather than a local closure: it is
+        // the one shared definition of this flattening, and
+        // `infra::executor::argo::watch`'s `LineSkip` must normalise a
+        // freshly re-read line the same way before comparing it against an
+        // anchor built from this method's own output — see that function's
+        // doc for the fix-round 3 bug two independent copies of this rule
+        // once produced.
         let mut prefixed = String::with_capacity(node.len() + line.len() + 3);
         prefixed.push('[');
-        prefixed.extend(node.chars().map(flatten));
+        prefixed.extend(node.chars().map(flatten_log_char));
         prefixed.push_str("] ");
-        prefixed.extend(line.chars().map(flatten));
+        // The one place the archive prefix's real width exists.
+        // `domain::repos::log_line` reserves `ASSUMED_ARCHIVE_PREFIX_BYTES` for
+        // it in `WRITE_SIDE_MAX_LINE_BYTES` and has no way to see a node name,
+        // so an assumption it documents but nothing measures is how a wrong
+        // dropped-byte count would reach an operator with no trail back to its
+        // cause. Measured after the prefix and before the line, so this is the
+        // prefix alone. Today's one producer is `format!("repo-{uuid}")`, ~41
+        // bytes wrapped, with ~212 to spare — so this is a tripwire for a
+        // future producer, not a live condition.
+        //
+        // Not a hard failure in release: the line still archives correctly, and
+        // the cost of crossing this is one under-reported truncation count, not
+        // a lost line. Once per process, because a node that crosses it crosses
+        // it on every one of its lines.
+        debug_assert!(
+            prefixed.len() <= ASSUMED_ARCHIVE_PREFIX_BYTES,
+            "archive prefix for node {node:?} is {} bytes, over domain::repos::\
+             ASSUMED_ARCHIVE_PREFIX_BYTES ({ASSUMED_ARCHIVE_PREFIX_BYTES}); \
+             WRITE_SIDE_MAX_LINE_BYTES no longer reserves enough and this node's \
+             truncated lines will be re-cut on read with a wrong dropped-byte count",
+            prefixed.len()
+        );
+        if prefixed.len() > ASSUMED_ARCHIVE_PREFIX_BYTES {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                warn!(
+                    %node,
+                    prefix_bytes = prefixed.len(),
+                    assumed = ASSUMED_ARCHIVE_PREFIX_BYTES,
+                    "this node's archive prefix is wider than domain::repos reserves for it; \
+                     an over-long line from this node is truncated twice and the marker it \
+                     carries under-reports the dropped bytes. Raise \
+                     ASSUMED_ARCHIVE_PREFIX_BYTES or shorten the node name",
+                );
+            });
+        }
+        prefixed.extend(line.chars().map(flatten_log_char));
         // The archive gets the **same string** the subscribers get — see this
         // method's "The prefix" doc section above.
         self.archive
@@ -1239,7 +1402,7 @@ where
         outcome: ExecutorOutcome,
         nodes: NodeOutcome,
         message: Option<String>,
-    ) -> Result<(), DomainError> {
+    ) -> Result<IngestOutcome, DomainError> {
         let finished_at = OffsetDateTime::now_utc();
 
         // Scopes are derived before the transaction opens: they are policy
@@ -1386,7 +1549,17 @@ where
         }
 
         Self::announce(&run, completion);
-        Ok(())
+        // `Duplicate` rather than `Applied` for the retry branch: `Completion`
+        // already draws exactly this line, and folding the two together is what
+        // would hide a stuck executor — see [`IngestOutcome::Duplicate`]. The
+        // recorded branch is classified by
+        // `crate::domain::state_machine::is_terminal` through Task 36's
+        // `From<RunState>` bridge, not by a list of terminal states written
+        // here.
+        Ok(match completion {
+            Completion::AlreadyRecorded => IngestOutcome::Duplicate,
+            Completion::Recorded { state, .. } => IngestOutcome::from(state),
+        })
     }
 
     /// Log the side effect a completion owes, outside its transaction.

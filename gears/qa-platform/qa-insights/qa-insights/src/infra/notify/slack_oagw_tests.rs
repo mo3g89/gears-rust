@@ -9,6 +9,7 @@
 
 use std::sync::Mutex;
 
+use crate::domain::ports::SlackBlock;
 use async_trait::async_trait;
 use oagw_sdk::api::ServiceGatewayClientV1;
 use toolkit_canonical_errors::CanonicalError;
@@ -237,23 +238,6 @@ impl ServiceGatewayClientV1 for FakeGateway {
 // REQUEST_TIMEOUT
 // ---------------------------------------------------------------------------
 
-/// The 10s bound is ported reasoning, not a guess
-/// (`manager/src/services/notifications.rs:52-64`). It is a fixed bound, not
-/// derived from any tick interval.
-///
-/// **Honesty note (R97):** this is true by construction — it compares the
-/// constant to itself spelled out in `Duration::from_secs(10)` — and cannot
-/// fail against any implementation that declares the constant differently,
-/// since [`SlackOagwClient`] is the only implementation. It exists because
-/// the brief asks for it verbatim.
-/// [`the_bound_is_actually_applied_to_a_hanging_gateway`] below is the test
-/// that can fail: it proves the bound is *applied* in `send`, not only
-/// *declared* on the type.
-#[test]
-fn the_slack_client_bounds_every_request() {
-    assert_eq!(SlackOagwClient::REQUEST_TIMEOUT, Duration::from_secs(10));
-}
-
 /// The one test in this module that can actually fail on the timeout wiring:
 /// if `send` stopped wrapping the proxy call in `tokio::time::timeout`, this
 /// would hang instead of returning within the assertion's deadline. A
@@ -352,13 +336,18 @@ async fn a_blank_channel_is_omitted_from_the_payload() {
     assert!(payload.get("channel").is_none());
 }
 
-/// Non-empty blocks are carried through verbatim.
+/// Non-empty blocks reach the payload as Block Kit, encoded by
+/// [`super::super::block_kit`] — the port carries `SlackBlock`, not JSON
+/// (review finding #17), so this is now also the assertion that the adapter
+/// does the encoding at all.
 #[tokio::test]
 async fn non_empty_blocks_are_included_in_the_payload() {
     let gateway = Arc::new(FakeGateway::answering(200));
     let client = SlackOagwClient::new(gateway.clone());
     let mut message = message();
-    message.blocks = vec![serde_json::json!({"type": "section"})];
+    message.blocks = vec![SlackBlock::Section {
+        text: "*Failed*".to_owned(),
+    }];
 
     client
         .send(&ctx(), &message)
@@ -368,7 +357,13 @@ async fn non_empty_blocks_are_included_in_the_payload() {
     let proxied = gateway.requests();
     let payload: serde_json::Value =
         serde_json::from_str(&proxied[0].body).expect("the body is JSON");
-    assert_eq!(payload["blocks"], serde_json::json!([{"type": "section"}]));
+    assert_eq!(
+        payload["blocks"],
+        serde_json::json!([{
+            "type": "section",
+            "text": { "type": "mrkdwn", "text": "*Failed*" }
+        }])
+    );
 }
 
 /// A non-2xx answer from the gateway (or the far side) is a failure, not a
@@ -431,5 +426,147 @@ fn webhook_path_strips_only_the_legal_credstore_scheme() {
         "credstore://slack/hook",
         "not a scheme this crate accepts anywhere, so not one this function pretends to \
          understand"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The golden payload — finding #17
+// ---------------------------------------------------------------------------
+
+/// The fallback text the golden render produces — `strip_mrkdwn` of the header
+/// section, then the summary, the counts and the body, joined by ` \u{b7} `.
+const GOLDEN_FALLBACK_TEXT: &str = ":redcircle: nightly-smoke-142 \u{2014} Failed \u{b7} \
+                                    vhp/smoke  \u{b7}  vp-nightly-1  \u{b7}  QA 8.0.1 (1024) \
+                                    \u{b7} passed 2, failed 2, skipped 1 \u{b7} \
+                                    >2 test failures detected";
+
+/// The golden render's `context` block text.
+const GOLDEN_FOOTER_TEXT: &str = "nightly  \u{b7}  qa-e2e @ main  \u{b7}  \
+                                  Started: 2026-04-07T01:01:00Z  \u{b7}  \
+                                  Finished: 2026-04-07T01:11:02Z";
+
+/// Every one of the six templates enabled with default wording, i.e. the state
+/// a tenant is in immediately after switching scheduled-run Slack alerts on.
+/// Mirrors `domain::notify::render_tests::config_with_every_template_enabled`.
+fn config_with_every_template_enabled() -> qa_insights_sdk::NotificationConfig {
+    let template = qa_insights_sdk::ScheduledRunSlackTemplate {
+        enabled: true,
+        ..qa_insights_sdk::ScheduledRunSlackTemplate::default()
+    };
+    qa_insights_sdk::NotificationConfig {
+        scheduled_run_slack_templates: qa_insights_sdk::ScheduledRunSlackTemplates {
+            pending: template.clone(),
+            in_progress: template.clone(),
+            succeeded: template.clone(),
+            failed: template.clone(),
+            error: template.clone(),
+            skipped: template,
+        },
+        ..qa_insights_sdk::NotificationConfig::default()
+    }
+}
+
+fn golden_render_context() -> crate::domain::notify::render::ScheduledRunRenderContext {
+    crate::domain::notify::render::ScheduledRunRenderContext {
+        run_name: "nightly-smoke-142".to_owned(),
+        plan_id: "vhp/smoke".to_owned(),
+        phase: "Failed".to_owned(),
+        run_source: "scheduled".to_owned(),
+        platform: Some("vp-nightly-1".to_owned()),
+        product_key: Some("QA".to_owned()),
+        app_version: Some("8.0.1".to_owned()),
+        app_build: Some("1024".to_owned()),
+        test_version: Some("main".to_owned()),
+        schedule_id: Some("nightly".to_owned()),
+        repo_name: Some("qa-e2e".to_owned()),
+        source_ref: Some("main".to_owned()),
+        source_ref_kind: Some("branch".to_owned()),
+        started_at: Some("2026-04-07T01:01:00Z".to_owned()),
+        finished_at: Some("2026-04-07T01:11:02Z".to_owned()),
+        duration: Some("10m 2s".to_owned()),
+        message: Some("2 test failures detected".to_owned()),
+        result_statuses: vec![
+            "PASSED".to_owned(),
+            "FAILED".to_owned(),
+            "PASSED".to_owned(),
+            "ERROR".to_owned(),
+            "SKIPPED".to_owned(),
+        ],
+    }
+}
+
+/// The whole webhook body, byte for byte, for one fully-populated
+/// scheduled-run render — the guard finding #17's refactor needed and this
+/// repo did not have. Nothing else asserts the *composition* of the domain
+/// renderer's blocks with the adapter's payload builder: `render_tests`
+/// reaches into one block at a time and this module's other payload tests use
+/// a hand-written stub block. Compared as [`serde_json::Value`], not as text,
+/// because `serde_json/preserve_order` is on workspace-wide and a text
+/// comparison would pass per-package and fail under `make test-no-macros`.
+#[tokio::test]
+async fn the_rendered_scheduled_run_payload_is_the_golden_block_kit_body() {
+    let rendered = crate::domain::notify::render::render_scheduled_run(
+        &config_with_every_template_enabled(),
+        "failed",
+        &golden_render_context(),
+    )
+    .expect("`failed` is one of the six tokens");
+
+    let gateway = Arc::new(FakeGateway::answering(200));
+    let client = SlackOagwClient::new(gateway.clone());
+    client
+        .send(
+            &ctx(),
+            &SlackMessage {
+                webhook_credstore_ref: "cred://slack-hook".to_owned(),
+                channel: Some("#qa-alerts".to_owned()),
+                text: rendered.fallback_text,
+                blocks: rendered.blocks,
+            },
+        )
+        .await
+        .expect("the fake gateway answers 200");
+
+    let proxied = gateway.requests();
+    let payload: serde_json::Value =
+        serde_json::from_str(&proxied[0].body).expect("the body is JSON");
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "text": GOLDEN_FALLBACK_TEXT,
+            "channel": "#qa-alerts",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": ":red_circle: `nightly-smoke-142` \u{2014} *Failed*"
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "`vhp/smoke`  \u{b7}  vp-nightly-1  \u{b7}  QA 8.0.1 (1024)"
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": ":white_check_mark: 2   :x: 2   :fast_forward: 1   \
+                                 :stopwatch: 10m 2s"
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": { "type": "mrkdwn", "text": ">2 test failures detected" }
+                },
+                {
+                    "type": "context",
+                    "elements": [{ "type": "mrkdwn", "text": GOLDEN_FOOTER_TEXT }]
+                }
+            ]
+        })
     );
 }

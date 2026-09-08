@@ -7,7 +7,7 @@
 //! immediately before the read; the query's field allow-list, sort validation and
 //! page clamp belong to the repository, next to the entity and the index they are
 //! about; and `?` resolves the error through
-//! [`crate::api::rest::error`].
+//! [`crate::domain::error`]'s boundary mapping.
 //!
 //! # The `OData` extractor is where a malformed query is refused
 //!

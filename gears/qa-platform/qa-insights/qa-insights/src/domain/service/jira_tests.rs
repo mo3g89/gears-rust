@@ -58,6 +58,8 @@ use crate::domain::service::test_support::{
 use crate::infra::storage::jira_sea_repo::OrmJiraRepository;
 use crate::infra::storage::results_sea_repo::OrmResultsRepository;
 use crate::infra::storage::test_db::{inmem_db, now, scope};
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 const TENANT: Uuid = Uuid::from_u128(0x0A);
 
@@ -164,12 +166,12 @@ impl JiraClient for FakeJira {
 struct TwoTenantAuthZ;
 
 #[async_trait]
-impl authz_resolver_sdk::AuthZResolverClient for TwoTenantAuthZ {
+impl authz_resolver_sdk::AuthZResolverApi for TwoTenantAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: authz_resolver_sdk::EvaluationRequest,
-    ) -> Result<authz_resolver_sdk::EvaluationResponse, authz_resolver_sdk::AuthZResolverError>
-    {
+    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError> {
         Ok(authz_resolver_sdk::EvaluationResponse {
             decision: true,
             context: authz_resolver_sdk::EvaluationResponseContext {
@@ -198,12 +200,12 @@ impl authz_resolver_sdk::AuthZResolverClient for TwoTenantAuthZ {
 struct GrantsJiraButNotResultsAuthZ;
 
 #[async_trait]
-impl authz_resolver_sdk::AuthZResolverClient for GrantsJiraButNotResultsAuthZ {
+impl authz_resolver_sdk::AuthZResolverApi for GrantsJiraButNotResultsAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: authz_resolver_sdk::EvaluationRequest,
-    ) -> Result<authz_resolver_sdk::EvaluationResponse, authz_resolver_sdk::AuthZResolverError>
-    {
+    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError> {
         if request.resource.resource_type.starts_with("qa.jira") {
             Ok(permissive_response(&request))
         } else {
@@ -257,8 +259,8 @@ impl JiraRepository for FailingUpsertJiraRepository {
         _tenant_id: Uuid,
         _bug: NewJiraBug,
     ) -> Result<JiraBug, DomainError> {
-        Err(DomainError::Database(
-            "simulated local registration failure".to_owned(),
+        Err(DomainError::database(
+            "simulated local registration failure",
         ))
     }
 
@@ -365,7 +367,7 @@ fn stored_config() -> JiraConfigInput {
     }
 }
 
-async fn build(authz: Arc<dyn authz_resolver_sdk::AuthZResolverClient>) -> Fixture {
+async fn build(authz: Arc<dyn authz_resolver_sdk::AuthZResolverApi>) -> Fixture {
     let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
     let jira = Arc::new(FakeJira::answering(StatusCategory::DONE));
     let service = JiraService::new(

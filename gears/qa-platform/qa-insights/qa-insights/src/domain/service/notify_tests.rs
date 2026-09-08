@@ -51,7 +51,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_insights_sdk::NotificationConfig;
 use qa_runs_sdk::ScheduleNotificationSettings;
 use toolkit_db::DBProvider;
@@ -69,8 +69,10 @@ use crate::domain::service::test_support::{
 use crate::domain::service::{actions, resources};
 use crate::infra::storage::notify_sea_repo::OrmNotifyRepository;
 use crate::infra::storage::test_db::inmem_db;
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::secure::DBRunner;
 use toolkit_security::AccessScope;
+use toolkit_security::PlatformSecurityContext;
 
 const TENANT: Uuid = Uuid::from_u128(0xA);
 const OTHER_TENANT: Uuid = Uuid::from_u128(0x0B);
@@ -87,12 +89,12 @@ const SCHEDULE: Uuid = Uuid::from_u128(0x30);
 struct TwoTenantAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for TwoTenantAuthZ {
+impl AuthZResolverApi for TwoTenantAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: authz_resolver_sdk::EvaluationRequest,
-    ) -> Result<authz_resolver_sdk::EvaluationResponse, authz_resolver_sdk::AuthZResolverError>
-    {
+    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError> {
         Ok(authz_resolver_sdk::EvaluationResponse {
             decision: true,
             context: authz_resolver_sdk::EvaluationResponseContext {
@@ -166,13 +168,30 @@ impl SlackClient for FakeSlack {
 /// A [`MailClient`] double, local to this test module — `gear.rs`'s
 /// `NeverWiredMailClient` moved out of `notify` in fix round 1 (R103) and a
 /// domain-layer test importing it back from the composition root would
-/// invert this crate's dependency direction. Same behaviour: always
-/// [`SendOutcome::UnsupportedEgress`], never an error.
-struct InertMail;
+/// invert this crate's dependency direction. Same behaviour as
+/// `infra::notify::UnsupportedMailClient`: always
+/// [`SendOutcome::UnsupportedEgress`], never an error — but it records the
+/// identity it was called as, which is what review finding #37 added to this
+/// port and [`send_test_sends_email_as_the_calling_tenant`] reads.
+#[derive(Default)]
+struct InertMail {
+    sent_as: Mutex<Vec<Uuid>>,
+}
+
+impl InertMail {
+    fn sent_as_tenants(&self) -> Vec<Uuid> {
+        self.sent_as.lock().unwrap().clone()
+    }
+}
 
 #[async_trait]
 impl MailClient for InertMail {
-    async fn send(&self, _message: &MailMessage) -> Result<SendOutcome, DomainError> {
+    async fn send(
+        &self,
+        ctx: &toolkit_security::SecurityContext,
+        _message: &MailMessage,
+    ) -> Result<SendOutcome, DomainError> {
+        self.sent_as.lock().unwrap().push(ctx.subject_tenant_id());
         Ok(SendOutcome::UnsupportedEgress)
     }
 }
@@ -189,6 +208,10 @@ struct Fixture {
     /// The qa-runs double [`NotifyService::notify_run_completed`] resolves
     /// a run through (R104) — held so a test can register or omit a run.
     runs: Arc<FakeRuns>,
+    /// The mail double, held for the same reason `slack` is: review finding
+    /// #37 gave [`MailClient::send`] a `SecurityContext` and the identity it
+    /// receives is only assertable from the double.
+    mail: Arc<InertMail>,
 }
 
 impl Fixture {
@@ -223,15 +246,16 @@ const RUN_NAME: &str = "nightly-smoke-142";
 /// ([`a_multi_tenant_scope_does_not_return_another_tenants_settings`],
 /// [`an_unresolvable_run_is_skipped_rather_than_propagated`]) do not have to
 /// undo an unwanted save or registration.
-async fn build(authz: Arc<dyn AuthZResolverClient>, slack: Arc<FakeSlack>) -> Fixture {
+async fn build(authz: Arc<dyn AuthZResolverApi>, slack: Arc<FakeSlack>) -> Fixture {
     let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
     let runs = Arc::new(FakeRuns::default());
+    let mail = Arc::new(InertMail::default());
     let service = NotifyService::new(
         Arc::clone(&db),
         OrmNotifyRepository,
         PolicyEnforcer::new(authz),
         Arc::clone(&slack) as Arc<dyn SlackClient>,
-        Arc::new(InertMail) as Arc<dyn MailClient>,
+        Arc::clone(&mail) as Arc<dyn MailClient>,
         Arc::clone(&runs) as Arc<dyn RunsReader>,
     );
     Fixture {
@@ -240,6 +264,7 @@ async fn build(authz: Arc<dyn AuthZResolverClient>, slack: Arc<FakeSlack>) -> Fi
         slack,
         db,
         runs,
+        mail,
     }
 }
 
@@ -531,7 +556,7 @@ async fn a_failing_release_still_leaves_the_failure_log_row() {
         FailingReleaseNotifyRepository,
         PolicyEnforcer::new(Arc::new(TenantScopedAuthZ)),
         Arc::clone(&slack) as Arc<dyn SlackClient>,
-        Arc::new(InertMail) as Arc<dyn MailClient>,
+        Arc::new(InertMail::default()) as Arc<dyn MailClient>,
         Arc::clone(&runs) as Arc<dyn RunsReader>,
     );
     let caller = ctx(TENANT);
@@ -840,7 +865,7 @@ async fn an_unconfigured_tenant_reads_the_default_config() {
         OrmNotifyRepository,
         PolicyEnforcer::new(Arc::new(TenantScopedAuthZ)),
         Arc::new(FakeSlack::default()) as Arc<dyn SlackClient>,
-        Arc::new(InertMail) as Arc<dyn MailClient>,
+        Arc::new(InertMail::default()) as Arc<dyn MailClient>,
         Arc::new(FakeRuns::default()) as Arc<dyn RunsReader>,
     );
     let ctx = ctx(TENANT);
@@ -916,6 +941,39 @@ async fn send_test_sends_slack_as_the_calling_tenant() {
         .expect("a working slack adapter must not error");
 
     assert_eq!(f.slack.sent_as_tenants(), [TENANT]);
+}
+
+/// **Review finding #37.** The email port takes the caller's `ctx` too, and
+/// `NotifyService` forwards the one it holds — the asymmetry the finding names
+/// was that [`MailClient::send`] took no identity at all while
+/// [`SlackClient::send`] did, even though both are called from this same
+/// method under the same tenant's authority. Pinned on the interactive
+/// test-send path, the twin of
+/// [`send_test_sends_slack_as_the_calling_tenant`].
+#[tokio::test]
+async fn send_test_sends_email_as_the_calling_tenant() {
+    let f = fixture_with(
+        Arc::new(FakeSlack::default()),
+        NotificationConfig {
+            email_enabled: true,
+            email_smtp_host: "smtp.example.com".to_owned(),
+            email_from: "qa@example.com".to_owned(),
+            email_recipients: "ops@example.com".to_owned(),
+            ..slack_only_config()
+        },
+    )
+    .await;
+
+    let err = f
+        .service
+        .send_test(&f.ctx, TestSend::Generic)
+        .await
+        .expect_err("the inert mail adapter reports unsupported egress");
+    assert!(
+        matches!(err, DomainError::UnsupportedEgress { .. }),
+        "{err:?}"
+    );
+    assert_eq!(f.mail.sent_as_tenants(), [TENANT]);
 }
 
 /// A generic test send propagates a slack failure rather than swallowing it —
@@ -1233,7 +1291,7 @@ async fn a_multi_tenant_scope_does_not_list_another_tenants_log_entries() {
 async fn the_claim_and_release_path_authorizes_a_write_not_a_read() {
     let authz = Arc::new(RecordingAuthZ::default());
     let f = build(
-        Arc::clone(&authz) as Arc<dyn AuthZResolverClient>,
+        Arc::clone(&authz) as Arc<dyn AuthZResolverApi>,
         Arc::new(FakeSlack::default()),
     )
     .await;

@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use toolkit_db::DBProvider;
 use toolkit_odata::ODataQuery;
 use uuid::Uuid;
@@ -43,7 +43,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn with_authz(authz: Arc<dyn AuthZResolverClient>) -> Self {
+    async fn with_authz(authz: Arc<dyn AuthZResolverApi>) -> Self {
         let db = inmem_db().await;
         let provider = Arc::new(DBProvider::<DomainError>::new(db.clone()));
         let service =

@@ -204,6 +204,11 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::Postgres => (PG_PARENT_UQ, PG_UP),
             sea_orm::DatabaseBackend::MySql => (MYSQL_PARENT_UQ, MYSQL_UP),
             sea_orm::DatabaseBackend::Sqlite => (SQLITE_PARENT_UQ, SQLITE_UP),
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         };
         // The parent unique index first: the composite foreign key in `sql`
         // references `qa_runs(id, tenant_id)`, and no dialect accepts a
@@ -222,6 +227,11 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::Postgres => PG_DOWN,
             sea_orm::DatabaseBackend::MySql => MYSQL_DOWN,
             sea_orm::DatabaseBackend::Sqlite => SQLITE_DOWN,
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         };
         conn.execute_unprepared(sql).await?;
         Ok(())

@@ -22,6 +22,8 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use super::*;
+use crate::domain::metrics::{QA_RUNS_INGEST, QA_RUNS_INGEST_DURATION};
+use crate::domain::ports::metrics::{IngestMetrics, IngestOutcome, NoopMetrics};
 use crate::domain::ports::run_executor::{ExecutionEvent, NodeOutcome, TestObservation};
 use crate::domain::repos::QueueRowRecord;
 use crate::domain::service::admission::tests::fakes::{
@@ -30,6 +32,7 @@ use crate::domain::service::admission::tests::fakes::{
 use crate::domain::service::test_support::{OTHER_TENANT, OWNER_TENANT, ctx, test_db_provider};
 use crate::domain::service::{FlushReport, LogArchive, LogFanout};
 use crate::domain::state_machine::{ExecutorOutcome, can_transition, is_terminal};
+use crate::infra::metrics::probe::MetricsProbe;
 
 const RUN: Uuid = Uuid::from_u128(0x0501);
 const QUEUE: Uuid = Uuid::from_u128(0x0E51);
@@ -193,6 +196,21 @@ impl LogArchive for RecordingArchive {
         }
         report
     }
+
+    /// Reads `self.stored` through the one shared parser
+    /// (`domain::repos::LogResume::from_archived_text`) — **not**
+    /// `self.pending` — which is what makes
+    /// `resume_positions_flushes_a_pending_tail_before_reading_it` below able
+    /// to prove `IngestService::resume_positions` flushes before it reads:
+    /// against a double that read `pending` directly, a missing flush would
+    /// be invisible.
+    async fn resume_positions(
+        &self,
+        _tenant: system_actor::TenantBound,
+        run_id: Uuid,
+    ) -> Result<LogResume, DomainError> {
+        Ok(LogResume::from_archived_text(&self.stored_text(run_id)))
+    }
 }
 
 struct Harness {
@@ -292,6 +310,20 @@ async fn build(
     queue: Arc<FakeQueue>,
     environments: Arc<FakeEnvironments>,
 ) -> Harness {
+    build_with_metrics(runs, queue, environments, Arc::new(NoopMetrics)).await
+}
+
+/// The same wiring with an emission port named.
+///
+/// Split out rather than adding a parameter to [`build`], so the ~60 tests in
+/// this file that do not read metrics keep the production default — a service
+/// holding `NoopMetrics` — and say nothing about it.
+async fn build_with_metrics(
+    runs: Arc<FakeRuns>,
+    queue: Arc<FakeQueue>,
+    environments: Arc<FakeEnvironments>,
+    metrics: Arc<dyn IngestMetrics>,
+) -> Harness {
     let db = test_db_provider().await;
     let logs = Arc::new(RecordingLogs::default());
     let archive = Arc::new(RecordingArchive::default());
@@ -304,6 +336,7 @@ async fn build(
         logs: Arc::clone(&logs) as Arc<dyn LogFanout>,
         archive: Arc::clone(&archive) as Arc<dyn LogArchive>,
         policy_enforcer: enforcer,
+        metrics,
     });
     Harness {
         runs,
@@ -718,6 +751,50 @@ async fn the_stored_status_is_trimmed_before_the_column_truncates_it() {
         },
         "PASSE matches no counter, so a wrong order is silent in the row and \
          visible only here"
+    );
+}
+
+/// **`resume_positions` flushes before it reads — fix-round 1, Important 3.**
+///
+/// `record` only buffers; a periodic `flush_due` tick or `finish` is what
+/// writes the row `log_resume_positions` reads. `gear.rs` runs `flush_due`
+/// *after* the dispatcher tick that triggers a re-attach, so without an
+/// explicit flush here, a run whose previous observer queued lines but never
+/// got to flush them would read a resume position that undercounts by up to a
+/// full tick's worth of its own output — and the resuming executor would
+/// re-fetch and re-archive exactly that tail.
+///
+/// `RecordingArchive::resume_positions` reads only `stored`, never `pending`
+/// (see that impl's own doc), so this is the one test that can tell "flushed
+/// first" apart from "read straight through": against a double that read
+/// `pending` directly, a missing flush would be invisible, which is exactly
+/// how this went unnoticed in the original commit.
+#[tokio::test]
+async fn resume_positions_flushes_a_pending_tail_before_reading_it() {
+    let h = harness(RunState::Running, LeaseState::Free).await;
+    h.ingest_log_line("a", "line one").await;
+
+    // Premise: nothing has been flushed yet, so a read that skipped the
+    // flush would see an empty archive.
+    assert!(
+        h.stored_text().is_empty(),
+        "premise: the line is only buffered, not yet flushed"
+    );
+
+    let resume = h
+        .ingest
+        .resume_positions(system_actor::TenantBound::new(OWNER_TENANT).unwrap(), RUN)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resume.lines_for("a"),
+        1,
+        "the pending line must be flushed before this reads, or it answers 0"
+    );
+    assert!(
+        !h.stored_text().is_empty(),
+        "the flush must have actually happened as an observable side effect"
     );
 }
 
@@ -1929,4 +2006,331 @@ fn result_row(status: &str) -> crate::domain::repos::TestResultRow {
         created_at: stamp,
         updated_at: stamp,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry: one ingest pass is one measured observation
+// ---------------------------------------------------------------------------
+
+/// An ingest emission port that panics on its only method. See
+/// `dispatch_tests`' `PanickingMeter` for why one is needed at all.
+struct PanickingIngestMeter;
+
+impl IngestMetrics for PanickingIngestMeter {
+    fn ingest_batch(&self, _outcome: IngestOutcome, _duration: std::time::Duration) {
+        panic!("a metrics adapter must never be able to fail the path it measures");
+    }
+}
+
+/// The default fixture with a real adapter installed over a private meter.
+async fn metered_harness(probe: &MetricsProbe) -> Harness {
+    let run = qa_runs_sdk::Run {
+        started_at: Some(time::OffsetDateTime::now_utc()),
+        execution_ref: Some("mock-execution-1".to_owned()),
+        ..run_fixture(RUN, Some(PLATFORM_A), true, RunState::Running)
+    };
+    build_with_metrics(
+        Arc::new(FakeRuns::with(vec![(OWNER_TENANT, run)])),
+        Arc::new(FakeQueue::with(vec![queued_row(
+            QUEUE,
+            OWNER_TENANT,
+            RUN,
+            PLATFORM_A,
+            true,
+            QueueState::Running,
+        )])),
+        Arc::new(FakeEnvironments::holding(PLATFORM_A, LeaseState::Free)),
+        probe.adapter(),
+    )
+    .await
+}
+
+/// **An ingest pass emits exactly one counter increment and one duration.**
+///
+/// Driven through the real `OTel` SDK with an in-memory exporter for the reason
+/// `a_dispatch_pass_records_one_observation` gives: what needs proving is that
+/// the rendered series is what a dashboard query finds.
+#[tokio::test]
+async fn an_ingest_pass_records_one_observation() {
+    let probe = MetricsProbe::new();
+    let h = metered_harness(&probe).await;
+
+    h.ingest_log_line("repo-a", "hello").await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter(QA_RUNS_INGEST),
+        1,
+        "one observation, one increment; the exported names were {:?}",
+        series.names()
+    );
+    assert_eq!(series.histogram_count(QA_RUNS_INGEST_DURATION), 1);
+    assert_eq!(
+        series.counter_with(QA_RUNS_INGEST, &[("outcome", "applied")]),
+        1,
+        "a log line is an observation applied to a live run"
+    );
+}
+
+/// **A completion and its retry are told apart.**
+///
+/// The two are one `Finished` event applied twice, and folding the second into
+/// `applied` is what would hide a stuck executor — see [`IngestOutcome`]'s
+/// `Duplicate`.
+#[tokio::test]
+async fn a_completion_and_its_retry_record_different_outcomes() {
+    let probe = MetricsProbe::new();
+    let h = metered_harness(&probe).await;
+
+    h.ingest
+        .apply(&owner(), RUN, finished(ExecutorOutcome::Failed))
+        .await
+        .unwrap();
+    h.ingest
+        .apply(&owner(), RUN, finished(ExecutorOutcome::Failed))
+        .await
+        .unwrap();
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter_with(QA_RUNS_INGEST, &[("outcome", "completed")]),
+        1,
+        "the first event wrote a terminal state"
+    );
+    assert_eq!(
+        series.counter_with(QA_RUNS_INGEST, &[("outcome", "duplicate")]),
+        1,
+        "the second reconciled to the state already recorded"
+    );
+    assert_eq!(series.histogram_count(QA_RUNS_INGEST_DURATION), 2);
+}
+
+/// **A refused observation records, and is not counted as a failure.**
+///
+/// A run invisible under the caller's scope is the caller's own request being
+/// wrong, which `DomainError::disclosable` is the classification of — so it
+/// must not land in the series an alert fires on.
+#[tokio::test]
+async fn a_refused_ingest_records_a_refusal_not_a_failure() {
+    let probe = MetricsProbe::new();
+    let h = metered_harness(&probe).await;
+
+    let refused = h
+        .ingest
+        .apply(
+            &ctx(OTHER_TENANT),
+            RUN,
+            ExecutionEvent::Log {
+                node: "repo-a".to_owned(),
+                line: "not yours".to_owned(),
+            },
+        )
+        .await;
+
+    assert!(refused.is_err(), "the fixture must actually be refused");
+    let series = probe.collect();
+    assert_eq!(
+        series.counter_with(QA_RUNS_INGEST, &[("outcome", "refused")]),
+        1
+    );
+    assert_eq!(
+        series.counter_with(QA_RUNS_INGEST, &[("outcome", "failed")]),
+        0,
+        "a scoping refusal is not this gear's fault and must not page anybody"
+    );
+}
+
+/// **A metric emission never fails an ingest pass.**
+///
+/// The ingest counterpart of `a_broken_metrics_adapter_does_not_fail_the_pass`,
+/// and the one that matters more: this path runs per log line.
+#[tokio::test]
+async fn a_broken_metrics_adapter_does_not_fail_an_ingest_pass() {
+    let run = qa_runs_sdk::Run {
+        started_at: Some(time::OffsetDateTime::now_utc()),
+        execution_ref: Some("mock-execution-1".to_owned()),
+        ..run_fixture(RUN, Some(PLATFORM_A), true, RunState::Running)
+    };
+    let h = build_with_metrics(
+        Arc::new(FakeRuns::with(vec![(OWNER_TENANT, run)])),
+        Arc::new(FakeQueue::default()),
+        Arc::new(FakeEnvironments::holding(PLATFORM_A, LeaseState::Free)),
+        Arc::new(PanickingIngestMeter),
+    )
+    .await;
+
+    // Must not panic, and must still do the work.
+    h.ingest_log_line("repo-a", "hello").await;
+
+    assert_eq!(
+        h.published_lines(),
+        vec!["[repo-a] hello".to_owned()],
+        "a broken metrics adapter must not change what ingest does"
+    );
+}
+
+/// **The inert `Started` event is not counted as an observation.**
+///
+/// `apply`'s `Started` arm returns `Ok` without reading or writing anything —
+/// the module header calls it deliberately inert. Counting it would put a no-op
+/// in the `applied` series, inflating the rate an operator reads as ingest
+/// throughput, and would feed the duration histogram a near-zero sample whose
+/// only effect is to drag down the p95 the family exists to report.
+///
+/// The pairing is what makes this a gate rather than an assertion that nothing
+/// happened: the same harness then applies a log line and must record exactly
+/// one observation, so a green result cannot come from an uninstalled adapter.
+#[tokio::test]
+async fn the_inert_started_event_is_not_counted_as_an_observation() {
+    let probe = MetricsProbe::new();
+    let h = metered_harness(&probe).await;
+
+    h.ingest
+        .apply(&owner(), RUN, ExecutionEvent::Started)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        probe.collect().counter(QA_RUNS_INGEST),
+        0,
+        "an event that reads nothing and writes nothing is not an observation"
+    );
+
+    h.ingest_log_line("repo-a", "hello").await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter(QA_RUNS_INGEST),
+        1,
+        "premise: the adapter is installed and the next event was counted"
+    );
+    assert_eq!(series.histogram_count(QA_RUNS_INGEST_DURATION), 1);
+}
+
+/// A [`LogArchive`] that takes a known, non-trivial amount of wall-clock time
+/// to flush, delegating everything else to [`RecordingArchive`].
+///
+/// `finish` flushes the run's buffered log before it returns, so a delay there
+/// puts a floor under one whole ingest pass. Its only job is to make the
+/// *magnitude* of the recorded sample assertable: every other double in this
+/// file answers instantly, so a call site that recorded a constant would
+/// produce a plausible sample and no count-based assertion could tell.
+struct SlowArchive {
+    inner: RecordingArchive,
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl LogArchive for SlowArchive {
+    fn record(&self, tenant_id: Uuid, run_id: Uuid, line: &str) {
+        self.inner.record(tenant_id, run_id, line);
+    }
+
+    async fn flush(&self, run_id: Uuid) -> Result<(), DomainError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.flush(run_id).await
+    }
+
+    async fn flush_due(&self) -> FlushReport {
+        self.inner.flush_due().await
+    }
+
+    async fn resume_positions(
+        &self,
+        tenant: system_actor::TenantBound,
+        run_id: Uuid,
+    ) -> Result<crate::domain::repos::LogResume, DomainError> {
+        self.inner.resume_positions(tenant, run_id).await
+    }
+}
+
+/// **The recorded ingest duration really is a clock around the pass.**
+///
+/// Every other ingest metric assertion here is about counts and labels, and
+/// counts cannot see a *value*: a call site that recorded `Duration::ZERO`, or
+/// a constant, or an `Instant` taken in the wrong place would satisfy all of
+/// them and hand a dashboard a fabricated distribution. Measured in
+/// qa-environments during Task 40 — a mutation replacing the elapsed time with
+/// a six-second constant passed that gear's whole suite, and this family had
+/// the same hole.
+///
+/// Written as **two bracketing assertions rather than one equality**, because
+/// an equality would be a timing test:
+///
+/// * the archive's flush sleeps 150 ms and `finish` awaits it before returning,
+///   so the sample cannot be in a bucket whose upper edge is 100 ms or below —
+///   that direction is deterministic, since a sleep can only overrun;
+/// * and it must not be in the `(5 s, 10 s]` bucket, which no in-memory fixture
+///   can honestly reach.
+///
+/// Probed edge by edge rather than through one call: `histogram_bucket_of`
+/// answers for the single bucket a value falls in, so asking about one edge
+/// says nothing about the buckets below it.
+///
+/// The `Finished` event is the one driven here rather than a log line, because
+/// the flush this fixture slows down happens in `finish` alone — a log line's
+/// `record` is synchronous by contract and would leave the delay outside the
+/// measured pass.
+#[tokio::test]
+async fn the_recorded_ingest_duration_tracks_the_pass_it_measures() {
+    let delay = std::time::Duration::from_millis(150);
+    let probe = MetricsProbe::new();
+
+    let run = qa_runs_sdk::Run {
+        started_at: Some(time::OffsetDateTime::now_utc()),
+        execution_ref: Some("mock-execution-1".to_owned()),
+        ..run_fixture(RUN, Some(PLATFORM_A), true, RunState::Running)
+    };
+    let db = test_db_provider().await;
+    let runs = Arc::new(FakeRuns::with(vec![(OWNER_TENANT, run)]));
+    let queue = Arc::new(FakeQueue::with(vec![queued_row(
+        QUEUE,
+        OWNER_TENANT,
+        RUN,
+        PLATFORM_A,
+        true,
+        QueueState::Running,
+    )]));
+    let environments = Arc::new(FakeEnvironments::holding(PLATFORM_A, LeaseState::Free));
+    let ingest = IngestService::new(IngestDeps {
+        db: SerializedDb::new(db),
+        runs,
+        queue,
+        environments: environments as Arc<dyn QaEnvironmentsClientV1>,
+        logs: Arc::new(RecordingLogs::default()) as Arc<dyn LogFanout>,
+        archive: Arc::new(SlowArchive {
+            inner: RecordingArchive::default(),
+            delay,
+        }) as Arc<dyn LogArchive>,
+        policy_enforcer: authz_resolver_sdk::PolicyEnforcer::new(Arc::new(SystemGrantingAuthZ)),
+        metrics: probe.adapter(),
+    });
+
+    ingest
+        .apply(&owner(), RUN, finished(ExecutorOutcome::Succeeded))
+        .await
+        .unwrap();
+
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count(QA_RUNS_INGEST_DURATION),
+        1,
+        "premise: exactly one ingest pass was timed"
+    );
+    for edge in [0.005_f64, 0.01, 0.025, 0.05, 0.1] {
+        assert_eq!(
+            series.histogram_bucket_of(QA_RUNS_INGEST_DURATION, edge),
+            Some(0),
+            "a pass whose archive flush slept for {delay:?} cannot have been measured at \
+             {edge} s or less, so that bucket must be empty -- a zero or a near-zero here \
+             means the clock is not around the pass"
+        );
+    }
+    assert_eq!(
+        series.histogram_bucket_of(QA_RUNS_INGEST_DURATION, 6.0),
+        Some(0),
+        "and it cannot have taken between five and ten seconds either: an in-memory \
+         fixture does not, so a sample there is a fabricated or stale duration rather \
+         than a measured one"
+    );
 }

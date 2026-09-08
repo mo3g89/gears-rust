@@ -54,14 +54,14 @@
 //! Everything else — transport failures, gateway errors, a 500 from the far side
 //! — becomes [`DomainError::Internal`], which is retryable at every call site
 //! that has a retry and an opaque 500 at the one that does not
-//! ([`crate::api::rest::error`] never discloses its payload).
+//! ([`crate::domain::error`]'s boundary mapping never discloses its payload).
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use qa_runs_sdk::{
-    LaunchRequest, QaRunsClientV1, QaRunsError, Run, RunSource, RunTarget, RunTestResult,
-    ScheduleNotificationSettings,
+    Exclusivity, LaunchRequest, QaRunsClientV1, QaRunsError, Run, RunSource, RunTarget,
+    RunTestResult, ScheduleNotificationSettings,
 };
 use time::OffsetDateTime;
 use toolkit_security::SecurityContext;
@@ -245,7 +245,7 @@ impl RunsLauncher for QaRunsReader {
             include_tags: Vec::new(),
             exclude_tags: Vec::new(),
             parameters: Vec::new(),
-            exclusive: None,
+            exclusive: Exclusivity::Inherit,
             timeout_seconds: None,
             source: RunSource::Manual,
             schedule_id: None,
@@ -266,10 +266,10 @@ impl RunsLauncher for QaRunsReader {
     /// non-scheduled source to `manual`, `manager/src/services/argo.rs:2461-2466`,
     /// called at `:2293-2296` for the run-source annotation this path would
     /// otherwise carry) and no schedule.
-    /// `exclusive: None` is the field this method's own port doc calls out —
-    /// legacy's `SubmitSingleTestRunRequest.exclusive: None` — so the launch
-    /// resolves its exclusivity from the plan and the tiers rather than this
-    /// adapter overriding it.
+    /// `exclusive: Exclusivity::Inherit` is the field this method's own port
+    /// doc calls out — legacy's `SubmitSingleTestRunRequest.exclusive: None`
+    /// — so the launch resolves its exclusivity from the plan and the tiers
+    /// rather than this adapter overriding it.
     ///
     /// `platform_id` and `branch` cross verbatim, unresolved further: this
     /// adapter does not default a branch, and neither does
@@ -296,7 +296,7 @@ impl RunsLauncher for QaRunsReader {
             include_tags: Vec::new(),
             exclude_tags: Vec::new(),
             parameters: Vec::new(),
-            exclusive: None,
+            exclusive: Exclusivity::Inherit,
             timeout_seconds: None,
             source: RunSource::Manual,
             schedule_id: None,
@@ -339,7 +339,7 @@ mod tests {
     use crate::domain::error::DomainError;
 
     /// qa-runs' run resource, spelled exactly as
-    /// `qa-runs/src/api/rest/error.rs:88` spells it — this is the id its errors
+    /// `qa-runs/src/domain/error.rs:597` spells it — this is the id its errors
     /// carry.
     #[resource_error(gts_id!("cf.qa.runs.run.v1~"))]
     struct FarSide;
@@ -379,7 +379,7 @@ mod tests {
 
     /// Anything else is internal, and the message says which gear failed so a
     /// log line is attributable. Opaque to a client — `DomainError::Internal`
-    /// maps to the canonical internal detail in `api::rest::error`.
+    /// maps to the canonical internal detail in `domain::error`.
     #[test]
     fn any_other_failure_is_internal() {
         let boom = CanonicalError::internal("upstream exploded").create();

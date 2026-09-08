@@ -20,12 +20,16 @@ use time::Duration as TimeDuration;
 use uuid::Uuid;
 
 use super::*;
+use crate::domain::metrics::{
+    QA_RUNS_DISPATCH, QA_RUNS_DISPATCH_DURATION, QA_RUNS_QUEUE_WAIT, QA_RUNS_QUEUE_WAIT_DURATION,
+};
 use crate::domain::ports::run_executor::MountSpec;
 use crate::domain::service::admission::tests::fakes::{
     self, Builder, FakeCatalog, FakeEnvironments, FakeQueue, FakeRuns, PLATFORM_A, PLATFORM_B,
     RecordingAuthZ, queued_row, row_aged, run_fixture,
 };
 use crate::domain::service::test_support::{OTHER_TENANT, OWNER_TENANT, ctx};
+use crate::infra::metrics::probe::MetricsProbe;
 
 /// Ids, so a failure names something.
 const RUN_1: Uuid = Uuid::from_u128(0x1001);
@@ -429,14 +433,14 @@ async fn a_tag_filter_selects_the_files_a_plan_run_executes() {
             path: "tests/a.py".to_owned(),
             title: None,
             tags: vec!["smoke".to_owned()],
-            exclusive: None,
+            exclusive: qa_catalog_sdk::Exclusivity::Inherit,
             bugs: Vec::new(),
         },
         qa_catalog_sdk::TestFileMeta {
             path: "tests/b.py".to_owned(),
             title: None,
             tags: vec!["destructive".to_owned()],
-            exclusive: None,
+            exclusive: qa_catalog_sdk::Exclusivity::Inherit,
             bugs: Vec::new(),
         },
     ]);
@@ -1453,7 +1457,7 @@ async fn the_ttl_sweep_expires_a_foreign_row_under_its_own_tenant() {
             ),
         ])))
         .queue(Arc::new(FakeQueue::with(vec![stale_owner, stale_other])))
-        .authz(Arc::clone(&covering) as Arc<dyn authz_resolver_sdk::AuthZResolverClient>)
+        .authz(Arc::clone(&covering) as Arc<dyn authz_resolver_sdk::AuthZResolverApi>)
         .build()
         .await;
 
@@ -1901,7 +1905,7 @@ async fn the_dispatcher_writes_under_the_rows_own_tenant() {
             max_concurrent_runs: 0,
             queue_ttl_seconds: 0,
         })
-        .authz(Arc::clone(&covering) as Arc<dyn authz_resolver_sdk::AuthZResolverClient>)
+        .authz(Arc::clone(&covering) as Arc<dyn authz_resolver_sdk::AuthZResolverApi>)
         .build()
         .await;
 
@@ -2400,6 +2404,7 @@ async fn admission_and_dispatch_share_one_platform_lock_registry() {
             admitter: None,
             dispatcher: None,
             watcher: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
             default_timeout_seconds: 900,
             limits: QueueLimits {
                 queue_max_depth: 20,
@@ -2407,6 +2412,10 @@ async fn admission_and_dispatch_share_one_platform_lock_registry() {
                 queue_ttl_seconds: 7200,
             },
             orphan_timeout_seconds: 600,
+            // `None` is the production default: `NoopMetrics`, which emits
+            // everything a wired gear emits and lets nothing observe it.
+            dispatch_metrics: None,
+            ingest_metrics: None,
         },
     );
 
@@ -3395,5 +3404,530 @@ async fn the_ttl_sweep_does_not_consult_the_policy_engine() {
         !enforcer.requested_any_for_nil_tenant(),
         "the sweep must elevate through domain::elevated, not the PEP: the stock \
          static-authz plugin denies every nil-tenant request"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry: the dispatcher tick is one measured pass
+// ---------------------------------------------------------------------------
+
+/// A metrics port that panics on every method.
+///
+/// The gear never installs one. It exists because
+/// `a_broken_metrics_adapter_does_not_fail_the_pass` cannot be written without
+/// it: the property under test is that the emission is guarded at the *call
+/// site*, and a call site that trusts the port's written contract passes every
+/// other test in this file.
+struct PanickingMeter;
+
+impl crate::domain::ports::metrics::DispatchMetrics for PanickingMeter {
+    fn dispatch_pass(
+        &self,
+        _outcome: crate::domain::ports::metrics::DispatchOutcome,
+        _duration: std::time::Duration,
+    ) {
+        panic!("a metrics adapter must never be able to fail the path it measures");
+    }
+
+    fn dispatch_decision(&self, _decision: crate::domain::ports::metrics::DispatchDecision) {
+        panic!("a metrics adapter must never be able to fail the path it measures");
+    }
+
+    fn queue_wait(&self, _waited: std::time::Duration) {
+        panic!("a metrics adapter must never be able to fail the path it measures");
+    }
+}
+
+/// **A dispatch pass emits exactly one counter increment and one duration.**
+///
+/// Driven through the real `OTel` SDK with an in-memory exporter, not a mock:
+/// what this needs to prove is that the *rendered series* is what a dashboard
+/// query will find, and a mock of the trait proves only that the call site
+/// calls the trait.
+#[tokio::test]
+async fn a_dispatch_pass_records_one_observation() {
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new().metrics(probe.adapter()).build().await;
+
+    fakes.dispatch.run_tick().await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter(QA_RUNS_DISPATCH),
+        1,
+        "one pass, one increment; the exported names were {:?}",
+        series.names()
+    );
+    assert_eq!(
+        series.histogram_count(QA_RUNS_DISPATCH_DURATION),
+        1,
+        "the counter and its duration are driven from one call, so they cannot \
+         disagree about how many passes there were"
+    );
+    assert_eq!(
+        series.counter_with(QA_RUNS_DISPATCH, &[("outcome", "completed")]),
+        1,
+        "a tick that reached the drain ran to the end"
+    );
+}
+
+/// **A failing dispatch pass still records, with a failure outcome.**
+///
+/// The RED half that is easy to omit: a metric that only counts successes tells
+/// an operator the rate and hides the errors.
+///
+/// The injected failure is `list_active`, which is the tick's *first* early
+/// return and the one an executor outage produces — the incident this counter
+/// is read during.
+#[tokio::test]
+async fn a_failing_dispatch_pass_records_a_failure_outcome() {
+    let executor = Arc::new(crate::infra::executor::mock::MockRunExecutor::new());
+    executor.fail_list_active("the executor is unreachable");
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .executor(Arc::clone(&executor) as Arc<dyn crate::domain::ports::run_executor::RunExecutor>)
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    fakes.dispatch.run_tick().await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter_with(QA_RUNS_DISPATCH, &[("outcome", "failed")]),
+        1,
+        "an executor outage is this gear's fault to fix, not the caller's"
+    );
+    assert_eq!(
+        series.histogram_count(QA_RUNS_DISPATCH_DURATION),
+        1,
+        "a pass that stopped early is still a pass that took time"
+    );
+}
+
+/// **A tick the concurrency cap stopped is refused, not failed.**
+///
+/// The distinction the outcome label exists for: a cluster at
+/// `max_concurrent_runs` is working as configured and must not page anybody,
+/// while the executor outage above must. Both stop the tick early and both
+/// leave `stopped_at` set, so nothing about *stopping* tells them apart.
+#[tokio::test]
+async fn a_tick_stopped_by_the_concurrency_cap_records_a_refusal() {
+    // One uncommitted claim against a cap of one, the fixture
+    // `the_ttl_sweep_runs_before_the_cap_check` uses to reach the same stop.
+    let claim = row_aged(
+        ROW_1,
+        OWNER_TENANT,
+        RUN_1,
+        PLATFORM_A,
+        false,
+        QueueState::Dispatching,
+        10,
+    );
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(
+            OWNER_TENANT,
+            run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Dispatching),
+        )])))
+        .queue(Arc::new(FakeQueue::with(vec![claim])))
+        .limits(QueueLimits {
+            queue_max_depth: 20,
+            max_concurrent_runs: 1,
+            queue_ttl_seconds: 7200,
+        })
+        .orphan_timeout(600)
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(
+        report.stopped_at,
+        Some("global cap evaluation"),
+        "the fixture must actually reach the cap, or this test proves nothing"
+    );
+    assert_eq!(
+        probe
+            .collect()
+            .counter_with(QA_RUNS_DISPATCH, &[("outcome", "refused")]),
+        1
+    );
+}
+
+/// **A metric emission never fails a request.**
+///
+/// Metrics are diagnostics. An adapter that panics or errors must not take the
+/// dispatch pass with it, and this pins that the emission path is infallible at
+/// the *call site* rather than only by the port's written contract — see
+/// `domain::service`'s `emit`.
+#[tokio::test]
+async fn a_broken_metrics_adapter_does_not_fail_the_pass() {
+    let fakes =
+        Builder::new()
+            .metrics(
+                Arc::new(PanickingMeter) as Arc<dyn crate::domain::ports::metrics::DispatchMetrics>
+            )
+            .build()
+            .await;
+
+    // Must not panic, and must still report what the tick did.
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(
+        report.stopped_at, None,
+        "a broken metrics adapter must not change what the tick does"
+    );
+}
+
+/// **A tick driven through the production adapter, with no `OTel` pipeline
+/// configured, behaves exactly as an unmetered one.**
+///
+/// This is the boot posture the gear ships in and the one every deployment
+/// without a collector runs: `gear.rs`'s init installs
+/// `infra::metrics::build_default_adapter` unconditionally, and with no
+/// provider ever registered the process-global one is the built-in no-op, so
+/// every instrument it built is a no-op.
+///
+/// The pairing is the test. Asserting only that the metered tick succeeds would
+/// pass against a tick that did nothing at all; running the *same* fixture
+/// twice, once through the real adapter and once through `NoopMetrics`, and
+/// requiring the two reports to be equal is what makes "measuring the path did
+/// not change it" the thing under test. `TickReport` already derived
+/// `PartialEq` before this task, which is what makes a whole-report comparison
+/// available here.
+#[tokio::test]
+async fn a_tick_with_no_pipeline_configured_behaves_exactly_as_an_unmetered_one() {
+    async fn tick_with(
+        metrics: Arc<dyn crate::domain::ports::metrics::DispatchMetrics>,
+    ) -> TickReport {
+        let stale = row_aged(
+            ROW_1,
+            OWNER_TENANT,
+            RUN_1,
+            PLATFORM_A,
+            false,
+            QueueState::Queued,
+            9_000,
+        );
+        let fakes = Builder::new()
+            .runs(Arc::new(FakeRuns::with(vec![(
+                OWNER_TENANT,
+                run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Queued),
+            )])))
+            .queue(Arc::new(FakeQueue::with(vec![stale])))
+            .metrics(metrics)
+            .build()
+            .await;
+        fakes.dispatch.run_tick().await
+    }
+
+    let metered = tick_with(crate::infra::metrics::build_default_adapter()).await;
+    let unmetered = tick_with(Arc::new(crate::domain::ports::metrics::NoopMetrics)
+        as Arc<dyn crate::domain::ports::metrics::DispatchMetrics>)
+    .await;
+
+    assert_eq!(
+        metered.expired, 1,
+        "premise: the fixture must actually do work, or two empty reports would \
+         compare equal and prove nothing"
+    );
+    assert_eq!(
+        metered, unmetered,
+        "installing the production adapter with no pipeline behind it must change \
+         nothing about what the tick does"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry: the queue wait
+// ---------------------------------------------------------------------------
+
+/// **A queued run that the tick drains reports how long it waited.**
+///
+/// The family that goes at `cpt-cf-qa-nfr-dispatch-latency`, which the tick's
+/// own duration cannot: the fixture enqueues the row an hour ago, so a metric
+/// that measured anything about *this* tick would report milliseconds. The
+/// assertion is on the bucket the value landed in, because that is what a p95
+/// query reads — an assertion on the count alone would pass against a wait of
+/// zero.
+///
+/// **What the bucket assertion pins, stated exactly, because the obvious
+/// reading of it is wrong.** An hour is far above `DURATION_BUCKETS`' 60 s top
+/// boundary, so `histogram_bucket_of(.., 3600.0)` reads the **overflow**
+/// bucket: it does not say the sample was an hour, only that it was more than
+/// a minute. That is still the whole of what this test needs — a tick duration
+/// is milliseconds — but it is bracketed on the other side here rather than
+/// left implied: the total count is one and the overflow holds it, so no
+/// sub-minute bucket holds anything, which is the statement "this is not the
+/// tick's own duration" in the strongest form these boundaries admit.
+#[tokio::test]
+async fn a_drained_run_reports_the_time_it_waited_in_the_queue() {
+    let waiting = row_aged(
+        ROW_1,
+        OWNER_TENANT,
+        RUN_1,
+        PLATFORM_A,
+        false,
+        QueueState::Queued,
+        3_600,
+    );
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(
+            OWNER_TENANT,
+            run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Queued),
+        )])))
+        .queue(Arc::new(FakeQueue::with(vec![waiting])))
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(report.claimed, 1, "premise: the tick must drain the row");
+    let series = probe.collect();
+    assert_eq!(
+        series.counter(QA_RUNS_QUEUE_WAIT),
+        1,
+        "one queued run reached an execution request"
+    );
+    assert_eq!(
+        series.histogram_count(QA_RUNS_QUEUE_WAIT_DURATION),
+        1,
+        "premise for the bracket below: exactly one observation was recorded"
+    );
+    assert_eq!(
+        series.histogram_bucket_of(QA_RUNS_QUEUE_WAIT_DURATION, 3_600.0),
+        Some(1),
+        "the one observation must sit in the bucket above the 60 s top boundary; \
+         with the count above, that places the whole sample beyond a minute and \
+         so beyond anything the tick that drained it could have taken"
+    );
+}
+
+/// **A run that never queued contributes nothing to the queue-wait family.**
+///
+/// The population matters as much as the measurement: the NFR is stated over
+/// *queued* runs, and a tick that drains nothing must leave the histogram
+/// empty rather than recording a zero. A zero-valued observation is
+/// indistinguishable in a quantile query from a real wait of zero, so it would
+/// silently drag the p95 down.
+#[tokio::test]
+async fn a_tick_that_drains_nothing_records_no_queue_wait() {
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new().metrics(probe.adapter()).build().await;
+
+    fakes.dispatch.run_tick().await;
+
+    let series = probe.collect();
+    assert_eq!(series.counter(QA_RUNS_QUEUE_WAIT), 0);
+    assert_eq!(series.histogram_count(QA_RUNS_QUEUE_WAIT_DURATION), 0);
+    assert_eq!(
+        series.counter(QA_RUNS_DISPATCH),
+        1,
+        "premise: the cycle itself was still counted, so this is the queue-wait \
+         family being empty rather than the adapter being uninstalled"
+    );
+}
+
+/// **A claimed row whose dispatch fails records no wait.**
+///
+/// It never reached an execution request, which is the end point the series is
+/// defined by; folding its time-to-failure in would mix two distributions.
+#[tokio::test]
+async fn a_row_that_fails_to_dispatch_records_no_queue_wait() {
+    let executor = Arc::new(crate::infra::executor::mock::MockRunExecutor::new());
+    executor.fail_start("the execution plane refuses");
+    let waiting = row_aged(
+        ROW_1,
+        OWNER_TENANT,
+        RUN_1,
+        PLATFORM_A,
+        false,
+        QueueState::Queued,
+        3_600,
+    );
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(
+            OWNER_TENANT,
+            run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Queued),
+        )])))
+        .queue(Arc::new(FakeQueue::with(vec![waiting])))
+        .executor(Arc::clone(&executor) as Arc<dyn crate::domain::ports::run_executor::RunExecutor>)
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(report.claimed, 1, "premise: the row was claimed");
+    assert_eq!(
+        probe.collect().counter(QA_RUNS_QUEUE_WAIT),
+        0,
+        "a run that never started never waited *for a start*"
+    );
+}
+
+/// **A persistently broken adapter is called once, not once per cycle.**
+///
+/// Catching the panic is only half the guarantee. The default panic hook writes
+/// to stderr *before* control returns to `domain::service`'s `emit`, so an
+/// adapter that panics every time — a poisoned instrument lock is the realistic
+/// shape — produces one line per emission, which on the ingest path is one line
+/// per log line. That is exactly the "never logs per-emission" failure the
+/// observability constraints name, arriving when the process can least absorb
+/// it.
+///
+/// So `emit` latches off after the first caught panic, and this counts the
+/// calls to prove it: two ticks, one call. Without the latch the count is two,
+/// and it would keep pace with the tick rate forever.
+#[tokio::test]
+async fn a_persistently_panicking_adapter_is_called_once_and_then_never_again() {
+    /// Counts its calls, then panics.
+    struct CountingPanickingMeter(std::sync::atomic::AtomicUsize);
+
+    impl crate::domain::ports::metrics::DispatchMetrics for CountingPanickingMeter {
+        fn dispatch_pass(
+            &self,
+            _outcome: crate::domain::ports::metrics::DispatchOutcome,
+            _duration: std::time::Duration,
+        ) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            panic!("this adapter is broken for the rest of the process");
+        }
+
+        fn dispatch_decision(&self, _decision: crate::domain::ports::metrics::DispatchDecision) {}
+        fn queue_wait(&self, _waited: std::time::Duration) {}
+    }
+
+    let meter = Arc::new(CountingPanickingMeter(std::sync::atomic::AtomicUsize::new(
+        0,
+    )));
+    let fakes = Builder::new()
+        .metrics(Arc::clone(&meter) as Arc<dyn crate::domain::ports::metrics::DispatchMetrics>)
+        .build()
+        .await;
+
+    fakes.dispatch.run_tick().await;
+    fakes.dispatch.run_tick().await;
+
+    assert_eq!(
+        meter.0.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the second cycle must not reach an adapter that has already panicked"
+    );
+}
+
+/// A [`RunExecutor`] that takes a known, non-trivial amount of wall-clock time
+/// to answer `list_active`, delegating everything else to the ordinary mock.
+///
+/// `list_active` is the tick's first outbound call, so a delay there puts a
+/// floor under the whole cycle. Its only job is to make the *magnitude* of the
+/// recorded sample assertable: every other double in this file answers
+/// instantly, so a call site that recorded a constant would produce a plausible
+/// sample and no count-based assertion could tell.
+struct SlowExecutor {
+    inner: crate::infra::executor::mock::MockRunExecutor,
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl crate::domain::ports::run_executor::RunExecutor for SlowExecutor {
+    async fn start(
+        &self,
+        spec: crate::domain::ports::run_executor::RunSpec,
+    ) -> Result<crate::domain::ports::run_executor::ExecutionRef, DomainError> {
+        self.inner.start(spec).await
+    }
+
+    async fn watch(
+        &self,
+        execution_ref: &crate::domain::ports::run_executor::ExecutionRef,
+        resume: crate::domain::repos::LogResume,
+    ) -> Result<crate::domain::ports::run_executor::ExecutionStream, DomainError> {
+        self.inner.watch(execution_ref, resume).await
+    }
+
+    async fn cancel(
+        &self,
+        execution_ref: &crate::domain::ports::run_executor::ExecutionRef,
+    ) -> Result<(), DomainError> {
+        self.inner.cancel(execution_ref).await
+    }
+
+    async fn list_active(
+        &self,
+    ) -> Result<
+        std::collections::BTreeSet<crate::domain::ports::run_executor::ExecutionRef>,
+        DomainError,
+    > {
+        tokio::time::sleep(self.delay).await;
+        self.inner.list_active().await
+    }
+}
+
+/// **The recorded cycle duration really is a clock around the cycle.**
+///
+/// Every other dispatch metric assertion here is about counts and labels, and
+/// counts cannot see a *value*: a call site that recorded `Duration::ZERO`, or
+/// a constant, or an `Instant` taken in the wrong place would satisfy all of
+/// them and hand a dashboard a fabricated distribution. Measured in
+/// qa-environments during Task 40 — a mutation replacing the elapsed time with
+/// a six-second constant passed that gear's whole suite, and this family had
+/// the same hole.
+///
+/// Written as **two bracketing assertions rather than one equality**, because
+/// an equality would be a timing test:
+///
+/// * the executor's `list_active` sleeps 150 ms and the tick awaits it, so the
+///   sample cannot be in a bucket whose upper edge is 100 ms or below — that
+///   direction is deterministic, since a sleep can only overrun;
+/// * and it must not be in the `(5 s, 10 s]` bucket, which no in-memory fixture
+///   can honestly reach, so any constant large enough to look like a real
+///   dispatcher cycle fails here.
+///
+/// Probed edge by edge rather than through one call: `histogram_bucket_of`
+/// answers for the single bucket a value falls in, so asking about one edge
+/// says nothing about the buckets below it.
+#[tokio::test]
+async fn the_recorded_cycle_duration_tracks_the_cycle_it_measures() {
+    let delay = std::time::Duration::from_millis(150);
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .executor(Arc::new(SlowExecutor {
+            inner: crate::infra::executor::mock::MockRunExecutor::new(),
+            delay,
+        })
+            as Arc<dyn crate::domain::ports::run_executor::RunExecutor>)
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    fakes.dispatch.run_tick().await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count(QA_RUNS_DISPATCH_DURATION),
+        1,
+        "premise: exactly one cycle was timed"
+    );
+    for edge in [0.005_f64, 0.01, 0.025, 0.05, 0.1] {
+        assert_eq!(
+            series.histogram_bucket_of(QA_RUNS_DISPATCH_DURATION, edge),
+            Some(0),
+            "a cycle whose executor listing slept for {delay:?} cannot have been measured \
+             at {edge} s or less, so that bucket must be empty -- a zero or a near-zero \
+             here means the clock is not around the cycle"
+        );
+    }
+    assert_eq!(
+        series.histogram_bucket_of(QA_RUNS_DISPATCH_DURATION, 6.0),
+        Some(0),
+        "and it cannot have taken between five and ten seconds either: an in-memory \
+         fixture does not, so a sample there is a fabricated or stale duration rather \
+         than a measured one"
     );
 }

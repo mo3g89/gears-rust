@@ -112,7 +112,10 @@ pub(super) fn register_collect_routes(mut router: Router, openapi: &dyn OpenApiR
              (the latter after path normalization) must be non-blank, or the request is a 400.",
         )
         .tag(API_TAG)
-        .public()
+        // `.public()` was split into two axes upstream and is now a deprecated
+        // alias forwarding to exactly this pair; the registration is unchanged.
+        .anonymous()
+        .exposed()
         .path_param("repo_id", "The repository this count belongs to")
         .query_param(
             "branch",

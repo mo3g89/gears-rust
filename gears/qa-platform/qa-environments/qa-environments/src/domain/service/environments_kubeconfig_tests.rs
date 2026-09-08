@@ -23,12 +23,13 @@ use std::sync::Arc;
 
 use credstore_sdk::{CredStoreClientV1, SecretRef, SharingMode};
 use qa_environments_sdk::{CredentialMaterial, EnvironmentPatch, NewEnvironment};
+use toolkit_odata::ODataQuery;
 use uuid::Uuid;
 
 use crate::api::rest::dto::{CreateEnvironmentReq, EnvironmentDto, UpdateEnvironmentReq};
 use crate::domain::error::DomainError;
 use crate::test_support::{
-    FixedPluginPort, RecordingCredStore, ScriptedPlugin,
+    CapturedLogs, FixedPluginPort, RecordingCredStore, ScriptedPlugin,
     build_services_tenant_scoped_with_plugin_and_credstore, ctx, inmem_db,
 };
 
@@ -325,9 +326,10 @@ async fn supplying_both_a_reference_and_a_document_is_a_validation_error_naming_
     assert!(
         services
             .environments
-            .list_environments(&ctx(tenant))
+            .list_environments(&ctx(tenant), &ODataQuery::default())
             .await
             .unwrap()
+            .items
             .is_empty()
     );
 }
@@ -441,9 +443,10 @@ async fn a_failed_credstore_write_creates_no_environment() {
     assert!(
         services
             .environments
-            .list_environments(&ctx(tenant))
+            .list_environments(&ctx(tenant), &ODataQuery::default())
             .await
             .unwrap()
+            .items
             .is_empty(),
         "no row may exist when the secret could not be stored"
     );
@@ -977,49 +980,12 @@ async fn deleting_an_environment_leaves_a_caller_supplied_secret_alone() {
 // ---------------------------------------------------------------------------
 // The security keystone
 // ---------------------------------------------------------------------------
-
-/// Collects the raw bytes a `tracing` subscriber writes, so a test can assert
-/// against **everything that was emitted** rather than a filtered view of it.
-///
-/// This exists instead of `tracing-test` (used elsewhere in this workspace)
-/// because of a hole that a break-test found: `tracing-test` keeps only the
-/// captured lines containing the test's span name, so a **multi-line** field
-/// value survives capture as its first line only. A kubeconfig is multi-line
-/// and its private key is not on line one, so a deliberate
-/// `info!(document = %material.expose())` planted in `write_generated_secret`
-/// left a `tracing-test` assertion on the canary **passing**. Against this
-/// buffer the same plant fails, which is the whole point of the test.
-#[derive(Clone, Default)]
-struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl CapturedLogs {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-    }
-
-    fn clear(&self) {
-        self.0.lock().unwrap().clear();
-    }
-}
-
-struct CapturedLogsWriter(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for CapturedLogsWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
-    type Writer = CapturedLogsWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        CapturedLogsWriter(Arc::clone(&self.0))
-    }
-}
+//
+// `CapturedLogs` / `CapturedLogsWriter` moved to `crate::test_support` (review
+// finding #29-followup) so `environments_sea_repo`'s tests can reuse the same
+// raw-byte capture instead of asserting only half of what a test's name
+// promises. See the doc comment there for the two hazards that apply to every
+// caller.
 
 /// The document must not appear in a log line, a `Debug` rendering, or a
 /// response body.

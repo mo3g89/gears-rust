@@ -181,7 +181,20 @@ pub fn file_declares_exclusive(
     if !tags_admit(&file.tags, include_tags, exclude_tags) {
         return None;
     }
-    Some(file.exclusive.unwrap_or(false))
+    // Named on all three states this crate's own `unwrap_or(false)` review
+    // findings (#10, #11) are about, even though `file.exclusive` is this
+    // module's local `Option<bool>` projection rather than the SDK's closed
+    // `Exclusivity` (out of scope for the type change — see this module's
+    // header and `FileMeta`'s doc): an admitted file always votes, so both the
+    // silent case and the declared-parallel case vote `false` here, and only
+    // a declared-exclusive file votes `true`. `None` and `Some(false)` share
+    // an arm (clippy `match_same_arms`) because they share a body, not
+    // because they share a meaning -- see the module header on why they must
+    // never be collapsed further up the call chain.
+    Some(match file.exclusive {
+        Some(true) => true,
+        None | Some(false) => false,
+    })
 }
 
 /// Resolve one standard plan: its `plan.yaml` tier, falling through to
@@ -245,7 +258,20 @@ pub fn resolve_plan_tier(
 /// (`manager/src/services/exclusivity.rs:468-488`, its test at `:656-664`).
 #[must_use]
 pub fn combine_nested(plan_tier: Option<bool>, test_meta_tier: Option<bool>) -> Resolution {
-    let exclusive = plan_tier.unwrap_or(false) || test_meta_tier.unwrap_or(false);
+    // Named on all three states of each tier, for the same reason
+    // `file_declares_exclusive` is: `None` and a declared `Some(false)` both
+    // contribute nothing to the OR, and only a declared `Some(true)` does.
+    // `None` and `Some(false)` share an arm (clippy `match_same_arms`)
+    // because they share a body, not a meaning.
+    let plan_says_exclusive = match plan_tier {
+        Some(true) => true,
+        None | Some(false) => false,
+    };
+    let test_meta_says_exclusive = match test_meta_tier {
+        Some(true) => true,
+        None | Some(false) => false,
+    };
+    let exclusive = plan_says_exclusive || test_meta_says_exclusive;
     // Branches 1-2 are the "contributed a `true`" cases, strongest source
     // first. Branches 3-4 are the "contributed a `false`" cases: nobody asked
     // for exclusivity, but somebody was *asked and answered*, so the tier names

@@ -22,6 +22,7 @@ use qa_runs::domain::error::DomainError;
 use qa_runs::domain::ports::run_executor::{
     ExecutionEvent, ExecutionNode, NodeOutcome, RunAccess, RunEnv, RunExecutor, RunSpec, RunnerSpec,
 };
+use qa_runs::domain::repos::LogResume;
 use qa_runs::domain::state_machine::ExecutorOutcome;
 use qa_runs::infra::executor::mock::MockRunExecutor;
 use uuid::Uuid;
@@ -67,7 +68,10 @@ async fn every_control_method_is_reachable_from_an_integration_test() {
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].run_id, run_id);
 
-    let mut stream = executor.watch(&execution_ref).await.unwrap();
+    let mut stream = executor
+        .watch(&execution_ref, LogResume::default())
+        .await
+        .unwrap();
     let mut events = Vec::new();
     while let Some(event) = stream.recv().await {
         events.push(event);
@@ -109,7 +113,7 @@ async fn every_control_method_is_reachable_from_an_integration_test() {
     // from an execution with nothing more to say.
     executor.fail_watch("watch unreachable");
     assert!(matches!(
-        executor.watch(&execution_ref).await.unwrap_err(),
+        executor.watch(&execution_ref, LogResume::default()).await.unwrap_err(),
         DomainError::ExecutorFailed(message) if message == "watch unreachable"
     ));
 }

@@ -18,7 +18,15 @@ use crate::domain::service::RegisteredProductPlugin;
 
 // ==================== Test repository DTOs ====================
 
-/// REST DTO for a registered git test repository.
+/// A test repository as published over REST.
+///
+/// **`credential_ref` is intentionally absent.** It names the credstore entry
+/// holding this repository's git credentials, and a LIST or GET caller can
+/// redeem a reference it has been handed. `SshKeyDto` and qa-environments'
+/// `PlatformDto` drop their credstore refs for the same reason. Do not add it
+/// back. The reference stays on the SDK model
+/// (`qa_catalog_sdk::TestRepository::credential_ref`), which is where the sync
+/// path reads it. Review finding #2.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct TestRepositoryDto {
@@ -30,10 +38,15 @@ pub struct TestRepositoryDto {
     pub default_branch: String,
     /// Subdirectory within the repo that contains test content ("" = root).
     pub content_root: String,
-    /// Reference to the access credential in credstore. The secret material
-    /// itself is never returned over this or any other API. `null` = public
-    /// repository.
-    pub credential_ref: Option<String>,
+    /// Whether an access credential is configured for this repository.
+    ///
+    /// A boolean, deliberately, not the `credential_ref` this field replaced: the
+    /// reference names a credstore entry a LIST or GET caller could redeem, and
+    /// that was the leak. Whether auth is configured is not itself sensitive — the
+    /// URL already implies it — and an operator diagnosing a failed sync on a
+    /// private repository needs it. `SshKeyDto` makes the same trade the same way,
+    /// publishing a `fingerprint` rather than its `credstore_ref`.
+    pub has_credential: bool,
     #[serde(with = "time::serde::rfc3339::option")]
     pub last_synced_at: Option<OffsetDateTime>,
     /// Sanitized error text of the last failed sync (`null` after a
@@ -54,7 +67,7 @@ impl From<sdk::TestRepository> for TestRepositoryDto {
             url: r.url,
             default_branch: r.default_branch,
             content_root: r.content_root,
-            credential_ref: r.credential_ref,
+            has_credential: r.credential_ref.is_some(),
             last_synced_at: r.last_synced_at,
             sync_error: r.sync_error,
             created_at: r.created_at,
@@ -189,7 +202,7 @@ impl From<sdk::Plan> for PlanDto {
             test_files: p.test_files,
             timeout_seconds: p.timeout_seconds,
             tags: p.tags,
-            exclusive: p.exclusive,
+            exclusive: p.exclusive.to_option_bool(),
         }
     }
 }
@@ -569,7 +582,7 @@ mod tests {
 
     use super::*;
 
-    fn repo() -> sdk::TestRepository {
+    fn repository_fixture() -> sdk::TestRepository {
         let now = OffsetDateTime::now_utc();
         sdk::TestRepository {
             id: Uuid::new_v4(),
@@ -588,7 +601,7 @@ mod tests {
 
     #[test]
     fn test_repository_dto_preserves_all_fields() {
-        let r = repo();
+        let r = repository_fixture();
         let dto = TestRepositoryDto::from(r.clone());
         assert_eq!(dto.id, r.id);
         assert_eq!(dto.product_id, r.product_id);
@@ -596,11 +609,74 @@ mod tests {
         assert_eq!(dto.url, r.url);
         assert_eq!(dto.default_branch, r.default_branch);
         assert_eq!(dto.content_root, r.content_root);
-        assert_eq!(dto.credential_ref, r.credential_ref);
         assert_eq!(dto.last_synced_at, r.last_synced_at);
         assert_eq!(dto.sync_error, r.sync_error);
         assert_eq!(dto.created_at, r.created_at);
         assert_eq!(dto.updated_at, r.updated_at);
+    }
+
+    /// **`credential_ref` must not appear on the read DTO.**
+    ///
+    /// It names a credstore entry holding the repository's git credentials, and a
+    /// LIST or GET caller can redeem it. `SshKeyDto` (`:528`) and `PlatformDto`
+    /// (`qa-environments/.../dto.rs:107`) both drop their credstore ref for the
+    /// same reason and both say so; this DTO was the outlier. Review finding #2.
+    ///
+    /// Asserted against the serialized JSON rather than the struct, because the
+    /// struct not having the field is what a compiler enforces and the wire not
+    /// carrying it is what an operator cares about.
+    #[test]
+    fn the_read_dto_does_not_publish_the_credential_reference() {
+        let r = sdk::TestRepository {
+            credential_ref: Some("qa-cred".to_owned()),
+            ..repository_fixture()
+        };
+        let body = serde_json::to_string(&TestRepositoryDto::from(r)).unwrap();
+        assert!(
+            !body.contains("credential_ref"),
+            "the read DTO must not publish credential_ref; body was {body}"
+        );
+        assert!(
+            !body.contains("qa-cred"),
+            "the read DTO must not publish the reference value; body was {body}"
+        );
+    }
+
+    /// **`has_credential` publishes the fact, not the reference.**
+    ///
+    /// It replaces `credential_ref` as the wire-visible signal that a repository is
+    /// authenticated: a bare boolean carries nothing a caller can redeem, unlike the
+    /// reference it stands in for, which must still never appear on the wire (the
+    /// leak this DTO fixed). Review finding #2.
+    #[test]
+    fn has_credential_reflects_whether_a_reference_is_set_without_publishing_it() {
+        let with_ref = sdk::TestRepository {
+            credential_ref: Some("qa-cred".to_owned()),
+            ..repository_fixture()
+        };
+        let body = serde_json::to_string(&TestRepositoryDto::from(with_ref)).unwrap();
+        assert!(
+            body.contains("\"has_credential\":true"),
+            "expected has_credential:true; body was {body}"
+        );
+        assert!(
+            !body.contains("credential_ref"),
+            "the read DTO must not publish credential_ref; body was {body}"
+        );
+        assert!(
+            !body.contains("qa-cred"),
+            "the read DTO must not publish the reference value; body was {body}"
+        );
+
+        let without_ref = sdk::TestRepository {
+            credential_ref: None,
+            ..repository_fixture()
+        };
+        let body = serde_json::to_string(&TestRepositoryDto::from(without_ref)).unwrap();
+        assert!(
+            body.contains("\"has_credential\":false"),
+            "expected has_credential:false; body was {body}"
+        );
     }
 
     #[test]
@@ -635,9 +711,29 @@ mod tests {
         assert_eq!(req.credential_ref, None);
     }
 
+    /// The wire boundary for `Plan::exclusive`: `sdk::Exclusivity` carries no
+    /// serde impl of its own (contract-purity rule; see that type's doc), so
+    /// `PlanDto::from` is where `null`/`true`/`false` actually gets produced.
+    /// This is one of the two named boundaries `Exclusivity`'s doc points at —
+    /// asserted here on the rendered JSON, not just on the Rust-level
+    /// `Option<bool>` field, so a `PlanDto::from` that stopped calling
+    /// `to_option_bool` would fail this test even if the field happened to
+    /// carry the right value some other way.
     #[test]
     fn plan_dto_preserves_exclusive_tri_state() {
-        for exclusive in [None, Some(true), Some(false)] {
+        for (exclusive, wire_option, wire_json) in [
+            (sdk::Exclusivity::Inherit, None, serde_json::json!(null)),
+            (
+                sdk::Exclusivity::Exclusive,
+                Some(true),
+                serde_json::json!(true),
+            ),
+            (
+                sdk::Exclusivity::Shared,
+                Some(false),
+                serde_json::json!(false),
+            ),
+        ] {
             let plan = sdk::Plan {
                 repo_id: Uuid::new_v4(),
                 product_id: Uuid::new_v4(),
@@ -653,9 +749,16 @@ mod tests {
                 exclusive,
             };
             let dto = PlanDto::from(plan.clone());
-            assert_eq!(dto.exclusive, exclusive, "tri-state must survive");
+            assert_eq!(dto.exclusive, wire_option, "tri-state must survive");
             assert_eq!(dto.repo_id, plan.repo_id);
             assert_eq!(dto.test_files, plan.test_files);
+
+            let body = serde_json::to_value(&dto).unwrap();
+            assert_eq!(
+                body["exclusive"], wire_json,
+                "the rendered JSON must be null/true/false, unchanged from the \
+                 Option<bool> this type replaced"
+            );
         }
     }
 

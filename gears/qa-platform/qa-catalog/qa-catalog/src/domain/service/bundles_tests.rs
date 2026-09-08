@@ -8,8 +8,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use authz_resolver_sdk::models::{EvaluationRequest, EvaluationResponse, EvaluationResponseContext};
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
+use authz_resolver_sdk::models::{
+    EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
+};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use flate2::read::GzDecoder;
 use qa_catalog_sdk::{BundleRequest, TestBundle};
 use time::OffsetDateTime;
@@ -24,6 +26,8 @@ use super::test_support::{
 use crate::domain::error::DomainError;
 use crate::domain::ports::bundle_store::BundleStore;
 use crate::domain::repos::BundlesRepository;
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 const FIXTURE_CONTENT: &str = "def test_a():\n    assert True\n";
 
@@ -119,7 +123,7 @@ impl BundlesRepository for MockBundlesRepository {
         bundle: TestBundle,
     ) -> Result<TestBundle, DomainError> {
         if self.failing_create {
-            return Err(DomainError::Database("descriptor write failed".to_owned()));
+            return Err(DomainError::database("descriptor write failed"));
         }
         self.rows
             .lock()
@@ -711,7 +715,7 @@ async fn create_bundle_deletes_the_blob_when_the_descriptor_write_fails() {
         .unwrap_err();
 
     assert!(
-        matches!(err, DomainError::Database(_)),
+        matches!(err, DomainError::Database { .. }),
         "the original write error must propagate, not the cleanup outcome: {err:?}"
     );
     assert!(
@@ -750,7 +754,7 @@ async fn create_bundle_rejects_path_traversal() {
 // delete per tenant under `system_actor::for_bundle_delete`
 // ---------------------------------------------------------------------------
 
-/// [`AuthZResolverClient`] double that records every request it is asked to
+/// [`AuthZResolverApi`] double that records every request it is asked to
 /// decide and always grants tenant-scoped access — the harness for
 /// [`tenants_with_expired_bundles_does_not_consult_the_policy_engine`]: a
 /// request that slipped through to `evaluate` is recorded here regardless of
@@ -767,11 +771,12 @@ impl RecordingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for RecordingAuthZ {
+impl AuthZResolverApi for RecordingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.requests
             .lock()
             .unwrap()
@@ -788,7 +793,7 @@ async fn build_service_with_authz(
     repos: Arc<MockTestReposRepository>,
     store: Arc<InMemoryBundleStore>,
     repos_dir: PathBuf,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
 ) -> BundlesService<MockBundlesRepository, MockTestReposRepository> {
     let enforcer = PolicyEnforcer::new(authz);
     let db = test_db_provider().await;
@@ -807,13 +812,7 @@ async fn tenants_with_expired_bundles_lists_each_expired_tenant_once() {
     let (tmp, repos) = synced_fixture(repo_id);
     let bundles = Arc::new(MockBundlesRepository::default());
     let store = Arc::new(InMemoryBundleStore::default());
-    let svc = build_service(
-        Arc::clone(&bundles),
-        repos,
-        store,
-        tmp.path().to_path_buf(),
-    )
-    .await;
+    let svc = build_service(Arc::clone(&bundles), repos, store, tmp.path().to_path_buf()).await;
 
     let now = OffsetDateTime::now_utc();
     // Two expired bundles for tenant_a (DISTINCT must collapse them), one
@@ -868,13 +867,7 @@ async fn tenants_with_expired_bundles_excludes_the_nil_tenant() {
     let (tmp, repos) = synced_fixture(repo_id);
     let bundles = Arc::new(MockBundlesRepository::default());
     let store = Arc::new(InMemoryBundleStore::default());
-    let svc = build_service(
-        Arc::clone(&bundles),
-        repos,
-        store,
-        tmp.path().to_path_buf(),
-    )
-    .await;
+    let svc = build_service(Arc::clone(&bundles), repos, store, tmp.path().to_path_buf()).await;
 
     let now = OffsetDateTime::now_utc();
     for (tenant, expires_at) in [
@@ -965,13 +958,7 @@ async fn purging_each_enumerated_tenant_removes_only_that_tenants_rows() {
     let (tmp, repos) = synced_fixture(repo_id);
     let bundles = Arc::new(MockBundlesRepository::default());
     let store = Arc::new(InMemoryBundleStore::default());
-    let svc = build_service(
-        Arc::clone(&bundles),
-        repos,
-        store,
-        tmp.path().to_path_buf(),
-    )
-    .await;
+    let svc = build_service(Arc::clone(&bundles), repos, store, tmp.path().to_path_buf()).await;
 
     let now = OffsetDateTime::now_utc();
     let id_a = Uuid::new_v4();

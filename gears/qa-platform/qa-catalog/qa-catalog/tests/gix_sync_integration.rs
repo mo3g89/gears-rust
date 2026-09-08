@@ -17,11 +17,11 @@
 use std::path::Path;
 
 use gix::bstr::BString;
-use qa_catalog::domain::error::DomainError;
-use qa_catalog::domain::parsing::plan_yaml::parse_plan_yaml;
-use qa_catalog::domain::ports::repo_sync::RepoSyncPort;
-use qa_catalog::infra::git::GixSyncEngine;
-use qa_catalog::infra::git::layout::{branch_workdir, host_dir};
+// `domain` and `infra` are `pub(crate)` (review finding #38); everything this
+// test needs is re-exported at the crate root, named there one item at a time.
+use qa_catalog::{
+    DomainError, GixSyncEngine, RepoSyncPort, branch_workdir, host_dir, parse_plan_yaml,
+};
 
 const PLAN_YAML: &str = "name: smoke\ntags: [ci]\ntests:\n  - tests/test_login.py\n";
 const PLAN_YAML_V2: &str = "name: smoke\ntags: [ci, nightly]\ntests:\n  - tests/test_login.py\n";

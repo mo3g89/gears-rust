@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use time::{Duration, OffsetDateTime};
 use toolkit_db::DBProvider;
 use toolkit_security::SecurityContext;
@@ -59,7 +59,7 @@ impl Fixture {
     async fn with_authz(
         lookback: Duration,
         page_size: u32,
-        authz: Arc<dyn AuthZResolverClient>,
+        authz: Arc<dyn AuthZResolverApi>,
     ) -> Self {
         let db = inmem_db().await;
         let provider = Arc::new(DBProvider::<DomainError>::new(db.clone()));

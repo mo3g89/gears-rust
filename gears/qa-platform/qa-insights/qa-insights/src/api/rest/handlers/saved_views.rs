@@ -4,8 +4,9 @@
 //!
 //! # Every service call goes through [`as_saved_view_error`]
 //!
-//! Not a bare `?`. `api::rest::error`'s own header records why: its blanket
-//! `From<DomainError> for CanonicalError` has no per-call-site information, so
+//! Not a bare `?`. [`as_saved_view_error`]'s own doc records why: the blanket
+//! `From<DomainError> for CanonicalError` in `domain::error` has no
+//! per-call-site information, so
 //! it attributes every `Validation` and every `Forbidden` to the test-result
 //! resource — right for the analytics and dashboard handlers, wrong here.
 //! `domain::service::saved_views` raises `Validation` on `scope`, `name` and
@@ -151,3 +152,7 @@ pub async fn delete_saved_view(
         .map_err(as_saved_view_error)?;
     Ok(no_content().into_response())
 }
+
+#[cfg(test)]
+#[path = "saved_views_handler_tests.rs"]
+mod saved_views_handler_tests;

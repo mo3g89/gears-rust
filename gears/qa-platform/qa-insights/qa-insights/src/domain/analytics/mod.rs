@@ -15,8 +15,8 @@
 //!   their normalization, with the two day-count defaults legacy applies before
 //!   [`aggregates`]' clamps see them. **A domain module and not a DTO**, so the
 //!   rules are testable without a router; the HTTP status each rejection carries
-//!   is [`crate::api::rest::error`]' single `Validation` arm and that module's
-//!   header carries the split.
+//!   is [`crate::domain::error`]' single `Validation` arm and that mapping's
+//!   own comment carries the split.
 //! * [`aggregates`] — Tasks 21-24: the summary, the per-test tallies, the three
 //!   lists, the heatmap, the trend, the flaky detector, the quality vectors, the
 //!   three group breakdowns, the build distribution and the build-tests

@@ -105,11 +105,14 @@ ALTER TABLE qa_platforms ADD COLUMN is_default BOOLEAN NOT NULL DEFAULT 0;
 /// `m20260814_000006_platform_default_branch::sql_for` records: the gear's tests
 /// only run `SQLite`, so a swapped match arm leaves every test green while
 /// handing the server dialects the wrong statement.
-const fn sql_for(backend: sea_orm::DatabaseBackend) -> &'static str {
+fn sql_for(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
     match backend {
-        sea_orm::DatabaseBackend::Postgres => POSTGRES_UP,
-        sea_orm::DatabaseBackend::MySql => MYSQL_UP,
-        sea_orm::DatabaseBackend::Sqlite => SQLITE_UP,
+        sea_orm::DatabaseBackend::Postgres => Ok(POSTGRES_UP),
+        sea_orm::DatabaseBackend::MySql => Ok(MYSQL_UP),
+        sea_orm::DatabaseBackend::Sqlite => Ok(SQLITE_UP),
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 
@@ -117,7 +120,7 @@ const fn sql_for(backend: sea_orm::DatabaseBackend) -> &'static str {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
-        let sql = sql_for(manager.get_database_backend());
+        let sql = sql_for(manager.get_database_backend())?;
         conn.execute_unprepared(sql).await?;
         Ok(())
     }
@@ -213,14 +216,19 @@ mod tests {
         use sea_orm::DatabaseBackend;
 
         for backend in [DatabaseBackend::Postgres, DatabaseBackend::MySql] {
-            let sql = without_comments(super::sql_for(backend));
+            let sql = without_comments(
+                super::sql_for(backend).expect("dispatch covers every backend this build compiles"),
+            );
             assert!(
                 sql.contains("DEFAULT FALSE"),
                 "{backend:?} must get the server statement spelling the literal FALSE"
             );
         }
 
-        let sqlite = without_comments(super::sql_for(DatabaseBackend::Sqlite));
+        let sqlite = without_comments(
+            super::sql_for(DatabaseBackend::Sqlite)
+                .expect("dispatch covers every backend this build compiles"),
+        );
         assert!(
             sqlite.contains("DEFAULT 0"),
             "SQLite must get the integer-literal statement"
@@ -287,7 +295,7 @@ mod tests {
     /// One INTEGER column of the planted row. `is_default` is a `BOOLEAN`,
     /// which `SQLite` stores as `INTEGER`, so reading it as text fails.
     async fn int_col(conn: &DatabaseConnection, column: &str) -> Option<i32> {
-        conn.query_one(sea_orm::Statement::from_string(
+        conn.query_one_raw(sea_orm::Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "SELECT {column} FROM qa_environments WHERE id = {};",
@@ -308,7 +316,7 @@ mod tests {
     /// a raw insert with an entity read makes the test depend on the two
     /// agreeing about how a `Uuid` is bound.
     async fn col(conn: &DatabaseConnection, column: &str) -> Option<String> {
-        conn.query_one(sea_orm::Statement::from_string(
+        conn.query_one_raw(sea_orm::Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "SELECT {column} FROM qa_environments WHERE id = {};",

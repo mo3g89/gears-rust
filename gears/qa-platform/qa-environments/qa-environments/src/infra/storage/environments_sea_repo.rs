@@ -12,24 +12,31 @@ use qa_product_sdk::observation::{
     HealthOutcome as PluginHealthOutcome, HealthState,
     ObservationOutcome as PluginObservationOutcome, ObservedAttrs,
 };
-use sea_orm::sea_query::{Expr, Func};
-use sea_orm::{ActiveValue, EntityTrait, QueryFilter};
+use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::Func;
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
+use toolkit_db::odata::sea_orm_filter::paginate_odata;
 use toolkit_db::secure::{
     DBRunner, SecureDeleteExt, SecureEntityExt, SecureUpdateExt, secure_insert,
     secure_update_with_scope,
 };
+use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::AccessScope;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::observation_write::ObservationWrite;
 use crate::domain::repos::{EnvironmentsRepository, PersistedCredentials};
-use crate::infra::storage::db::db_err;
+use crate::infra::storage::db::{PAGE_LIMITS, db_err, odata_err};
 use crate::infra::storage::entity::environment::{
     self, ActiveModel as EnvironmentAM, Column as EnvironmentColumn, Entity as EnvironmentEntity,
 };
 use crate::infra::storage::mapper::{credentials_to_json, environment_to_sdk};
+use crate::infra::storage::odata::{
+    EnvironmentFilterField, EnvironmentODataMapper, NAME_TIEBREAKER,
+};
 
 /// ORM-based implementation of the `EnvironmentsRepository` trait.
 #[derive(Clone, Default)]
@@ -44,7 +51,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         id: Uuid,
     ) -> Result<Option<Environment>, DomainError> {
         let found = EnvironmentEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -53,18 +60,34 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         Ok(found.map(environment_to_sdk))
     }
 
-    async fn list<C: DBRunner>(
+    async fn list_page<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
-    ) -> Result<Vec<Environment>, DomainError> {
-        let rows = EnvironmentEntity::find()
-            .secure()
-            .scope_with(scope)
-            .all(runner)
-            .await
-            .map_err(db_err)?;
-        Ok(rows.into_iter().map(environment_to_sdk).collect())
+        query: &ODataQuery,
+    ) -> Result<Page<Environment>, DomainError> {
+        // `.secure().scope_with(scope)` before `paginate_odata`, and not
+        // optionally: that function's first parameter is
+        // `SecureSelect<E, Scoped>`, so an unscoped select does not type-check
+        // and the caller's `$filter` is applied on top of the tenant predicate
+        // rather than in place of it.
+        let scoped = EnvironmentEntity::find().secure().scope_with(scope);
+
+        paginate_odata::<EnvironmentFilterField, EnvironmentODataMapper, _, _, _, _>(
+            scoped,
+            runner,
+            query,
+            // `name` ascending, not `created_at` descending as qa-runs uses:
+            // `idx_qa_environments_tenant_name (tenant_id, name)` makes this an
+            // exact index prefix once the scope has pinned the tenant, and
+            // `name` is unique per tenant so a single-key cursor is total. See
+            // `infra::storage::odata`'s header.
+            NAME_TIEBREAKER,
+            PAGE_LIMITS,
+            environment_to_sdk,
+        )
+        .await
+        .map_err(|error| odata_err(&error))
     }
 
     async fn list_all_with_tenant<C: DBRunner>(
@@ -72,6 +95,34 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         runner: &C,
         scope: &AccessScope,
     ) -> Result<Vec<(Environment, Uuid)>, DomainError> {
+        // **Unbounded by design, and the one read on this trait that is.**
+        //
+        // Review finding #55 is about a client-facing collection read with no
+        // page; `list_page` three declarations above is where it is closed, and
+        // that method's doc says so. This is the deliberate exception, recorded
+        // here rather than left as an unremarked `.all()` that reads like the
+        // defect the finding named:
+        //
+        // * **No client can ask for it.** It is not reachable from any route.
+        //   The sole caller is the background observation ticker's per-cycle
+        //   sweep (`EnvironmentsService::run_observation_cycle`), which is this
+        //   gear's own maintenance duty; a request cannot reach it, so there is
+        //   no page size for a caller to omit and no query to widen.
+        // * **The caller needs every row.** The sweep exists to observe each
+        //   environment once per cycle. Paging it would mean either a cursor
+        //   held across ticks -- with rows created or deleted between them
+        //   silently skipped or re-observed -- or a cap, which would leave
+        //   environments past it never observed at all. Completeness is the
+        //   whole contract, the same argument `local_client`'s `drain_pages`
+        //   makes for the SDK reads.
+        // * **It is still scoped.** `allow_all` is a value of `AccessScope`,
+        //   not a bypass: the read goes through `.secure().scope_with(scope)`
+        //   like every other one here, and the tenant travels back with each
+        //   row so the sweep can mint a tenant-bound context per environment.
+        //   The trait's own doc carries that reasoning at length.
+        //
+        // The bound that does exist is deployment scale: `cpt-cf-qa-nfr-scale`'s
+        // first number is 100 platforms, which is the size of this sweep.
         let rows = EnvironmentEntity::find()
             .secure()
             .scope_with(scope)
@@ -192,7 +243,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         credentials: Option<PersistedCredentials>,
     ) -> Result<Option<Environment>, DomainError> {
         let existing = EnvironmentEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -329,8 +380,8 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
             .col_expr(EnvironmentColumn::IsDefault, Expr::value(false))
             .filter(
                 sea_orm::Condition::all()
-                    .add(Expr::col(EnvironmentColumn::ProductId).eq(product_id))
-                    .add(Expr::col(EnvironmentColumn::Id).ne(except_id)),
+                    .add(EnvironmentColumn::ProductId.eq(product_id))
+                    .add(EnvironmentColumn::Id.ne(except_id)),
             )
             .secure()
             .scope_with(scope)
@@ -348,7 +399,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         id: Uuid,
     ) -> Result<bool, DomainError> {
         let result = EnvironmentEntity::delete_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .exec(runner)
@@ -409,15 +460,35 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         let now = OffsetDateTime::now_utc();
 
         let update = EnvironmentEntity::update_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentColumn::Id.eq(id)))
             .secure()
             .scope_with(scope);
 
         let update = match observation.environment() {
             PluginObservationOutcome::Detected(_) => {
                 let roles = observation.roles();
-                let attrs = serde_json::to_value(observation.attrs())
-                    .unwrap_or_else(|_| serde_json::json!({}));
+                // `ObservedAttrs` is a `BTreeMap<String, String>`, so this
+                // cannot fail today. It is matched rather than defaulted
+                // because the alternative wrote an empty attribute map
+                // *together with* a `Checked` status -- recording "we looked
+                // and saw nothing" for what is actually "we could not
+                // serialize what we saw". If the map's value type ever widens,
+                // this must skip the health write, not invent one.
+                // Review finding #29.
+                //
+                // This early `return Ok(())` also exits before the health-half
+                // match below and before the `rows_affected == 0` check at the
+                // end of this method, so a write against a nonexistent
+                // environment that also hit this (currently unreachable)
+                // branch would report success instead of
+                // `EnvironmentNotFound`. That is what this brief's own
+                // suggested fix does; noted rather than changed, since
+                // reordering it is a different, un-asked-for change in
+                // control flow. Review finding #29 (minor).
+                let Some(attrs) = attrs_or_skip(serde_json::to_value(observation.attrs()), id)
+                else {
+                    return Ok(());
+                };
                 update
                     // Target is authoritative: overwrite outright, even to NULL.
                     .col_expr(
@@ -443,7 +514,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
                         EnvironmentColumn::ObservedBaseUrl,
                         Func::coalesce([
                             Expr::value(roles.base_url.clone()),
-                            Expr::col(EnvironmentColumn::ObservedBaseUrl).into(),
+                            Expr::col(EnvironmentColumn::ObservedBaseUrl),
                         ])
                         .into(),
                     )
@@ -518,6 +589,39 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
     }
 }
 
+/// Turn an observed-attribute serialization outcome into either the value to
+/// write, or the signal that [`OrmEnvironmentsRepository::record_observation`]
+/// must skip the whole health write instead of recording an empty one.
+///
+/// # Why this is a free function rather than inline in the match arm
+///
+/// `record_observation`'s own call site can never produce the `Err` this
+/// matches: `ObservedAttrs` is a `BTreeMap<String, String>`, and
+/// `serde_json::to_value` on one cannot fail. Pulling the decision out into a
+/// function that takes the *outcome* of that serialization, rather than the
+/// value to serialize, is what lets
+/// [`a_serialization_failure_skips_the_write_and_warns`] drive the skip path
+/// with a real `serde_json::Error` — the one a genuinely malformed document
+/// produces — instead of the call site's always-succeeds input. Review
+/// finding #29.
+fn attrs_or_skip(
+    result: Result<serde_json::Value, serde_json::Error>,
+    id: Uuid,
+) -> Option<serde_json::Value> {
+    match result {
+        Ok(attrs) => Some(attrs),
+        Err(error) => {
+            warn!(
+                environment_id = %id,
+                %error,
+                "qa-environments: observed attributes could not be serialized; skipping this \
+                 health write rather than recording an empty one"
+            );
+            None
+        }
+    }
+}
+
 /// Tests for `record_observation`'s five merge rules (three for the version
 /// half, two for the cluster-health half).
 ///
@@ -547,7 +651,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod record_observation_tests {
     use qa_environments_sdk::NewEnvironment;
-    use sea_orm::{EntityTrait, QueryFilter};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     use toolkit_db::secure::{DBRunner, SecureEntityExt};
     use toolkit_security::AccessScope;
     use uuid::Uuid;
@@ -556,9 +660,11 @@ mod record_observation_tests {
         FailureClass, HealthState, ObservedAttrs, PluginFailure, PluginObservation,
     };
 
+    use crate::test_support::CapturedLogs;
+
     use super::{
-        EnvironmentColumn, EnvironmentEntity, Expr, ObservationWrite, PluginHealthOutcome,
-        PluginObservationOutcome,
+        EnvironmentColumn, EnvironmentEntity, ObservationWrite, PluginHealthOutcome,
+        PluginObservationOutcome, attrs_or_skip,
     };
     use crate::domain::repos::{EnvironmentsRepository, PersistedCredentials};
     use crate::infra::storage::entity::environment;
@@ -688,7 +794,7 @@ mod record_observation_tests {
     /// would drop the four columns under test.
     async fn fetch_row(conn: &impl DBRunner, scope: &AccessScope, id: Uuid) -> environment::Model {
         EnvironmentEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(conn)
@@ -1081,5 +1187,69 @@ mod record_observation_tests {
              health column since Task 19 dropped the legacy pair"
         );
         assert_eq!(row.health_detail.as_deref(), Some("Healthy"));
+    }
+
+    /// **The skip path, exercised with a real `serde_json::Error`.** Review
+    /// finding #29, and its own follow-up: the first version of this test
+    /// asserted only `outcome.is_none()`, leaving the `_and_warns` half of
+    /// its name unverified -- exactly the gap #28 disclosed and #29 did not.
+    /// It now drives the `warn!` too, via [`crate::test_support::CapturedLogs`]
+    /// (moved there from `environments_kubeconfig_tests` for this reuse).
+    ///
+    /// `record_observation`'s own call site can never produce this `Err`:
+    /// `ObservedAttrs` is a `BTreeMap<String, String>`, and
+    /// `serde_json::to_value` on one cannot fail. So this cannot be TDD'd the
+    /// ordinary way -- there is no way to make the *call site* red first --
+    /// and this test does not pretend otherwise. What it does honestly is
+    /// drive [`attrs_or_skip`] directly with the `serde_json::Error` a
+    /// genuinely malformed document produces (from a real failed parse, not a
+    /// fabricated stand-in), and pin that the decision function returns
+    /// `None` rather than `Some(json!({}))` -- the fix for the trap this
+    /// finding is about, closed before the map's value type could ever widen
+    /// enough to reach it for real.
+    ///
+    /// No `#[tokio::test]` needed: `attrs_or_skip` is synchronous, so a plain
+    /// thread-local `tracing::subscriber::set_default` guard already covers
+    /// the one call made while it is held -- there is no `.await` for the
+    /// guard to need to survive. The other hazard the harness's doc comment
+    /// warns about (global per-callsite `Interest` caching) does not apply
+    /// either: this `warn!` callsite lives only in `attrs_or_skip`'s `Err`
+    /// arm, which no other test in this crate reaches, so no other test can
+    /// have cached it as `never` first. Confirmed empirically, not just
+    /// argued -- see the fix report for both the solo and full-suite runs.
+    #[test]
+    fn a_serialization_failure_skips_the_write_and_warns() {
+        let malformed = serde_json::from_str::<serde_json::Value>("{not json")
+            .expect_err("deliberately malformed, to get a real serde_json::Error");
+
+        let logs = CapturedLogs::default();
+        let outcome = {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(logs.clone())
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .finish();
+            let _guard = tracing::subscriber::set_default(subscriber);
+            attrs_or_skip(Err(malformed), Uuid::from_u128(0x0E))
+        };
+
+        assert!(
+            outcome.is_none(),
+            "a serialization failure must skip the write, not answer an empty attribute map"
+        );
+        assert!(
+            logs.text().contains("skipping this health write"),
+            "a serialization failure must be logged, not silent; captured: {}",
+            logs.text()
+        );
+    }
+
+    /// The ordinary path: a value that serialized without issue is passed
+    /// through unchanged.
+    #[test]
+    fn a_successful_serialization_is_passed_through() {
+        let value = serde_json::json!({"namespace": "virtuozzo"});
+        let outcome = attrs_or_skip(Ok(value.clone()), Uuid::from_u128(0x0E));
+        assert_eq!(outcome, Some(value));
     }
 }

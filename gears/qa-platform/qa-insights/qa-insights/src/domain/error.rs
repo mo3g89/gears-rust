@@ -78,7 +78,7 @@
 //!   forecast this and did not need it: the projection's delete-then-insert runs
 //!   inside the caller's transaction, so a lost race surfaces as a database
 //!   error and rolls back rather than as this variant. It is mapped at the
-//!   boundary anyway — see `api::rest::error` — and unconstructed).
+//!   boundary anyway — see the boundary mapping below — and unconstructed).
 //! * [`DomainError::UnsupportedEgress`] — the notification router (Tasks
 //!   36-39).
 //!
@@ -102,17 +102,25 @@
 //! re-export and recorded the two conditions in that file's header, pointing at
 //! this one. This is where the pointer lands, and the mappings that header
 //! promises — `IngestConflict` to `CanonicalError::Aborted`, `UnsupportedEgress`
-//! to `CanonicalError::Unimplemented` — are Task 16's, in `api::rest::error`,
-//! which is where every sibling puts its single `From<DomainError> for
-//! CanonicalError` (`qa-runs/src/api/rest/error.rs:317`). They are not repeated
-//! here, because a domain module that names `CanonicalError` is a domain module
-//! that has learned about transports.
+//! to `CanonicalError::Unimplemented` — are Task 16's, in the boundary mapping
+//! **below in this same file**.
+//!
+//! They were written in `api::rest::error`, and this paragraph used to say they
+//! were "not repeated here, because a domain module that names `CanonicalError`
+//! is a domain module that has learned about transports". The review's own
+//! findings #15/#16 went the other way: two domain modules were already naming
+//! `CanonicalError`, and the mapping sitting one layer up is what made their
+//! fall-through arms call *into* the transport layer. `qa-runs` moved its impl
+//! next to its enum for the same reason (`qa-runs/src/domain/error.rs`), and so
+//! did this one.
 //!
 //! **Discharged by Task 16**, both of them, with a test each
 //! (`api::rest::error::tests::an_ingest_conflict_is_409_aborted` and
-//! `..::an_unsupported_egress_channel_is_501_unimplemented`). The chain from
-//! this file to there terminates for those two before it is picked back up below
-//! for Task 28's own additions.
+//! `..::an_unsupported_egress_channel_is_501_unimplemented` — the tests stayed
+//! in `api::rest::error`, which still owns the two call-site renderers they
+//! share a module with). The chain from `qa-insights-sdk` to those two arms
+//! terminates here before it is picked back up below for Task 28's own
+//! additions.
 //!
 //! # Task 28 adds one variant and reaches the boundary for another
 //!
@@ -133,8 +141,14 @@
 //! `qa-insights-sdk/src/errors.rs` to here to there now terminates.
 
 use thiserror::Error;
+use toolkit_canonical_errors::{CanonicalError, resource_error};
 use toolkit_macros::domain_model;
 use uuid::Uuid;
+
+// The resource type the mapping below shares with
+// `domain::error_attribution::as_jira_error` -- imported rather than
+// re-declared so both raise the same `gts_id`.
+use crate::domain::error_attribution::JiraBugResourceError;
 
 /// Domain-specific errors using thiserror.
 #[domain_model]
@@ -309,24 +323,72 @@ pub enum DomainError {
     #[error("access denied")]
     Forbidden,
 
-    /// A storage failure.
-    #[error("database error: {0}")]
-    Database(String),
+    /// A storage failure: the driver's own message, plus the error it came
+    /// from when there was a typed one.
+    ///
+    /// # Why there is a boxed source here — review finding #25
+    ///
+    /// This was `Database(String)`, so `From<toolkit_db::DbError>` kept
+    /// `e.to_string()` and dropped the error itself: `.source()` returned
+    /// `None`, and anything a caller might have wanted from the original —
+    /// `sea_orm::DbErr`'s SQLSTATE, a `sqlx::Error`'s constraint name, the
+    /// whole cause chain rendered into a `tracing` field with `{:?}` — was
+    /// unrecoverable by the time the error left `infra::storage`. The
+    /// `TODO(DE1302)` that used to sit above the `From` impl below named
+    /// exactly this fix.
+    ///
+    /// `message` keeps the rendered text and the `Display` string is
+    /// unchanged (`"database error: {message}"`), so every response body, log
+    /// line and persisted `error` column this variant reaches reads exactly as
+    /// it did before.
+    #[error("database error: {message}")]
+    Database {
+        /// The driver's rendered message — `DbError::to_string()` for a
+        /// converted error, or the text a caller had in hand for one built
+        /// with [`DomainError::database`].
+        message: String,
+        /// The error this was converted from. `From<toolkit_db::DbError>`
+        /// always sets it; `None` for a failure that only ever existed as text
+        /// (a `toolkit_odata::Error::Db` string, a test fixture), which is why
+        /// this is an `Option` rather than a required field.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// Anything else, and nothing a caller can act on.
     #[error("internal error: {0}")]
     Internal(String),
 }
 
-// TODO(DE1302): `Database(String)` only stores a formatted message, so this
-// `From` impl drops the source error. Extend `Database` to hold a boxed source
-// so `.source()` returns the original error, then remove this allow. Carried
-// verbatim from `qa-environments/src/domain/error.rs`, which carries the same
-// TODO against the same lint.
-#[allow(unknown_lints, de1302_error_from_to_string)]
+impl DomainError {
+    /// A [`Self::Database`] from a rendered message alone, with no source to
+    /// attach — for a storage failure that arrives as text rather than as a
+    /// typed error (`infra::storage`'s `toolkit_odata` mapping, and test
+    /// fixtures).
+    ///
+    /// Prefer `?` on a `toolkit_db::DbError`, which goes through
+    /// `From<toolkit_db::DbError>` and keeps the original as `.source()`
+    /// (review finding #25).
+    #[must_use]
+    pub fn database(message: impl Into<String>) -> Self {
+        Self::Database {
+            message: message.into(),
+            source: None,
+        }
+    }
+}
+
+/// Review finding #25: the source is boxed into [`DomainError::Database`]
+/// rather than flattened to `e.to_string()`, so `.source()` reaches the
+/// original `DbError` and its own cause chain. See that variant's doc; the
+/// TODO(DE1302) comment and its lint allowance, which named exactly this fix,
+/// are gone with it.
 impl From<toolkit_db::DbError> for DomainError {
     fn from(e: toolkit_db::DbError) -> Self {
-        DomainError::Database(e.to_string())
+        DomainError::Database {
+            message: e.to_string(),
+            source: Some(Box::new(e)),
+        }
     }
 }
 
@@ -334,11 +396,424 @@ impl From<authz_resolver_sdk::EnforcerError> for DomainError {
     fn from(e: authz_resolver_sdk::EnforcerError) -> Self {
         tracing::error!(error = %e, "AuthZ scope resolution failed");
         match e {
+            // A denial, and the one `CompileFailed` shape `authz-resolver-sdk`
+            // itself documents as a deny, are both about the caller.
+            //
+            // `CompileFailed` is not one thing — its two constructors
+            // disagree about who the failure is about
+            // (`authz-resolver-sdk/src/pep/compiler.rs:44-55`):
+            //
+            // - `ConstraintsRequiredButAbsent`: "a deny: the PEP asked for
+            //   row-level constraints but received an empty set. Fail-closed"
+            //   (`compiler.rs:45-48`) — the PDP answered allow but supplied no
+            //   row scope. A scoped-permission refusal, the same shape as
+            //   `Denied`, so it merges into this arm rather than getting a
+            //   twin `=> Self::Forbidden` clippy would flag as
+            //   `match_same_arms`.
+            // - `AllConstraintsFailed` (below) means the PDP named predicates
+            //   this PEP could not compile at all — a policy/PEP mismatch,
+            //   not a fact about the caller's permissions. That is a fault,
+            //   so it is a 500, not folded in here.
+            //
+            // Both `CompileFailed` shapes still fail closed: neither produces
+            // an `AccessScope`, so no row becomes reachable either way. Only
+            // the status differs. Review finding #3.
             authz_resolver_sdk::EnforcerError::Denied { .. }
-            | authz_resolver_sdk::EnforcerError::CompileFailed(_) => Self::Forbidden,
+            | authz_resolver_sdk::EnforcerError::CompileFailed(
+                authz_resolver_sdk::pep::ConstraintCompileError::ConstraintsRequiredButAbsent,
+            ) => Self::Forbidden,
+            authz_resolver_sdk::EnforcerError::CompileFailed(err) => {
+                Self::Internal(format!("authorization scope compilation failed: {err}"))
+            }
             authz_resolver_sdk::EnforcerError::EvaluationFailed(err) => {
                 Self::Internal(err.to_string())
             }
         }
+    }
+}
+
+// -- The boundary mapping ----------------------------------------------------
+//
+// **`impl From<DomainError> for CanonicalError` lives here, beside the enum it
+// maps, and not in `api::rest::error` where it was written.** Every `?` in a
+// handler still reaches it, because a trait impl is resolved by coherence
+// rather than by an import -- and that is precisely why it had to move. While
+// it sat in the transport layer, `domain::error_attribution::as_jira_error`'s
+// `other => other.into()` fall-through was a *domain* module calling into
+// `api::rest::error`, and `api` is a transport over `domain` rather than the
+// other way round. Review findings #15, #16.
+//
+// **Deleting the `use` line did not close that**, which is the mistake this
+// move corrects: `crate::no_api_in_domain_tests` is a text scan over imports,
+// so it could never have contradicted a claim about a trait impl. The scan
+// pins the imports; the location of the impl is what pins this.
+//
+// The three resource types the mapping raises came with it. `api::rest::error`
+// imports them back for its own two call-site renderers and re-exports what a
+// handler needs, so a REST handler still imports its error rendering from
+// exactly one module.
+//
+// # What this mapping is written to keep
+//
+// * **The `match` has no catch-all arm**, so adding a [`DomainError`] variant
+//   is a compile error here rather than a silent 500.
+//
+//   **Two** variants are mapped that nothing in this crate constructs yet, and
+//   they are mapped anyway for exactly that reason: the task that raises one
+//   should find the boundary decision already taken and reviewed, not discover
+//   it as an unexplained 500. Named individually rather than counted, so that a
+//   `grep -rn 'DomainError::<variant>'` can settle the claim:
+//
+//   * [`DomainError::UnsupportedEgress`] -- the notification router, Tasks
+//     36-39.
+//   * [`DomainError::IngestConflict`] -- **neither loop.** Task 13 forecast it
+//     for the ingest path and did not need it; this module's own header records
+//     why (the projection's delete-then-insert runs inside the caller's
+//     transaction, so a lost race is a rolled-back database error).
+//
+//   [`DomainError::JiraNotConfigured`] left that list at Task 32, which is both
+//   its first constructor and its first path to this boundary:
+//   `domain::service::jira::JiraService::check_status` raises it for a tenant
+//   with no config or a disabled one, and `infra::jira::oagw_client` raises it
+//   before it will provision egress for a disabled integration. It is the third
+//   variant to make that transition (after `SavedViewNameExists` and
+//   `SavedViewNotFound` at Task 28) and the count above is adjusted rather than
+//   the bullet merely deleted, because a stale count is what this paragraph is
+//   about.
+//
+//   One variant is deliberately **not** in that list, and was wrongly put there
+//   by earlier revisions:
+//
+//   * [`DomainError::BugNotFound`] -- constructed since `ef878c22` at
+//     `infra/storage/jira_sea_repo.rs:189`, on the "the bug row is gone between
+//     the insert and the re-read of the same transaction" race in `upsert_bug`.
+//     That site's own comment calls the race unreachable in practice, which is a
+//     different claim from "no code constructs it" -- and treating the two as
+//     one is what would let a Tasks 31-34 engineer skip the path without ever
+//     looking at it.
+//
+//   **The rule this paragraph keeps getting wrong**, stated so the next edit
+//   does not: "has no constructor", "is unreachable in practice" and "cannot
+//   reach a handler yet" are three different properties. Only the first belongs
+//   in the list above, and only a grep decides it.
+//
+// # The two mappings this file *owed* before the mapping existed
+//
+// This module's header names them, and the debt is discharged below:
+// [`DomainError::IngestConflict`] to `CanonicalError::Aborted` (409,
+// retryable), and [`DomainError::UnsupportedEgress`] to
+// `CanonicalError::Unimplemented` (501 -- a working configuration and a missing
+// adapter, which is why it is not a `Validation`). `qa-insights-sdk/src/errors.rs`
+// pointed here; the chain now terminates in this file rather than one layer up.
+//
+// # What a caller may read
+//
+// [`DomainError::Database`], [`DomainError::Internal`] and
+// [`DomainError::CorruptState`] carry text that originates in a database
+// driver, in this gear's internals, or in a persisted column. **None of it may
+// reach an HTTP body**: driver text names indexes, columns and key values, and
+// `CorruptState` carries the offending column's contents verbatim. Each is
+// logged at ERROR with the real cause and answered with the canonical internal
+// detail, which `toolkit-canonical-errors` supplies and this gear does not
+// choose.
+//
+// `opaque_internal` takes the [`DomainError`] rather than a message, so it
+// cannot be handed pre-formatted text by mistake -- qa-runs' idiom, and the
+// reason it is worth copying is that the mistake it prevents is a one-word
+// edit.
+
+/// `qa_test_results` and `qa_test_case_results` — the projection this gear
+/// exists to serve, and the resource the rebuild endpoint mutates.
+///
+/// Matches `domain::service::resources::TEST_RESULT`, deliberately: the PEP
+/// resource type and the error resource type name the same thing, and a caller
+/// denied on `qa.test_result` should be told about `cf.qa.insights.test_result`.
+#[resource_error(gts_id!("cf.qa.insights.test_result.v1~"))]
+pub(crate) struct TestResultResourceError;
+
+/// `qa_saved_views`. Declared now because [`DomainError::SavedViewNameExists`]
+/// already exists and the `match` below is exhaustive — a caller told a *test
+/// result* already exists while naming a saved view would go looking for the
+/// wrong row. Task 28 owns the endpoints.
+#[resource_error(gts_id!("cf.qa.insights.saved_view.v1~"))]
+pub(crate) struct SavedViewResourceError;
+
+/// `qa_notification_config`, `qa_notification_log` and `qa_run_notifications`.
+/// Tasks 36-39; [`as_notification_error`] is Task 38's call-site renderer.
+#[resource_error(gts_id!("cf.qa.insights.notification.v1~"))]
+pub(crate) struct NotificationResourceError;
+
+/// Log the real cause, answer with the canonical internal detail.
+///
+/// Takes the error rather than a message so no call site can pass it text it
+/// formatted itself — the payloads of these three variants are precisely what
+/// must not cross the boundary.
+fn opaque_internal(e: &DomainError) -> CanonicalError {
+    tracing::error!(error = ?e, "internal error reached the API boundary");
+    CanonicalError::internal("An internal error occurred").create()
+}
+
+impl From<DomainError> for CanonicalError {
+    fn from(e: DomainError) -> Self {
+        let ce = match &e {
+            // -- 404, not found ---------------------------------------------
+            //
+            // Asynchronous ingest makes this a *normal transient state*, not a
+            // corruption: the run finished and the event has not been consumed
+            // yet. `DomainError::RunNotIngested`'s own doc says a caller that
+            // can render an empty history should prefer doing so — so this arm
+            // exists for the callers that genuinely cannot, and 404 is the
+            // honest answer for them. It is also what keeps the cross-tenant
+            // existence oracle closed: a run in another tenant reaches this
+            // gear as the same variant (`infra::clients::qa_runs`).
+            DomainError::RunNotIngested { run_id } => TestResultResourceError::not_found(format!(
+                "No results have been ingested for run {run_id}"
+            ))
+            .with_resource(run_id.to_string())
+            .create(),
+
+            DomainError::BugNotFound { key } => {
+                JiraBugResourceError::not_found(format!("Bug {key} is not tracked"))
+                    .with_resource(key.clone())
+                    .create()
+            }
+
+            // Absent and another owner's are the same 404 — this variant's own
+            // doc states the cross-owner existence oracle it closes, matching
+            // `qa-runs`' `DomainError::ScheduleNotFound`.
+            DomainError::SavedViewNotFound { id } => {
+                SavedViewResourceError::not_found(format!("Saved view {id} not found"))
+                    .with_resource(id.to_string())
+                    .create()
+            }
+
+            // -- 409, already exists / aborted ------------------------------
+            DomainError::SavedViewNameExists { name } => SavedViewResourceError::already_exists(
+                format!("A saved view named '{name}' already exists in this scope"),
+            )
+            .with_resource(name.clone())
+            .create(),
+
+            // Retryable, and the reconciler retries whether or not the caller
+            // does — which is why this is `Aborted` (409, "try again") rather
+            // than an opaque 500.
+            DomainError::IngestConflict => {
+                TestResultResourceError::aborted("Concurrent ingest for the same run, retry")
+                    .with_reason("INGEST_CONFLICT")
+                    .create()
+            }
+
+            // -- 400, failed precondition / invalid argument ----------------
+            //
+            // Nothing was attempted, which is what separates this from a JIRA
+            // call that failed: the tenant has no configuration at all.
+            DomainError::JiraNotConfigured => JiraBugResourceError::failed_precondition()
+                .with_precondition_violation(
+                    "jira_configuration",
+                    "JIRA is not configured for this tenant",
+                    "NOT_CONFIGURED",
+                )
+                .create(),
+
+            // **This said "every `Validation` this gear can raise today comes
+            // from the rebuild window", and that was already false when it was
+            // written.** `domain::error`'s own header lists `infra::storage::db::
+            // odata_err` — `$filter`, `$orderby` and `cursor` on the two flat
+            // collections — and `infra::storage::mapper` raises one too. Task 25a
+            // adds `domain::analytics::query`, the overview query string's five
+            // rules (`product_id`, `version`, `scope`, `group_by`, `plan_id`) plus
+            // the build-tests drill-down's `build`. Corrected rather than extended,
+            // because the false premise is what made the conclusion look
+            // load-bearing.
+            //
+            // `TEST_RESULT` is nevertheless right for this arm's *unrendered*
+            // callers — every one of them sits behind a test-result read or
+            // write: `resources::TEST_RESULT` with `actions::LIST` is the grant
+            // the overview and both collections require, and
+            // `actions::REBUILD` the one the rebuild does.
+            //
+            // **The saved-view name was the candidate this comment named, and
+            // Task 28 is the fix round.** `domain::service::saved_views` raises
+            // `Validation` on `scope`, `name` and `plan_path`, none of which is
+            // a test-result field, so its four handlers do not reach this arm
+            // at all — they wrap the service call in `as_saved_view_error`
+            // instead, which re-attributes `Validation` (and `Forbidden`) to
+            // `SavedViewResourceError` before this blanket `match` ever sees
+            // them. This arm stays the right default for every caller that
+            // still reaches it unwrapped, and the rule for the *next* one is
+            // unchanged: a `Validation` whose resource is not the test result
+            // needs a call-site renderer, exactly as qa-runs' `Validation` arm
+            // records. Branching on the field name would mis-attribute the
+            // next field added on either side.
+            DomainError::Validation { field, message } => {
+                TestResultResourceError::invalid_argument()
+                    .with_field_violation(field, message, "VALIDATION")
+                    .create()
+            }
+
+            // A **grant** the write path cannot execute, not a denial — so 400
+            // with a named precondition violation and deliberately not the 403
+            // below. An operator who sees 403 goes and asks for the `rebuild`
+            // grant they already hold; what actually needs changing is the shape
+            // of the policy that answers it. `JiraNotConfigured` above sets the
+            // precedent for surfacing a deployment-configuration precondition
+            // this way.
+            //
+            // Attributed to the test-result resource because that is the only
+            // resource whose write path raises it today. A second raiser needs a
+            // call-site renderer, exactly as the `Validation` arm below records —
+            // and unlike that one, this variant carries the PEP resource type, so
+            // the renderer has something to switch on.
+            DomainError::UnsupportedScope { resource } => {
+                tracing::error!(
+                    %resource,
+                    "the authorization policy compiled to a scope this gear cannot execute; \
+                     the operation was refused. See domain::service::refuse_scope_beyond_tenant",
+                );
+                TestResultResourceError::failed_precondition()
+                    .with_precondition_violation(
+                        "authorization_policy",
+                        format!(
+                            "The policy for '{resource}' grants this operation with a scope \
+                             constraining more than the tenant, which this operation cannot \
+                             honour. It must constrain owner_tenant_id only."
+                        ),
+                        "SCOPE_NOT_TENANT_ONLY",
+                    )
+                    .create()
+            }
+
+            // -- 403 --------------------------------------------------------
+            DomainError::Forbidden => TestResultResourceError::permission_denied()
+                .with_reason("ACCESS_DENIED")
+                .create(),
+
+            // -- 501 --------------------------------------------------------
+            //
+            // Email, which design decision D10 defers: its config, routing,
+            // dedupe and logging all ship and only the send does not. A
+            // deployment reaching this has a *working* configuration and a
+            // missing adapter, so it is not a 400 — there is nothing the caller
+            // can change about the request.
+            DomainError::UnsupportedEgress { channel } => NotificationResourceError::unimplemented(
+                format!("This deployment has no adapter for the '{channel}' channel"),
+            )
+            .create(),
+
+            // -- 500, opaque ------------------------------------------------
+            DomainError::CorruptState { .. }
+            | DomainError::Database { .. }
+            | DomainError::Internal(_) => opaque_internal(&e),
+        };
+
+        if let Some(diag) = ce.diagnostic() {
+            tracing::debug!(diagnostic = %diag, "Canonical error diagnostic");
+        }
+
+        ce
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    //! `From<EnforcerError> for DomainError`, pinned one arm per test so a
+    //! future change to any single arm fails exactly one test rather than
+    //! being lost in a combined assertion.
+    use authz_resolver_sdk::EnforcerError;
+    use authz_resolver_sdk::pep::ConstraintCompileError;
+
+    use super::*;
+
+    /// The routine, expected outcome: a PDP deny is about the caller, and
+    /// stays a 403.
+    #[test]
+    fn a_denial_is_still_forbidden() {
+        let e = EnforcerError::Denied { deny_reason: None };
+        assert!(matches!(DomainError::from(e), DomainError::Forbidden));
+    }
+
+    /// **Deliberately still a 403, not the 500 finding #3 is about.**
+    ///
+    /// `ConstraintsRequiredButAbsent` means the PDP answered *allow* but
+    /// supplied no row-level constraints although the PEP asked for them.
+    /// `authz-resolver-sdk`'s own compiler doc calls this a deny: "the PEP
+    /// asked for row-level constraints but received an empty set. Fail-closed"
+    /// (`authz-resolver-sdk/src/pep/compiler.rs:45-48`). That is a
+    /// scoped-permission refusal — the same shape as `Denied` — not a broken
+    /// policy engine, so a reader who knows only finding #3 ("a compile fault
+    /// is a 500") would expect this test to assert `Internal` and would be
+    /// wrong: this specific compile failure is about the caller, not the PDP.
+    #[test]
+    fn a_scope_required_but_absent_is_still_forbidden() {
+        let e = EnforcerError::CompileFailed(ConstraintCompileError::ConstraintsRequiredButAbsent);
+        assert!(
+            matches!(DomainError::from(e), DomainError::Forbidden),
+            "ConstraintsRequiredButAbsent is a documented deny, not a fault"
+        );
+    }
+
+    /// The half finding #3 is actually about: the PDP named predicates this
+    /// PEP cannot compile at all — a configuration fault, not a fact about
+    /// the caller's permissions (`compiler.rs:52`).
+    #[test]
+    fn all_constraints_failing_to_compile_is_internal_not_forbidden() {
+        let e = EnforcerError::CompileFailed(ConstraintCompileError::AllConstraintsFailed {
+            reason: "unknown predicate `frobnicate`".to_owned(),
+        });
+        assert!(
+            matches!(DomainError::from(e), DomainError::Internal(_)),
+            "AllConstraintsFailed must map to Internal (500), not Forbidden (403)"
+        );
+    }
+
+    /// Unchanged: the PDP RPC itself failing is a fault, not a decision.
+    #[test]
+    fn an_evaluation_failure_is_internal() {
+        let e = EnforcerError::EvaluationFailed(
+            CanonicalError::service_unavailable()
+                .with_detail("plugin not registered")
+                .create(),
+        );
+        assert!(matches!(DomainError::from(e), DomainError::Internal(_)));
+    }
+
+    /// Review finding #25, and the `TODO(DE1302)` that used to sit above
+    /// `From<toolkit_db::DbError>`: the conversion keeps the original error as
+    /// `.source()` instead of flattening it to its `Display` text. Without
+    /// this, `sea_orm`'s SQLSTATE and `sqlx`'s constraint name are gone by the
+    /// time the error leaves `infra::storage`.
+    #[test]
+    fn a_db_error_converted_to_a_domain_error_keeps_its_source() {
+        let db_error = toolkit_db::DbError::UnknownDsn("mysql://nowhere".to_owned());
+        let rendered = db_error.to_string();
+
+        let domain = DomainError::from(db_error);
+
+        // The `Display` string is unchanged by the boxing, which is what lets
+        // every existing response body and `error` column stay as it was.
+        assert_eq!(domain.to_string(), format!("database error: {rendered}"));
+
+        let source = std::error::Error::source(&domain).expect("the DbError is now the source");
+        assert!(
+            source.is::<toolkit_db::DbError>(),
+            "the source must be the original error, not a re-wrapping of its text"
+        );
+        assert_eq!(source.to_string(), rendered);
+    }
+
+    /// The other constructor deliberately has no source: a failure that only
+    /// ever existed as text cannot invent one, and `.source()` says so rather
+    /// than pointing at a stand-in.
+    #[test]
+    fn a_database_error_built_from_text_alone_has_no_source() {
+        let domain = DomainError::database("relation \"qa\" does not exist");
+
+        assert_eq!(
+            domain.to_string(),
+            "database error: relation \"qa\" does not exist"
+        );
+        assert!(std::error::Error::source(&domain).is_none());
     }
 }

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use qa_environments_sdk::{NewVariable, Variable};
 use toolkit_db::secure::DBRunner;
+use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -9,20 +10,36 @@ use crate::domain::error::DomainError;
 /// Repository trait for pipeline (global) and per-environment variable persistence.
 #[async_trait]
 pub trait VariablesRepository: Send + Sync {
-    /// List all global pipeline variables visible within the given security scope.
-    async fn list_pipeline<C: DBRunner>(
+    /// One page of the global pipeline variables visible within `scope`,
+    /// ordered by name, with the caller's `OData` query applied on top.
+    ///
+    /// Both this and [`Self::list_for_environment_page`] replaced unbounded
+    /// `find().secure().scope_with(scope).all()` reads (review finding #55).
+    /// The `scope` is applied before the filter and cannot be widened by one —
+    /// see [`EnvironmentsRepository::list_page`](super::EnvironmentsRepository::list_page)
+    /// for the type-level reason.
+    async fn list_pipeline_page<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
-    ) -> Result<Vec<Variable>, DomainError>;
+        query: &ODataQuery,
+    ) -> Result<Page<Variable>, DomainError>;
 
-    /// List all variables scoped to a single environment.
-    async fn list_for_environment<C: DBRunner>(
+    /// One page of a single environment's variables, ordered by name.
+    ///
+    /// `environment_id` is pinned by the repository rather than expressible as
+    /// a `$filter`: the physical column is `platform_id`, and the endpoint's
+    /// own `environment_id` parameter carries an authorization precheck a
+    /// `$filter` would skip. See
+    /// [`VariableFilterField`](crate::infra::storage::odata::VariableFilterField)'s
+    /// doc for the full argument.
+    async fn list_for_environment_page<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
         environment_id: Uuid,
-    ) -> Result<Vec<Variable>, DomainError>;
+        query: &ODataQuery,
+    ) -> Result<Page<Variable>, DomainError>;
 
     /// Look up an existing variable by its natural key without applying
     /// action-specific authorization: `(environment_id, name)` when

@@ -75,6 +75,11 @@
 //! [`DomainError::IllegalTransition`]: crate::domain::error::DomainError::IllegalTransition
 //! [`DomainError::QueueRowNotQueued`]: crate::domain::error::DomainError::QueueRowNotQueued
 
+/// The two log-line sanitizers and the caps they are built from -- the
+/// write-side one decides what the archive holds, which is why they are
+/// here beside [`flatten_log_char`] rather than in `api::rest::sse`, where
+/// they were declared until Task 21. See the module's own header.
+mod log_line;
 mod queue_repo;
 mod run_logs_repo;
 mod runs_repo;
@@ -183,11 +188,18 @@ pub(crate) fn window_size(window: u64) -> usize {
     usize::try_from(window).unwrap_or(usize::MAX)
 }
 
+pub use log_line::{
+    MAX_LINE_BYTES, TRUNCATION_MARKER_MAX, WRITE_SIDE_MAX_LINE_BYTES, sanitize_line,
+    sanitize_line_for_archive,
+};
 pub use queue_repo::{
     ClaimAge, ClaimRow, ExpiredRow, MAX_CLAIM_SCAN, MAX_QUEUE_READ_LIMIT, NewQueueRow,
     QueueRepository, QueueRowRecord, QueuedPlatform, RowStatus,
 };
-pub use run_logs_repo::{ArchivedLog, RunLogsRepository};
+// `pub(crate)` at its declaration and re-exported on the same terms: only
+// `service::ingest::fan_out_log` has any use for it -- see its own doc.
+pub(crate) use log_line::ASSUMED_ARCHIVE_PREFIX_BYTES;
+pub use run_logs_repo::{ArchivedLog, LogPosition, LogResume, RunLogsRepository, flatten_log_char};
 pub use runs_repo::{
     MAX_TIMEOUT_SWEEP_SCAN, MAX_WATCH_SCAN, NewRun, NewTestResult, OwnedRunId, RunResultDelta,
     RunStatePatch, RunWithResult, RunsRepository, TestResultRow, TimeoutCandidate, WatchCandidate,
