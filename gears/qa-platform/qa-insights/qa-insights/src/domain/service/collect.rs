@@ -654,11 +654,16 @@ where
 
     /// Emit one collect-report outcome, guarded by this service's own latch.
     ///
-    /// A method rather than an inline [`emit`] call at each of the six
-    /// outcomes: `record_count` refuses on five paths, and a helper is what
-    /// makes each of them one line at the point of refusal rather than a
-    /// four-line block that invites somebody to add a sixth refusal without
-    /// one.
+    /// **One call site, deliberately**: [`Self::record_count`], on the outcome
+    /// [`Self::write_reported_count`] handed back. The refusals inside that
+    /// function do not emit — each returns its label instead, and the single
+    /// emission happens once above them, on whichever label came out. That is
+    /// what makes "one report, one increment" a property of the shape rather
+    /// than of six call sites all remembering to fire exactly once.
+    ///
+    /// A named method rather than the [`emit`] call spelled out there, so
+    /// `record_count` reads as the request path it is and this service's latch
+    /// is named in one place.
     fn report(&self, outcome: CollectReportOutcome) {
         emit(&self.metrics_silenced, || {
             self.metrics.collect_report(outcome);
@@ -976,6 +981,32 @@ where
         let universe = self.catalog.list_universe(ctx, None, None).await?;
         let repo_ids: BTreeSet<Uuid> = universe.iter().map(|test| test.repo_id).collect();
 
+        // ── Unmeasured, and this is the disclosure rather than an oversight ──
+        //
+        // The loop below swallows every per-repository launch failure the same
+        // way `domain::service::jira_poller` swallows a per-bug one: logged,
+        // skipped, never fatal. The poller's version of that defect is what
+        // `domain::ports::metrics::JiraBugOutcome` exists to make visible; this
+        // one is still invisible. A cycle that failed to launch for every
+        // repository in the universe reports `completed` on
+        // `crate::domain::metrics::QA_INSIGHTS_COLLECT`, exactly like a cycle
+        // that launched them all, and `launched` — the count that would tell
+        // them apart — is returned to the caller and reaches no series at all.
+        //
+        // Deliberately not closed here. The observability plan instruments at
+        // pass boundaries and names the per-bug counter as its one exception;
+        // adding an eighth family unasked is a wider change than the task that
+        // wrote this comment was given. **Recorded because there is no later
+        // qa-insights task to inherit it** — the phase continues in other
+        // gears.
+        //
+        // Closing it is one counter and one emission: a counter family named
+        // qa_insights_collect_launch_total, with a two-value `outcome` label
+        // (launched / refused), incremented in the two arms below. It needs no
+        // new call site, no new label taxonomy, and no change to the cycle
+        // family: the cycle stays one observation and the launches become
+        // their own, which is the same split the poll and the per-bug families
+        // already use.
         let mut launched = 0usize;
         for repo_id in repo_ids {
             let url = self.collect_url(repo_id, branch, ctx.subject_tenant_id());

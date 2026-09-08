@@ -211,9 +211,17 @@ where
 
     /// Emit one per-bug outcome, guarded by this service's own latch.
     ///
-    /// A method rather than an inline [`emit`] at each of the eight outcomes:
-    /// the per-bug chain classifies in eight places, and a helper keeps each
-    /// of them one line at the point of classification.
+    /// **One call site, deliberately**: [`Self::run_pass`]'s loop, on the
+    /// outcome [`Self::poll_one_bug`] returned. Nothing inside that chain
+    /// emits — every one of its classification points *returns* its label, and
+    /// the emission happens once above them all. That is what makes "exactly
+    /// one increment per bug per pass" a property of the shape rather than of
+    /// a dozen return sites each remembering to fire exactly once, and that
+    /// invariant is what lets a sum over the family be the denominator every
+    /// per-class rate is read against.
+    ///
+    /// A named method rather than the [`emit`] call spelled out at that loop,
+    /// so this service's latch is named in one place.
     fn record_bug(&self, outcome: JiraBugOutcome) {
         emit(&self.metrics_silenced, || self.metrics.bug(outcome));
     }
@@ -289,9 +297,9 @@ where
                 .await;
             // The emission is here rather than inside `poll_one_bug` so that
             // there is exactly one per bug however many ways that chain can
-            // end: an emission at each classification site would be eight
-            // sites to keep in step, and a ninth end added later would emit
-            // nothing at all.
+            // end. An emission at each classification site would be a dozen
+            // returns to keep in step, and the end added by the next person to
+            // touch that chain would emit nothing at all.
             self.record_bug(outcome);
         }
 
@@ -305,6 +313,7 @@ where
     /// (`jira_poller.rs:83-85` for the status check; `trigger_auto_rerun`'s
     /// own `tracing::warn!`-and-return arms for the rest, `:126-132`,
     /// `:151-162`, `:211-220`).
+    ///
     /// # The return value is the only record a caller gets
     ///
     /// Nothing above this function can see what happened to one bug — that is
@@ -381,6 +390,7 @@ where
     /// is attempted regardless of what happens next, and its failure does not
     /// gate the auto-rerun decision that follows it — the two are
     /// independent, per this task's Step 0, point 3.
+    ///
     /// Returns whether the write landed. The value is not a control-flow
     /// signal — the caller proceeds either way, exactly as before — only a
     /// classification for [`Self::classify`].
@@ -406,10 +416,12 @@ where
     /// D8: a resolved bug reruns only when a new build has appeared since the
     /// version it was filed against (`manager/src/services/jira_poller.rs:60-70`).
     ///
-    /// The four no-op paths below all answer [`JiraBugOutcome::Resolved`]:
+    /// The three no-op paths below all answer [`JiraBugOutcome::Resolved`]:
     /// each is a decision *not* to rerun, taken deliberately and on purpose,
-    /// and none of them dropped anything. Only the plan-version read can fail
-    /// here, and that one did drop a rerun.
+    /// and none of them dropped anything. (The fourth such decision, the
+    /// auto-rerun switch being off, is [`Self::poll_one_bug`]'s and never
+    /// reaches this function.) Only the plan-version read can fail here, and
+    /// that one did drop a rerun.
     async fn maybe_rerun(&self, ctx: &SecurityContext, bug: &JiraBug) -> JiraBugOutcome {
         // Legacy's own early return (`jira_poller.rs:226-229`): a bug with no
         // recorded version can never have "a new one" by comparison.
@@ -503,6 +515,7 @@ where
 
     /// The launch itself, once a `test_file` and a `branch` have been
     /// resolved.
+    ///
     /// # The rerun counter is incremented here, before the call
     ///
     /// [`crate::domain::metrics::QA_INSIGHTS_JIRA_RERUN`] counts **attempts**,

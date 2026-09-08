@@ -203,9 +203,14 @@ fn no_label_value_collides_within_its_own_enum() {
 /// [`CollectOutcome::Failed`] exactly when the canonical rendering is a 500.
 /// A variant reclassified on one side and not the other fails here.
 ///
-/// [`every_domain_error`] is what makes the sweep total; the bridges' own
-/// matches have no `_` arm, so a variant added to [`DomainError`] fails to
-/// compile there before it can reach this test.
+/// [`every_domain_error`] supplies the values, and **its completeness is this
+/// test's premise rather than its subject**: the loop below sees whatever that
+/// array holds and would pass just as happily over twelve variants as over
+/// thirteen, which is exactly what it did until fix round 1 found
+/// [`DomainError::Internal`] missing from it.
+/// [`the_sweep_above_covers_every_domain_error_variant`] checks what can be
+/// checked about that array, and [`every_domain_error`]'s own header sets out
+/// which link in the chain is still not held.
 #[test]
 fn a_refusal_and_an_internal_failure_are_told_apart_by_what_the_api_may_disclose() {
     for error in every_domain_error() {
@@ -229,16 +234,48 @@ fn a_refusal_and_an_internal_failure_are_told_apart_by_what_the_api_may_disclose
 
 /// One of every [`DomainError`] variant.
 ///
-/// Hand-maintained, and its own oracle in the way
-/// [`crate::domain::metrics::COUNTERS`] is — the compiler cannot enumerate an
-/// enum's variants. What keeps it honest is that both `From<&DomainError>`
-/// bridges match exhaustively with no `_` arm, so a variant added to
-/// [`DomainError`] is a compile error in the bridge, at which point whoever
-/// adds it is already editing the file this list guards.
+/// # It was not total, and the argument that said it was did not cover it
+///
+/// This list is written out by hand — the compiler cannot enumerate an enum's
+/// variants — and through fix round 1 it was missing [`DomainError::Internal`],
+/// which is one of the three variants that decide
+/// [`CollectOutcome::Failed`] and is reachable on both measured paths through
+/// `From<EnforcerError>`. The doc here claimed the omission was impossible,
+/// on the grounds that both `From<&DomainError>` bridges match exhaustively
+/// with no `_` arm. That argument is true and does not apply: the bridges'
+/// exhaustiveness protects **the bridges**, and nothing about adding a variant
+/// there forces a value into this array.
+///
+/// # What holds it now, link by link, and which link is still not held
+///
+/// 1. **A variant added to [`DomainError`] is a compile error in
+///    [`variant_index`]**, whose match has no `_` arm. The author must number
+///    it, and that is what lands them in this file — three lines above this
+///    array and immediately below [`DOMAIN_ERROR_VARIANTS`].
+/// 2. **The array's length is [`DOMAIN_ERROR_VARIANTS`]**, so adding a value
+///    without raising the count, or raising the count without adding a value,
+///    does not compile. That link is the compiler's.
+/// 3. **[`the_sweep_above_covers_every_domain_error_variant`] asserts the
+///    numbers this array yields are exactly `0..`[`DOMAIN_ERROR_VARIANTS`]**,
+///    so a duplicated entry cannot stand in for a missing one and a
+///    renumbering that leaves a hole fails.
+/// 4. **Nothing forces [`DOMAIN_ERROR_VARIANTS`] to equal the number of
+///    variants the enum actually has.** An author who numbers a new variant in
+///    step 1 and stops there leaves the sweep silently one variant narrower,
+///    and every test here still passes — which is precisely the state fix round
+///    1 found. Step 1's compile error is the whole of what points at it.
+///
+/// That fourth link cannot be closed from inside a test in stable Rust: no test
+/// can observe a variant nobody constructed, `std::mem::variant_count` is
+/// nightly-only, and a derive macro for one array would be a larger thing than
+/// the array. **So this is not the mechanism that would have caught the
+/// original defect** — it is a shorter, louder path to noticing it, and the
+/// gap is written down here rather than argued away, which is what the doc
+/// this replaced got wrong.
 ///
 /// A function rather than a `const`, because four variants own a `String` and
 /// one boxes an error.
-fn every_domain_error() -> [DomainError; 12] {
+fn every_domain_error() -> [DomainError; DOMAIN_ERROR_VARIANTS] {
     [
         DomainError::RunNotIngested {
             run_id: Uuid::nil(),
@@ -269,7 +306,85 @@ fn every_domain_error() -> [DomainError; 12] {
         },
         DomainError::Forbidden,
         DomainError::database("boom"),
+        DomainError::Internal("boom".to_owned()),
     ]
+}
+
+/// How many variants [`DomainError`] has, which is also the length of
+/// [`every_domain_error`]'s array.
+///
+/// Bumping this without adding a value to that array is a **compile** error:
+/// the array literal would then be one element short of its declared length.
+/// That is the one link in this chain the compiler holds on its own.
+const DOMAIN_ERROR_VARIANTS: usize = 13;
+
+/// A number per [`DomainError`] variant, in declaration order.
+///
+/// **Exhaustive with no `_` arm on purpose**: a variant added to
+/// [`DomainError`] does not compile here until somebody numbers it, which is
+/// what puts the author of that variant in this file, three lines above the
+/// array they also have to extend.
+///
+/// The numbers mean nothing beyond being distinct and contiguous from zero. The
+/// last arm is written in terms of [`DOMAIN_ERROR_VARIANTS`] rather than as a
+/// literal so that raising the count *moves* it — leaving a hole in the middle
+/// of the range that
+/// [`the_sweep_above_covers_every_domain_error_variant`] reports — instead of
+/// sitting quietly at a number a stale count still agrees with.
+fn variant_index(error: &DomainError) -> usize {
+    match error {
+        DomainError::RunNotIngested { .. } => 0,
+        DomainError::UnsupportedScope { .. } => 1,
+        DomainError::IngestConflict => 2,
+        DomainError::SavedViewNameExists { .. } => 3,
+        DomainError::SavedViewNotFound { .. } => 4,
+        DomainError::JiraNotConfigured => 5,
+        DomainError::BugNotFound { .. } => 6,
+        DomainError::UnsupportedEgress { .. } => 7,
+        DomainError::CorruptState { .. } => 8,
+        DomainError::Validation { .. } => 9,
+        DomainError::Forbidden => 10,
+        DomainError::Database { .. } => 11,
+        DomainError::Internal(_) => DOMAIN_ERROR_VARIANTS - 1,
+    }
+}
+
+/// **The sweep's array numbers exactly `0..`[`DOMAIN_ERROR_VARIANTS`], once
+/// each.**
+///
+/// [`a_refusal_and_an_internal_failure_are_told_apart_by_what_the_api_may_disclose`]
+/// iterates a hand-written array, so its coverage is whatever that array
+/// happens to hold. This checks the two ways that array can be wrong *without
+/// the count also being wrong*: a duplicated entry standing in for a missing
+/// one, and a renumbering in [`variant_index`] that leaves a hole. It compares
+/// the *set* of numbers, not the count of them, which is what makes the first
+/// of those visible.
+///
+/// # It would not have caught the defect that prompted it, and that is the
+/// # point of saying so
+///
+/// Fix round 1 found [`DomainError::Internal`] missing from the array with the
+/// length constant agreeing at twelve. Under that state this assertion is
+/// green: twelve entries numbering `0..12`, compared against `0..12`. The
+/// unheld link is item 4 of [`every_domain_error`]'s list — nothing ties
+/// [`DOMAIN_ERROR_VARIANTS`] to the enum's real variant count, and nothing in
+/// stable Rust can, because no test can observe a variant nobody constructed.
+///
+/// What this test *is* worth is the narrower guarantee above, and what actually
+/// guards the original defect is the compile error in [`variant_index`], which
+/// puts the author of a new variant in this file next to both the count and the
+/// array. Stated plainly because the doc this round replaced claimed a
+/// completeness it did not have, and replacing one overclaim with another is
+/// the failure this remediation keeps repeating.
+#[test]
+fn the_sweep_above_covers_every_domain_error_variant() {
+    let swept: BTreeSet<usize> = every_domain_error().iter().map(variant_index).collect();
+    let expected: BTreeSet<usize> = (0..DOMAIN_ERROR_VARIANTS).collect();
+    assert_eq!(
+        swept, expected,
+        "every_domain_error must carry one of each DomainError variant; \
+         a number missing here is a variant the disclosure sweep never sees"
+    );
 }
 
 /// **Every signature refusal path has its own label value.**

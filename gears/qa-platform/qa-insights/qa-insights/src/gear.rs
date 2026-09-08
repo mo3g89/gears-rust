@@ -1739,6 +1739,28 @@ mod tests {
     /// five resolved cross-gear clients before it will run a single line, and
     /// the harness that supplies those is `tests/ingest_idempotence.rs`, which
     /// cannot see whether a *field* was wired.
+    ///
+    /// # The slice really is `init` and nothing after it
+    ///
+    /// It ends at the first line that is exactly four spaces and a closing
+    /// brace, which is the method's own closing brace: everything inside the
+    /// body is indented at least eight.
+    ///
+    /// The alternative this replaced — slicing to the enclosing block's
+    /// `\n}\n` — returns the same text today, because `init` is the only item
+    /// in that block. **Its risk is narrow rather than absent**, and worth
+    /// naming precisely: the block is `impl Gear for QaInsights`, a *trait*
+    /// impl, so no ad-hoc method can be added to it — only a method the `Gear`
+    /// trait itself grows and this gear implements after `init` would widen
+    /// the slice. That is unlikely and not impossible, and the cost of ruling
+    /// it out is one different call to `find`.
+    ///
+    /// It is worth ruling out because
+    /// `init_installs_one_metrics_adapter_into_both_ports` asserts something is
+    /// **absent**, and an absence assertion is only as narrow as its slice: a
+    /// slice that quietly grew would start reporting on code `init` does not
+    /// contain. [`the_init_slice_covers_exactly_one_method`] is what pins the
+    /// width; widening this function fails both tests, measured.
     fn init_source() -> &'static str {
         let src = include_str!("gear.rs");
         let start = src
@@ -1746,9 +1768,31 @@ mod tests {
             .expect("gear.rs declares Gear::init");
         let tail = &src[start..];
         let end = tail
-            .find("\n}\n")
-            .expect("the impl block containing init is closed");
+            .find("\n    }\n")
+            .expect("init's body is closed at its own indentation");
         &tail[..end]
+    }
+
+    /// **The slice `init_source` returns stops at the end of `init`.**
+    ///
+    /// `init_installs_one_metrics_adapter_into_both_ports` is a source-text
+    /// assertion, so the width of [`init_source`]'s slice is part of what it
+    /// asserts: a slice that ran past `init` would make its `metrics.enabled`
+    /// check report on somebody else's method. This pins the width by the
+    /// property that makes it narrow — one method declaration — rather than by
+    /// a length, which would need updating every time `init` gained a line.
+    #[test]
+    fn the_init_slice_covers_exactly_one_method() {
+        let body = init_source();
+        assert_eq!(
+            body.matches("\n    async fn ").count() + body.matches("\n    fn ").count(),
+            0,
+            "init_source must not reach a second method declaration: {body}"
+        );
+        assert!(
+            body.starts_with("    async fn init("),
+            "and it must start at init's own declaration: {body}"
+        );
     }
 
     /// **The metrics adapter is installed unconditionally, into both ports.**

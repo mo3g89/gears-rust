@@ -108,7 +108,7 @@ fn is_this_gears_own_failure(error: &DomainError) -> bool {
 /// taxonomy of [`DomainError`]: that would be a second partition of this
 /// gear's failure space with nothing checking it still agreed with the one the
 /// API boundary makes, on a label whose useful question is one bit wide. See
-/// [`is_this_gears_own_failure`].
+/// `is_this_gears_own_failure` below (private, so this is not a link).
 #[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollectOutcome {
@@ -148,7 +148,7 @@ impl CollectOutcome {
 
 impl From<&DomainError> for CollectOutcome {
     /// The disclosure classification *is* the fault classification. See
-    /// [`is_this_gears_own_failure`] for why there is no third failure value.
+    /// `is_this_gears_own_failure` for why there is no third failure value.
     fn from(error: &DomainError) -> Self {
         if is_this_gears_own_failure(error) {
             Self::Failed
@@ -330,13 +330,13 @@ impl From<&DomainError> for JiraPollOutcome {
 ///
 /// # What is not a failure
 ///
-/// [`Self::Unresolved`] and [`Self::Resolved`] are the healthy majority. The
-/// four no-op paths inside `maybe_rerun` — the auto-rerun switch off, a bug
+/// [`Self::Unresolved`] and [`Self::Resolved`] are the healthy majority. Four
+/// paths reach [`Self::Resolved`] without a rerun — the auto-rerun switch being
+/// off, which `poll_one_bug` decides, and three inside `maybe_rerun`: a bug
 /// with no recorded version, a plan with no recorded build, and a latest build
-/// equal to the one the bug was filed against — are all [`Self::Resolved`]:
-/// each is a decision not to rerun, taken deliberately, and separating them
-/// would put four more series on this label to answer a question nobody asks
-/// of a counter.
+/// equal to the one the bug was filed against. Each is a decision not to
+/// rerun, taken deliberately, and separating them would put four more series
+/// on this label to answer a question nobody asks of a counter.
 #[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JiraBugOutcome {
