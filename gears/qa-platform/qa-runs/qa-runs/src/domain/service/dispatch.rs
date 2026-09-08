@@ -1146,7 +1146,7 @@ where
     /// The three values are used as follows, and each is the label
     /// [`DispatchOutcome`]'s own doc describes:
     ///
-    /// * [`DispatchOutcome::Started`] — the cycle reached the drain. The
+    /// * [`DispatchOutcome::Completed`] — the cycle reached the drain. The
     ///   ordinary tick, including a tick that found nothing to do.
     /// * [`DispatchOutcome::Refused`] — a rule stopped it: the concurrency cap
     ///   this cycle, or a policy denial, both of which that doc names.
@@ -1261,7 +1261,7 @@ where
         // the drain are logged and counted in the report where they happened;
         // folding them in here would make `Failed` mean "something, somewhere",
         // which is not a signal an alert can be written against.
-        (report, DispatchOutcome::Started)
+        (report, DispatchOutcome::Completed)
     }
 
     /// Expire queued rows past `queue_ttl_seconds`, one tenant at a time.
@@ -2467,9 +2467,13 @@ where
     ///   `cpt-cf-qa-nfr-dispatch-latency` is stated over *queued* runs.
     ///
     /// The instant is read here rather than passed in because this is the
-    /// moment after `dispatch_one` returned an accepted execution, which is the
-    /// end point the NFR names. What the measurement is, and where it diverges
-    /// from that NFR, is in
+    /// first moment after `dispatch_one` returned an accepted execution that the
+    /// drain can observe. **It is not the end point the NFR names**, and it is
+    /// not the acceptance instant either: `submit` stamps that inside
+    /// `dispatch_one`, which returns `Result<(), _>` and keeps it, so what is
+    /// read here is later by three scoped writes. The error is one-signed — it
+    /// can only inflate. What the measurement is, and where it diverges from
+    /// `cpt-cf-qa-nfr-dispatch-latency` in both directions, is in
     /// [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`]'s own doc.
     fn record_queue_wait(&self, row: ClaimedRow) {
         let Some(enqueued_at) = row.enqueued_at else {

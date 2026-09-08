@@ -176,8 +176,12 @@ fn a_refusal_and_an_internal_failure_are_told_apart_by_the_disclosure_rule() {
 ///
 /// [`expected_outcome`]'s match has no `_` arm, so a state added to
 /// [`RunState`] does not compile until somebody classifies it here. The
-/// cross-check against [`TERMINAL_STATES`] is what catches the other half: a
-/// state left out of [`EVERY_RUN_STATE`] entirely.
+/// cross-check against [`TERMINAL_STATES`] catches one half of the other
+/// defect — a **terminal** state left out of [`EVERY_RUN_STATE`], which would
+/// make the completed count come up short. It says nothing about a **live**
+/// state left out: dropping one changes neither side of that comparison. What
+/// catches that is [`EVERY_RUN_STATE`]'s own `[RunState; 10]` type annotation,
+/// which is a compile error one element short.
 #[test]
 fn a_terminal_state_completes_the_pass_and_a_live_one_applies_it() {
     for state in EVERY_RUN_STATE {

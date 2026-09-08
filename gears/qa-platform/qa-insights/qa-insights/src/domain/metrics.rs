@@ -63,9 +63,10 @@ pub const QA_INSIGHTS_COLLECT: &str = "qa_insights_collect_total";
 ///
 /// A cycle contains one qa-catalog universe read and one qa-runs launch call
 /// per repository, all issued serially, so this grows with the size of the
-/// universe as well as with either sibling's latency. It is the dispatcher's
-/// own RED duration and it is not an NFR: this gear's design states no bound
-/// over the collect path.
+/// universe as well as with either sibling's latency. It is the collect
+/// scheduler's own RED duration — this gear has no dispatcher; the word belongs
+/// to qa-runs, and the sentence was copied from there — and it is not an NFR:
+/// this gear's design states no bound over the collect path.
 pub const QA_INSIGHTS_COLLECT_DURATION: &str = "qa_insights_collect_duration_seconds";
 
 /// One report on the runner's signed callback —

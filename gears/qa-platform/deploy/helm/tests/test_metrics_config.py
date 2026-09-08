@@ -27,11 +27,20 @@ does not exist.
      a transform that lands its replacement at the wrong indentation produces a
      file that still renders and no longer loads.
   2. The gears Deployment mounts that ConfigMap at the directory holding the
-     config file the server reads -- `/etc/cf-gears/qa-platform-stack.yaml`,
+     config file ENTRYPOINT.SH reads -- `/etc/cf-gears/qa-platform-stack.yaml`,
      named in full both by entrypoint.sh's `GEARS_CONFIG_FILE` default and by
      the Dockerfile's `CMD --config`, and overridden by neither the Deployment
      nor this chart. A correct ConfigMap that no container mounts is the same
      defect one step along.
+
+     **The server itself reads a different file**, and the distinction matters
+     to anyone reading this test against the stand: entrypoint.sh treats
+     `/etc/cf-gears/qa-platform-stack.yaml` strictly as a read-only template,
+     renders it to `/var/lib/cf-gears/.rendered-qa-platform-stack.yaml`,
+     rewrites the `--config` argument to that path and execs. So this mount is
+     the INPUT to the render, and `deploy/remote/verify-k8s.sh`'s step 17 reads
+     the rendered output. What this test can hold is the chart's half: the
+     ConfigMap arrives at the path the render reads from.
   3. Both states render: default-off unchanged from the committed file, and
      enabled-on with the operator's own collector address. The pair is the
      test -- a template that hard-coded `enabled: true` would pass an
@@ -85,12 +94,15 @@ CHART = pathlib.Path(__file__).resolve().parent.parent / "qa-platform"
 ORIGIN = "https://example-metrics-test.invalid"
 CONFIGMAP = "qa-platform-gears-config"
 CONFIG_KEY = "qa-platform-stack.yaml"
-# The DIRECTORY the config file is read from. Both paths that name the file name
-# it in full: entrypoint.sh's `GEARS_CONFIG_FILE:-/etc/cf-gears/qa-platform-stack.yaml`
-# and qa-platform.Dockerfile's CMD `--config /etc/cf-gears/qa-platform-stack.yaml`.
+# The DIRECTORY entrypoint.sh renders the config FROM. Both paths that name the
+# file name it in full: entrypoint.sh's
+# `GEARS_CONFIG_FILE:-/etc/cf-gears/qa-platform-stack.yaml` and
+# qa-platform.Dockerfile's CMD `--config /etc/cf-gears/qa-platform-stack.yaml`.
 # Neither is a directory, and neither is overridden by gears-deployment.yaml --
-# so this is the dirname the ConfigMap volume has to land on for the file at
-# that path to be the rendered one rather than the copy baked into the image.
+# so this is the dirname the ConfigMap volume has to land on for the template
+# entrypoint.sh reads to be this release's copy rather than the one baked into
+# the image. (The server is then handed the RENDERED file under
+# /var/lib/cf-gears; see this module's docstring, link 2.)
 CONFIG_MOUNT = "/etc/cf-gears"
 COLLECTOR = "http://otel-collector.observability.svc.cluster.local:4317"
 
@@ -153,6 +165,14 @@ def gears_config(docs):
 
 
 def check_default(failures):
+    """Appends to `failures`; prints its PASS only if IT added nothing.
+
+    The `mine` list, rather than a truth test on `failures`, is what makes that
+    true: gating on the shared list works only for whichever check happens to
+    run first, and this one only ran first by accident of `main`'s ordering.
+    A guard against a false green must not itself print one.
+    """
+    mine = []
     docs, _, rc = render()
     if rc != 0:
         failures.append("FAIL: a default render must succeed")
@@ -163,29 +183,37 @@ def check_default(failures):
         return
     metrics = otel.get("metrics") or {}
     if metrics.get("enabled") is not False:
-        failures.append(
+        mine.append(
             "FAIL (default render): opentelemetry.metrics.enabled is "
             f"{metrics.get('enabled')!r}, expected False. A default install must "
             "not start pushing OTLP at an address nobody configured.")
     exporter = metrics.get("exporter") or {}
     if exporter.get("kind") != "otlp_grpc" or not exporter.get("endpoint"):
-        failures.append(
+        mine.append(
             "FAIL (default render): opentelemetry.metrics.exporter must carry a "
             f"kind and an endpoint, got {exporter!r}. Without them the transform "
             "in gears-config-configmap.yaml has no sentinel to rewrite.")
     if (otel.get("resource") or {}).get("service_name") != "qa-platform":
-        failures.append(
+        mine.append(
             "FAIL (default render): opentelemetry.resource.service_name is "
             f"{(otel.get('resource') or {}).get('service_name')!r}, expected "
             "'qa-platform'. Unset, the toolkit's default attributes every data "
             "point to `cf-gears` and two stacks pushing to one collector become "
             "indistinguishable in every query.")
-    if not failures:
-        print(f"PASS: default render carries opentelemetry.metrics disabled, "
-              f"with an exporter to rewrite and service_name=qa-platform")
+    failures.extend(mine)
+    if not mine:
+        print("PASS: default render carries opentelemetry.metrics disabled, "
+              "with an exporter to rewrite and service_name=qa-platform")
 
 
 def check_enabled(failures):
+    """Appends to `failures`; prints its PASS only if IT added nothing.
+
+    See `check_default` for why the accumulator is local. This one carried the
+    sharper version of the same defect: its `print` was unconditional, so a run
+    that appended three failures still ended the line with `PASS:`.
+    """
+    mine = []
     docs, _, rc = render("--set", "opentelemetry.metrics.enabled=true",
                          "--set", f"opentelemetry.metrics.endpoint={COLLECTOR}")
     if rc != 0:
@@ -197,14 +225,14 @@ def check_enabled(failures):
         return
     metrics = otel.get("metrics") or {}
     if metrics.get("enabled") is not True:
-        failures.append(
+        mine.append(
             "FAIL (enabled render): opentelemetry.metrics.enabled is "
             f"{metrics.get('enabled')!r} after --set enabled=true. The transform "
             "in gears-config-configmap.yaml silently did not fire; the gears would "
             "come up with the built-in no-op meter provider while helm reported "
             "success.")
     if (metrics.get("exporter") or {}).get("endpoint") != COLLECTOR:
-        failures.append(
+        mine.append(
             "FAIL (enabled render): the exporter endpoint is "
             f"{(metrics.get('exporter') or {}).get('endpoint')!r}, expected "
             f"{COLLECTOR!r}. Left at the committed loopback address the reader "
@@ -213,12 +241,14 @@ def check_enabled(failures):
     # carry the identical line `    enabled: false`, so a transform written with
     # a one-line sentinel would rewrite whichever it reached first.
     if (otel.get("tracing") or {}).get("enabled") is not False:
-        failures.append(
+        mine.append(
             "FAIL (enabled render): opentelemetry.tracing.enabled became "
             f"{(otel.get('tracing') or {}).get('enabled')!r}. The metrics transform "
             "matched the tracing block too -- its sentinel is not unique.")
-    print("PASS: --set opentelemetry.metrics.enabled=true reaches the gears' "
-          "config with the operator's endpoint, and leaves tracing off")
+    failures.extend(mine)
+    if not mine:
+        print("PASS: --set opentelemetry.metrics.enabled=true reaches the gears' "
+              "config with the operator's endpoint, and leaves tracing off")
 
 
 def check_refusal(failures):
@@ -259,16 +289,17 @@ def check_mount(failures):
     if mount is None or mount.get("mountPath") != CONFIG_MOUNT:
         failures.append(
             f"FAIL: {CONFIGMAP} is a volume but is not mounted at {CONFIG_MOUNT} "
-            f"(got {mount!r}). The server reads "
-            f"{CONFIG_MOUNT}/{CONFIG_KEY} -- entrypoint.sh's GEARS_CONFIG_FILE "
+            f"(got {mount!r}). entrypoint.sh renders from "
+            f"{CONFIG_MOUNT}/{CONFIG_KEY} -- its GEARS_CONFIG_FILE "
             "default and the Dockerfile's CMD --config both name that file, and "
             "the Deployment overrides neither -- so with the volume landing "
-            "anywhere else the gears would read the copy baked into the image "
-            "instead, with whatever metrics setting was committed rather than "
-            "the one this release asked for.")
+            "anywhere else entrypoint.sh would render the copy baked into the "
+            "image instead, and the server would be handed whatever metrics "
+            "setting was committed rather than the one this release asked for.")
         return
     print(f"PASS: the gears container mounts {CONFIGMAP} at {CONFIG_MOUNT}, "
-          f"the directory holding the {CONFIG_MOUNT}/{CONFIG_KEY} the server reads")
+          f"the directory holding the {CONFIG_MOUNT}/{CONFIG_KEY} entrypoint.sh "
+          "renders the server's config from")
 
 
 def constants_catalog(failures):

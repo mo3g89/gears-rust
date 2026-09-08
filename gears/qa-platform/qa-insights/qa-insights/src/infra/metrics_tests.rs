@@ -110,7 +110,13 @@ fn one_poll_pass_drives_the_counter_and_its_histogram_together() {
 }
 
 /// **Every label value the taxonomy admits reaches the exporter as its own data
-/// point.**
+/// point — on the histograms as well as the counters.**
+///
+/// **The histogram half is the half that was missing**, and it is the half a
+/// dashboard needs most: `record(value, &[])` beside a correctly labelled
+/// `add` satisfies every count-only assertion in this file, and then every
+/// `histogram_quantile(… by (outcome))` written against these families
+/// collapses to one merged series with no error anywhere.
 ///
 /// Sweeps the four `ALL` constants rather than sampling. The defect is an
 /// adapter that hard-codes one attribute — every value would still export, into
@@ -143,6 +149,16 @@ fn every_label_value_reaches_the_exporter_on_its_own_series() {
             "collect outcome {} exported no series of its own",
             outcome.as_str()
         );
+        assert_eq!(
+            series.histogram_count_with(
+                QA_INSIGHTS_COLLECT_DURATION,
+                &[("outcome", outcome.as_str())]
+            ),
+            1,
+            "collect outcome {} exported no HISTOGRAM series of its own, so a \
+             per-outcome quantile query would read one merged distribution",
+            outcome.as_str()
+        );
     }
     for outcome in CollectReportOutcome::ALL {
         assert_eq!(
@@ -159,6 +175,16 @@ fn every_label_value_reaches_the_exporter_on_its_own_series() {
             "poll outcome {} exported no series of its own",
             outcome.as_str()
         );
+        assert_eq!(
+            series.histogram_count_with(
+                QA_INSIGHTS_JIRA_POLL_DURATION,
+                &[("outcome", outcome.as_str())]
+            ),
+            1,
+            "poll outcome {} exported no HISTOGRAM series of its own, so a \
+             per-outcome quantile query would read one merged distribution",
+            outcome.as_str()
+        );
     }
     for outcome in JiraBugOutcome::ALL {
         assert_eq!(
@@ -173,11 +199,17 @@ fn every_label_value_reaches_the_exporter_on_its_own_series() {
 /// **The auto-rerun family is one unlabelled series.**
 ///
 /// The family carries no attributes on purpose — see
-/// [`crate::domain::metrics::QA_INSIGHTS_JIRA_RERUN`] — so this pins that no
-/// label crept in: a labelled data point would still be counted by `counter`,
-/// but `counter_with` over an empty label set would stop describing the whole
-/// family, and any label added here would be one carrying a tenant, a bug or a
-/// plan, which is the disclosure rule this catalog is built around.
+/// [`crate::domain::metrics::QA_INSIGHTS_JIRA_RERUN`] — and any label added here
+/// would be one carrying a tenant, a bug or a plan, which is the disclosure rule
+/// this catalog is built around.
+///
+/// **Pinned with `counter_with_exactly`, not `counter_with`, and that is the
+/// whole test.** An at-least filter over an empty label set is vacuously true of
+/// every data point, so `counter_with(name, &[])` returns exactly what `counter`
+/// returns — the assertion would restate the line above it and would stay green
+/// the day `auto_rerun` started attaching a tenant id, which is precisely the
+/// rule its own doc invokes. The exact form is a statement about the labels the
+/// point does *not* carry, and no subset filter can make it.
 #[test]
 fn the_auto_rerun_family_carries_no_labels() {
     let probe = MetricsProbe::new();
@@ -189,9 +221,10 @@ fn the_auto_rerun_family_carries_no_labels() {
     let series = probe.collect();
     assert_eq!(series.counter(QA_INSIGHTS_JIRA_RERUN), 2);
     assert_eq!(
-        series.counter_with(QA_INSIGHTS_JIRA_RERUN, &[]),
+        series.counter_with_exactly(QA_INSIGHTS_JIRA_RERUN, &[]),
         2,
-        "an unlabelled family's whole total must be reachable with no label filter"
+        "the auto-rerun counter must carry NO attribute at all; every whole \
+         increment must be reachable under an exactly-empty label set"
     );
 }
 

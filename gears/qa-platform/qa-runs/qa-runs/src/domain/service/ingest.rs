@@ -828,10 +828,14 @@ where
         let measured = !matches!(event, ExecutionEvent::Started);
         let started = Instant::now();
         let landed = self.apply_event(ctx, run_id, event).await;
-        // One observation is one measured pass, and this is the boundary the
-        // `cpt-cf-qa-nfr-result-latency` p95 is stated over: the executor's
-        // event in, the run row updated. `Self::ingest`'s loop is a driver over
-        // this, not a second unit — timing the loop would time the run.
+        // One observation is one measured pass: the event in hand here, the
+        // run row updated. That is the GEAR-SIDE HALF of
+        // `cpt-cf-qa-nfr-result-latency` and not the NFR's own span — the
+        // requirement is stated over runner emission -> API visibility, so this
+        // excludes the runner-to-gear transport ahead of it and the read side
+        // after it. `crate::domain::metrics::QA_RUNS_INGEST_DURATION`'s doc
+        // states the gap in full. `Self::ingest`'s loop is a driver over this,
+        // not a second unit — timing the loop would time the run.
         //
         // Guarded rather than called directly; see `super::emit`. It matters
         // more here than on the dispatcher, because this path runs per log line.

@@ -1,7 +1,7 @@
 //! qa-runs observability metric catalog.
 //!
 //! DESIGN's p95 NFRs are stated over dispatch and ingest, and until this module
-//! existed nothing measured either: `grep -rn 'metrics!|prometheus|
+//! existed nothing observed either path at all: `grep -rn 'metrics!|prometheus|
 //! opentelemetry|histogram'` over all four qa-platform gears returned zero
 //! non-test hits. The NFRs were not badly observed, they were unobservable.
 //! Review finding #4.
@@ -81,12 +81,20 @@ pub const QA_RUNS_DISPATCH_DURATION: &str = "qa_runs_dispatch_duration_seconds";
 /// is never queued at all.
 ///
 /// **It counts departures, not arrivals.** Every increment is a row leaving the
-/// queue *successfully*, so two populations are missing from it: a claimed row
-/// whose dispatch failed, and a queued row the TTL sweep expired before any
-/// tick reached it. It therefore equals the rate at which runs are enqueued
-/// only in steady state, and diverges from it in exactly the incidents an
-/// operator is reading it during — pair it with the dispatcher's own report
-/// and with [`QA_RUNS_DISPATCH`] rather than treating it as an arrival rate.
+/// queue *successfully*, so four populations are missing from it: a claimed row
+/// whose dispatch failed, a queued row the TTL sweep expired before any tick
+/// reached it, and — because `service::dispatch`'s `record_queue_wait` returns
+/// early rather than record a span it cannot compute — a drained row with no
+/// `enqueued_at` and a drained row whose stored instant is ahead of the drain's
+/// clock. It therefore equals the rate at which runs are enqueued only in
+/// steady state, and diverges from it in exactly the incidents an operator is
+/// reading it during.
+///
+/// **The arrival side is [`QA_RUNS_DISPATCH_DECISION`], not
+/// [`QA_RUNS_DISPATCH`].** `qa_runs_dispatch_decision_total{decision="queued"}`
+/// counts admissions into the FIFO, which is the denominator this counter is
+/// the numerator of; [`QA_RUNS_DISPATCH`] is per *cycle* and joins to neither.
+/// Read the dispatcher's own report beside both.
 ///
 /// It is the companion counter for [`QA_RUNS_QUEUE_WAIT_DURATION`]'s p95, which
 /// observes the same events.
@@ -163,8 +171,19 @@ pub const QA_RUNS_DISPATCH_DECISION: &str = "qa_runs_dispatch_decision_total";
 /// Labelled by [`crate::domain::ports::metrics::IngestOutcome`].
 pub const QA_RUNS_INGEST: &str = "qa_runs_ingest_total";
 
-/// Wall-clock duration of one ingest pass — the second p95 NFR. Same label set
-/// as [`QA_RUNS_INGEST`].
+/// Wall-clock duration of one ingest pass. Same label set as
+/// [`QA_RUNS_INGEST`].
+///
+/// **It is the gear-side half of `cpt-cf-qa-nfr-result-latency`, not that
+/// NFR.** PRD and `DESIGN.md` state the requirement over *runner event emission
+/// → API visibility*. This span shares neither endpoint: it opens when the
+/// event has already reached `IngestService::apply` and closes when that pass
+/// returns, so it excludes the runner-to-gear transport on one side and the
+/// read path on the other. What it bounds is the part this gear can act on, and
+/// an alert on it can miss a violation whose whole cost was paid outside the
+/// span — the same shape of gap [`QA_RUNS_QUEUE_WAIT_DURATION`] states in full
+/// for the other NFR, and the same reason [`QA_RUNS_DISPATCH_DURATION`] carries
+/// its own disclaimer.
 pub const QA_RUNS_INGEST_DURATION: &str = "qa_runs_ingest_duration_seconds";
 
 /// Every counter family this gear exports.

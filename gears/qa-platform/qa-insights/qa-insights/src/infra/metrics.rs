@@ -315,6 +315,42 @@ pub(crate) mod probe {
         }
     }
 
+    /// Which data points a reader below counts.
+    ///
+    /// A three-valued choice rather than an `Option<&[..]>` because the third
+    /// value is not expressible as a filter: [`Self::Exactly`] is a statement
+    /// about the labels a data point does **not** carry, and no subset
+    /// predicate can make it. See `Series::counter_with_exactly`.
+    #[derive(Clone, Copy)]
+    enum LabelMatch<'a> {
+        /// Every data point, whatever it carries.
+        Any,
+        /// Data points carrying at least every pair given. Vacuously true of
+        /// every point when the slice is empty.
+        AtLeast(&'a [(&'a str, &'a str)]),
+        /// Data points whose attribute set is exactly the pairs given, and
+        /// nothing else. An empty slice therefore means "unlabelled".
+        Exactly(&'a [(&'a str, &'a str)]),
+    }
+
+    impl LabelMatch<'_> {
+        fn admits<'a>(self, attributes: impl Iterator<Item = &'a opentelemetry::KeyValue>) -> bool {
+            let wanted = match self {
+                Self::Any => return true,
+                Self::AtLeast(wanted) | Self::Exactly(wanted) => wanted,
+            };
+            let held: Vec<(&str, String)> = attributes
+                .map(|kv| (kv.key.as_str(), kv.value.as_str().into_owned()))
+                .collect();
+            if matches!(self, Self::Exactly(_)) && held.len() != wanted.len() {
+                return false;
+            }
+            wanted
+                .iter()
+                .all(|(key, value)| held.iter().any(|(k, v)| k == key && v == value))
+        }
+    }
+
     /// What one flush produced, with the questions the tests ask of it.
     pub struct Series {
         metrics: Vec<ResourceMetrics>,
@@ -323,28 +359,34 @@ pub(crate) mod probe {
     impl Series {
         /// Total of a `u64` counter family across every label combination.
         pub fn counter(&self, name: &str) -> u64 {
-            self.sum_counter(name, None)
+            self.sum_counter(name, LabelMatch::Any)
         }
 
         /// Total of a `u64` counter family restricted to data points carrying
-        /// every one of `labels`.
+        /// **at least** every one of `labels`.
         pub fn counter_with(&self, name: &str, labels: &[(&str, &str)]) -> u64 {
-            self.sum_counter(name, Some(labels))
+            self.sum_counter(name, LabelMatch::AtLeast(labels))
         }
 
-        fn sum_counter(&self, name: &str, labels: Option<&[(&str, &str)]>) -> u64 {
+        /// Total of a `u64` counter family restricted to data points whose
+        /// attribute set is **exactly** `labels` — no extra key.
+        ///
+        /// The reason this exists beside [`Self::counter_with`] is the empty
+        /// slice. `AtLeast(&[])` is vacuously true of every data point, so
+        /// `counter_with(name, &[])` is not a claim about labels at all — it
+        /// returns the same number [`Self::counter`] does, and would keep
+        /// returning it the day the family started attaching a tenant id. An
+        /// unlabelled family has to be pinned with this one.
+        pub fn counter_with_exactly(&self, name: &str, labels: &[(&str, &str)]) -> u64 {
+            self.sum_counter(name, LabelMatch::Exactly(labels))
+        }
+
+        fn sum_counter(&self, name: &str, labels: LabelMatch<'_>) -> u64 {
             let mut total = 0;
             for metric in self.named(name) {
                 if let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() {
                     for point in sum.data_points() {
-                        let matches = labels.is_none_or(|wanted| {
-                            wanted.iter().all(|(key, value)| {
-                                point.attributes().any(|kv| {
-                                    kv.key.as_str() == *key && kv.value.as_str() == *value
-                                })
-                            })
-                        });
-                        if matches {
+                        if labels.admits(point.attributes()) {
                             total += point.value();
                         }
                     }
@@ -356,11 +398,30 @@ pub(crate) mod probe {
         /// How many observations a histogram family recorded, across every
         /// label combination.
         pub fn histogram_count(&self, name: &str) -> u64 {
+            self.sum_histogram(name, LabelMatch::Any)
+        }
+
+        /// How many observations a histogram family recorded on the data points
+        /// carrying **at least** every one of `labels`.
+        ///
+        /// This is the per-label-value rate, and without it a histogram's labels
+        /// are unpinned: `record(value, &[])` beside a correctly labelled
+        /// `add` passes every count-only assertion, and every
+        /// `histogram_quantile(… by (outcome))` a dashboard writes then
+        /// collapses to one merged series. qa-catalog's own adapter tests name
+        /// that defect; this is the same reader, back-ported.
+        pub fn histogram_count_with(&self, name: &str, labels: &[(&str, &str)]) -> u64 {
+            self.sum_histogram(name, LabelMatch::AtLeast(labels))
+        }
+
+        fn sum_histogram(&self, name: &str, labels: LabelMatch<'_>) -> u64 {
             let mut total = 0;
             for metric in self.named(name) {
                 if let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data() {
                     for point in histogram.data_points() {
-                        total += point.count();
+                        if labels.admits(point.attributes()) {
+                            total += point.count();
+                        }
                     }
                 }
             }

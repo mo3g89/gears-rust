@@ -41,7 +41,7 @@ fn every_catalog_family_is_exported_under_its_catalog_name() {
 
     // One emission into every family, so each instrument has a data point and
     // therefore appears in the export at all.
-    adapter.dispatch_pass(DispatchOutcome::Started, Duration::from_millis(1));
+    adapter.dispatch_pass(DispatchOutcome::Completed, Duration::from_millis(1));
     adapter.dispatch_decision(DispatchDecision::Queued);
     adapter.queue_wait(Duration::from_millis(1));
     adapter.ingest_batch(IngestOutcome::Applied, Duration::from_millis(1));
@@ -106,12 +106,20 @@ fn one_ingest_batch_drives_the_counter_and_its_histogram_together() {
 }
 
 /// **Every label value the taxonomy admits reaches the exporter as its own data
-/// point.**
+/// point — on the histograms as well as the counters.**
 ///
 /// Sweeps the three `ALL` constants rather than sampling. The defect is an
 /// adapter that hard-codes one attribute — every value would still export, into
 /// one merged series, and a per-outcome dashboard would read a flat line for
 /// every outcome but the hard-coded one.
+///
+/// **The histogram half is the half that was missing**, and it is the half a
+/// dashboard needs most: `record(value, &[])` beside a correctly labelled
+/// `add` satisfies every count-only assertion in this file, and then every
+/// `histogram_quantile(… by (outcome))` written against these families
+/// collapses to one merged series with no error anywhere. qa-catalog's
+/// equivalent test states the same thing about itself; this is that assertion
+/// back-ported.
 #[test]
 fn every_label_value_reaches_the_exporter_on_its_own_series() {
     let probe = MetricsProbe::new();
@@ -135,6 +143,14 @@ fn every_label_value_reaches_the_exporter_on_its_own_series() {
             "dispatch outcome {} exported no series of its own",
             outcome.as_str()
         );
+        assert_eq!(
+            series
+                .histogram_count_with(QA_RUNS_DISPATCH_DURATION, &[("outcome", outcome.as_str())]),
+            1,
+            "dispatch outcome {} exported no HISTOGRAM series of its own, so a \
+             per-outcome quantile query would read one merged distribution",
+            outcome.as_str()
+        );
     }
     for decision in DispatchDecision::ALL {
         assert_eq!(
@@ -154,6 +170,13 @@ fn every_label_value_reaches_the_exporter_on_its_own_series() {
             "ingest outcome {} exported no series of its own",
             outcome.as_str()
         );
+        assert_eq!(
+            series.histogram_count_with(QA_RUNS_INGEST_DURATION, &[("outcome", outcome.as_str())]),
+            1,
+            "ingest outcome {} exported no HISTOGRAM series of its own, so a \
+             per-outcome quantile query would read one merged distribution",
+            outcome.as_str()
+        );
     }
 }
 
@@ -170,7 +193,7 @@ fn every_duration_histogram_carries_the_declared_boundaries() {
     let probe = MetricsProbe::new();
     let adapter = probe.adapter();
 
-    adapter.dispatch_pass(DispatchOutcome::Started, Duration::from_secs(6));
+    adapter.dispatch_pass(DispatchOutcome::Completed, Duration::from_secs(6));
     adapter.queue_wait(Duration::from_secs(6));
     adapter.ingest_batch(IngestOutcome::Applied, Duration::from_secs(6));
 
@@ -182,6 +205,39 @@ fn every_duration_histogram_carries_the_declared_boundaries() {
             "{family} must carry the declared second boundaries; the OTel defaults \
              are milliseconds in all but name and would squeeze every value this \
              gear records into one interval"
+        );
+    }
+}
+
+/// **The two NFR thresholds are bucket edges.**
+///
+/// [`super::DURATION_BUCKETS`]' doc claims 10.0 and 5.0 are boundaries *because
+/// the two NFR thresholds are those numbers*: `cpt-cf-qa-nfr-dispatch-latency`
+/// is *queued start <= 10 s p95* and `cpt-cf-qa-nfr-result-latency` is *result
+/// visible <= 5 s p95* (DESIGN 1.2's table). Putting each on an edge is what
+/// lets an alert read a bucket instead of interpolating across one. This gear's
+/// is the only bucket set in the
+/// subsystem that encodes a threshold, and the claim is only true of a dashboard
+/// while the numbers are actually in the set — a re-tuning that moved either one
+/// would leave the reasoning in the doc and take the capability away, silently,
+/// with every other test in this file still green. qa-environments and
+/// qa-catalog each assert the equivalent property of their own sets.
+///
+/// It asserts membership only. Whether either series *measures* its NFR is a
+/// different question, settled in the negative in
+/// [`crate::domain::metrics::QA_RUNS_DISPATCH_DURATION`]'s doc and settled
+/// two-sidedly in [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`]'s.
+#[test]
+fn the_declared_boundaries_put_the_nfr_thresholds_on_bucket_edges() {
+    for (threshold, what) in [
+        (10.0_f64, "the cpt-cf-qa-nfr-dispatch-latency p95 threshold"),
+        (5.0_f64, "the cpt-cf-qa-nfr-result-latency p95 threshold"),
+    ] {
+        assert!(
+            DURATION_BUCKETS.contains(&threshold),
+            "{threshold} s is {what} and must be a bucket edge, so an alert reads a \
+             bucket rather than an interpolation across one; boundaries are \
+             {DURATION_BUCKETS:?}"
         );
     }
 }
@@ -204,7 +260,7 @@ fn a_duration_is_recorded_in_seconds() {
     let adapter = probe.adapter();
 
     // One six-second sample into every duration family this gear declares.
-    adapter.dispatch_pass(DispatchOutcome::Started, Duration::from_secs(6));
+    adapter.dispatch_pass(DispatchOutcome::Completed, Duration::from_secs(6));
     adapter.queue_wait(Duration::from_secs(6));
     adapter.ingest_batch(IngestOutcome::Applied, Duration::from_secs(6));
 
@@ -227,9 +283,15 @@ fn a_duration_is_recorded_in_seconds() {
 /// **One `queue_wait` call drives its counter and its histogram, unlabelled.**
 ///
 /// The family carries no attributes on purpose — see the adapter's
-/// implementation — so this also pins that no label crept in: a labelled data
-/// point would still be counted by `counter`, but `counter_with` over an empty
-/// label set would stop describing the whole family.
+/// implementation — so this also pins that no label crept in, and it does so
+/// with `counter_with_exactly` / `histogram_count_with_exactly` rather than
+/// with `counter_with`. That distinction is the whole assertion: an
+/// **at-least** filter over an empty label set is vacuously true of every data
+/// point, so `counter_with(name, &[])` returns exactly what `counter` returns
+/// and would go on returning it the day a tenant id was attached here — which
+/// is the disclosure rule `domain::ports::metrics`' header states. The exact
+/// form is a statement about the labels the point does *not* carry, which no
+/// subset filter can make.
 #[test]
 fn one_queue_wait_drives_the_counter_and_its_histogram_together() {
     let probe = MetricsProbe::new();
@@ -239,6 +301,17 @@ fn one_queue_wait_drives_the_counter_and_its_histogram_together() {
     let series = probe.collect();
     assert_eq!(series.counter(QA_RUNS_QUEUE_WAIT), 1);
     assert_eq!(series.histogram_count(QA_RUNS_QUEUE_WAIT_DURATION), 1);
+    assert_eq!(
+        series.counter_with_exactly(QA_RUNS_QUEUE_WAIT, &[]),
+        1,
+        "the queue-wait counter must carry NO attribute at all; any label here \
+         would be one bearing a tenant, a platform or a run"
+    );
+    assert_eq!(
+        series.histogram_count_with_exactly(QA_RUNS_QUEUE_WAIT_DURATION, &[]),
+        1,
+        "and neither may its histogram"
+    );
     assert_eq!(
         series.histogram_bucket_of(QA_RUNS_QUEUE_WAIT_DURATION, 3.0),
         Some(1),

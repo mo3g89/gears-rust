@@ -1108,9 +1108,38 @@ step "17: the gears' rendered config carries the OpenTelemetry metrics block"
 # fact on the node is the rendered CONFIG, not an endpoint.
 #
 # READ FROM /var/lib/cf-gears/.rendered-*, not from the ConfigMap: that
-# rendered file is what the server actually loaded (entrypoint.sh writes it
-# and then execs), so this also proves the ConfigMap was mounted and read --
-# the same reason checks 3, 4 and 7 read it rather than the ConfigMap.
+# rendered file is what the server actually loaded (entrypoint.sh writes it and
+# then rewrites its own `--config` argument to it before exec'ing), which is the
+# same reason checks 3, 4 and 7 read it rather than the ConfigMap.
+#
+# THAT ALONE DOES NOT PROVE THE ConfigMap WAS MOUNTED, and an earlier revision
+# of this comment claimed it did. qa-platform.Dockerfile BAKES
+# gears/qa-platform/config/qa-platform-stack.yaml into the image at
+# /etc/cf-gears/qa-platform-stack.yaml -- exactly the path entrypoint.sh reads
+# as GEARS_CONFIG_FILE. With the ConfigMap absent, or mounted somewhere else,
+# entrypoint.sh renders the BAKED copy instead: the rendered file still exists,
+# still carries a well-formed `opentelemetry:` block, and the committed value of
+# the metrics flag is `false` -- so the else branch below would print
+# "PASS: ... metrics are DISABLED (the chart default)" to an operator who ran
+# `--set opentelemetry.metrics.enabled=true`, and the FAIL text about an
+# unmounted ConfigMap could never be reached for that cause. A false green on
+# the exact defect this step exists for.
+#
+# SO THE MOUNT IS PROVEN FIRST, from the rendered file itself, before the flag
+# is read at all. The discriminator is `discovery_url`, and it is the only
+# clean one: gears-config-configmap.yaml rewrites the committed
+# `https://keycloak:8443/realms/qa-platform` to `$PUBLIC_ORIGIN/...` in ITS
+# render, unconditionally and on every install (deploy-k8s.sh passes the same
+# origin to `--set publicOrigin=`), and entrypoint.sh does NOT touch that key --
+# it rewrites `issuer_pattern`, which is a different setting, and leaves
+# `discovery_url` alone by design (see that template's own comment on why the
+# two differ). So the rewritten value can only have come through the ConfigMap,
+# and the committed literal can only have come from the baked image copy.
+#
+# ASYMMETRIC, like check 2: PASS needs the rewritten form PRESENT and the
+# committed literal ABSENT. Presence alone would not catch a partial render, and
+# absence alone is what an unreadable exec fakes -- which is why both halves go
+# through grep_count() rather than through `${n:-0}`.
 #
 # ABSENCE IS A FAIL, DISABLED IS A NOTE. `enabled: false` is the chart's
 # default and a legitimate deployment state -- an operator who has no
@@ -1118,12 +1147,37 @@ step "17: the gears' rendered config carries the OpenTelemetry metrics block"
 # the committed config or the chart's transform lost it, and the operator who
 # later sets opentelemetry.metrics.enabled=true would get a successful helm
 # upgrade and no metrics.
+
+# ---- the mount, proven before anything is read out of the block ----------
+# PUBLIC_ORIGIN is validated above as `scheme://host[:port]`, so the only BRE
+# metacharacter it can contain is `.`; escaping it keeps this a literal match
+# rather than one where `10.136.20.200` would also match `10x136x20x200`.
+origin_re="${PUBLIC_ORIGIN//./\\.}"
+if ! grep_count deploy/qa-platform-gears "discovery_url: \"$origin_re/realms/qa-platform\"" \
+    /var/lib/cf-gears/.rendered-qa-platform-stack.yaml \
+    "rendered config: ConfigMap-rewritten discovery_url count"; then
+    exit 1
+fi
+n_cm="$GREP_COUNT_VAL"
+if ! grep_count deploy/qa-platform-gears 'discovery_url: "https://keycloak:8443/realms/qa-platform"' \
+    /var/lib/cf-gears/.rendered-qa-platform-stack.yaml \
+    "rendered config: committed placeholder discovery_url count"; then
+    exit 1
+fi
+n_baked="$GREP_COUNT_VAL"
+if [ "$n_cm" -ge 1 ] && [ "$n_baked" -eq 0 ]; then
+    echo "PASS: the rendered config came from ConfigMap qa-platform-gears-config, not from the copy baked into the image (rewritten discovery_url lines=$n_cm, committed-placeholder lines=$n_baked)"
+else
+    echo "FAIL: the gears rendered their config from the copy BAKED INTO THE IMAGE, not from ConfigMap qa-platform-gears-config (rewritten discovery_url lines=$n_cm, committed-placeholder lines=$n_baked; wanted >=1 and 0). entrypoint.sh reads /etc/cf-gears/qa-platform-stack.yaml, which qa-platform.Dockerfile also bakes in, so an absent or misplaced ConfigMap mount is silent -- the pod starts and serves. Everything this step would report about opentelemetry below would then be the COMMITTED defaults rather than what this release asked for, and every OIDC token would fail validation besides. Check 'kubectl -n $NAMESPACE get deploy qa-platform-gears -o jsonpath={.spec.template.spec.volumes}' and that the volumeMount lands on /etc/cf-gears." >&2
+    exit 1
+fi
+
 rc=0
 kubectl exec -n "$NAMESPACE" deploy/qa-platform-gears -- \
     sed -n '/^opentelemetry:/,/^[^ #]/p' /var/lib/cf-gears/.rendered-qa-platform-stack.yaml \
     > "$WORKDIR/otel.block" 2>"$WORKDIR/otel.err" || rc=$?
 if [ "$rc" -ne 0 ] || [ ! -s "$WORKDIR/otel.block" ]; then
-    echo "FAIL: the gears' rendered /var/lib/cf-gears/.rendered-qa-platform-stack.yaml carries no 'opentelemetry:' block (exit $rc): $(cat "$WORKDIR/otel.err" 2>/dev/null). Every one of the 22 metric families in DESIGN 3.9 is then unreachable, silently -- the gears report nothing about it. Check gears/qa-platform/config/qa-platform-stack.yaml and that ConfigMap qa-platform-gears-config is mounted at /etc/cf-gears." >&2
+    echo "FAIL: the gears' rendered /var/lib/cf-gears/.rendered-qa-platform-stack.yaml carries no 'opentelemetry:' block (exit $rc): $(cat "$WORKDIR/otel.err" 2>/dev/null). Every one of the 22 metric families in DESIGN 3.9 is then unreachable, silently -- the gears report nothing about it. The mount itself is already proven above, so this is the committed config or the chart's transform having lost the block: check gears/qa-platform/config/qa-platform-stack.yaml and gears-config-configmap.yaml's fourth transform." >&2
     exit 1
 fi
 otel_service="$(sed -n 's/^    service_name: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$WORKDIR/otel.block" | head -1)"
@@ -1169,7 +1223,7 @@ if [ "$otel_metrics" = "true" ]; then
     esac
     echo "PASS: metrics are ENABLED and push to '$otel_endpoint' (service_name=$otel_service, tracing=$otel_tracing)"
 else
-    echo "PASS: the metrics block is present and correctly shaped; metrics are DISABLED (the chart default). NOTE: nothing from DESIGN 3.9 leaves this stack. Turn it on with --set opentelemetry.metrics.enabled=true --set opentelemetry.metrics.endpoint=<collector>."
+    echo "PASS: the metrics block is present and correctly shaped, in a config proven above to have come from the ConfigMap; metrics are DISABLED (the chart default). NOTE: nothing from DESIGN 3.9 leaves this stack. Turn it on with --set opentelemetry.metrics.enabled=true --set opentelemetry.metrics.endpoint=<collector>."
 fi
 
 step "18: the deployed binary carries exactly the metric catalog, name for name"

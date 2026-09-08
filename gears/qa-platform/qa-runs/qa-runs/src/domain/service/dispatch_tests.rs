@@ -3465,7 +3465,7 @@ async fn a_dispatch_pass_records_one_observation() {
          disagree about how many passes there were"
     );
     assert_eq!(
-        series.counter_with(QA_RUNS_DISPATCH, &[("outcome", "started")]),
+        series.counter_with(QA_RUNS_DISPATCH, &[("outcome", "completed")]),
         1,
         "a tick that reached the drain ran to the end"
     );
@@ -3652,6 +3652,16 @@ async fn a_tick_with_no_pipeline_configured_behaves_exactly_as_an_unmetered_one(
 /// assertion is on the bucket the value landed in, because that is what a p95
 /// query reads — an assertion on the count alone would pass against a wait of
 /// zero.
+///
+/// **What the bucket assertion pins, stated exactly, because the obvious
+/// reading of it is wrong.** An hour is far above `DURATION_BUCKETS`' 60 s top
+/// boundary, so `histogram_bucket_of(.., 3600.0)` reads the **overflow**
+/// bucket: it does not say the sample was an hour, only that it was more than
+/// a minute. That is still the whole of what this test needs — a tick duration
+/// is milliseconds — but it is bracketed on the other side here rather than
+/// left implied: the total count is one and the overflow holds it, so no
+/// sub-minute bucket holds anything, which is the statement "this is not the
+/// tick's own duration" in the strongest form these boundaries admit.
 #[tokio::test]
 async fn a_drained_run_reports_the_time_it_waited_in_the_queue() {
     let waiting = row_aged(
@@ -3684,10 +3694,16 @@ async fn a_drained_run_reports_the_time_it_waited_in_the_queue() {
         "one queued run reached an execution request"
     );
     assert_eq!(
+        series.histogram_count(QA_RUNS_QUEUE_WAIT_DURATION),
+        1,
+        "premise for the bracket below: exactly one observation was recorded"
+    );
+    assert_eq!(
         series.histogram_bucket_of(QA_RUNS_QUEUE_WAIT_DURATION, 3_600.0),
         Some(1),
-        "an hour in the queue must be recorded as an hour, not as the duration of \
-         the tick that drained it"
+        "the one observation must sit in the bucket above the 60 s top boundary; \
+         with the count above, that places the whole sample beyond a minute and \
+         so beyond anything the tick that drained it could have taken"
     );
 }
 

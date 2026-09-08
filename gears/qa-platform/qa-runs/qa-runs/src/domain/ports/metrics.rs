@@ -86,11 +86,12 @@ use crate::domain::state_machine::is_terminal;
 pub enum DispatchOutcome {
     /// The cycle ran to the end and drained what it was allowed to drain —
     /// **including a cycle that found nothing to do**, which is the healthy
-    /// steady state and the overwhelming majority of ticks. It does not mean
-    /// any particular run started; how many rows a cycle claimed is the
-    /// dispatcher's own report, and whether a queued run reached an execution
-    /// is [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT`].
-    Started,
+    /// steady state and the overwhelming majority of ticks. The word is the one
+    /// the other three qa-platform gears use for the same shape of pass, and it
+    /// says what it means: the tick reached its own end. How many rows it
+    /// claimed is the dispatcher's own report, and whether a queued run reached
+    /// an execution is [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT`].
+    Completed,
     /// A rule stopped the cycle — the concurrency cap, or a policy decision the
     /// decision point denied. Expected traffic under a configured limit rather
     /// than an incident, and deliberately not something an alert fires on.
@@ -105,13 +106,13 @@ impl DispatchOutcome {
     /// Every value, for the exhaustiveness the naming and closedness tests
     /// sweep. Declared rather than derived; see [`crate::domain::metrics::COUNTERS`]
     /// for the same caveat and the same reason it is worth having.
-    pub const ALL: [Self; 3] = [Self::Started, Self::Refused, Self::Failed];
+    pub const ALL: [Self; 3] = [Self::Completed, Self::Refused, Self::Failed];
 
     /// The label value, as it appears in the series.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Started => "started",
+            Self::Completed => "completed",
             Self::Refused => "refused",
             Self::Failed => "failed",
         }
@@ -269,8 +270,14 @@ impl From<RunState> for IngestOutcome {
 //  Port traits — one per measured path
 // ════════════════════════════════════════════════════════════════════
 
-/// The dispatch path's telemetry — the p95 NFR stated over it, plus what
-/// admission decided upstream of it.
+/// The dispatch path's telemetry — the proxy this gear can offer for
+/// `cpt-cf-qa-nfr-dispatch-latency`, plus what admission decided upstream of it.
+///
+/// **Neither method measures that NFR's own quantity**, and the two catalog
+/// docs say how far each falls short:
+/// [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`] is a two-sided proxy
+/// for it, and [`crate::domain::metrics::QA_RUNS_DISPATCH_DURATION`] is the
+/// dispatcher's own RED duration and is explicitly not it.
 ///
 /// # Implementations must not fail a caller
 ///
@@ -312,7 +319,10 @@ pub trait DispatchMetrics: Send + Sync + 'static {
     fn queue_wait(&self, waited: Duration);
 }
 
-/// The ingest path's telemetry — the second p95 NFR.
+/// The ingest path's telemetry — the **gear-side half** of
+/// `cpt-cf-qa-nfr-result-latency`, which is stated over runner emission → API
+/// visibility and so shares neither endpoint with what this measures. See
+/// [`crate::domain::metrics::QA_RUNS_INGEST_DURATION`].
 ///
 /// The same infallibility contract as [`DispatchMetrics`], and it matters more
 /// here: ingest runs per log line, so an implementation that allocated or
