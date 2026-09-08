@@ -155,6 +155,67 @@ mod tests {
 
     use super::{CanonicalError, DomainError};
 
+    /// **The observation metric's refusal/failure label agrees, variant by
+    /// variant, with what this mapping may disclose.**
+    ///
+    /// `ObservationClass::from(&DomainError)` splits the cycle's `Err` half into
+    /// "a rule decided this" and "something broke", and it does so by naming the
+    /// same three variants the mapping above renders as an opaque 500. Two
+    /// partitions of one failure space is exactly the shape that drifts, so this
+    /// asserts the agreement rather than describing it: a variant reclassified
+    /// on one side and not the other fails here.
+    ///
+    /// **It lives in the API layer because it cannot live anywhere else.** The
+    /// natural home is beside the label, in `domain::ports::metrics`' own tests
+    /// — and `no_api_in_domain_tests` forbids any module under `src/domain` from
+    /// naming `crate::api`, which is where `CanonicalError::from` is. The domain
+    /// side carries a pointer to this test; qa-insights, whose canonical mapping
+    /// is in its domain layer, keeps its version of this sweep there.
+    ///
+    /// The list is written out by hand — the compiler cannot enumerate an
+    /// enum's variants — and its completeness is this test's premise rather
+    /// than its subject. What holds it is
+    /// `impl From<&DomainError> for ObservationClass`, whose match has no `_`
+    /// arm: a variant added to `DomainError` does not compile until somebody
+    /// classifies it there, and the mapping above has no `_` arm either.
+    #[test]
+    fn the_metric_label_agrees_with_what_the_api_may_disclose() {
+        use crate::domain::ports::metrics::ObservationClass;
+
+        let errors = [
+            DomainError::EnvironmentNotFound { id: Uuid::nil() },
+            DomainError::VariableNotFound { id: Uuid::nil() },
+            DomainError::EnvironmentNameExists {
+                name: "e".to_owned(),
+            },
+            DomainError::VariableNameExists {
+                name: "v".to_owned(),
+            },
+            DomainError::EnvironmentUnavailable { id: Uuid::nil() },
+            DomainError::EnvironmentLeased { id: Uuid::nil() },
+            DomainError::Validation {
+                field: "name".to_owned(),
+                message: "required".to_owned(),
+            },
+            DomainError::LeaseConflict,
+            DomainError::Forbidden,
+            DomainError::CredStore("sealed".to_owned()),
+            DomainError::database("connection reset"),
+            DomainError::Internal("boom".to_owned()),
+        ];
+
+        for error in errors {
+            let rendered = format!("{error:?}");
+            let labelled_as_our_failure =
+                ObservationClass::from(&error) == ObservationClass::Failed;
+            let opaque = CanonicalError::from(error).status_code() == 500;
+            assert_eq!(
+                labelled_as_our_failure, opaque,
+                "the observation label disagrees with the canonical rendering for {rendered}"
+            );
+        }
+    }
+
     #[test]
     fn environment_not_found_maps_to_not_found_404() {
         let ce: CanonicalError = DomainError::EnvironmentNotFound { id: Uuid::new_v4() }.into();

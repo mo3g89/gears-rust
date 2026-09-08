@@ -45,6 +45,8 @@
 //!   material" and "reports what it found" is a type, not a promise.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use credstore_sdk::{
     CredStoreClientV1, CredStoreError, SecretRef, SecretValue, SharingMode, WritePrecondition,
@@ -55,8 +57,11 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::RunnerSecretWriter;
+use crate::domain::ports::metrics::{
+    CycleOutcome, EnvironmentOutcome, NoopMetrics, ObservationClass, ObservationMetrics,
+};
 use crate::domain::repos::{EnvironmentsRepository, LeasesRepository};
-use crate::domain::service::DbProvider;
+use crate::domain::service::{DbProvider, emit};
 use crate::domain::system_actor;
 use authz_resolver_sdk::PolicyEnforcer;
 use qa_product_sdk::QaProductPluginV1;
@@ -165,6 +170,17 @@ pub struct EnvironmentsService<P: EnvironmentsRepository, L: LeasesRepository> {
     /// `infra::product_plugin` for why this gear must not fail to boot when
     /// `qa-catalog` is absent.
     product_plugins: Arc<dyn ProductPluginPort>,
+    /// Where the observation cycle reports itself. `NoopMetrics` when no
+    /// adapter was installed, never `None`: a service built without one emits
+    /// every signal a wired one does and nothing observes, which is what makes
+    /// "silent with no adapter" a property of the type rather than of a branch
+    /// somebody remembered to write. See [`crate::domain::ports::metrics`].
+    metrics: Arc<dyn ObservationMetrics>,
+    /// Latched by the first metric emission that panics, after which this
+    /// service emits nothing. Per service, not global -- `domain::service`'s
+    /// `emit` carries the argument, and the test that drives a panicking
+    /// adapter is why it matters.
+    metrics_silenced: AtomicBool,
     policy_enforcer: PolicyEnforcer,
 }
 
@@ -207,6 +223,21 @@ const LEGACY_CREDENTIAL_UNBINDABLE: &str = "this environment still holds its cre
      belong to. Re-save the environment's credentials so each one is stored under its own key.";
 
 impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
+    /// `metrics` is `None` for every construction site that does not measure
+    /// this service, which is every one but `gear.rs`'s `init`. `None` is not
+    /// "metrics off": the field becomes `NoopMetrics`, so an unmetered service
+    /// runs every emission a metered one does and nothing observes. An
+    /// `Option` parameter rather than a `with_metrics` builder for that
+    /// reason — "no adapter" is a state a construction site says, not one it
+    /// reaches by forgetting.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one argument per collaborator this service holds (the db provider, two \
+                  repositories, credstore, the runner-Secret writer, the product-plugin port, \
+                  the metrics port and the enforcer). The DI container's own constructor \
+                  carries the same allowance for the same reason, and this one has exactly \
+                  one caller (`AppServices::new`)."
+    )]
     pub fn new(
         db: Arc<DbProvider>,
         repo: Arc<P>,
@@ -214,6 +245,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         credstore: Arc<dyn CredStoreClientV1>,
         observer: Arc<dyn RunnerSecretWriter>,
         product_plugins: Arc<dyn ProductPluginPort>,
+        metrics: Option<Arc<dyn ObservationMetrics>>,
         policy_enforcer: PolicyEnforcer,
     ) -> Self {
         Self {
@@ -223,6 +255,8 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             credstore,
             observer,
             product_plugins,
+            metrics: metrics.unwrap_or_else(|| Arc::new(NoopMetrics)),
+            metrics_silenced: AtomicBool::new(false),
             policy_enforcer,
         }
     }
@@ -661,12 +695,48 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// failing (a dangling or unreadable reference), not a fact about the
     /// environment's cluster, so it propagates as a genuine `DomainError` rather
     /// than being folded into the `ObservationOutcome` an operator reads.
-    #[instrument(skip(self, ctx), fields(environment_id = %id))]
     pub async fn observe_environment(
         &self,
         ctx: &SecurityContext,
         id: Uuid,
     ) -> Result<Environment, DomainError> {
+        self.observe_environment_classified(ctx, id)
+            .await
+            .map(|(environment, _)| environment)
+    }
+
+    /// [`Self::observe_environment`], with the label the observation cycle
+    /// needs carried out beside the row.
+    ///
+    /// # Why the class is returned rather than re-derived
+    ///
+    /// [`ObservationClass`] distinguishes a cluster that could not be reached
+    /// from one that refused a credential, and both of those are `Ok` here —
+    /// the failure is a *value*, persisted into the environment's row, which is
+    /// the rule [`Self::observe_environment`]'s own doc opens with. So the
+    /// class is not recoverable from this method's `Result`, and reconstructing
+    /// it from the refreshed row would mean parsing back a projection of the
+    /// very thing that is still in hand two statements earlier. It is read off
+    /// the plugin's own [`PluginObservationOutcome`] instead, before the write.
+    ///
+    /// The public method above discards it. That is deliberate: the REST
+    /// refresh route measures nothing (it is one caller-initiated observation,
+    /// not a cycle), and the alternative — widening the public signature —
+    /// would put a metric label in this gear's REST-facing surface.
+    ///
+    /// `name = "observe_environment"` keeps the span this method has always
+    /// emitted under the name every existing log line and dashboard knows it
+    /// by; the split is an implementation detail and must not rename a span.
+    #[instrument(
+        name = "observe_environment",
+        skip(self, ctx),
+        fields(environment_id = %id)
+    )]
+    async fn observe_environment_classified(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<(Environment, ObservationClass), DomainError> {
         info!("Observing environment");
 
         // UPDATE, not GET: this method persists (`record_observation`) and
@@ -690,16 +760,28 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
 
         let observation = self.observe_through_plugin(ctx, &environment).await;
 
+        // Read here, from the value the plugin returned, and not from the row
+        // written below: `record_observation`'s merge rules deliberately keep
+        // an older successful detection alongside a newer failure, so the row
+        // answers "what is known about this environment" while the label has to
+        // answer "what happened this time".
+        let class = match observation.environment() {
+            PluginObservationOutcome::Detected(_) => ObservationClass::Detected,
+            PluginObservationOutcome::Failed(failure) => ObservationClass::from(failure.class),
+        };
+
         self.repo
             .record_observation(&conn, &scope, id, &observation)
             .await?;
 
         info!("Successfully observed environment");
 
-        self.repo
+        let refreshed = self
+            .repo
             .get(&conn, &scope, id)
             .await?
-            .ok_or(DomainError::EnvironmentNotFound { id })
+            .ok_or(DomainError::EnvironmentNotFound { id })?;
+        Ok((refreshed, class))
     }
 
     /// Observe this environment through its product's plugin.
@@ -1026,16 +1108,73 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// as well as its own `qa.platform` `update`. Under `static-authz-plugin`
     /// no policy work is needed — a tenant-bound context is granted by tenant,
     /// whatever the resource type.
+    ///
+    /// # What this cycle reports about itself
+    ///
+    /// Three families, and the split between them is the point.
+    /// [`crate::domain::metrics::QA_ENVIRONMENTS_OBSERVATION_CYCLE`] and its
+    /// duration are emitted here, once, around the whole pass;
+    /// [`crate::domain::metrics::QA_ENVIRONMENTS_OBSERVATION`] is emitted from
+    /// the [`ObservationCycleReport`] this returns, so the series and the
+    /// `debug!` line `crate::gear`'s ticker writes from the same value cannot
+    /// disagree; and
+    /// [`crate::domain::metrics::QA_ENVIRONMENTS_OBSERVATION_DURATION`] is the
+    /// one per-item emission, inside
+    /// [`Self::observe_every_environment`]'s loop, because a cycle duration
+    /// summed over a hundred environments cannot tell one hanging cluster from
+    /// a hundred slow ones.
+    ///
+    /// Nothing here changes what this method does or returns: every emission
+    /// goes through `domain::service::emit`, which cannot fail the cycle and
+    /// cannot log.
+    pub async fn run_observation_cycle(
+        &self,
+        cancel: &CancellationToken,
+    ) -> ObservationCycleReport {
+        let started = Instant::now();
+        let (report, outcome) = self.observe_every_environment(cancel).await;
+        // Read before the emission, so a slow adapter cannot inflate the
+        // duration it is being handed.
+        let elapsed = started.elapsed();
+        emit(&self.metrics_silenced, || {
+            self.metrics.observation_cycle(outcome, elapsed);
+            // Both values every time, including zero: a `failed` series that
+            // only appears once something has failed is a series an alert
+            // reads as "no data" rather than as a healthy zero. The port's own
+            // doc carries the argument.
+            self.metrics
+                .cycle_environments(EnvironmentOutcome::Observed, report.observed);
+            self.metrics
+                .cycle_environments(EnvironmentOutcome::Failed, report.failed);
+        });
+        report
+    }
+
+    /// [`Self::run_observation_cycle`]'s body, plus the one fact the report
+    /// cannot carry: **how the cycle ended**.
+    ///
+    /// [`ObservationCycleReport`] counts environments, and an all-zero report
+    /// is produced by three completely different situations — a deployment with
+    /// no environments, a failed database connection, and a failed listing.
+    /// The first is healthy and the other two mean nothing has been observed at
+    /// all. So the outcome travels out beside the report rather than being
+    /// derived from it, exactly as qa-runs' dispatcher had to do for its own
+    /// tick report, and for the same reason: two opposite situations that are
+    /// indistinguishable in the value would otherwise have to share a label.
+    ///
+    /// The split is also what makes the cycle the measured unit: the wrapper
+    /// reads the clock once around this whole call, so one cycle is one sample
+    /// on both cycle instruments however many environments it visited.
     #[allow(
         clippy::cognitive_complexity,
         reason = "inflated by the per-environment branches (nil tenant, observe Err, self-heal \
                   Err), each of which owes an operator a distinct log line - same diagnosis as \
                   qa-runs' `service::dispatch::run_tick`/`reconcile_claims`"
     )]
-    pub async fn run_observation_cycle(
+    async fn observe_every_environment(
         &self,
         cancel: &CancellationToken,
-    ) -> ObservationCycleReport {
+    ) -> (ObservationCycleReport, CycleOutcome) {
         let mut report = ObservationCycleReport::default();
 
         let conn = match self.db.conn() {
@@ -1046,7 +1185,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                     "qa-environments observation cycle: failed to acquire a database \
                      connection; skipping this cycle"
                 );
-                return report;
+                return (report, CycleOutcome::Unstarted);
             }
         };
 
@@ -1109,7 +1248,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                     "qa-environments observation cycle: failed to list environments; skipping \
                      this cycle"
                 );
-                return report;
+                return (report, CycleOutcome::Unstarted);
             }
         };
 
@@ -1123,7 +1262,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                     attempted = report.attempted,
                     "qa-environments observation cycle stopping early (shutdown)"
                 );
-                return report;
+                return (report, CycleOutcome::Cancelled);
             }
 
             report.attempted += 1;
@@ -1136,13 +1275,32 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                      skipping it rather than observing it under an unscoped identity"
                 );
                 report.failed += 1;
+                // Counted, not timed: nothing was contacted, so there is no
+                // observation latency to record, and a near-zero sample would
+                // drag down the quantile the per-environment histogram exists
+                // to report. `ObservationClass`'s own doc states this as the
+                // one population the two environment families differ by.
                 continue;
             }
 
             let ctx = system_actor::for_observation(tenant_id);
 
-            match self.observe_environment(&ctx, environment.id).await {
-                Ok(_) => report.observed += 1,
+            let started = Instant::now();
+            let observed = self
+                .observe_environment_classified(&ctx, environment.id)
+                .await;
+            // Stopped the instant the call returns, before the branch below:
+            // neither the `warn!` formatting nor the report's own bookkeeping
+            // is work this environment's systems did, and charging it to them
+            // would put the failure arm systematically above the success arm
+            // for a reason that has nothing to do with either.
+            let elapsed = started.elapsed();
+
+            let class = match observed {
+                Ok((_, class)) => {
+                    report.observed += 1;
+                    class
+                }
                 Err(error) => {
                     warn!(
                         environment_id = %environment.id,
@@ -1152,13 +1310,41 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                          continuing with the rest"
                     );
                     report.failed += 1;
+                    ObservationClass::from(&error)
                 }
-            }
+            };
+            // The **only** per-item emission in this gear, and the label is a
+            // closed nine-value set: the environment's id, its name, its tenant
+            // and its cluster's address are all in scope here and none of them
+            // reaches a series. `domain::ports::metrics`' header carries the
+            // reason, which is disclosure before cardinality.
+            emit(&self.metrics_silenced, || {
+                self.metrics.environment_observed(class, elapsed);
+            });
 
+            // ── Unmeasured, and this is the disclosure rather than an oversight ──
+            //
+            // The self-heal below is the iteration's *second* round trip -- it
+            // writes decision D4's runner `Secret` into the Argo cluster,
+            // independently of how the observation above went, and it swallows
+            // its own failures into a log line exactly as the observation does.
+            // So a cycle whose self-heal is timing out on every environment
+            // shows up in this cycle's duration and in nothing finer, and the
+            // per-environment histogram above does not account for it: a
+            // cycle's duration is therefore larger than the sum of its
+            // per-environment samples, by the self-heal and by the enumeration.
+            //
+            // It is left open because this task measures the observation path
+            // and the self-heal is a different port with a different failure
+            // vocabulary (`RunnerSecretWriter` returns `Result<(), String>` --
+            // free text, which is precisely what may not become a label).
+            // Closing it is one more family with its own two-valued outcome and
+            // one emission around this call; it needs no new call site and no
+            // change to anything here.
             self.self_heal_kubeconfig_secret(&ctx, &environment).await;
         }
 
-        report
+        (report, CycleOutcome::Completed)
     }
 
     /// The ticker's per-cycle call into [`Self::materialise_runner_secret`],
