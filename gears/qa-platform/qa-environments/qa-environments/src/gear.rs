@@ -28,6 +28,7 @@ use crate::config::QaEnvironmentsConfig;
 use crate::domain::local_client::QaEnvironmentsLocalClient;
 #[cfg(not(feature = "runner-secret"))]
 use crate::domain::ports::NoopRunnerSecretWriter;
+use crate::domain::ports::metrics::ObservationMetrics;
 use crate::domain::ports::{ProductPluginPort, RunnerSecretWriter};
 use crate::domain::service::AppServices;
 use crate::infra::metrics::build_default_adapter;
@@ -145,7 +146,13 @@ impl Gear for QaEnvironments {
         // deployment with no pipeline builds every instrument and emits into
         // nothing, which is exactly the "silent with no adapter" posture the
         // observability constraints ask for. See `infra::metrics`' header.
+        // One adapter, two ports. `QaEnvironmentsMetricsMeter` implements both
+        // `ObservationMetrics` and `PluginMetrics`, and the same `Arc` is
+        // coerced into each: the observation cycle and the plugin boundary
+        // report through one object, so their series cannot come from two
+        // differently-configured meters.
         let metrics = build_default_adapter();
+        let observation_metrics: Arc<dyn ObservationMetrics> = metrics.clone();
 
         let services = Arc::new(AppServices::new(
             Arc::new(OrmEnvironmentsRepository),
@@ -156,6 +163,7 @@ impl Gear for QaEnvironments {
             credstore,
             observer,
             product_plugins,
+            Some(observation_metrics),
             Some(metrics),
             cfg.max_variables,
         ));
@@ -536,15 +544,21 @@ mod tests {
     }
 
     /// **`init` builds exactly one metrics adapter and hands it to the
-    /// container, with no switch of its own.**
+    /// container's two metric ports, with no switch of its own.**
     ///
-    /// Three claims, and the third is the one that is easy to get wrong later.
+    /// Four claims, and the last is the one that is easy to get wrong later.
     /// `build_default_adapter` reads the process-global meter provider, which
     /// `toolkit`'s telemetry init leaves as the built-in no-op when metrics are
     /// off or were never configured — so a `metrics.enabled` branch here would
     /// be a second, independent switch that can disagree with the first, and the
     /// disagreement's symptom is a gear that exports nothing while the
     /// deployment believes telemetry is on.
+    ///
+    /// The **two** wirings matter as much as the one construction: the
+    /// observation cycle and the plugin boundary are separate ports on one
+    /// adapter, and an `init` that filled only the first would leave the plugin
+    /// families with no production emitter while every other test in this crate
+    /// stayed green.
     #[test]
     fn init_installs_exactly_one_metrics_adapter_into_the_container() {
         let init = init_source();
@@ -558,6 +572,12 @@ mod tests {
             init.contains("Some(metrics)"),
             "the adapter init built must reach AppServices::new, or nothing in this gear \
              emits anything"
+        );
+        assert!(
+            init.contains("Some(observation_metrics)"),
+            "and it must reach BOTH metric ports: one adapter object behind the observation \
+             cycle and behind the plugin boundary, or one of the two families has no \
+             production emitter"
         );
         assert!(
             !init.contains("metrics.enabled"),

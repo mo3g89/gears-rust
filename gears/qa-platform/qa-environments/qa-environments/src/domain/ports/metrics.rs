@@ -1,19 +1,81 @@
-//! qa-environments observability port — the typed metric-emission trait for
-//! the observation cycle.
+//! qa-environments observability ports — the typed metric-emission traits for
+//! the observation cycle and for the plugin boundary.
 //!
-//! [`ObservationMetrics`] owns the whole catalog declared in
-//! [`crate::domain::metrics`]. One infra adapter
-//! ([`crate::infra::metrics::QaEnvironmentsMetricsMeter`]) implements it; DI
-//! hands [`crate::domain::service::EnvironmentsService`] an `Arc<dyn _>` view.
+//! [`ObservationMetrics`] and [`PluginMetrics`] own the whole catalog declared
+//! in [`crate::domain::metrics`]. One infra adapter
+//! ([`crate::infra::metrics::QaEnvironmentsMetricsMeter`]) implements both; DI
+//! hands [`crate::domain::service::EnvironmentsService`] an `Arc<dyn _>` view of
+//! each.
+//!
+//! # Why the plugin boundary is timed here, at the caller, and not in the
+//! plugins
+//!
+//! **The design decision [`PluginMetrics`] exists to record.** The alternative
+//! was to instrument the plugins: have every implementation of
+//! `qa_product_sdk::QaProductPluginV1` time and count its own work. That is
+//! more faithful per plugin, and it is the wrong trade here for two reasons
+//! that are both about `qa-product-sdk` rather than about metrics.
+//!
+//! * **It would widen the contract every plugin author must satisfy.**
+//!   `qa-product-sdk` is deliberately narrow — its own feature documentation
+//!   argues that the crate gates its own code rather than growing its
+//!   dependency graph, and `qa-plugin-k8s` exists precisely so that the one
+//!   heavy dependency in this subsystem sits in a crate only the plugins that
+//!   need it link. Putting an `opentelemetry` dependency in the SDK would put
+//!   it in every plugin, including plugins written outside this repository.
+//! * **The caller can answer the question completely.** What a dashboard needs
+//!   is *how long does this deployment's plugin take, and how often does it
+//!   fail*, and both are visible from outside the call: the duration is the
+//!   round trip, and the failure class is
+//!   `qa_product_sdk::observation::FailureClass`, which the plugin contract
+//!   already requires a plugin to classify its failure as before it may cross
+//!   the boundary. Nothing a plugin knows about itself is needed for either.
+//!
+//! What the caller genuinely cannot see is *why* a plugin was slow — which of
+//! its own internal steps cost the seconds. That is a real loss, it is what
+//! plugin-side instrumentation would have bought, and a plugin that wants it
+//! can still emit its own metrics without any of this changing. It is recorded
+//! here so the trade is visible rather than implied.
+//!
+//! ## No plugin identity is a label, including its GTS type id — measured
+//!
+//! The obvious dimension for a plugin-boundary family is *which plugin*, and it
+//! is absent. Two separate reasons, and the second needed checking rather than
+//! assuming.
+//!
+//! * **The instance id is not available here at all.** This gear resolves a
+//!   plugin through [`crate::domain::ports::ProductPluginPort`], which hands
+//!   back an `Arc<dyn QaProductPluginV1>` and nothing else;
+//!   `QaProductPluginV1` declares no identity method, and the id lives in
+//!   qa-catalog's `qa_products.plugin_instance_id` column. Labelling by it
+//!   would mean widening a cross-gear SDK trait to carry a metric dimension.
+//! * **The GTS *type* id is a set of one, so it would be a constant label.**
+//!   `qa-product-sdk` declares exactly one product-plugin spec type,
+//!   `QaProductPluginSpecV1`; `toolkit_gts::PluginV1::build_registration`
+//!   composes an instance id as that type id followed by the plugin's own
+//!   instance segment; and qa-catalog's `list_registered_plugins` filters the
+//!   types-registry by equality against that one constant. So every product
+//!   plugin in any deployment shares one type id, and only the tail
+//!   distinguishes them.
+//!
+//! **What separates "the plugin is slow" from "the gear is slow" is therefore
+//! the nesting, not a label** — see [`crate::domain::metrics`]' header — and
+//! the nesting separates them completely. If this platform ever grows a second
+//! product-plugin spec type, the second reason's premise fails and a type label
+//! becomes worth its key; that is the condition to revisit this under.
 //!
 //! # Design choices
 //!
 //! qa-runs' four, which its own ports module states, applied to this gear:
 //!
-//! * **Trait segregation.** There is exactly one measured path here, so there
-//!   is one trait. The segregation is not abandoned — it is satisfied
-//!   trivially — and a second measured path (Task 40's plugin boundary is the
-//!   one already named) gets its own trait rather than widening this one.
+//! * **Trait segregation.** Two measured paths, two traits. The observation
+//!   cycle's port and the plugin boundary's port are separate because their
+//!   emissions have different populations and different lifetimes: a cycle
+//!   emits once per tick, a plugin call once per round trip actually made, and
+//!   a consumer of one has no use for the other. Widening
+//!   [`ObservationMetrics`] would have made every implementation of it — the
+//!   adapter, [`NoopMetrics`], and every test double — carry a method about a
+//!   subject it has nothing to say about.
 //! * **Typed label values.** Every label is a closed enum with a total
 //!   `as_str`. There is no constructor taking a `&str`, so a typo cannot reach
 //!   a dashboard and neither can a value nobody enumerated.
@@ -413,6 +475,136 @@ impl From<&DomainError> for ObservationClass {
     }
 }
 
+/// `class` label on
+/// [`crate::domain::metrics::QA_ENVIRONMENTS_PLUGIN_CALL`] and its duration
+/// histogram — **what one product plugin answered**, at the granularity the
+/// plugin contract itself classifies at.
+///
+/// # Seven values, and every one of them is the plugin's own answer
+///
+/// `QaProductPluginV1::observe` returns a `PluginObservation` whose environment
+/// half is either `Detected` or `Failed(PluginFailure)`, and a `PluginFailure`
+/// carries a `FailureClass`. So the taxonomy is `Detected` plus the six
+/// `FailureClass` values, and it is total over what a plugin can say: there is
+/// no eighth end to that call.
+///
+/// # Why this is not [`ObservationClass`], which has the same six in it
+///
+/// [`ObservationClass`] labels *the whole per-environment observation*, and
+/// carries two values this enum must not have — `refused` and `failed` — which
+/// are the `Err` half of `observe_environment`. Those are ends the observation
+/// can reach **without a plugin ever being called**: a PDP denial, a failed
+/// database connection, a missing row.
+///
+/// Sharing one enum between the two families would put two values on this one
+/// that can never be emitted, which is the "series that reads as coverage"
+/// defect: a dashboard would show a permanently flat `refused` line on the
+/// plugin-call family and a reader would conclude no plugin call is ever
+/// refused, which is true only because the concept does not apply.
+/// `From<FailureClass>` is implemented for both enums, from the same source, so
+/// the six shared values cannot drift apart and
+/// `the_two_class_taxonomies_agree_on_every_failure_class` is what asserts it.
+///
+/// # There is no value for a plugin that was never reached
+///
+/// Deliberately, and it is the same argument as above from the other side.
+/// `observe_through_plugin` has four exits before the round trip — no product,
+/// no resolvable plugin, no resolver at all, an unreadable credential — and
+/// none of them emits into this family, because nothing was called and a
+/// near-zero sample would corrupt the distribution this family exists to
+/// report. They are still counted, as
+/// [`crate::domain::metrics::QA_ENVIRONMENTS_OBSERVATION`]'s `failed` and as
+/// [`ObservationClass::Internal`] on the observation histogram, so the
+/// population is not lost — the two families differ by exactly that set, and
+/// that difference is itself the signal that resolution rather than the plugin
+/// is what is failing.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginCallClass {
+    /// The plugin returned attributes: it reached the target and read it.
+    /// The healthy majority, and the population a p95 is normally read over.
+    Detected,
+    /// The plugin could not reach the target at all.
+    ///
+    /// The class whose duration is paid in a connect timeout rather than in
+    /// work, so one environment in this state can dominate a whole cycle.
+    Unreachable,
+    /// The target was reached and refused the credential.
+    AuthRejected,
+    /// The target was reached but the thing being read is not there.
+    NotFound,
+    /// Something was read and could not be understood.
+    Malformed,
+    /// The plugin's own timeout fired.
+    ///
+    /// Distinct from [`Self::Unreachable`] in the plugin contract and kept
+    /// distinct here: one means nothing answered, the other means something
+    /// answered too slowly, and on *this* family — which contains the round
+    /// trip and nothing else — the duration distributions of the two are the
+    /// cleanest evidence available for which.
+    Timeout,
+    /// Something on the plugin's side of the wire — the plugin or its
+    /// configuration, not the target.
+    ///
+    /// The plugin contract's own residual bucket. **On this family it means
+    /// only what a plugin said**, unlike [`ObservationClass::Internal`], which
+    /// this gear also produces for an unresolvable plugin or an unreadable
+    /// credential. That is the sharpest illustration of why the two enums are
+    /// separate: the same word answers a different question on each family.
+    Internal,
+}
+
+impl PluginCallClass {
+    /// Every value. See [`CycleOutcome::ALL`], including for why the allowance
+    /// below sits on the constant rather than on this block.
+    #[allow(dead_code, reason = "see the allowance on `CycleOutcome::ALL`")]
+    pub const ALL: [Self; 7] = [
+        Self::Detected,
+        Self::Unreachable,
+        Self::AuthRejected,
+        Self::NotFound,
+        Self::Malformed,
+        Self::Timeout,
+        Self::Internal,
+    ];
+
+    /// The label value, as it appears in the series.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Detected => "detected",
+            Self::Unreachable => "unreachable",
+            Self::AuthRejected => "auth_rejected",
+            Self::NotFound => "not_found",
+            Self::Malformed => "malformed",
+            Self::Timeout => "timeout",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+impl From<FailureClass> for PluginCallClass {
+    /// One-for-one, and **exhaustive with no `_` arm on purpose**: a seventh
+    /// `FailureClass` must be classified by whoever adds it rather than
+    /// inheriting [`Self::Internal`] by default.
+    ///
+    /// Here rather than beside `FailureClass` for the reason
+    /// `From<FailureClass> for ObservationClass` gives: that type lives in
+    /// `qa-product-sdk`, a crate this gear only reads, and an impl there would
+    /// put one gear's metric label in the contract every product plugin depends
+    /// on.
+    fn from(class: FailureClass) -> Self {
+        match class {
+            FailureClass::Unreachable => Self::Unreachable,
+            FailureClass::AuthRejected => Self::AuthRejected,
+            FailureClass::NotFound => Self::NotFound,
+            FailureClass::Malformed => Self::Malformed,
+            FailureClass::Timeout => Self::Timeout,
+            FailureClass::Internal => Self::Internal,
+        }
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════
 //  Port trait
 // ════════════════════════════════════════════════════════════════════
@@ -475,6 +667,38 @@ pub trait ObservationMetrics: Send + Sync + 'static {
     fn environment_observed(&self, class: ObservationClass, duration: Duration);
 }
 
+/// The plugin boundary's telemetry: one call into code this deployment does not
+/// own.
+///
+/// # Implementations must not fail a caller
+///
+/// The method returns `()`, takes `&self`, and is called from a path whose
+/// behaviour must not depend on whether metrics are wired. An implementation
+/// must not panic, must not block, and has no error to propagate by
+/// construction. Dropping a sample is the correct response to an adapter that
+/// cannot record one. See this module's header, and `domain::service::emit`,
+/// which is where that contract stops being a promise.
+pub trait PluginMetrics: Send + Sync + 'static {
+    /// One `QaProductPluginV1::observe` round trip, with what the plugin
+    /// answered and the wall-clock time it took. Counts into
+    /// [`crate::domain::metrics::QA_ENVIRONMENTS_PLUGIN_CALL`] and observes
+    /// into [`crate::domain::metrics::QA_ENVIRONMENTS_PLUGIN_CALL_DURATION`] —
+    /// one call, two instruments, so the rate and the quantile can never
+    /// disagree about how many plugin calls there were.
+    ///
+    /// **The duration is the round trip and nothing else**, which is the whole
+    /// point of the family and the one thing an implementation must not be
+    /// asked to widen: it is nested inside
+    /// [`crate::domain::metrics::QA_ENVIRONMENTS_OBSERVATION_DURATION`], and
+    /// the two are useful precisely because their difference is everything
+    /// this gear does *around* a plugin.
+    ///
+    /// **Per call, and that is bounded**: the label is a closed seven-value
+    /// set, so a deployment with ten thousand environments contributes ten
+    /// thousand samples across the same seven series.
+    fn plugin_call(&self, class: PluginCallClass, duration: Duration);
+}
+
 // ════════════════════════════════════════════════════════════════════
 //  No-op implementation
 // ════════════════════════════════════════════════════════════════════
@@ -498,4 +722,8 @@ impl ObservationMetrics for NoopMetrics {
     fn observation_cycle(&self, _outcome: CycleOutcome, _duration: Duration) {}
     fn cycle_environments(&self, _outcome: EnvironmentOutcome, _count: u32) {}
     fn environment_observed(&self, _class: ObservationClass, _duration: Duration) {}
+}
+
+impl PluginMetrics for NoopMetrics {
+    fn plugin_call(&self, _class: PluginCallClass, _duration: Duration) {}
 }

@@ -59,6 +59,7 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::RunnerSecretWriter;
 use crate::domain::ports::metrics::{
     CycleOutcome, EnvironmentOutcome, NoopMetrics, ObservationClass, ObservationMetrics,
+    PluginCallClass, PluginMetrics,
 };
 use crate::domain::repos::{EnvironmentsRepository, LeasesRepository};
 use crate::domain::service::{DbProvider, emit};
@@ -176,10 +177,24 @@ pub struct EnvironmentsService<P: EnvironmentsRepository, L: LeasesRepository> {
     /// "silent with no adapter" a property of the type rather than of a branch
     /// somebody remembered to write. See [`crate::domain::ports::metrics`].
     metrics: Arc<dyn ObservationMetrics>,
+    /// Where the plugin boundary reports itself — the `observe` round trip and
+    /// nothing around it. A second port rather than a widened first one, for
+    /// the reason [`crate::domain::ports::metrics`]' header gives, and in
+    /// production it is the **same adapter object** behind both: `gear.rs`
+    /// builds one and coerces it twice.
+    plugin_metrics: Arc<dyn PluginMetrics>,
     /// Latched by the first metric emission that panics, after which this
     /// service emits nothing. Per service, not global -- `domain::service`'s
     /// `emit` carries the argument, and the test that drives a panicking
     /// adapter is why it matters.
+    ///
+    /// **One latch for both ports**, because the latch is per *service* and
+    /// this is one service. A panicking observation-cycle emission therefore
+    /// silences the plugin-call emissions too. That is the intended reading of
+    /// "per service": what the latch protects is this service's paths, and an
+    /// adapter that panics once has given up its claim on all of them --
+    /// splitting it would mean a second broken adapter still flooding stderr
+    /// from the same object.
     metrics_silenced: AtomicBool,
     policy_enforcer: PolicyEnforcer,
 }
@@ -246,6 +261,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         observer: Arc<dyn RunnerSecretWriter>,
         product_plugins: Arc<dyn ProductPluginPort>,
         metrics: Option<Arc<dyn ObservationMetrics>>,
+        plugin_metrics: Option<Arc<dyn PluginMetrics>>,
         policy_enforcer: PolicyEnforcer,
     ) -> Self {
         Self {
@@ -256,6 +272,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             observer,
             product_plugins,
             metrics: metrics.unwrap_or_else(|| Arc::new(NoopMetrics)),
+            plugin_metrics: plugin_metrics.unwrap_or_else(|| Arc::new(NoopMetrics)),
             metrics_silenced: AtomicBool::new(false),
             policy_enforcer,
         }
@@ -818,6 +835,21 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// neither the credstore response nor the plugin's return value is ever
     /// passed to a tracing macro, so no field carries credential material for
     /// a skip to guard.
+    ///
+    /// # The plugin call is measured, and only the plugin call
+    ///
+    /// One sample per round trip on
+    /// [`crate::domain::metrics::QA_ENVIRONMENTS_PLUGIN_CALL`] and its duration
+    /// histogram, labelled by what the plugin answered. The span is the
+    /// `observe` call alone — the four exits above it emit nothing, because
+    /// nothing was called, which is what makes that family's total the number
+    /// of times this deployment really talked to a plugin.
+    ///
+    /// It is **nested inside** the per-environment observation duration
+    /// [`Self::observe_environment_classified`] records, not parallel to it.
+    /// The difference between the two is everything this gear does around a
+    /// plugin, and that difference is the whole reason the boundary is measured
+    /// separately at all.
     async fn observe_through_plugin(
         &self,
         ctx: &SecurityContext,
@@ -861,8 +893,42 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             observed,
         };
 
+        // `observed_schema` is a declaration getter -- it reads the plugin's
+        // own static field list and contacts nothing -- so it is deliberately
+        // outside the measured span below. What that span contains is the round
+        // trip and nothing else, which is the property
+        // `QA_ENVIRONMENTS_PLUGIN_CALL_DURATION`'s doc is written around.
         let schema = plugin.observed_schema();
-        ObservationWrite::new(&schema, plugin.observe(&handle).await)
+
+        // ── The plugin boundary ──────────────────────────────────────────
+        //
+        // The one call in this gear into code the deployment does not own. The
+        // clock starts immediately before it and stops the instant it returns:
+        // not the resolution above (qa-catalog's own family measures that), not
+        // the credential read, not the projection below, not the write.
+        //
+        // Nested inside `QA_ENVIRONMENTS_OBSERVATION_DURATION`, never parallel
+        // to it -- both constants say so, and the useful operation is the
+        // difference rather than the sum. Before this measurement existed, "the
+        // VHP plugin's detect is timing out" and "qa-environments is slow" were
+        // the same series.
+        let started = Instant::now();
+        let observation = plugin.observe(&handle).await;
+        let elapsed = started.elapsed();
+
+        // Read off the value the plugin returned, before anything projects or
+        // persists it: `ObservationWrite::new` applies `retain_declared`, so
+        // reading the class back out of the write would be reading a projection
+        // of the answer rather than the answer.
+        let class = match &observation.environment {
+            PluginObservationOutcome::Detected(_) => PluginCallClass::Detected,
+            PluginObservationOutcome::Failed(failure) => PluginCallClass::from(failure.class),
+        };
+        emit(&self.metrics_silenced, || {
+            self.plugin_metrics.plugin_call(class, elapsed);
+        });
+
+        ObservationWrite::new(&schema, observation)
     }
 
     /// The observation an environment gets when nothing was able to look at

@@ -35,7 +35,7 @@ use credstore_sdk::CredStoreClientV1;
 use toolkit_db::{DBProvider, DbError};
 use toolkit_macros::domain_model;
 
-use crate::domain::ports::metrics::ObservationMetrics;
+use crate::domain::ports::metrics::{ObservationMetrics, PluginMetrics};
 use crate::domain::ports::{ProductPluginPort, RunnerSecretWriter};
 use crate::domain::repos::{EnvironmentsRepository, LeasesRepository, VariablesRepository};
 
@@ -292,10 +292,10 @@ where
         clippy::too_many_arguments,
         reason = "the DI container's constructor takes one argument per collaborator it wires \
                   (three repositories, the db provider, authz, credstore, the observation \
-                  port, the product-plugin port, the metrics port, and the one scalar knob). \
-                  Grouping them into a parameter struct would move the same ten names one \
-                  indirection away without removing any of them, and `AppServices::new` has \
-                  exactly one caller (`gear.rs`'s `init`)."
+                  port, the product-plugin port, the two metrics ports, and the one scalar \
+                  knob). Grouping them into a parameter struct would move the same eleven \
+                  names one indirection away without removing any of them, and \
+                  `AppServices::new` has exactly one caller (`gear.rs`'s `init`)."
     )]
     pub fn new(
         environments_repo: Arc<P>,
@@ -307,6 +307,7 @@ where
         observer: Arc<dyn RunnerSecretWriter>,
         product_plugins: Arc<dyn ProductPluginPort>,
         metrics: Option<Arc<dyn ObservationMetrics>>,
+        plugin_metrics: Option<Arc<dyn PluginMetrics>>,
         max_variables: usize,
     ) -> Self {
         let enforcer = PolicyEnforcer::new(authz);
@@ -320,6 +321,7 @@ where
                 observer,
                 product_plugins,
                 metrics,
+                plugin_metrics,
                 enforcer.clone(),
             ),
             variables: VariablesService::new(

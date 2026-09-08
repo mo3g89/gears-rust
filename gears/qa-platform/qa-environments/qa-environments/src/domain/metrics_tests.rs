@@ -21,6 +21,7 @@ use super::{COUNTERS, DURATIONS};
 use crate::domain::error::DomainError;
 use crate::domain::ports::metrics::{
     CycleOutcome, EnvironmentOutcome, NoopMetrics, ObservationClass, ObservationMetrics,
+    PluginCallClass, PluginMetrics,
 };
 
 /// **Every metric constant is the literal Prometheus series name.**
@@ -85,6 +86,9 @@ fn label_taxonomies_are_closed_sets() {
         assert!(!outcome.as_str().is_empty());
     }
     for class in ObservationClass::ALL {
+        assert!(!class.as_str().is_empty());
+    }
+    for class in PluginCallClass::ALL {
         assert!(!class.as_str().is_empty());
     }
 }
@@ -153,7 +157,8 @@ fn every_label_value_is_lower_snake_case() {
         .iter()
         .map(|v| v.as_str())
         .chain(EnvironmentOutcome::ALL.iter().map(|v| v.as_str()))
-        .chain(ObservationClass::ALL.iter().map(|v| v.as_str()));
+        .chain(ObservationClass::ALL.iter().map(|v| v.as_str()))
+        .chain(PluginCallClass::ALL.iter().map(|v| v.as_str()));
     for value in values {
         assert!(
             value
@@ -189,6 +194,10 @@ fn no_label_value_collides_within_its_own_enum() {
     distinct(
         &ObservationClass::ALL.map(ObservationClass::as_str),
         "ObservationClass",
+    );
+    distinct(
+        &PluginCallClass::ALL.map(PluginCallClass::as_str),
+        "PluginCallClass",
     );
 }
 
@@ -437,4 +446,130 @@ fn the_no_op_port_accepts_every_emission_and_returns_nothing() {
     for class in ObservationClass::ALL {
         metrics.environment_observed(class, Duration::from_millis(1));
     }
+    for class in PluginCallClass::ALL {
+        metrics.plugin_call(class, Duration::from_millis(1));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The plugin-boundary taxonomy
+// ---------------------------------------------------------------------------
+
+/// **Every `FailureClass` the plugin contract declares has a plugin-call label
+/// value of its own, and no two share one.**
+///
+/// The same property [`every_failure_class_projects_to_its_own_label`] asserts
+/// for [`ObservationClass`], asserted again for the enum that actually labels
+/// the plugin boundary. It is not implied by that test: the two enums have
+/// independent `From<FailureClass>` impls, and a fold in one is invisible from
+/// the other.
+///
+/// [`every_failure_class`] supplies the values, and **its completeness is this
+/// test's premise rather than its subject** — see its own header for which
+/// links in that chain are held and which one is not.
+#[test]
+fn every_failure_class_projects_to_its_own_plugin_call_label() {
+    let projected: BTreeSet<&str> = every_failure_class()
+        .iter()
+        .map(|class| PluginCallClass::from(*class).as_str())
+        .collect();
+    assert_eq!(
+        projected.len(),
+        every_failure_class().len(),
+        "two FailureClass variants project to the same plugin-call label: {projected:?}"
+    );
+    assert!(
+        !projected.contains(PluginCallClass::Detected.as_str()),
+        "no failure class may project onto the success value"
+    );
+}
+
+/// **The two class taxonomies say the same thing about every failure class.**
+///
+/// [`ObservationClass`] labels a whole per-environment observation and
+/// [`PluginCallClass`] labels the round trip inside it, and the six failure
+/// values they share come from one source. Two independent projections of one
+/// enum is exactly the shape that drifts, and a drift here would be maximally
+/// confusing rather than merely wrong: an operator subtracting one family from
+/// the other — which both constants' docs tell them to do — would be
+/// subtracting series whose `class=timeout` meant different things.
+///
+/// `PluginCallClass`'s own doc claims this agreement; this is the assertion
+/// behind the claim.
+#[test]
+fn the_two_class_taxonomies_agree_on_every_failure_class() {
+    for class in every_failure_class() {
+        assert_eq!(
+            PluginCallClass::from(class).as_str(),
+            ObservationClass::from(class).as_str(),
+            "the two taxonomies render {class:?} differently, so one series' \
+             class label cannot be read against the other's"
+        );
+    }
+}
+
+/// **The plugin-call taxonomy has a value for every end of a plugin call and
+/// for nothing else.**
+///
+/// Both halves matter, and the second is the one worth a test.
+///
+/// `QaProductPluginV1::observe` returns a `PluginObservation` whose environment
+/// half is `Detected` or `Failed(PluginFailure)`, so the ends are exactly
+/// detection plus the failure classes — that is the first half, asserted as a
+/// count.
+///
+/// The second half is that this enum must **not** carry
+/// [`ObservationClass`]'s two extra values. `refused` and `failed` are ends the
+/// *observation* can reach without a plugin ever being called, so on the
+/// plugin-call family they would be series that can never move — a flat line a
+/// reader would take for "no plugin call is ever refused" when the truth is
+/// that the concept does not apply. That is the "declared family with no
+/// emitter" defect one level down, at the label.
+#[test]
+fn the_plugin_call_taxonomy_covers_a_plugin_call_and_nothing_more() {
+    assert_eq!(
+        PluginCallClass::ALL.len(),
+        every_failure_class().len() + 1,
+        "a plugin call ends in a detection or in one of the contract's failure classes, \
+         and there is no third kind of end"
+    );
+
+    let plugin_call: BTreeSet<&str> = PluginCallClass::ALL
+        .iter()
+        .map(|class| class.as_str())
+        .collect();
+    for absent in [ObservationClass::Refused, ObservationClass::Failed] {
+        assert!(
+            !plugin_call.contains(absent.as_str()),
+            "{} is an end the observation can reach with no plugin call in it, so a \
+             plugin-call series carrying it could never move",
+            absent.as_str()
+        );
+    }
+}
+
+/// **The plugin-call families are namespaced and paired like every other, and
+/// they are not the observation families under another name.**
+///
+/// The catalog-wide rules above already sweep them. What this adds is the one
+/// thing those cannot see: that the two levels are *different* families. A
+/// plugin-call constant that had been written as the observation constant would
+/// satisfy every naming rule in this file and would silently merge the inner
+/// measurement into the outer one — which is precisely the double-count both
+/// constants' docs warn a reader against, arriving from the code side instead.
+#[test]
+fn the_plugin_call_families_are_not_the_observation_families() {
+    assert_ne!(
+        super::QA_ENVIRONMENTS_PLUGIN_CALL,
+        super::QA_ENVIRONMENTS_OBSERVATION
+    );
+    assert_ne!(
+        super::QA_ENVIRONMENTS_PLUGIN_CALL_DURATION,
+        super::QA_ENVIRONMENTS_OBSERVATION_DURATION
+    );
+    assert!(
+        COUNTERS.contains(&super::QA_ENVIRONMENTS_PLUGIN_CALL)
+            && DURATIONS.contains(&super::QA_ENVIRONMENTS_PLUGIN_CALL_DURATION),
+        "and both are in the declared lists, or no naming rule in this file checks them"
+    );
 }

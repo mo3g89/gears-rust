@@ -39,7 +39,7 @@ use qa_product_sdk::plugin::{
     CredentialClassification, CredentialInput, EnvironmentHandle, QaProductPluginV1,
 };
 
-use crate::domain::ports::metrics::ObservationMetrics;
+use crate::domain::ports::metrics::{ObservationMetrics, PluginMetrics};
 use crate::domain::ports::{
     NoopRunnerSecretWriter, PluginUnavailable, ProductPluginPort, RunnerSecretWriter,
 };
@@ -580,6 +580,7 @@ pub fn build_services_with_plugin_port(
         observer,
         product_plugins,
         None,
+        None,
         max_variables,
     )
 }
@@ -606,6 +607,7 @@ pub fn build_services_with_plugin_port_and_metrics(
     observer: Arc<dyn RunnerSecretWriter>,
     product_plugins: Arc<dyn ProductPluginPort>,
     metrics: Option<Arc<dyn ObservationMetrics>>,
+    plugin_metrics: Option<Arc<dyn PluginMetrics>>,
     max_variables: usize,
 ) -> Arc<ConcreteAppServices> {
     let db: Arc<DBProvider<DbError>> = Arc::new(DBProvider::new(db));
@@ -620,6 +622,7 @@ pub fn build_services_with_plugin_port_and_metrics(
         observer,
         product_plugins,
         metrics,
+        plugin_metrics,
         max_variables,
     ))
 }
@@ -639,6 +642,32 @@ pub fn build_services_tenant_scoped_with_plugin_and_metrics(
         Arc::new(NoopRunnerSecretWriter),
         product_plugins,
         Some(metrics),
+        None,
+        crate::config::QaEnvironmentsConfig::default().max_variables,
+    )
+}
+
+/// Services wired with [`TenantScopedAuthZ`], a caller-supplied product-plugin
+/// port and a caller-supplied **plugin-boundary** metrics adapter -- the shape
+/// Task 40's plugin-call tests want.
+///
+/// A sibling of [`build_services_tenant_scoped_with_plugin_and_metrics`] rather
+/// than a widening of it, for the reason that funnel's own doc gives: the
+/// observation-cycle tests want `None` here and these want `None` there, and a
+/// helper taking both would make every call site state an absence.
+pub fn build_services_tenant_scoped_with_plugin_and_plugin_metrics(
+    db: Db,
+    product_plugins: Arc<dyn ProductPluginPort>,
+    plugin_metrics: Arc<dyn PluginMetrics>,
+) -> Arc<ConcreteAppServices> {
+    build_services_with_plugin_port_and_metrics(
+        db,
+        Arc::new(TenantScopedAuthZ),
+        Arc::new(RecordingCredStore::new()),
+        Arc::new(NoopRunnerSecretWriter),
+        product_plugins,
+        None,
+        Some(plugin_metrics),
         crate::config::QaEnvironmentsConfig::default().max_variables,
     )
 }

@@ -1,11 +1,11 @@
-//! `OpenTelemetry`-backed adapter for the qa-environments metric port.
+//! `OpenTelemetry`-backed adapter for the qa-catalog metric port.
 //!
-//! [`QaEnvironmentsMetricsMeter`] owns one instrument per family in
+//! [`QaCatalogMetricsMeter`] owns one instrument per family in
 //! [`crate::domain::metrics`] and implements
-//! [`crate::domain::ports::metrics::ObservationMetrics`]. One
-//! `Arc<QaEnvironmentsMetricsMeter>` is built at gear init by
+//! [`crate::domain::ports::metrics::PluginResolutionMetrics`]. One
+//! `Arc<QaCatalogMetricsMeter>` is built at gear init by
 //! [`build_default_adapter`] and coerced into the `Arc<dyn _>` view
-//! `EnvironmentsService` holds.
+//! `QaProductRegistry` holds.
 //!
 //! # Instrument naming: the catalog constant *is* the instrument name
 //!
@@ -22,8 +22,8 @@
 //! AM's adapter takes `(meter, prefix)` and composes each name with `format!`,
 //! so its catalog constants equal the rendered name only under the default
 //! prefix. This adapter takes the meter alone and reads the names straight out
-//! of [`crate::domain::metrics`], following qa-runs' and qa-insights' answer to
-//! the same question.
+//! of [`crate::domain::metrics`], following qa-runs', qa-insights' and
+//! qa-environments' answer to the same question.
 //!
 //! The reason is the gate. `domain::metrics`' naming tests assert properties
 //! **of the constants**, and they are only a gate on what a dashboard finds if
@@ -44,10 +44,11 @@
 //! error, and nothing here panics.
 //!
 //! That is only half of the guarantee, because the call site takes
-//! `Arc<dyn ObservationMetrics>` and this is not the only implementation it can
-//! be handed. The other half lives at the call site: `domain::service`'s `emit`
-//! runs one emission so that a panicking implementation cannot take the
-//! measured path with it, and latches off after the first panic. See its doc.
+//! `Arc<dyn PluginResolutionMetrics>` and this is not the only implementation
+//! it can be handed. The other half lives at the call site:
+//! `domain::service`'s `emit` runs one emission so that a panicking
+//! implementation cannot take the measured path with it, and latches off after
+//! the first panic. See its doc.
 //!
 //! # Without a pipeline, every instrument is a no-op
 //!
@@ -65,109 +66,64 @@ use std::time::Duration;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 
-use crate::domain::metrics::{
-    QA_ENVIRONMENTS_OBSERVATION, QA_ENVIRONMENTS_OBSERVATION_CYCLE,
-    QA_ENVIRONMENTS_OBSERVATION_CYCLE_DURATION, QA_ENVIRONMENTS_OBSERVATION_DURATION,
-    QA_ENVIRONMENTS_PLUGIN_CALL, QA_ENVIRONMENTS_PLUGIN_CALL_DURATION,
-};
-use crate::domain::ports::metrics::{
-    CycleOutcome, EnvironmentOutcome, ObservationClass, ObservationMetrics, PluginCallClass,
-    PluginMetrics,
-};
+use crate::domain::metrics::{QA_CATALOG_PLUGIN_RESOLUTION, QA_CATALOG_PLUGIN_RESOLUTION_DURATION};
+use crate::domain::ports::metrics::{PluginResolutionMetrics, PluginResolutionOutcome};
 
-/// The `outcome` label key, shared by the two cycle-level families and the
-/// report-driven counter — one word, so a dashboard that pivots the cycle by
-/// outcome uses the same expression on the environment counter.
+/// The `outcome` label key, carried by both families so that a rate and a
+/// quantile are two queries over one partition.
 const OUTCOME: &str = "outcome";
 
-/// The `class` label key, carried by the per-environment duration histogram and
-/// by both plugin-call families.
-///
-/// A **different** key from [`OUTCOME`] on purpose. The two dimensions are
-/// nested rather than parallel — every class rolls up to one outcome, through
-/// `ObservationClass::counts_as_observed` — and giving them one key would let a
-/// dashboard sum a nine-valued partition and a two-valued partition of the same
-/// events into one meaningless total.
-///
-/// The plugin-call families reuse it rather than inventing a third word because
-/// their label answers the same *kind* of question — what happened, at the
-/// plugin contract's own granularity — over a narrower population. The two
-/// families are told apart by their names, which is where the distinction
-/// belongs; a second word for one concept would make a dashboard's `class`
-/// filter silently miss half the data.
-const CLASS: &str = "class";
-
-/// Explicit second boundaries for every duration histogram.
+/// Explicit second boundaries for the duration histogram.
 ///
 /// Declared rather than left to the SDK default, and this is load-bearing. The
 /// `OTel` defaults are `[0, 5, 10, 25, 50, … 10000]`, which are milliseconds in
 /// all but name. Read as **seconds**, their first interval above zero is
-/// `(0, 5]`, and a p95 read off that bucket is its upper edge rather than an
-/// estimate of anything. A quantile query is the entire reason both duration
-/// families exist, so the boundaries are part of the metric's definition rather
-/// than a tuning knob.
+/// `(0, 5]`, and every resolution this gear will ever perform lands in it — a
+/// p95 read off that bucket is its upper edge rather than an estimate of
+/// anything. A quantile query is the entire reason the duration family exists,
+/// so the boundaries are part of the metric's definition rather than a tuning
+/// knob.
 ///
-/// **The two families are two orders of magnitude apart, and the set spans
-/// both.** A per-environment observation is one round trip to that
-/// environment's own systems, so its healthy range is tens of milliseconds to
-/// seconds and its unhealthy range is whatever timeout the plugin's client
-/// applies. A cycle is that, serially, once per registered environment — at the
-/// hundred the platform is sized for, a healthy cycle is already in the
-/// minutes. The low end therefore goes down to 10 ms for the first family and
-/// the high end runs to five minutes for the second, and each family's own
-/// label lets a query keep the two apart.
+/// **This set is two orders of magnitude lower than qa-environments', and the
+/// deviation is the point.** That gear's boundaries run to five minutes because
+/// its families measure round trips to customer clusters and whole cycles over
+/// a hundred of them. A resolution is a policy decision plus one indexed row
+/// read plus a hash probe, none of which crosses a customer network, so a
+/// healthy sample is sub-millisecond to a few milliseconds and the interesting
+/// question — *is the PDP or the database making resolution expensive* — is
+/// asked in that range. Buckets sized for the other gear would answer it with
+/// one bucket.
 ///
-/// **The plugin-call duration shares the set rather than getting one of its
-/// own**, and that is deliberate rather than economical. Its samples are a
-/// strict subset of the per-environment observation's — the round trip inside
-/// the observation that contains it — so its range is contained in that
-/// family's range by construction, and sharing the boundaries is what makes the
-/// two comparable bucket for bucket. Subtracting one from the other is the
-/// operation both constants' docs are written around, and it is only honest
-/// arithmetic if the two are bucketed alike.
+/// **No boundary here is an NFR threshold.** The qa-platform design states no
+/// latency bound over plugin resolution — the one NFR that reaches this gear at
+/// all is a capacity envelope allocated to qa-runs and qa-insights — so there
+/// was no number to place and none was invented.
 ///
-/// **Two boundaries are chosen rather than round, and neither is an NFR.**
-/// 60 s is `ObservationConfig::MIN_POLL_INTERVAL_SECONDS`, the floor below
-/// which a deployment cannot configure the ticker; 300 s is that config's
-/// default interval. A cycle whose duration crosses its own interval silently
-/// pushes every later tick back — `MissedTickBehavior::Delay` — so having an
-/// edge on both numbers means that question is answered by a bucket rather
-/// than by interpolating across one. They come from this gear's own config,
-/// not from a design threshold: as
-/// [`crate::domain::metrics::QA_ENVIRONMENTS_OBSERVATION_DURATION`]'s doc sets
-/// out, `cpt-cf-qa-nfr-scale` states no latency bound over this path at all,
-/// so there was no NFR number to place and none was invented.
-///
-/// **The 300 s ceiling is a stated limit, not a claim of adequacy.** A cycle
-/// over a hundred environments where several are timing out will exceed it and
-/// land in the overflow bucket, where a quantile is again an edge. Extending
-/// the high end is a change to make with real cycle data in hand rather than by
-/// guessing at one now; past five minutes the counter beside the histogram and
-/// the trend are what an operator reads.
+/// **The 10 s ceiling is a stated limit, not a claim of adequacy.** A
+/// resolution that outruns it is a PDP or a database that has stopped
+/// answering, and it lands in the overflow bucket where a quantile is again an
+/// edge; past that point the counter beside the histogram is what an operator
+/// reads. Extending the high end is a change to make with real data rather than
+/// by guessing at one now.
 const DURATION_BUCKETS: &[f64] = &[
-    0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
 /// The instrumentation scope this gear's instruments are reported under.
-const SCOPE: &str = "qa-environments";
+const SCOPE: &str = "qa-catalog";
 
-/// Owns one `OpenTelemetry` instrument per qa-environments metric family and
+/// Owns one `OpenTelemetry` instrument per qa-catalog metric family and
 /// implements the port trait over them.
 ///
 /// **The instruments are built once, in [`Self::new`], and held.** Looking one
 /// up per emission would put a map probe and a string hash on the measured
-/// path, and the per-environment family emits once per registered environment
-/// per cycle.
-pub struct QaEnvironmentsMetricsMeter {
-    cycle: Counter<u64>,
-    cycle_duration: Histogram<f64>,
-    observation: Counter<u64>,
-    observation_duration: Histogram<f64>,
-    plugin_call: Counter<u64>,
-    plugin_call_duration: Histogram<f64>,
+/// path, and this path runs once per environment per observation cycle.
+pub struct QaCatalogMetricsMeter {
+    resolution: Counter<u64>,
+    resolution_duration: Histogram<f64>,
 }
 
-impl QaEnvironmentsMetricsMeter {
+impl QaCatalogMetricsMeter {
     /// Build every instrument this gear exports.
     ///
     /// Names come from [`crate::domain::metrics`] verbatim and carry no
@@ -175,45 +131,18 @@ impl QaEnvironmentsMetricsMeter {
     #[must_use]
     pub fn new(meter: &Meter) -> Self {
         Self {
-            cycle: meter
-                .u64_counter(QA_ENVIRONMENTS_OBSERVATION_CYCLE)
+            resolution: meter
+                .u64_counter(QA_CATALOG_PLUGIN_RESOLUTION)
                 .with_description(
-                    "Observation cycles, by how the cycle ended \
-                     (completed / cancelled / unstarted)",
+                    "Product-plugin resolutions, by how the resolution ended \
+                     (resolved / unregistered / refused / failed)",
                 )
                 .build(),
-            cycle_duration: meter
-                .f64_histogram(QA_ENVIRONMENTS_OBSERVATION_CYCLE_DURATION)
-                .with_description("Wall-clock duration of one observation cycle, in seconds")
-                .with_boundaries(DURATION_BUCKETS.to_vec())
-                .build(),
-            observation: meter
-                .u64_counter(QA_ENVIRONMENTS_OBSERVATION)
+            resolution_duration: meter
+                .f64_histogram(QA_CATALOG_PLUGIN_RESOLUTION_DURATION)
                 .with_description(
-                    "Environments a cycle reported on, taken from the cycle's own report \
-                     (observed = an outcome was persisted, failed = nothing was)",
-                )
-                .build(),
-            observation_duration: meter
-                .f64_histogram(QA_ENVIRONMENTS_OBSERVATION_DURATION)
-                .with_description(
-                    "Wall-clock duration of one environment's observation, in seconds, by \
-                     where it ended; the failure classes are the plugin contract's own",
-                )
-                .with_boundaries(DURATION_BUCKETS.to_vec())
-                .build(),
-            plugin_call: meter
-                .u64_counter(QA_ENVIRONMENTS_PLUGIN_CALL)
-                .with_description(
-                    "Calls into a product plugin's observe, by what the plugin answered; \
-                     the failure classes are the plugin contract's own",
-                )
-                .build(),
-            plugin_call_duration: meter
-                .f64_histogram(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION)
-                .with_description(
-                    "Wall-clock duration of one product-plugin observe round trip, in \
-                     seconds, and of nothing around it",
+                    "Wall-clock duration of one product-plugin resolution, in seconds: \
+                     the policy check, the product read and the ClientHub probe",
                 )
                 .with_boundaries(DURATION_BUCKETS.to_vec())
                 .build(),
@@ -221,33 +150,11 @@ impl QaEnvironmentsMetricsMeter {
     }
 }
 
-impl ObservationMetrics for QaEnvironmentsMetricsMeter {
-    fn observation_cycle(&self, outcome: CycleOutcome, duration: Duration) {
+impl PluginResolutionMetrics for QaCatalogMetricsMeter {
+    fn plugin_resolution(&self, outcome: PluginResolutionOutcome, duration: Duration) {
         let labels = [KeyValue::new(OUTCOME, outcome.as_str())];
-        self.cycle.add(1, &labels);
-        self.cycle_duration.record(duration.as_secs_f64(), &labels);
-    }
-
-    fn cycle_environments(&self, outcome: EnvironmentOutcome, count: u32) {
-        self.observation.add(
-            u64::from(count),
-            &[KeyValue::new(OUTCOME, outcome.as_str())],
-        );
-    }
-
-    fn environment_observed(&self, class: ObservationClass, duration: Duration) {
-        self.observation_duration.record(
-            duration.as_secs_f64(),
-            &[KeyValue::new(CLASS, class.as_str())],
-        );
-    }
-}
-
-impl PluginMetrics for QaEnvironmentsMetricsMeter {
-    fn plugin_call(&self, class: PluginCallClass, duration: Duration) {
-        let labels = [KeyValue::new(CLASS, class.as_str())];
-        self.plugin_call.add(1, &labels);
-        self.plugin_call_duration
+        self.resolution.add(1, &labels);
+        self.resolution_duration
             .record(duration.as_secs_f64(), &labels);
     }
 }
@@ -259,24 +166,23 @@ impl PluginMetrics for QaEnvironmentsMetricsMeter {
 /// the built-in no-op, so every instrument this returns is a no-op and every
 /// emission through it is silent. See this module's header.
 #[must_use]
-pub fn build_default_adapter() -> Arc<QaEnvironmentsMetricsMeter> {
+pub fn build_default_adapter() -> Arc<QaCatalogMetricsMeter> {
     let scope = opentelemetry::InstrumentationScope::builder(SCOPE).build();
     let meter = opentelemetry::global::meter_with_scope(scope);
-    Arc::new(QaEnvironmentsMetricsMeter::new(&meter))
+    Arc::new(QaCatalogMetricsMeter::new(&meter))
 }
 
 /// A private meter provider and the series it collected, for tests.
 ///
 /// Lives here, beside the adapter, rather than in a test file, because two
 /// modules read it: this module's own tests and
-/// `domain::service::environments`'. The call-site suite is the one that
+/// `domain::service::plugin_registry`'s. The call-site suite is the one that
 /// matters most — what needs proving there is that the **rendered series** is
 /// what a dashboard query will find, and a mock of the port would prove only
 /// that the call site calls the port.
 ///
-/// Copied from qa-insights' `infra::metrics::probe`, with one addition this
-/// gear needs: [`Series::histogram_count_with`], because the per-environment
-/// histogram's per-label count *is* the per-class rate here.
+/// Copied from qa-environments' `infra::metrics::probe`, which copied it from
+/// qa-insights'.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::expect_used, reason = "test-only helper")]
@@ -287,7 +193,7 @@ pub mod probe {
     use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 
-    use super::QaEnvironmentsMetricsMeter;
+    use super::QaCatalogMetricsMeter;
 
     /// A meter provider private to one test, its in-memory exporter, and the
     /// adapter built over it.
@@ -298,7 +204,7 @@ pub mod probe {
     pub struct MetricsProbe {
         provider: SdkMeterProvider,
         exporter: InMemoryMetricExporter,
-        adapter: Arc<QaEnvironmentsMetricsMeter>,
+        adapter: Arc<QaCatalogMetricsMeter>,
     }
 
     impl MetricsProbe {
@@ -311,7 +217,7 @@ pub mod probe {
             // second literal: one constant with two readers is what makes a
             // change to it visible here rather than only in production.
             let scope = opentelemetry::InstrumentationScope::builder(super::SCOPE).build();
-            let adapter = Arc::new(QaEnvironmentsMetricsMeter::new(
+            let adapter = Arc::new(QaCatalogMetricsMeter::new(
                 &provider.meter_with_scope(scope),
             ));
             Self {
@@ -322,7 +228,7 @@ pub mod probe {
         }
 
         /// The adapter to hand a service under test.
-        pub fn adapter(&self) -> Arc<QaEnvironmentsMetricsMeter> {
+        pub fn adapter(&self) -> Arc<QaCatalogMetricsMeter> {
             Arc::clone(&self.adapter)
         }
 

@@ -213,6 +213,7 @@ async fn a_cycle_that_cannot_list_its_environments_is_unstarted_not_completed() 
         Arc::new(NoopRunnerSecretWriter),
         port_detecting(),
         Some(probe.adapter()),
+        None,
         crate::config::QaEnvironmentsConfig::default().max_variables,
     );
 
@@ -524,6 +525,7 @@ async fn a_refused_observation_is_not_a_detected_one() {
         Arc::new(NoopRunnerSecretWriter),
         port_detecting(),
         Some(probe.adapter()),
+        None,
         crate::config::QaEnvironmentsConfig::default().max_variables,
     );
 
@@ -700,5 +702,504 @@ async fn a_cycle_with_no_pipeline_configured_behaves_exactly_as_an_unmetered_one
         metered, unmetered,
         "installing the production adapter with no pipeline behind it must not change \
          a single count"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The plugin boundary (Task 40)
+// ---------------------------------------------------------------------------
+//
+// The families above measure what this gear does. These measure what the code
+// this gear does not own does, and their whole value is that the two are told
+// apart: "the VHP plugin's detect is timing out" and "qa-environments is slow"
+// were one series before them.
+
+use crate::domain::metrics::{QA_ENVIRONMENTS_PLUGIN_CALL, QA_ENVIRONMENTS_PLUGIN_CALL_DURATION};
+use crate::domain::ports::metrics::{PluginCallClass, PluginMetrics};
+use crate::test_support::{
+    build_services_tenant_scoped_with_plugin_and_plugin_metrics, no_plugin_port,
+};
+
+/// **A plugin call is timed and its failure class is counted.**
+///
+/// The plugin boundary is where a QA Platform deployment meets code it does not
+/// own. "The VHP plugin's detect is timing out" and "qa-environments is slow"
+/// are different pages for an operator, and without this they are the same
+/// series. Review finding #4.
+///
+/// The class is the plugin's own — `FailureClass::Unreachable`, projected
+/// one-for-one — so what is asserted is that the value a plugin classified its
+/// failure as is the value a dashboard finds, with nothing in between
+/// reinterpreting it.
+#[tokio::test]
+async fn a_plugin_observation_is_timed_and_classified() {
+    let probe = MetricsProbe::new();
+    let services = build_services_tenant_scoped_with_plugin_and_plugin_metrics(
+        inmem_db().await,
+        Arc::new(FixedPluginPort::new(Arc::new(ScriptedPlugin::vhp_shaped(
+            failed_with(FailureClass::Unreachable),
+        )))),
+        probe.adapter(),
+    );
+    services
+        .environments
+        .create_environment(
+            &ctx(Uuid::new_v4()),
+            pasted("environment-a", "kubeconfig-a"),
+        )
+        .await
+        .unwrap();
+
+    let report = services
+        .environments
+        .run_observation_cycle(&CancellationToken::new())
+        .await;
+    assert_eq!(
+        report.observed, 1,
+        "premise: an unreachable target is a *successful* observation of an unreachable \
+         target -- the failure is persisted as a value"
+    );
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter_with(
+            QA_ENVIRONMENTS_PLUGIN_CALL,
+            &[("class", PluginCallClass::Unreachable.as_str())]
+        ),
+        1,
+        "one plugin call, one increment under the plugin's own class; the exported names \
+         were {:?}",
+        series.names()
+    );
+    assert_eq!(
+        series.histogram_count(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION),
+        1,
+        "and the counter and its histogram move together"
+    );
+}
+
+/// **Every answer a plugin can give is counted under its own class, in one
+/// cycle.**
+///
+/// Swept rather than sampled, over one cycle with one environment per class, so
+/// visit order cannot matter. The defect is an emission that hard-codes its
+/// label: every call would still be counted, into one merged series, and the
+/// per-class question the family exists for would read a flat line everywhere
+/// but the hard-coded value.
+///
+/// `KeyedPlugin` answers per kubeconfig document, which is what lets one cycle
+/// drive seven different classes deterministically.
+#[tokio::test]
+async fn every_plugin_answer_is_counted_under_its_own_class() {
+    // One environment per label value, keyed on its own kubeconfig document so
+    // that the visit order of the cycle cannot affect which class each reaches.
+    let mut outcomes: HashMap<Vec<u8>, PluginObservation> = HashMap::new();
+    let mut expected: Vec<(String, PluginCallClass)> = Vec::new();
+    outcomes.insert(b"kubeconfig-detected".to_vec(), detected());
+    expected.push(("kubeconfig-detected".to_owned(), PluginCallClass::Detected));
+    for class in [
+        FailureClass::Unreachable,
+        FailureClass::AuthRejected,
+        FailureClass::NotFound,
+        FailureClass::Malformed,
+        FailureClass::Timeout,
+        FailureClass::Internal,
+    ] {
+        let label = PluginCallClass::from(class);
+        let document = format!("kubeconfig-{}", label.as_str());
+        outcomes.insert(document.clone().into_bytes(), failed_with(class));
+        expected.push((document, label));
+    }
+    assert_eq!(
+        expected.len(),
+        PluginCallClass::ALL.len(),
+        "premise: one environment per label value, or this sweep is not a sweep"
+    );
+
+    let probe = MetricsProbe::new();
+    let services = build_services_tenant_scoped_with_plugin_and_plugin_metrics(
+        inmem_db().await,
+        port_keyed(outcomes),
+        probe.adapter(),
+    );
+    let tenant = Uuid::new_v4();
+    for (document, class) in &expected {
+        services
+            .environments
+            .create_environment(&ctx(tenant), pasted(class.as_str(), document))
+            .await
+            .unwrap();
+    }
+
+    let report = services
+        .environments
+        .run_observation_cycle(&CancellationToken::new())
+        .await;
+    assert_eq!(
+        u64::from(report.attempted),
+        expected.len() as u64,
+        "premise: every seeded environment was visited"
+    );
+
+    let series = probe.collect();
+    for (_, class) in &expected {
+        assert_eq!(
+            series.counter_with(QA_ENVIRONMENTS_PLUGIN_CALL, &[("class", class.as_str())]),
+            1,
+            "plugin-call class {} reached no series of its own",
+            class.as_str()
+        );
+        assert_eq!(
+            series.histogram_count_with(
+                QA_ENVIRONMENTS_PLUGIN_CALL_DURATION,
+                &[("class", class.as_str())]
+            ),
+            1,
+            "and its duration was recorded under that class too"
+        );
+    }
+}
+
+/// **An environment whose plugin could not be resolved is not a plugin call.**
+///
+/// The population rule, stated as the difference between two families that a
+/// naive reading would expect to move together. `observe_through_plugin` has
+/// four exits before the round trip; on all of them the observation is still
+/// counted and still recorded — a failure persisted as a value, which is this
+/// gear's central rule — but **nothing was called**, so nothing may be timed.
+///
+/// A near-zero sample here would be worse than a missing one: it would drag
+/// down the quantile of the family whose entire purpose is to report how long a
+/// plugin takes, using observations in which no plugin ran.
+///
+/// The gap between the two totals is itself the signal that resolution rather
+/// than the plugin is failing, so the test asserts the gap rather than each
+/// count on its own.
+#[tokio::test]
+async fn an_unresolvable_plugin_is_observed_but_never_timed() {
+    let probe = MetricsProbe::new();
+    let db = inmem_db().await;
+    // A permissive port seeds the row -- `create_environment` validates the
+    // submitted credential through the plugin, so a gear with no resolver
+    // cannot create one. The cycle that matters then runs over the *same*
+    // database through a gear that has no resolver at all, which is the
+    // deployment state under test.
+    let seeder = build_services_tenant_scoped_with_plugin(db.clone(), port_detecting());
+    seeder
+        .environments
+        .create_environment(
+            &ctx(Uuid::new_v4()),
+            pasted("environment-a", "kubeconfig-a"),
+        )
+        .await
+        .unwrap();
+
+    let unresolvable = build_services_with_plugin_port_and_metrics(
+        db,
+        Arc::new(TenantScopedAuthZ),
+        Arc::new(RecordingCredStore::new()),
+        Arc::new(NoopRunnerSecretWriter),
+        no_plugin_port(),
+        Some(probe.adapter()),
+        Some(probe.adapter()),
+        crate::config::QaEnvironmentsConfig::default().max_variables,
+    );
+    let report = unresolvable
+        .environments
+        .run_observation_cycle(&CancellationToken::new())
+        .await;
+
+    assert_eq!(
+        (report.attempted, report.observed),
+        (1, 1),
+        "premise: the environment was visited and its failure persisted, which is what \
+         makes the absence below a real absence rather than an empty cycle"
+    );
+
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count(QA_ENVIRONMENTS_OBSERVATION_DURATION),
+        1,
+        "the observation itself is timed: this gear did work, and it took time"
+    );
+    assert_eq!(
+        series.counter(QA_ENVIRONMENTS_PLUGIN_CALL),
+        0,
+        "but no plugin was called, so the plugin-call family must not move; its total is \
+         the number of times this deployment really talked to a plugin"
+    );
+    assert_eq!(
+        series.histogram_count(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION),
+        0,
+        "and above all nothing may be timed: a near-zero sample from an observation with \
+         no round trip in it corrupts the distribution this family exists to report"
+    );
+}
+
+/// **The plugin call is measured inside the observation that contains it, and
+/// the two are separate series.**
+///
+/// The property both constants' docs are written around, asserted rather than
+/// described. One environment, one cycle, one adapter behind both ports: the
+/// observation duration takes one sample and the plugin-call duration takes one
+/// sample, and they are *different* families — so a dashboard subtracting one
+/// from the other is subtracting the plugin's round trip from everything this
+/// gear did around it.
+///
+/// What this cannot assert is the inequality between the two samples: both are
+/// wall-clock reads microseconds apart against an in-memory fake, and an
+/// assertion on their ordering would be a timing test. What it does assert is
+/// the containment's observable consequence — the two families count the same
+/// event once each — together with
+/// [`an_unresolvable_plugin_is_observed_but_never_timed`], which shows the
+/// inner family is a strict subset of the outer one.
+#[tokio::test]
+async fn a_plugin_call_and_its_observation_are_two_series_over_one_event() {
+    let probe = MetricsProbe::new();
+    let services = build_services_with_plugin_port_and_metrics(
+        inmem_db().await,
+        Arc::new(TenantScopedAuthZ),
+        Arc::new(RecordingCredStore::new()),
+        Arc::new(NoopRunnerSecretWriter),
+        port_detecting(),
+        Some(probe.adapter()),
+        Some(probe.adapter()),
+        crate::config::QaEnvironmentsConfig::default().max_variables,
+    );
+    services
+        .environments
+        .create_environment(
+            &ctx(Uuid::new_v4()),
+            pasted("environment-a", "kubeconfig-a"),
+        )
+        .await
+        .unwrap();
+
+    services
+        .environments
+        .run_observation_cycle(&CancellationToken::new())
+        .await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count_with(
+            QA_ENVIRONMENTS_OBSERVATION_DURATION,
+            &[("class", ObservationClass::Detected.as_str())]
+        ),
+        1,
+        "the outer measurement: one environment's whole observation"
+    );
+    assert_eq!(
+        series.histogram_count_with(
+            QA_ENVIRONMENTS_PLUGIN_CALL_DURATION,
+            &[("class", PluginCallClass::Detected.as_str())]
+        ),
+        1,
+        "the inner one: the plugin round trip inside it"
+    );
+    assert_eq!(
+        series.counter(QA_ENVIRONMENTS_PLUGIN_CALL),
+        1,
+        "one round trip, counted once -- not once per environment visited and not once \
+         per cycle"
+    );
+}
+
+/// An adapter that panics on every plugin-call emission, plus a count of how
+/// many times it was reached.
+struct PanickingPluginMetrics {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PluginMetrics for PanickingPluginMetrics {
+    fn plugin_call(&self, _class: PluginCallClass, _duration: std::time::Duration) {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        panic!("the adapter is broken");
+    }
+}
+
+/// **A broken plugin-boundary adapter neither fails the cycle nor is called
+/// twice.**
+///
+/// The same contract `a_broken_metrics_adapter_does_not_fail_an_observation_cycle`
+/// asserts for the cycle port, asserted again for the port added at the plugin
+/// boundary — and it is not implied by that test, because this emission is at a
+/// different call site, inside the loop rather than around it. Without
+/// `catch_unwind` the panic would unwind through `observe_through_plugin` and
+/// take the whole cycle with it.
+///
+/// Two environments in one cycle, so the latch has something to prevent: the
+/// second call is where a caught-but-unlatched guard would write its second
+/// stderr line.
+///
+/// This test prints a panic backtrace even when it passes, for the reason its
+/// sibling's doc gives.
+#[tokio::test]
+async fn a_broken_plugin_metrics_adapter_does_not_fail_an_observation_cycle() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let services = build_services_tenant_scoped_with_plugin_and_plugin_metrics(
+        inmem_db().await,
+        port_detecting(),
+        Arc::new(PanickingPluginMetrics {
+            calls: Arc::clone(&calls),
+        }),
+    );
+    let tenant = Uuid::new_v4();
+    for name in ["environment-a", "environment-b"] {
+        services
+            .environments
+            .create_environment(&ctx(tenant), pasted(name, name))
+            .await
+            .unwrap();
+    }
+
+    let report = services
+        .environments
+        .run_observation_cycle(&CancellationToken::new())
+        .await;
+
+    assert_eq!(
+        (report.attempted, report.observed),
+        (2, 2),
+        "the cycle must do its work with a broken adapter, not merely survive"
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the first panic latches the service off; the second environment's emission is \
+         the log flood the latch exists to prevent"
+    );
+}
+
+/// A plugin that takes a known, non-trivial amount of wall-clock time to
+/// answer, delegating everything else to a VHP-shaped [`ScriptedPlugin`].
+///
+/// Its only job is to make the *magnitude* of the recorded sample assertable.
+/// Every other double here answers instantly, so a call site that recorded a
+/// constant — or a stale `Instant` — would produce a plausible sample and no
+/// count-based assertion could tell.
+struct SlowPlugin {
+    inner: ScriptedPlugin,
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl qa_product_sdk::QaProductPluginV1 for SlowPlugin {
+    fn credential_schema(&self) -> Vec<qa_product_sdk::FieldDesc> {
+        self.inner.credential_schema()
+    }
+
+    fn observed_schema(&self) -> Vec<qa_product_sdk::FieldDesc> {
+        self.inner.observed_schema()
+    }
+
+    async fn validate_credentials(
+        &self,
+        input: &qa_product_sdk::CredentialInput,
+    ) -> Result<Vec<qa_product_sdk::CredentialClassification>, PluginFailure> {
+        self.inner.validate_credentials(input).await
+    }
+
+    async fn observe(
+        &self,
+        env: &qa_product_sdk::EnvironmentHandle<'_>,
+    ) -> qa_product_sdk::observation::PluginObservation {
+        tokio::time::sleep(self.delay).await;
+        self.inner.observe(env).await
+    }
+
+    async fn prepare_run_access(
+        &self,
+        _env: &qa_product_sdk::EnvironmentHandle<'_>,
+    ) -> Result<qa_product_sdk::RunAccess, PluginFailure> {
+        unimplemented!("dispatch is qa-runs' side of the contract, not this gear's")
+    }
+
+    fn runner(
+        &self,
+        _observed: Option<&qa_product_sdk::observation::ObservedAttrs>,
+    ) -> qa_product_sdk::RunnerSpec {
+        unimplemented!("dispatch is qa-runs' side of the contract, not this gear's")
+    }
+
+    fn env_contract(&self) -> qa_product_sdk::RunVarContract {
+        self.inner.env_contract()
+    }
+}
+
+/// **The recorded duration really is the clock around the plugin call.**
+///
+/// Every other assertion in this file is about counts and labels, and counts
+/// cannot see a *value*: a call site that recorded `Duration::ZERO`, or a
+/// constant, or an `Instant` taken in the wrong place would satisfy all of
+/// them and hand a dashboard a fabricated distribution. Measured — a mutation
+/// replacing the elapsed time with a six-second constant passed the whole
+/// suite before this test existed.
+///
+/// It is written as **two bracketing assertions rather than one equality**,
+/// because an equality would be a timing test:
+///
+/// * the plugin sleeps 150 ms, so the sample cannot be in the 10 ms bucket or
+///   below — that direction is deterministic, since a sleep can only overrun;
+/// * and it must not be in the `(5 s, 10 s]` bucket, which no in-memory fake
+///   can honestly reach, so any constant large enough to look like a real
+///   cluster round trip fails here.
+///
+/// Between them they pin that the value tracks the call. They deliberately do
+/// **not** pin it more tightly than that; a narrower window would start failing
+/// on a loaded machine, which is how a timing assertion gets deleted.
+#[tokio::test]
+async fn the_recorded_plugin_duration_tracks_the_call_it_measures() {
+    let delay = std::time::Duration::from_millis(150);
+    let probe = MetricsProbe::new();
+    let services = build_services_tenant_scoped_with_plugin_and_plugin_metrics(
+        inmem_db().await,
+        Arc::new(FixedPluginPort::new(Arc::new(SlowPlugin {
+            inner: ScriptedPlugin::vhp_shaped(detected()),
+            delay,
+        }))),
+        probe.adapter(),
+    );
+    services
+        .environments
+        .create_environment(
+            &ctx(Uuid::new_v4()),
+            pasted("environment-a", "kubeconfig-a"),
+        )
+        .await
+        .unwrap();
+
+    services
+        .environments
+        .run_observation_cycle(&CancellationToken::new())
+        .await;
+
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION),
+        1,
+        "premise: exactly one plugin call was timed"
+    );
+    // Every bucket whose upper edge is at or below 100 ms must be empty. Probed
+    // edge by edge rather than through one call: `histogram_bucket_of` answers
+    // for the single bucket a value falls in, so asking about one edge says
+    // nothing about the buckets below it -- which is how the sibling version of
+    // this assertion in qa-catalog let a zero-duration mutation through.
+    for edge in [0.01_f64, 0.05, 0.1] {
+        assert_eq!(
+            series.histogram_bucket_of(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION, edge),
+            Some(0),
+            "a plugin that slept for {delay:?} cannot have been measured at {edge} s or \
+             less, so that bucket must be empty -- a zero or a near-zero here means the \
+             clock is not around the call"
+        );
+    }
+    assert_eq!(
+        series.histogram_bucket_of(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION, 6.0),
+        Some(0),
+        "and it cannot have taken between five and ten seconds either: an in-memory \
+         double does not, so a sample there is a fabricated or stale duration rather \
+         than a measured one"
     );
 }

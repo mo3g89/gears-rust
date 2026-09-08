@@ -21,9 +21,11 @@ use super::{DURATION_BUCKETS, SCOPE, build_default_adapter};
 use crate::domain::metrics::{
     COUNTERS, DURATIONS, QA_ENVIRONMENTS_OBSERVATION, QA_ENVIRONMENTS_OBSERVATION_CYCLE,
     QA_ENVIRONMENTS_OBSERVATION_CYCLE_DURATION, QA_ENVIRONMENTS_OBSERVATION_DURATION,
+    QA_ENVIRONMENTS_PLUGIN_CALL, QA_ENVIRONMENTS_PLUGIN_CALL_DURATION,
 };
 use crate::domain::ports::metrics::{
-    CycleOutcome, EnvironmentOutcome, ObservationClass, ObservationMetrics,
+    CycleOutcome, EnvironmentOutcome, ObservationClass, ObservationMetrics, PluginCallClass,
+    PluginMetrics,
 };
 
 /// **Every family in the catalog is exported under exactly its catalog name.**
@@ -45,6 +47,7 @@ fn every_catalog_family_is_exported_under_its_catalog_name() {
     adapter.observation_cycle(CycleOutcome::Completed, Duration::from_millis(1));
     adapter.cycle_environments(EnvironmentOutcome::Observed, 1);
     adapter.environment_observed(ObservationClass::Detected, Duration::from_millis(1));
+    adapter.plugin_call(PluginCallClass::Detected, Duration::from_millis(1));
 
     let series = probe.collect();
     let exported = series.names();
@@ -176,6 +179,9 @@ fn every_label_value_reaches_the_exporter_on_its_own_series() {
     for class in ObservationClass::ALL {
         adapter.environment_observed(class, Duration::from_millis(1));
     }
+    for class in PluginCallClass::ALL {
+        adapter.plugin_call(class, Duration::from_millis(1));
+    }
 
     let series = probe.collect();
     for outcome in CycleOutcome::ALL {
@@ -208,6 +214,23 @@ fn every_label_value_reaches_the_exporter_on_its_own_series() {
             ),
             1,
             "observation class {} exported no series of its own",
+            class.as_str()
+        );
+    }
+    for class in PluginCallClass::ALL {
+        assert_eq!(
+            series.counter_with(QA_ENVIRONMENTS_PLUGIN_CALL, &[("class", class.as_str())]),
+            1,
+            "plugin-call class {} exported no counter series of its own",
+            class.as_str()
+        );
+        assert_eq!(
+            series.histogram_count_with(
+                QA_ENVIRONMENTS_PLUGIN_CALL_DURATION,
+                &[("class", class.as_str())]
+            ),
+            1,
+            "plugin-call class {} exported no histogram series of its own",
             class.as_str()
         );
     }
@@ -274,6 +297,7 @@ fn every_duration_histogram_carries_the_declared_boundaries() {
 
     adapter.observation_cycle(CycleOutcome::Completed, Duration::from_secs(6));
     adapter.environment_observed(ObservationClass::Detected, Duration::from_secs(6));
+    adapter.plugin_call(PluginCallClass::Detected, Duration::from_secs(6));
 
     let series = probe.collect();
     for family in DURATIONS {
@@ -330,31 +354,42 @@ fn the_declared_boundaries_include_the_pollers_floor_and_default_interval() {
     }
 }
 
-/// **The duration is recorded in seconds, not milliseconds.**
+/// **Every duration is recorded in seconds, not milliseconds.**
 ///
 /// A different defect from the boundaries themselves: `as_millis` instead of
-/// `as_secs_f64` would put a six-second cycle in the overflow bucket above 300,
-/// and no assertion about the boundary set would notice.
+/// `as_secs_f64` would put a six-second sample in the overflow bucket above
+/// 300, and no assertion about the boundary set would notice.
+///
+/// **Swept over both per-item histograms**, because each is a separate
+/// conversion in the adapter: a version that got the observation family right
+/// and the plugin-call family wrong would pass a test that only drove the
+/// first — measured, when this test drove only the first and a millisecond
+/// mutation on the plugin-call recording came back green.
 #[test]
 fn a_duration_is_recorded_in_seconds() {
     let probe = MetricsProbe::new();
+    let adapter = probe.adapter();
 
-    probe
-        .adapter()
-        .environment_observed(ObservationClass::Detected, Duration::from_secs(6));
+    adapter.environment_observed(ObservationClass::Detected, Duration::from_secs(6));
+    adapter.plugin_call(PluginCallClass::Detected, Duration::from_secs(6));
 
     let series = probe.collect();
-    assert_eq!(
-        series.histogram_bucket_of(QA_ENVIRONMENTS_OBSERVATION_DURATION, 6.0),
-        Some(1),
-        "six seconds recorded as seconds lands in the bucket that contains 6.0; \
-         recorded as 6000 it would land in the overflow bucket instead"
-    );
-    assert_eq!(
-        series.histogram_bucket_of(QA_ENVIRONMENTS_OBSERVATION_DURATION, 6000.0),
-        Some(0),
-        "and nothing may be sitting in the overflow bucket"
-    );
+    for family in [
+        QA_ENVIRONMENTS_OBSERVATION_DURATION,
+        QA_ENVIRONMENTS_PLUGIN_CALL_DURATION,
+    ] {
+        assert_eq!(
+            series.histogram_bucket_of(family, 6.0),
+            Some(1),
+            "{family}: six seconds recorded as seconds lands in the bucket that contains \
+             6.0; recorded as 6000 it would land in the overflow bucket instead"
+        );
+        assert_eq!(
+            series.histogram_bucket_of(family, 6000.0),
+            Some(0),
+            "{family}: and nothing may be sitting in the overflow bucket"
+        );
+    }
 }
 
 /// **The default adapter builds and emits with no pipeline configured.**
@@ -376,4 +411,93 @@ fn the_default_adapter_emits_silently_with_no_pipeline_configured() {
     adapter.observation_cycle(CycleOutcome::Cancelled, Duration::from_millis(1));
     adapter.cycle_environments(EnvironmentOutcome::Failed, 7);
     adapter.environment_observed(ObservationClass::AuthRejected, Duration::from_millis(1));
+    adapter.plugin_call(PluginCallClass::Timeout, Duration::from_millis(1));
+}
+
+/// **One `plugin_call` drives both of its instruments, once each, under the
+/// same label.**
+///
+/// Unlike the per-environment pair, this family's counter and histogram carry
+/// **the same** key and the same value, and that is deliberate: they partition
+/// the same events at the same granularity, so a per-class rate off the counter
+/// and a per-class quantile off the histogram are two queries over one
+/// partition. The per-environment family cannot do that — its counter is driven
+/// from the cycle's report and carries `outcome` — which is why this pair
+/// exists as a pair.
+#[test]
+fn one_plugin_call_drives_the_counter_and_its_histogram_together() {
+    let probe = MetricsProbe::new();
+
+    probe
+        .adapter()
+        .plugin_call(PluginCallClass::Unreachable, Duration::from_millis(250));
+
+    let series = probe.collect();
+    assert_eq!(series.counter(QA_ENVIRONMENTS_PLUGIN_CALL), 1);
+    assert_eq!(
+        series.histogram_count(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION),
+        1
+    );
+    assert_eq!(
+        series.counter_with(QA_ENVIRONMENTS_PLUGIN_CALL, &[("class", "unreachable")]),
+        1,
+        "the label value is the enum's own rendering, not a second spelling"
+    );
+    assert_eq!(
+        series.histogram_count_with(
+            QA_ENVIRONMENTS_PLUGIN_CALL_DURATION,
+            &[("class", "unreachable")]
+        ),
+        1,
+        "and the histogram carries the same key and the same value, which is what lets a          rate and a quantile be read off one partition"
+    );
+}
+
+/// **The plugin-call families are exported apart from the observation
+/// families.**
+///
+/// The defect this catches is the one both constants' docs warn a *reader*
+/// against, arriving from the code side: an adapter that recorded the plugin
+/// call into the observation instruments would export a plausible-looking
+/// series set, and the inner measurement would be silently added to the outer
+/// one — double-counting the round trip, and destroying the subtraction the
+/// whole boundary measurement exists for.
+///
+/// The two are driven with different durations so the assertion is about which
+/// instrument received what, not merely about counts.
+#[test]
+fn a_plugin_call_is_not_recorded_into_the_observation_families() {
+    let probe = MetricsProbe::new();
+    let adapter = probe.adapter();
+
+    adapter.environment_observed(ObservationClass::Detected, Duration::from_secs(6));
+    adapter.plugin_call(PluginCallClass::Detected, Duration::from_millis(20));
+
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count(QA_ENVIRONMENTS_OBSERVATION_DURATION),
+        1,
+        "the observation histogram took exactly its own one sample"
+    );
+    assert_eq!(
+        series.histogram_count(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION),
+        1,
+        "and so did the plugin-call histogram"
+    );
+    assert_eq!(
+        series.histogram_bucket_of(QA_ENVIRONMENTS_OBSERVATION_DURATION, 6.0),
+        Some(1),
+        "the six seconds went to the observation family"
+    );
+    assert_eq!(
+        series.histogram_bucket_of(QA_ENVIRONMENTS_PLUGIN_CALL_DURATION, 6.0),
+        Some(0),
+        "and not to the plugin-call family, which received twenty milliseconds"
+    );
+    assert_eq!(
+        series.counter(QA_ENVIRONMENTS_OBSERVATION),
+        0,
+        "and a plugin call adds nothing to the report-driven counter, which is the \
+         cycle's own tally"
+    );
 }

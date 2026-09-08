@@ -1,11 +1,19 @@
 //! qa-environments observability metric catalog.
 //!
-//! One background path in this gear is measured here: the **observation
-//! cycle** — `domain::service::EnvironmentsService`'s `run_observation_cycle`,
-//! the body `crate::gear`'s observation ticker runs once per
-//! `qa-environments.observation.poll_interval_seconds`. Before this module
-//! existed nothing in any qa-platform gear measured it; the cycle's only
+//! Two paths in this gear are measured here.
+//!
+//! The **observation cycle** — `domain::service::EnvironmentsService`'s
+//! `run_observation_cycle`, the body `crate::gear`'s observation ticker runs
+//! once per `qa-environments.observation.poll_interval_seconds`. Before this
+//! module existed nothing in any qa-platform gear measured it; the cycle's only
 //! report was one `debug!` line per tick.
+//!
+//! And the **plugin boundary** — the `observe` round trip
+//! `observe_through_plugin` makes into a product plugin, which is where a
+//! deployment of this platform meets code it does not own. It is measured
+//! *separately from, and inside,* the observation that contains it; see the
+//! nesting section below, which is the part of this header a reader must not
+//! skip.
 //!
 //! # Metric naming
 //!
@@ -24,16 +32,44 @@
 //! a name nobody queries looks, from inside this process, exactly like a
 //! series that works.
 //!
-//! # Four families, at two levels, and why both levels exist
+//! # Six families, at three levels, and why all three exist
 //!
 //! | Level | Counter | Histogram | Label |
 //! | --- | --- | --- | --- |
 //! | the cycle | [`QA_ENVIRONMENTS_OBSERVATION_CYCLE`] | [`QA_ENVIRONMENTS_OBSERVATION_CYCLE_DURATION`] | [`crate::domain::ports::metrics::CycleOutcome`] |
 //! | one environment | [`QA_ENVIRONMENTS_OBSERVATION`] | [`QA_ENVIRONMENTS_OBSERVATION_DURATION`] | see below |
+//! | one plugin call | [`QA_ENVIRONMENTS_PLUGIN_CALL`] | [`QA_ENVIRONMENTS_PLUGIN_CALL_DURATION`] | [`crate::domain::ports::metrics::PluginCallClass`] |
 //!
 //! The cycle level is the ordinary RED shape every sibling gear uses: one
 //! sample per pass, so sample volume follows the tick rate rather than the
 //! workload.
+//!
+//! # The three levels are nested, and must never be added together
+//!
+//! **This is the one thing to know before reading any of them.** Each level is
+//! strictly contained in the one above it:
+//!
+//! ```text
+//! cycle duration
+//!   └─ per-environment observation duration   (once per registered environment)
+//!        ├─ plugin resolution                 (qa-catalog's own family)
+//!        ├─ the credential read out of credstore
+//!        ├─ plugin call duration              (this gear's plugin-call family)
+//!        └─ the observation write and the re-read
+//! ```
+//!
+//! So a cycle's seconds already contain every environment's, and an
+//! environment's already contain its plugin call's. Summing two of them
+//! double-counts the same wall-clock time, and a dashboard that stacks them
+//! reports several hundred percent of a real interval.
+//!
+//! What the nesting buys is the distinction the plugin boundary exists for.
+//! *The VHP plugin's detect is timing out* and *qa-environments is slow* were
+//! one series before the innermost level existed: a slow observation could be
+//! the plugin's round trip, the PDP, qa-catalog's resolution, credstore, or two
+//! database calls, and nothing said which. Subtracting the plugin-call duration
+//! from the observation duration is now the answer, and each of the two pages
+//! it distinguishes goes to a different team.
 //!
 //! The per-environment level is the deliberate exception, and the reason is
 //! arithmetic rather than preference. One cycle contacts **every** registered
@@ -124,6 +160,16 @@ pub const QA_ENVIRONMENTS_OBSERVATION: &str = "qa_environments_observation_total
 /// instant that call returns, before the cycle's own logging and bookkeeping,
 /// so nothing this gear does *between* environments is charged to any of them.
 ///
+/// **Two of those steps are now measured separately, and this family contains
+/// both of them.** The plugin's round trip is
+/// [`QA_ENVIRONMENTS_PLUGIN_CALL_DURATION`], and the resolution above it is
+/// qa-catalog's own plugin-resolution duration. Neither is parallel to this
+/// family: both are strictly inside it, so **adding either to this one counts
+/// the same seconds twice**. What they are for is *subtraction* — this family
+/// minus the plugin call is everything this gear does around a plugin, which is
+/// the number that says whether a slow observation is the plugin's fault or
+/// ours. See this module's header for the whole containment picture.
+///
 /// **Only the seven plugin-reported classes are guaranteed to contain a round
 /// trip.** [`crate::domain::ports::metrics::ObservationClass::Refused`] and
 /// [`crate::domain::ports::metrics::ObservationClass::Failed`] are the `Err`
@@ -180,6 +226,67 @@ pub const QA_ENVIRONMENTS_OBSERVATION: &str = "qa_environments_observation_total
 pub const QA_ENVIRONMENTS_OBSERVATION_DURATION: &str =
     "qa_environments_observation_duration_seconds";
 
+/// One call **into a product plugin** — `EnvironmentsService`'s
+/// `observe_through_plugin`, counting the `observe` round trips it makes,
+/// classified by what the plugin answered.
+///
+/// # The population is "a plugin was actually reached"
+///
+/// Deliberately narrower than [`QA_ENVIRONMENTS_OBSERVATION`]. Four things can
+/// end an environment's observation before any plugin is called — the
+/// environment names no product, the product names no resolvable plugin, no
+/// resolver is registered at all, or a credential could not be read back out of
+/// credstore — and `observe_through_plugin` returns a recorded failure for each
+/// of them without a round trip. None of those emit here, and that is what
+/// makes this family a denominator: **its total is the number of times this
+/// deployment actually talked to a plugin.**
+///
+/// A rising gap between this family's total and
+/// [`QA_ENVIRONMENTS_OBSERVATION`]'s is therefore itself a signal — it means
+/// environments are failing before the plugin, which is a resolution or
+/// credential problem and not a plugin problem. qa-catalog's own
+/// plugin-resolution family is where the first half of that is visible.
+///
+/// Labelled by [`crate::domain::ports::metrics::PluginCallClass`].
+pub const QA_ENVIRONMENTS_PLUGIN_CALL: &str = "qa_environments_plugin_call_total";
+
+/// Wall-clock duration of **one plugin round trip and nothing else** —
+/// `QaProductPluginV1::observe`, from the call to the value it returned.
+///
+/// # What is inside the span, stated exactly because that is the whole point
+///
+/// The `observe` call, and nothing before or after it. Not the plugin
+/// resolution, not the credential read, not `observed_schema` (a declaration
+/// getter this gear calls just above), not the projection of the answer into
+/// columns, not the write. **The plugin boundary is where a qa-platform
+/// deployment meets code it does not own, and this family is the measure of
+/// what happens on the far side of it.**
+///
+/// # It is nested inside [`QA_ENVIRONMENTS_OBSERVATION_DURATION`], not parallel
+/// to it
+///
+/// Every sample here is contained in exactly one sample there, which contains
+/// several other things besides. **Adding the two together double-counts.** The
+/// operation that means something is the difference:
+///
+/// * a p95 that rises **here** and there together is the plugin or the target
+///   it talks to — *"the VHP plugin's detect is timing out"*;
+/// * a p95 that rises **there** and not here is this gear, its database, its
+///   PDP, credstore, or qa-catalog's resolution — *"qa-environments is slow"*.
+///
+/// Before this family existed those two readings were the same series, and they
+/// go to different people. That is the reason this level of the catalog exists
+/// at all; see this module's header for the full containment picture.
+///
+/// # Why the caller times it rather than the plugin
+///
+/// [`crate::domain::ports::metrics`]'s header carries the argument in full: the
+/// measurement a dashboard needs is answerable from outside the call, and
+/// `qa-product-sdk` deliberately keeps its dependency graph narrow rather than
+/// pushing an observability dependency onto every plugin author.
+pub const QA_ENVIRONMENTS_PLUGIN_CALL_DURATION: &str =
+    "qa_environments_plugin_call_duration_seconds";
+
 /// Every counter family this gear exports.
 ///
 /// Declared rather than derived, and therefore its own oracle. What makes it
@@ -204,6 +311,7 @@ pub const QA_ENVIRONMENTS_OBSERVATION_DURATION: &str =
 pub const COUNTERS: &[&str] = &[
     QA_ENVIRONMENTS_OBSERVATION_CYCLE,
     QA_ENVIRONMENTS_OBSERVATION,
+    QA_ENVIRONMENTS_PLUGIN_CALL,
 ];
 
 /// Every duration histogram this gear exports. See [`COUNTERS`] for why the
@@ -212,6 +320,7 @@ pub const COUNTERS: &[&str] = &[
 pub const DURATIONS: &[&str] = &[
     QA_ENVIRONMENTS_OBSERVATION_CYCLE_DURATION,
     QA_ENVIRONMENTS_OBSERVATION_DURATION,
+    QA_ENVIRONMENTS_PLUGIN_CALL_DURATION,
 ];
 
 #[cfg(test)]

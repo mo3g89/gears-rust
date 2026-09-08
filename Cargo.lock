@@ -9098,6 +9098,8 @@ dependencies = [
  "gts",
  "http",
  "inventory",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "qa-catalog-sdk",
  "qa-product-sdk",
  "regex",

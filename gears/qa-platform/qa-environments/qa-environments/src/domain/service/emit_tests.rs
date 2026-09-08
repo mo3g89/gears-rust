@@ -3,12 +3,14 @@
 //!
 //! # Why a parity test and not a shared crate
 //!
-//! qa-runs, qa-insights and now qa-environments each carry the same panic guard
-//! around a metric emission. Two copies were accepted on review; the third is
-//! where "copy it again" stops being an answer, because the guard is not
-//! decoration — it is what makes "metrics must not change behaviour" true at
-//! the call site, and a fix applied to one copy silently leaves the other two
-//! unfixed.
+//! qa-runs, qa-insights, qa-environments and now qa-catalog each carry the same
+//! panic guard around a metric emission. Two copies were accepted on review;
+//! the third is where "copy it again" stopped being an answer, because the
+//! guard is not decoration — it is what makes "metrics must not change
+//! behaviour" true at the call site, and a fix applied to one copy silently
+//! leaves the others unfixed. The fourth arrived with Task 40's plugin-boundary
+//! work, under an explicit ruling that the extraction is a recorded follow-up
+//! rather than that task's job.
 //!
 //! A shared crate is the structural answer and is **out of this task's scope**:
 //! the observability plan puts one there, and creating one would be a
@@ -41,15 +43,24 @@ use std::path::PathBuf;
 /// The `domain/service/mod.rs` of each gear that carries a copy of the guard,
 /// relative to this crate's manifest directory.
 ///
-/// qa-environments' own path is included: comparing the two siblings to each
-/// other while assuming this crate agrees with them is exactly the hole that
-/// would let this crate be the one that drifted.
+/// qa-environments' own path is included: comparing the siblings to each other
+/// while assuming this crate agrees with them is exactly the hole that would
+/// let this crate be the one that drifted.
+///
+/// This list is hosted here rather than in each gear because one host reading
+/// four files is cheaper than four hosts reading four files each, and because
+/// a divergence is one fact, not four. The cost is that qa-catalog's guard is
+/// only checked when *this* crate's suite runs.
 const GUARD_SITES: &[(&str, &str)] = &[
     ("qa-environments", "src/domain/service/mod.rs"),
     ("qa-runs", "../../qa-runs/qa-runs/src/domain/service/mod.rs"),
     (
         "qa-insights",
         "../../qa-insights/qa-insights/src/domain/service/mod.rs",
+    ),
+    (
+        "qa-catalog",
+        "../../qa-catalog/qa-catalog/src/domain/service/mod.rs",
     ),
 ];
 
@@ -114,9 +125,9 @@ fn the_guard_is_byte_for_byte_the_guard_the_sibling_gears_run() {
     for (gear, body) in &bodies[1..] {
         assert_eq!(
             body, first,
-            "{gear}'s metric-emission guard has diverged from {first_gear}'s. The three \
-             gears carry one function in three files; a change to one of them is a change \
-             the other two have not had."
+            "{gear}'s metric-emission guard has diverged from {first_gear}'s. The four \
+             gears carry one function in four files; a change to one of them is a change \
+             the other three have not had."
         );
     }
 
