@@ -35,12 +35,18 @@ use super::{
     CollectReportBaseUrl, CollectReportSigningSecret, CollectService, DefaultCollectBranch,
 };
 use crate::domain::error::DomainError;
+use crate::domain::metrics::{
+    QA_INSIGHTS_COLLECT, QA_INSIGHTS_COLLECT_DURATION, QA_INSIGHTS_COLLECT_REPORT,
+};
+use crate::domain::ports::metrics::{CollectMetrics, CollectOutcome, CollectReportOutcome};
 use crate::domain::ports::{CatalogReader, RunsLauncher};
 use crate::domain::repos::CollectRepository;
 use crate::domain::service::test_support::{
-    DenyAllAuthZ, FakeCatalog, RecordingAuthZ, TenantScopedAuthZ, ctx, universe_test,
+    CatalogFailure, DenyAllAuthZ, FakeCatalog, RecordingAuthZ, SlowCatalog, TenantScopedAuthZ, ctx,
+    universe_test,
 };
 use crate::domain::system_actor::TenantBound;
+use crate::infra::metrics::probe::MetricsProbe;
 use crate::infra::storage::collect_sea_repo::OrmCollectRepository;
 use crate::infra::storage::test_db::{inmem_db, scope};
 
@@ -120,6 +126,23 @@ struct Fixture {
     db: Arc<DBProvider<DomainError>>,
     ctx: SecurityContext,
     launcher: Arc<FakeRunsLauncher>,
+    /// The real `OpenTelemetry` adapter this fixture's service emits through,
+    /// over a meter provider private to this fixture.
+    ///
+    /// **Every fixture carries one, whether or not its test reads it**, and
+    /// the reason is the constraint that makes metric tests easy to get wrong:
+    /// an emission is silent when no adapter is installed, so a test that
+    /// asserted on a service built without one would pass while measuring
+    /// nothing. Installing the real adapter everywhere means the metric
+    /// assertions below are reading the same code path production runs, and
+    /// the tests that ignore it are still exercising it.
+    ///
+    /// Private per fixture, not shared: a counter is cumulative, so a shared
+    /// provider would make every `assert_eq!(.., 1)` here order-dependent.
+    metrics: MetricsProbe,
+    /// Retained so a test can make the universe read fail, which is the only
+    /// way a cycle reaches an outcome other than `completed`.
+    catalog: Arc<FakeCatalog>,
 }
 
 impl Fixture {
@@ -157,21 +180,25 @@ async fn fixture() -> Fixture {
     let catalog = Arc::new(FakeCatalog::default());
     catalog.add(Uuid::new_v4(), "main", universe_test("tests/a.py"));
     let launcher = Arc::new(FakeRunsLauncher::default());
+    let metrics = MetricsProbe::new();
     let service = CollectService::new(
         Arc::clone(&db),
         OrmCollectRepository,
-        catalog as Arc<dyn CatalogReader>,
+        Arc::clone(&catalog) as Arc<dyn CatalogReader>,
         Arc::clone(&launcher) as Arc<dyn RunsLauncher>,
         PolicyEnforcer::new(Arc::new(TenantScopedAuthZ)),
         DefaultCollectBranch("main".to_owned()),
         CollectReportBaseUrl("http://insights.example".to_owned()),
         CollectReportSigningSecret(SECRET.to_owned()),
+        Some(metrics.adapter()),
     );
     Fixture {
         service,
         db,
         ctx: ctx(TENANT),
         launcher,
+        metrics,
+        catalog,
     }
 }
 
@@ -200,21 +227,25 @@ async fn fixture_with_two_repos_one_missing_the_branch() -> Fixture {
     );
     let launcher = Arc::new(FakeRunsLauncher::default());
     launcher.fail_for(repo_missing_branch);
+    let metrics = MetricsProbe::new();
     let service = CollectService::new(
         Arc::clone(&db),
         OrmCollectRepository,
-        catalog as Arc<dyn CatalogReader>,
+        Arc::clone(&catalog) as Arc<dyn CatalogReader>,
         Arc::clone(&launcher) as Arc<dyn RunsLauncher>,
         PolicyEnforcer::new(Arc::new(TenantScopedAuthZ)),
         DefaultCollectBranch("main".to_owned()),
         CollectReportBaseUrl("http://insights.example".to_owned()),
         CollectReportSigningSecret(SECRET.to_owned()),
+        Some(metrics.adapter()),
     );
     Fixture {
         service,
         db,
         ctx: ctx(TENANT),
         launcher,
+        metrics,
+        catalog,
     }
 }
 
@@ -459,6 +490,7 @@ async fn the_empty_signing_secret_fails_every_report_closed() {
         DefaultCollectBranch("main".to_owned()),
         CollectReportBaseUrl("http://insights.example".to_owned()),
         CollectReportSigningSecret(String::new()),
+        None,
     );
 
     // The signature an attacker would have to guess is the HMAC of the empty
@@ -502,6 +534,7 @@ async fn a_too_short_signing_secret_fails_every_report_closed() {
         DefaultCollectBranch("main".to_owned()),
         CollectReportBaseUrl("http://insights.example".to_owned()),
         CollectReportSigningSecret("short".to_owned()),
+        None,
     );
 
     let sig = service.sign(REPO, "main", TENANT);
@@ -538,6 +571,7 @@ async fn a_whitespace_only_signing_secret_fails_every_report_closed() {
         DefaultCollectBranch("main".to_owned()),
         CollectReportBaseUrl("http://insights.example".to_owned()),
         CollectReportSigningSecret(whitespace_secret),
+        None,
     );
 
     let sig = service.sign(REPO, "main", TENANT);
@@ -627,6 +661,7 @@ async fn trigger_requires_the_qa_test_result_collect_grant() {
         DefaultCollectBranch("main".to_owned()),
         CollectReportBaseUrl("http://insights.example".to_owned()),
         CollectReportSigningSecret(SECRET.to_owned()),
+        None,
     );
 
     let err = service.trigger(&ctx(TENANT), None).await.unwrap_err();
@@ -662,6 +697,7 @@ async fn trigger_asks_the_pdp_for_exactly_qa_test_result_collect() {
         DefaultCollectBranch("main".to_owned()),
         CollectReportBaseUrl("http://insights.example".to_owned()),
         CollectReportSigningSecret(SECRET.to_owned()),
+        None,
     );
 
     service.trigger(&ctx(TENANT), None).await.expect("granted");
@@ -713,5 +749,392 @@ async fn record_count_is_scoped_by_the_callers_own_tenant_not_by_the_pdp() {
         f.count_for("tests/a.py").await,
         3,
         "the other tenant's write must not be visible under this tenant's scope"
+    );
+}
+
+// ---------------------------------------------------------------------------
+//  Metrics — Task 38 of the observability plan
+// ---------------------------------------------------------------------------
+//
+// Every assertion below reads the **rendered series** back out of a real
+// `OpenTelemetry` pipeline (`MetricsProbe`), not a mock of the port. A mock
+// would prove only that the call site calls something; what has to be true is
+// that a dashboard query finds the sample.
+
+/// **One cycle is one observation on both of its instruments.**
+///
+/// The pairing is the property: a rate read off the counter and a p95 read off
+/// the histogram must never disagree about how many cycles there were, which is
+/// why the port takes the duration rather than leaving the histogram to a
+/// second call.
+#[tokio::test]
+async fn a_collect_cycle_records_one_observation() {
+    let f = fixture().await;
+
+    let launched = f
+        .service
+        .run_collect_cycle(&f.ctx, "main")
+        .await
+        .expect("the cycle runs");
+    // A premise, not the assertion: a cycle that launched nothing would still
+    // emit, and this test would then be measuring an empty loop.
+    assert_eq!(launched, 1);
+
+    let series = f.metrics.collect();
+    assert_eq!(
+        series.counter(QA_INSIGHTS_COLLECT),
+        1,
+        "one cycle, one increment; the exported names were {:?}",
+        series.names()
+    );
+    assert_eq!(series.histogram_count(QA_INSIGHTS_COLLECT_DURATION), 1);
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_COLLECT, &[("outcome", "completed")]),
+        1
+    );
+}
+
+/// **A cycle whose per-repository launches all fail is still `completed`.**
+///
+/// `run_collect_cycle`'s own doc: a launch failure is logged, skipped and not
+/// fatal. That is deliberate and this pins the metric to it — folding those
+/// into the cycle's outcome would make `failed` mean "something, somewhere",
+/// which is not a signal an alert can be written against. What the operator
+/// reads instead is the returned count against the universe size.
+#[tokio::test]
+async fn a_cycle_whose_launches_were_refused_is_not_a_failed_cycle() {
+    let f = fixture_with_two_repos_one_missing_the_branch().await;
+
+    let launched = f
+        .service
+        .run_collect_cycle(&f.ctx, "feature-x")
+        .await
+        .expect("the cycle runs");
+    assert_eq!(launched, 1, "premise: one of the two launches was refused");
+
+    let series = f.metrics.collect();
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_COLLECT, &[("outcome", "completed")]),
+        1
+    );
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_COLLECT, &[("outcome", "failed")]),
+        0
+    );
+}
+
+/// **A broken sibling is this gear's failure; a refused one is not.**
+///
+/// The two arms are the same code path with a different error, so nothing but
+/// the label can tell them apart — and they need opposite responses. A
+/// `Forbidden` universe read is a policy to fix and must not page anybody; an
+/// unreachable qa-catalog is the series an alert fires on.
+#[tokio::test]
+async fn a_refused_cycle_and_a_broken_one_record_different_outcomes() {
+    let refused = fixture().await;
+    refused.catalog.fail_reads(CatalogFailure::Forbidden);
+    refused
+        .service
+        .run_collect_cycle(&refused.ctx, "main")
+        .await
+        .expect_err("a refused universe read fails the cycle");
+
+    let series = refused.metrics.collect();
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_COLLECT, &[("outcome", "refused")]),
+        1,
+        "a denied universe read is the caller's policy, not this gear's fault"
+    );
+    assert_eq!(series.histogram_count(QA_INSIGHTS_COLLECT_DURATION), 1);
+
+    let broken = fixture().await;
+    broken.catalog.fail_reads(CatalogFailure::Internal);
+    broken
+        .service
+        .run_collect_cycle(&broken.ctx, "main")
+        .await
+        .expect_err("an unreachable qa-catalog fails the cycle");
+
+    let series = broken.metrics.collect();
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_COLLECT, &[("outcome", "failed")]),
+        1,
+        "an unreachable sibling is this gear's incident to answer"
+    );
+}
+
+/// **An accepted report is counted, so the refusal rates below have a
+/// denominator.**
+#[tokio::test]
+async fn an_accepted_report_records_itself() {
+    let f = fixture().await;
+    let sig = f.sig_for(REPO, "main", TENANT);
+
+    f.service
+        .record_count(
+            TenantBound::new(TENANT).unwrap(),
+            REPO,
+            "main",
+            &sig,
+            "tests/a.py",
+            5,
+        )
+        .await
+        .expect("a correctly signed report");
+
+    let series = f.metrics.collect();
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_COLLECT_REPORT, &[("outcome", "recorded")]),
+        1,
+        "the exported names were {:?}",
+        series.names()
+    );
+}
+
+/// **Each HMAC refusal path is counted as its own class.**
+///
+/// This is the finding the family exists for. All three refusals answer the
+/// caller with one indistinguishable `Forbidden` — deliberately, so the
+/// response is not an oracle — so **the metric is the only place they are
+/// separable at all**, and an operator who cannot separate them cannot act:
+/// `secret_unconfigured` is a config file to fix, `signature_invalid` is a
+/// stale runner or somebody guessing.
+///
+/// Each arm builds its own service and its own probe, because the secret is
+/// constructor state and the three cases need three different secrets.
+#[tokio::test]
+async fn every_hmac_refusal_is_counted_under_its_own_class() {
+    // Unconfigured: fail-closed, even for a signature computed under the very
+    // same empty secret.
+    let (service, metrics) = metered_service("").await;
+    let sig = service.sign(REPO, "main", TENANT);
+    refuse(&service, "main", &sig).await;
+    assert_eq!(
+        metrics.collect().counter_with(
+            QA_INSIGHTS_COLLECT_REPORT,
+            &[("outcome", "secret_unconfigured")]
+        ),
+        1,
+        "an unconfigured secret is a deployment mistake and must not read as an attack"
+    );
+
+    // Malformed: not hex at all, so there is no tag to compare.
+    let (service, metrics) = metered_service(SECRET).await;
+    refuse(&service, "main", "zzzz-not-hex").await;
+    assert_eq!(
+        metrics.collect().counter_with(
+            QA_INSIGHTS_COLLECT_REPORT,
+            &[("outcome", "signature_malformed")]
+        ),
+        1
+    );
+
+    // Invalid: well-formed hex that does not verify.
+    let (service, metrics) = metered_service(SECRET).await;
+    refuse(&service, "main", &"ab".repeat(32)).await;
+    assert_eq!(
+        metrics.collect().counter_with(
+            QA_INSIGHTS_COLLECT_REPORT,
+            &[("outcome", "signature_invalid")]
+        ),
+        1
+    );
+
+    // And a shape guard, which is a different class again: the signature
+    // verified and the payload did not.
+    let (service, metrics) = metered_service(SECRET).await;
+    let blank_branch_sig = service.sign(REPO, "   ", TENANT);
+    refuse(&service, "   ", &blank_branch_sig).await;
+    let series = metrics.collect();
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_COLLECT_REPORT, &[("outcome", "invalid")]),
+        1
+    );
+    assert_eq!(
+        series.counter_with(
+            QA_INSIGHTS_COLLECT_REPORT,
+            &[("outcome", "signature_invalid")]
+        ),
+        0,
+        "a valid signature over a malformed payload is not a signature failure"
+    );
+}
+
+/// A [`CollectService`] over `secret`, with its own probe. The report tests
+/// need three different secrets, and the secret is constructor state.
+async fn metered_service(secret: &str) -> (CollectService<OrmCollectRepository>, MetricsProbe) {
+    let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
+    let catalog = Arc::new(FakeCatalog::default());
+    let launcher = Arc::new(FakeRunsLauncher::default());
+    let metrics = MetricsProbe::new();
+    let service = CollectService::new(
+        db,
+        OrmCollectRepository,
+        catalog as Arc<dyn CatalogReader>,
+        launcher as Arc<dyn RunsLauncher>,
+        PolicyEnforcer::new(Arc::new(TenantScopedAuthZ)),
+        DefaultCollectBranch("main".to_owned()),
+        CollectReportBaseUrl("http://insights.example".to_owned()),
+        CollectReportSigningSecret(secret.to_owned()),
+        Some(metrics.adapter()),
+    );
+    (service, metrics)
+}
+
+/// Submit one report that must be refused, and assert only that it was — each
+/// caller then reads which class it was counted under.
+async fn refuse(service: &CollectService<OrmCollectRepository>, branch: &str, sig: &str) {
+    let err = service
+        .record_count(
+            TenantBound::new(TENANT).unwrap(),
+            REPO,
+            branch,
+            sig,
+            "tests/a.py",
+            5,
+        )
+        .await
+        .expect_err("this report must be refused");
+    assert!(
+        matches!(err, DomainError::Forbidden | DomainError::Validation { .. }),
+        "{err:?}"
+    );
+}
+
+/// **A panicking metrics adapter does not fail the cycle, and is called once.**
+///
+/// Two properties in one test because the second is what makes the first
+/// survivable in production. The guard catches the panic so the measured path
+/// is unaffected; the latch means a *persistently* broken adapter is called
+/// once and then never again, rather than writing a panic line to stderr on
+/// every cycle.
+#[tokio::test]
+async fn a_broken_metrics_adapter_does_not_fail_a_collect_cycle() {
+    #[derive(Default)]
+    struct Panicking {
+        calls: Mutex<usize>,
+    }
+    impl CollectMetrics for Panicking {
+        fn collect_cycle(&self, _outcome: CollectOutcome, _duration: std::time::Duration) {
+            *self.calls.lock().unwrap() += 1;
+            panic!("this adapter is broken");
+        }
+        fn collect_report(&self, _outcome: CollectReportOutcome) {}
+    }
+
+    let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
+    let catalog = Arc::new(FakeCatalog::default());
+    catalog.add(Uuid::new_v4(), "main", universe_test("tests/a.py"));
+    let launcher = Arc::new(FakeRunsLauncher::default());
+    let broken = Arc::new(Panicking::default());
+    let service = CollectService::new(
+        db,
+        OrmCollectRepository,
+        catalog as Arc<dyn CatalogReader>,
+        Arc::clone(&launcher) as Arc<dyn RunsLauncher>,
+        PolicyEnforcer::new(Arc::new(TenantScopedAuthZ)),
+        DefaultCollectBranch("main".to_owned()),
+        CollectReportBaseUrl("http://insights.example".to_owned()),
+        CollectReportSigningSecret(SECRET.to_owned()),
+        Some(Arc::clone(&broken) as Arc<dyn CollectMetrics>),
+    );
+
+    let ctx = ctx(TENANT);
+    assert_eq!(
+        service
+            .run_collect_cycle(&ctx, "main")
+            .await
+            .expect("a broken metrics adapter must not fail the cycle"),
+        1
+    );
+    assert_eq!(
+        service
+            .run_collect_cycle(&ctx, "main")
+            .await
+            .expect("nor the next one"),
+        1
+    );
+
+    assert_eq!(
+        *broken.calls.lock().unwrap(),
+        1,
+        "the second cycle must not reach an adapter that has already panicked"
+    );
+    assert_eq!(
+        launcher.calls().len(),
+        2,
+        "premise: both cycles really ran and really launched"
+    );
+}
+
+/// **The recorded cycle duration really is a clock around the cycle.**
+///
+/// Every other collect metric assertion here is about counts and labels, and
+/// counts cannot see a *value*: a call site that recorded `Duration::ZERO`, or
+/// a constant, or an `Instant` taken in the wrong place would satisfy all of
+/// them and hand a dashboard a fabricated distribution. Measured in
+/// qa-environments during Task 40 — a mutation replacing the elapsed time with
+/// a six-second constant passed that gear's whole suite, and this family had
+/// the same hole.
+///
+/// Written as **two bracketing assertions rather than one equality**, because
+/// an equality would be a timing test:
+///
+/// * the catalog's universe read sleeps 150 ms and the cycle awaits it before
+///   launching anything, so the sample cannot be in a bucket whose upper edge
+///   is 100 ms or below — that direction is deterministic, since a sleep can
+///   only overrun;
+/// * and it must not be in the `(5 s, 10 s]` bucket, which no in-memory fixture
+///   can honestly reach.
+///
+/// Probed edge by edge rather than through one call: `histogram_bucket_of`
+/// answers for the single bucket a value falls in, so asking about one edge
+/// says nothing about the buckets below it.
+#[tokio::test]
+async fn the_recorded_cycle_duration_tracks_the_cycle_it_measures() {
+    let delay = std::time::Duration::from_millis(150);
+    let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
+    let catalog = Arc::new(FakeCatalog::default());
+    catalog.add(Uuid::new_v4(), "main", universe_test("tests/a.py"));
+    let metrics = MetricsProbe::new();
+    let service = CollectService::new(
+        Arc::clone(&db),
+        OrmCollectRepository,
+        Arc::new(SlowCatalog::new(Arc::clone(&catalog), delay)) as Arc<dyn CatalogReader>,
+        Arc::new(FakeRunsLauncher::default()) as Arc<dyn RunsLauncher>,
+        PolicyEnforcer::new(Arc::new(TenantScopedAuthZ)),
+        DefaultCollectBranch("main".to_owned()),
+        CollectReportBaseUrl("http://insights.example".to_owned()),
+        CollectReportSigningSecret(SECRET.to_owned()),
+        Some(metrics.adapter()),
+    );
+
+    let launched = service
+        .run_collect_cycle(&ctx(TENANT), "main")
+        .await
+        .expect("the cycle runs");
+    assert_eq!(launched, 1, "premise: the cycle really did its work");
+
+    let series = metrics.collect();
+    assert_eq!(
+        series.histogram_count(QA_INSIGHTS_COLLECT_DURATION),
+        1,
+        "premise: exactly one cycle was timed"
+    );
+    for edge in [0.01_f64, 0.05, 0.1] {
+        assert_eq!(
+            series.histogram_bucket_of(QA_INSIGHTS_COLLECT_DURATION, edge),
+            Some(0),
+            "a cycle whose universe read slept for {delay:?} cannot have been measured at \
+             {edge} s or less, so that bucket must be empty -- a zero or a near-zero here \
+             means the clock is not around the cycle"
+        );
+    }
+    assert_eq!(
+        series.histogram_bucket_of(QA_INSIGHTS_COLLECT_DURATION, 6.0),
+        Some(0),
+        "and it cannot have taken between five and ten seconds either: an in-memory \
+         fixture does not, so a sample there is a fabricated or stale duration rather \
+         than a measured one"
     );
 }

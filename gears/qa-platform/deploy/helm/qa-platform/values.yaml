@@ -189,3 +189,31 @@ collectReportSigningSecret: ""
 # measured the pod->node hostPort hairpin as broken). deploy-k8s.sh resolves the
 # ui Service's ClusterIP and passes it with --set.
 uiServiceClusterIP: ""
+
+# WHETHER THE 22 METRIC FAMILIES LEAVE THE PROCESS AT ALL, and where they go.
+# The catalog -- series name, type, labels, and what each supports -- is
+# docs/DESIGN.md 3.9.
+#
+# METRICS ARE PUSHED OVER OTLP, NOT SCRAPED, so there is no port to open and no
+# scrape annotation to add: libs/toolkit's `init_metrics_provider` builds an
+# OTLP exporter behind a periodic reader, and nothing in this repository serves
+# a `/metrics` route. `endpoint` is where that reader pushes.
+#
+# OFF BY DEFAULT, and off is a working state rather than a broken one: with
+# `enabled: false` the process-global meter provider stays the built-in no-op,
+# every instrument is a no-op, and the gears behave identically. Nothing is
+# observable, and nothing misbehaves.
+#
+# `endpoint` IS REQUIRED WHEN `enabled` IS TRUE -- gears-config-configmap.yaml
+# refuses to render the pair otherwise. The committed config's value is the
+# loopback address, which is right under `cargo run` beside a local collector
+# and wrong in a pod, whose 127.0.0.1 is itself; enabling without re-pointing
+# it produces a stack that looks instrumented, logs an export failure every
+# interval and fills no dashboard.
+#
+#   --set opentelemetry.metrics.enabled=true \
+#   --set opentelemetry.metrics.endpoint=http://otel-collector.observability.svc.cluster.local:4317
+opentelemetry:
+  metrics:
+    enabled: false
+    endpoint: ""

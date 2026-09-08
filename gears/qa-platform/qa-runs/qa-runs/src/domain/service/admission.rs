@@ -64,7 +64,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::PolicyEnforcer;
@@ -76,8 +76,9 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::launch::{Admission, Admitted, Admitter};
-use super::{DbProvider, QueueLimits, actions, resources};
+use super::{DbProvider, QueueLimits, actions, emit, resources};
 use crate::domain::error::DomainError;
+use crate::domain::ports::metrics::{DispatchDecision, DispatchMetrics};
 use crate::domain::ports::run_executor::RunExecutor;
 use crate::domain::queue::{
     AdmissionDecision, Occupancy, cap_reached, decide_admission, depth_limit, global_cap_status,
@@ -361,6 +362,12 @@ pub struct AdmissionDeps<R, Q> {
     pub locks: PlatformLocks,
     pub limits: QueueLimits,
     pub policy_enforcer: PolicyEnforcer,
+    /// Where every admission decision is counted — see
+    /// [`AdmissionService::recorded`]. `NoopMetrics` when no adapter is
+    /// installed; see [`super::ServiceDeps::dispatch_metrics`], which is the
+    /// **same** `Arc` the dispatch service is handed, so both halves of the
+    /// dispatch story report through one adapter.
+    pub metrics: Arc<dyn DispatchMetrics>,
 }
 
 /// Decide-and-record, under the platform's admission lock.
@@ -376,6 +383,10 @@ pub struct AdmissionService<R, Q> {
     /// Not a constructor argument: one service is one gate, and the container
     /// hands *this* service to both callers of the cap.
     cap: GlobalCapGate,
+    /// See [`AdmissionDeps::metrics`].
+    metrics: Arc<dyn DispatchMetrics>,
+    /// This service's emission latch — see `super::emit`.
+    metrics_silenced: AtomicBool,
 }
 
 impl<R, Q> AdmissionService<R, Q>
@@ -394,7 +405,38 @@ where
             limits: deps.limits,
             policy_enforcer: deps.policy_enforcer,
             cap: GlobalCapGate::default(),
+            metrics: deps.metrics,
+            metrics_silenced: AtomicBool::new(false),
         }
+    }
+
+    /// Count what admission decided, then hand the outcome on unchanged.
+    ///
+    /// **Here rather than in `service::launch`, because this is where the
+    /// decision is made.** `LaunchService` receives an [`Admitted`] and acts on
+    /// it; a counter there would be counting what it was told, one indirection
+    /// away from the enum whose fourth variant is supposed to be a compile
+    /// error. The `From<&Admission>` projection it uses lives beside
+    /// [`Admission`] itself, in `service::launch`, for the reason that type's
+    /// doc gives.
+    ///
+    /// Called from all three outcomes of the [`Admitter`] impl — the
+    /// platformless early return, the queue-row path, and [`Self::bypass`] — so
+    /// the family counts exactly the launches this gear admitted, and a fourth
+    /// outcome added without a call here is a missing series rather than a
+    /// wrong one. It is deliberately **not** called on the error paths: a
+    /// refusal is not a decision, and `QueueFull` and `ConcurrencyLimit` are
+    /// already the caller's own 429.
+    ///
+    /// Takes and returns the value rather than borrowing it, so a call site
+    /// cannot construct an [`Admitted`] and forget to route it through here
+    /// without that being visible on the same line.
+    fn recorded(&self, admitted: Admitted) -> Admitted {
+        let decision = DispatchDecision::from(&admitted.admission);
+        emit(&self.metrics_silenced, || {
+            self.metrics.dispatch_decision(decision);
+        });
+        admitted
     }
 
     /// The lock registry, for the composition test that proves admission and
@@ -631,10 +673,10 @@ where
         // occupies cluster capacity, which is why the cap is above this line and
         // why the slot travels with this outcome too.
         let Some(platform_id) = run.platform_id else {
-            return Ok(Admitted {
+            return Ok(self.recorded(Admitted {
                 admission: Admission::Unqueued,
                 slot,
-            });
+            }));
         };
 
         let lock = self.locks.get(platform_id).await;
@@ -758,7 +800,7 @@ where
             }
         };
 
-        Ok(Admitted { admission, slot })
+        Ok(self.recorded(Admitted { admission, slot }))
     }
 
     /// The bypass seam: an unmetered slot and [`Admission::Unqueued`].
@@ -790,10 +832,10 @@ where
     /// reachable from `service::launch` — see `Admitter::bypass`'s doc for why
     /// that matters.
     async fn bypass(&self, _ctx: &SecurityContext) -> Result<Admitted, DomainError> {
-        Ok(Admitted {
+        Ok(self.recorded(Admitted {
             admission: Admission::Unqueued,
             slot: CapSlot { outstanding: None },
-        })
+        }))
     }
 }
 

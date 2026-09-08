@@ -50,6 +50,14 @@ gts = { workspace = true }
 # missing plugin must not take down healthy gears).
 types-registry-sdk = { workspace = true }
 
+# The metric instruments `infra::metrics::QaCatalogMetricsMeter` holds, and the
+# process-global meter provider `build_default_adapter` reads. Only the
+# `Counter`/`Histogram`/`Meter` surface and `global::meter_with_scope` are used;
+# the SDK itself (`opentelemetry_sdk`) is a dev-dependency, because a gear emits
+# into whatever pipeline `toolkit`'s telemetry init installed and never builds
+# one.
+opentelemetry = { workspace = true }
+
 toolkit = { workspace = true }
 toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
 toolkit-db-macros = { workspace = true }
@@ -78,6 +86,13 @@ tempfile = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
+# The in-memory metric pipeline `infra::metrics::probe` builds: an adapter test
+# has to read back what was really exported, and the SDK is the only thing that
+# can produce that. Declared here rather than relied on through feature
+# unification with a sibling crate -- `cargo hack --each-feature` builds this
+# package on its own, where unification would not save it.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+
 # In-memory CredStoreClientV1 double for the DB-backed tenant-scoping tier.
 credstore-sdk = { workspace = true, features = ["test-util"] }
 # `MockTypesRegistryClient` + `make_test_instance`, for the product-plugin

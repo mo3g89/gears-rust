@@ -173,6 +173,15 @@ url = { workspace = true }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
 
+# The metric instruments `infra::metrics` holds — `Counter`, `Histogram`, the
+# `Meter` they are built from, and the process-global meter provider
+# `build_default_adapter` reads. Only the API crate: the SDK (providers,
+# exporters, readers) is the *pipeline's* concern and `libs/toolkit`'s
+# `telemetry::init` owns it, so a gear that never configures a pipeline is
+# still fully instrumented and every instrument it builds is a no-op. Same
+# split `account-management`'s Cargo.toml makes.
+opentelemetry = { workspace = true }
+
 toolkit = { workspace = true }
 toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
 toolkit-db-macros = { workspace = true }
@@ -230,6 +239,17 @@ regex = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The in-memory metric exporter (`InMemoryMetricExporter`) the adapter's tests
+# and the two call-site tests read their series back from — it lives behind
+# `opentelemetry_sdk`'s `testing` feature.
+#
+# **Declared here rather than inherited.** `libs/toolkit-http` enables the same
+# feature, and under a plain workspace build Cargo's feature unification would
+# hand it to this crate for free — but that unification does not hold under
+# `cargo build -p qa-runs` or under `cargo hack --each-feature`, both of which
+# are green gates on this branch. A dependency this crate's own tests name is a
+# dependency this crate declares.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # For `infra::executor::argo::watch`'s own loopback `kube::Client` doubles
 # (Task 17, fix round 1) — see the `[features]` note's `argo` entry for why
 # these live here rather than as optional entries in `[dependencies]`. Never

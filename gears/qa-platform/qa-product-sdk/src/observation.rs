@@ -61,8 +61,28 @@ pub enum FailureClass {
     ///
     /// This is the residual bucket, and it is carrying two distinct meanings —
     /// "misconfigured" and "the plugin is broken". Splitting it needs a new
-    /// variant, which is deferred to whichever task gives [`FailureClass`] a
+    /// variant, which was deferred to whichever task gave [`FailureClass`] a
     /// wire form, because that is when adding one stops being free.
+    ///
+    /// **That wire form now exists, and adding a variant is no longer free.**
+    /// `qa-environments` labels a Prometheus series by this enum
+    /// (`qa-environments/src/domain/ports/metrics.rs`'s `ObservationClass`,
+    /// projected one-for-one with no `_` arm), so every variant here is a label
+    /// value on an exported metric. The consequences of adding one, in the
+    /// order they bite:
+    ///
+    /// * a new series appears, and a dashboard or alert written against
+    ///   `internal` stops seeing the traffic that moved to the new value —
+    ///   silently, because a query for a label value that no longer receives
+    ///   samples returns a flat line rather than an error;
+    /// * every panel and alert expression naming the old value has to be
+    ///   revisited, and none of them is in this repository.
+    ///
+    /// The split is still the right end state — telling an operator that their
+    /// exec credential plugin failed because of a defect in ours remains worse
+    /// than coarse. It is now a change with a migration attached rather than a
+    /// free one, and this note records the status change rather than making the
+    /// split: doing it here would be doing it without the dashboards in view.
     Internal,
 }
 

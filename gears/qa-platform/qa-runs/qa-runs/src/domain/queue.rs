@@ -163,6 +163,17 @@ pub struct QueuedRow {
     pub id: Uuid,
     /// The run's resolved exclusivity flag.
     pub exclusive: bool,
+    /// When the row joined the queue — the query's own `ORDER BY` key, carried
+    /// through so the tick that drains the row can report how long it waited
+    /// (`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`).
+    ///
+    /// **Read by nothing in this module.** [`plan_dispatch_batch`] takes the
+    /// rows in the order the repository returned them and never compares
+    /// timestamps; ordering is the query's job, stated at
+    /// `QueueRepository::queued_rows`. The field is on this type rather than
+    /// re-read later because the drain has this snapshot in hand and a second
+    /// read would be a second query per claimed row.
+    pub enqueued_at: OffsetDateTime,
 }
 
 /// The cluster-wide concurrency limit, as named fields.
@@ -496,6 +507,7 @@ mod tests {
         QueuedRow {
             id: id(n),
             exclusive,
+            enqueued_at: at(0),
         }
     }
 

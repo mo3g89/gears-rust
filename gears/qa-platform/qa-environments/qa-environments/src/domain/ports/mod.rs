@@ -1,3 +1,13 @@
+/// The observability metric-emission port: the label taxonomy and the trait
+/// `domain::service::EnvironmentsService` emits the observation cycle through.
+///
+/// `pub mod` rather than the `mod` + `pub use` shape its two neighbours use.
+/// The module holds a trait, three label enums and a no-op implementation, and
+/// flattening six names into this file would lose the `metrics::` qualifier
+/// that makes a label enum readable at a call site. qa-runs and qa-insights
+/// name theirs the same way, and every call site in all three reads
+/// `ports::metrics::..`.
+pub mod metrics;
 mod product_plugin;
 mod runner_secret;
 

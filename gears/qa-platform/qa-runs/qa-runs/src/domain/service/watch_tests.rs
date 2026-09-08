@@ -313,6 +313,10 @@ async fn harness() -> Harness {
                 queue_ttl_seconds: 7200,
             },
             orphan_timeout_seconds: 600,
+            // `None` is the production default: `NoopMetrics`, which emits
+            // everything a wired gear emits and lets nothing observe it.
+            dispatch_metrics: None,
+            ingest_metrics: None,
         },
     ));
     Harness {
@@ -821,6 +825,10 @@ async fn resume_harness() -> ResumeHarness {
                 queue_ttl_seconds: 7200,
             },
             orphan_timeout_seconds: 600,
+            // `None` is the production default: `NoopMetrics`, which emits
+            // everything a wired gear emits and lets nothing observe it.
+            dispatch_metrics: None,
+            ingest_metrics: None,
         },
     ));
     ResumeHarness {

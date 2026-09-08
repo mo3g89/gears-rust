@@ -17,6 +17,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -30,17 +31,23 @@ use uuid::Uuid;
 
 use super::JiraPollerService;
 use crate::domain::error::DomainError;
+use crate::domain::metrics::{
+    QA_INSIGHTS_JIRA_BUG, QA_INSIGHTS_JIRA_POLL, QA_INSIGHTS_JIRA_POLL_DURATION,
+    QA_INSIGHTS_JIRA_RERUN,
+};
 use crate::domain::ports::jira_client::{
     IssueRef, JiraClient, JiraIssue, NewIssue, StatusCategory,
 };
+use crate::domain::ports::metrics::{JiraBugOutcome, JiraPollMetrics, JiraPollOutcome};
 use crate::domain::ports::{CatalogReader, EnvironmentReader, RunsLauncher};
 use crate::domain::repos::{JiraRepository, NewTestResult, ResultsRepository};
 use crate::domain::service::jira::{JiraConfigInput, JiraService};
 use crate::domain::service::test_support::{
-    DEFAULT_BRANCH, FakeCatalog, FakePlatforms, TenantScopedAuthZ, UNIVERSE_TEST_PLAN_PATH,
-    UNIVERSE_TEST_REPO_ID, ctx,
+    DEFAULT_BRANCH, FakeCatalog, FakePlatforms, SlowCatalog, TenantScopedAuthZ,
+    UNIVERSE_TEST_PLAN_PATH, UNIVERSE_TEST_REPO_ID, ctx,
 };
 use crate::infra::leader::{LeaderElector, LeaderWorkFn, NoopLeaderElector, work_fn};
+use crate::infra::metrics::probe::MetricsProbe;
 use crate::infra::storage::jira_sea_repo::OrmJiraRepository;
 use crate::infra::storage::results_sea_repo::OrmResultsRepository;
 use crate::infra::storage::test_db::{inmem_db, scope};
@@ -132,6 +139,21 @@ struct FakeJiraStatus {
     /// pass does after `open_bugs` and the last thing it does before
     /// `resolve_bug`: parking here is exactly the window the race needs open.
     rendezvous: Option<Arc<Rendezvous>>,
+    /// Makes every `check_status` fail. Added by Task 38 of the observability
+    /// plan: the poller logs and skips a failed status check, so before the
+    /// per-bug counter existed there was no observable difference between a
+    /// pass whose every check failed and a pass whose every bug was still
+    /// open, and therefore nothing to write a test against.
+    fail_checks: AtomicBool,
+}
+
+impl FakeJiraStatus {
+    /// Make every subsequent `check_status` fail with an opaque internal
+    /// error. The failure is generic on purpose: the poller does not branch on
+    /// which error it was, it logs whatever it got and skips the bug.
+    fn fail_status_checks(&self) {
+        self.fail_checks.store(true, AtomicOrdering::SeqCst);
+    }
 }
 
 #[async_trait]
@@ -155,6 +177,9 @@ impl JiraClient for FakeJiraStatus {
             rendezvous.arrive().await;
         }
         self.asked.lock().unwrap().push(jira_key.to_owned());
+        if self.fail_checks.load(AtomicOrdering::SeqCst) {
+            return Err(DomainError::Internal("JIRA is unreachable".to_owned()));
+        }
         Ok(self.category.clone())
     }
 
@@ -198,11 +223,24 @@ struct RecordedLaunch {
 #[derive(Default)]
 struct FakeLauncher {
     launches: Mutex<Vec<RecordedLaunch>>,
+    /// Makes every `launch_test` fail, while still recording the attempt.
+    ///
+    /// Added by Task 38 of the observability plan, and the *recording* half is
+    /// what it is for: a refused launch is still a call into qa-runs'
+    /// admission path, so the rerun counter must count it, and only a double
+    /// that records before it fails can tell a counted attempt from an
+    /// uncounted one.
+    fail_launches: AtomicBool,
 }
 
 impl FakeLauncher {
     fn launches(&self) -> usize {
         self.launches.lock().unwrap().len()
+    }
+
+    /// Make every subsequent `launch_test` fail, after recording it.
+    fn fail_test_launches(&self) {
+        self.fail_launches.store(true, AtomicOrdering::SeqCst);
     }
 
     /// The most recent launch. Panics if none was made — every caller of this
@@ -254,6 +292,11 @@ impl RunsLauncher for FakeLauncher {
             branch: branch.map(str::to_owned),
             bypassed_admission: false,
         });
+        if self.fail_launches.load(AtomicOrdering::SeqCst) {
+            return Err(DomainError::Internal(
+                "qa-runs refused the launch".to_owned(),
+            ));
+        }
         Ok(())
     }
 }
@@ -296,6 +339,19 @@ struct Fixture {
         )
     )]
     elector: Arc<dyn LeaderElector>,
+    /// The real `OpenTelemetry` adapter this fixture's poller emits through,
+    /// over a meter provider private to this fixture.
+    ///
+    /// **Every fixture carries one, whether or not its test reads it.** An
+    /// emission is silent when no adapter is installed, so a metric assertion
+    /// made against a service built without one would pass while measuring
+    /// nothing; installing the real adapter everywhere means the assertions
+    /// below read the same code path production runs, and the tests that
+    /// ignore it exercise it anyway.
+    ///
+    /// Private per fixture, not shared: a counter is cumulative, so a shared
+    /// provider would make every `assert_eq!(.., 1)` here order-dependent.
+    metrics: MetricsProbe,
 }
 
 fn stored_jira_config() -> JiraConfigInput {
@@ -367,6 +423,7 @@ async fn build_on(
         category: StatusCategory::new(category),
         asked: Mutex::new(Vec::new()),
         rendezvous,
+        fail_checks: AtomicBool::new(false),
     });
     let jira_service = Arc::new(JiraService::new(
         Arc::clone(&db),
@@ -378,11 +435,13 @@ async fn build_on(
     let catalog = Arc::new(FakeCatalog::default());
     let platforms = Arc::new(FakePlatforms::default());
     let launcher = Arc::new(FakeLauncher::default());
+    let metrics = MetricsProbe::new();
     let service = Arc::new(JiraPollerService::new(
         Arc::clone(&jira_service),
         Arc::clone(&catalog) as Arc<dyn CatalogReader>,
         Arc::clone(&platforms) as Arc<dyn EnvironmentReader>,
         Arc::clone(&launcher) as Arc<dyn RunsLauncher>,
+        Some(metrics.adapter()),
     ));
     let ctx = ctx(TENANT);
 
@@ -406,6 +465,7 @@ async fn build_on(
         db,
         platform_id: Uuid::nil(),
         elector,
+        metrics,
     }
 }
 
@@ -1031,5 +1091,483 @@ async fn two_concurrent_pollers_produce_one_rerun() {
     assert!(
         a.bug_is_resolved(JIRA_KEY).await,
         "and the pass that won must still have done its work"
+    );
+}
+
+// ---------------------------------------------------------------------------
+//  Metrics — Task 38 of the observability plan
+// ---------------------------------------------------------------------------
+//
+// Every assertion below reads the **rendered series** back out of a real
+// `OpenTelemetry` pipeline (`MetricsProbe`), not a mock of the port. A mock
+// would prove only that the call site calls something; what has to be true is
+// that a dashboard query finds the sample.
+
+/// A PDP double that grants everything except one `(resource_type, action)`
+/// pair.
+///
+/// Local to this module, and narrower than `DenyAllAuthZ` on purpose: the
+/// per-bug failures this file has to reach are *individual steps* of one pass,
+/// and a double that denied everything would stop the pass at its first read
+/// instead. `resolve_bug` is `(qa.jira_bug, update)` and
+/// `latest_version_for_plan` is `(qa.test_result, list)`, so denying exactly
+/// one of those puts the failure at exactly one step with every other step
+/// still working — which is the shape a real partial policy has, and the only
+/// way to make the poller swallow a failure at a chosen point.
+struct DenyOneAuthZ {
+    resource: &'static str,
+    action: &'static str,
+}
+
+#[async_trait]
+impl authz_resolver_sdk::AuthZResolverClient for DenyOneAuthZ {
+    async fn evaluate(
+        &self,
+        request: authz_resolver_sdk::EvaluationRequest,
+    ) -> Result<authz_resolver_sdk::EvaluationResponse, authz_resolver_sdk::AuthZResolverError>
+    {
+        if request.resource.resource_type == self.resource && request.action.name == self.action {
+            return Ok(authz_resolver_sdk::EvaluationResponse {
+                decision: false,
+                context: authz_resolver_sdk::EvaluationResponseContext::default(),
+            });
+        }
+        Ok(authz_resolver_sdk::EvaluationResponse {
+            decision: true,
+            context: authz_resolver_sdk::EvaluationResponseContext {
+                constraints: vec![authz_resolver_sdk::Constraint {
+                    predicates: vec![authz_resolver_sdk::Predicate::In(
+                        authz_resolver_sdk::InPredicate::new(
+                            toolkit_security::pep_properties::OWNER_TENANT_ID,
+                            [TENANT],
+                        ),
+                    )],
+                }],
+                ..Default::default()
+            },
+        })
+    }
+}
+
+/// **One pass is one observation on both of its instruments.**
+///
+/// The premise assertion matters as much as the metric one: a pass that looked
+/// at no bug would still emit, and this test would then be measuring an empty
+/// loop rather than a working one.
+#[tokio::test]
+async fn a_poll_pass_records_one_observation() {
+    let f = fixture_with_resolved_bug_and_new_build().await;
+
+    f.service.poll_once(&f.ctx).await.expect("the pass runs");
+    assert_eq!(f.launcher.launches(), 1, "premise: the pass really ran");
+
+    let series = f.metrics.collect();
+    assert_eq!(
+        series.counter(QA_INSIGHTS_JIRA_POLL),
+        1,
+        "one pass, one increment; the exported names were {:?}",
+        series.names()
+    );
+    assert_eq!(series.histogram_count(QA_INSIGHTS_JIRA_POLL_DURATION), 1);
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_JIRA_POLL, &[("outcome", "completed")]),
+        1
+    );
+}
+
+/// **A tenant with no JIRA configuration is `skipped`, not `completed`.**
+///
+/// Both answer `Ok(())`, so nothing but the label separates them — and the
+/// difference is the whole question an operator asks first: a deployment where
+/// every pass is skipped because nobody configured JIRA looks, on a
+/// `completed`-only counter, exactly like one where every pass is working.
+#[tokio::test]
+async fn a_pass_for_a_tenant_without_jira_is_skipped_not_completed() {
+    let f = build_with_category(StatusCategory::DONE, false).await;
+
+    f.service.poll_once(&f.ctx).await.expect("a silent no-op");
+
+    let series = f.metrics.collect();
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_JIRA_POLL, &[("outcome", "skipped")]),
+        1
+    );
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_JIRA_POLL, &[("outcome", "completed")]),
+        0,
+        "a pass that looked at no bug has not completed anything"
+    );
+    assert_eq!(
+        series.counter(QA_INSIGHTS_JIRA_BUG),
+        0,
+        "and it contributes nothing to the per-bug family"
+    );
+}
+
+/// **A pass the PDP refuses is `refused`, not `failed`.**
+///
+/// The two need opposite responses — a missing grant is a policy to fix and
+/// must not page anybody — and the pass returns the same `Err` shape either
+/// way, so only the label tells them apart.
+#[tokio::test]
+async fn a_refused_pass_is_not_a_failed_pass() {
+    // Denied at exactly the config *read* the pass opens with. A blanket
+    // `DenyAllAuthZ` cannot serve here: this fixture saves its JIRA config
+    // through the service's own write path, which that double refuses too, so
+    // the test would fail while building rather than while polling.
+    let f = build_with_authz(
+        StatusCategory::DONE,
+        true,
+        Arc::new(DenyOneAuthZ {
+            resource: "qa.jira_config",
+            action: "get",
+        }),
+    )
+    .await;
+
+    f.service
+        .poll_once(&f.ctx)
+        .await
+        .expect_err("a denied config read fails the pass");
+
+    let series = f.metrics.collect();
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_JIRA_POLL, &[("outcome", "refused")]),
+        1
+    );
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_JIRA_POLL, &[("outcome", "failed")]),
+        0
+    );
+    assert_eq!(series.histogram_count(QA_INSIGHTS_JIRA_POLL_DURATION), 1);
+}
+
+/// **An open bug and a resolved one are counted apart, one increment each.**
+#[tokio::test]
+async fn an_open_bug_and_a_resolved_one_are_counted_apart() {
+    let still_open = build_with_category("indeterminate", true).await;
+    still_open.file_bug("T1", Some(OLD_VERSION), None).await;
+    still_open
+        .service
+        .poll_once(&still_open.ctx)
+        .await
+        .expect("the pass runs");
+    assert!(
+        !still_open.bug_is_resolved(JIRA_KEY).await,
+        "premise: JIRA still reports this one open"
+    );
+    assert_eq!(
+        still_open
+            .metrics
+            .collect()
+            .counter_with(QA_INSIGHTS_JIRA_BUG, &[("outcome", "unresolved")]),
+        1
+    );
+
+    let resolved = fixture_with_resolved_bug_and_no_new_build().await;
+    resolved
+        .service
+        .poll_once(&resolved.ctx)
+        .await
+        .expect("the pass runs");
+    assert!(
+        resolved.bug_is_resolved(JIRA_KEY).await,
+        "premise: this one really was resolved"
+    );
+    let series = resolved.metrics.collect();
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_JIRA_BUG, &[("outcome", "resolved")]),
+        1
+    );
+    assert_eq!(
+        series.counter(QA_INSIGHTS_JIRA_BUG),
+        1,
+        "exactly one increment per bug per pass, whatever the chain did"
+    );
+}
+
+/// **Every failure the poller swallows is counted under its own class.**
+///
+/// This is the finding the family exists for, and it is swept rather than
+/// sampled. `domain::service::jira_poller`'s header states that every per-bug
+/// failure is logged and skipped and never becomes a pass error — so the pass
+/// answers `Ok(())` in all six arms below, and **the per-bug counter is the
+/// only place any of them is observable at all**. A pass that silently dropped
+/// forty bugs was, before this, indistinguishable from a clean one.
+///
+/// Each arm arranges its failure at one step and leaves every other step
+/// working, so a defect that mislabels one arm cannot be hidden by another
+/// failing first.
+#[tokio::test]
+async fn every_swallowed_per_bug_failure_is_counted_under_its_own_class() {
+    // 1. The JIRA status call.
+    let f = build().await;
+    f.file_bug("T1", Some(OLD_VERSION), None).await;
+    f.jira_client.fail_status_checks();
+    assert_bug_outcome(&f, "status_check_failed").await;
+
+    // 2. The local resolve write, denied at exactly (qa.jira_bug, update) so
+    //    the listing above it still works.
+    let f = build_with_authz(
+        StatusCategory::DONE,
+        true,
+        Arc::new(DenyOneAuthZ {
+            resource: "qa.jira_bug",
+            action: "update",
+        }),
+    )
+    .await;
+    f.file_bug("T1", Some(OLD_VERSION), None).await;
+    assert_bug_outcome(&f, "resolve_write_failed").await;
+
+    // 3. The plan's latest build, denied at (qa.test_result, list).
+    let f = build_with_authz(
+        StatusCategory::DONE,
+        true,
+        Arc::new(DenyOneAuthZ {
+            resource: "qa.test_result",
+            action: "list",
+        }),
+    )
+    .await;
+    f.file_bug("T1", Some(OLD_VERSION), None).await;
+    assert_bug_outcome(&f, "plan_version_unreadable").await;
+
+    // 4. The platform's default branch.
+    let f = fixture_with_platform_branch(DEFAULT_BRANCH).await;
+    f.add_resolved_bug_with_new_build("T1", DEFAULT_BRANCH)
+        .await;
+    f.catalog
+        .add_test_on_branch_only(DEFAULT_BRANCH, "tests/t1.py", "T1");
+    f.platforms.fail_reads(true);
+    assert_bug_outcome(&f, "branch_unresolved").await;
+
+    // 5. The catalog universe lookup — here, a universe with no test
+    //    declaring this bug's title, which `find_plan_test_file` answers
+    //    identically to a failed read.
+    let f = build().await;
+    f.file_bug("T1", Some(OLD_VERSION), None).await;
+    f.record_build(NEW_VERSION, None).await;
+    assert_bug_outcome(&f, "test_file_unresolved").await;
+
+    // 6. The launch itself.
+    let f = fixture_with_resolved_bug_and_new_build().await;
+    f.launcher.fail_test_launches();
+    assert_bug_outcome(&f, "launch_failed").await;
+}
+
+/// Run one pass and assert its single bug was counted under `outcome`, and
+/// under nothing else.
+///
+/// The `Ok(())` assertion is not incidental: it is the premise the whole family
+/// rests on — the pass really did swallow the failure — and a change that
+/// started propagating per-bug errors would fail here rather than silently
+/// making these assertions vacuous.
+async fn assert_bug_outcome(f: &Fixture, outcome: &str) {
+    f.service
+        .poll_once(&f.ctx)
+        .await
+        .expect("a per-bug failure never fails the pass");
+
+    let series = f.metrics.collect();
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_JIRA_BUG, &[("outcome", outcome)]),
+        1,
+        "the bug was not counted as {outcome}; the exported names were {:?}",
+        series.names()
+    );
+    assert_eq!(
+        series.counter(QA_INSIGHTS_JIRA_BUG),
+        1,
+        "and it must be counted once, under one class only"
+    );
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_JIRA_POLL, &[("outcome", "completed")]),
+        1,
+        "the pass itself completed, which is exactly why the per-bug family \
+         is the only place this failure is visible"
+    );
+}
+
+/// **A rerun is counted as a launch, separately from the poll.**
+///
+/// A pass is one increment on the poll family however many reruns it fired, so
+/// a rerun storm is invisible there by construction. This family is where it
+/// shows, and the two halves below are the two ways a counter of successes
+/// would get it wrong: a pass that reruns nothing must count nothing, and a
+/// launch qa-runs **refuses** must still count, because it cost the same call
+/// into the admission path that a storm is made of.
+#[tokio::test]
+async fn an_auto_rerun_is_counted_as_a_launch_whether_or_not_it_was_accepted() {
+    let accepted = fixture_with_resolved_bug_and_new_build().await;
+    accepted
+        .service
+        .poll_once(&accepted.ctx)
+        .await
+        .expect("the pass runs");
+    assert_eq!(accepted.launcher.launches(), 1, "premise: a rerun happened");
+    assert_eq!(
+        accepted.metrics.collect().counter(QA_INSIGHTS_JIRA_RERUN),
+        1
+    );
+
+    let refused = fixture_with_resolved_bug_and_new_build().await;
+    refused.launcher.fail_test_launches();
+    refused
+        .service
+        .poll_once(&refused.ctx)
+        .await
+        .expect("the pass runs");
+    let series = refused.metrics.collect();
+    assert_eq!(
+        series.counter(QA_INSIGHTS_JIRA_RERUN),
+        1,
+        "a refused launch is still a call into qa-runs and still part of a storm"
+    );
+    assert_eq!(
+        series.counter_with(QA_INSIGHTS_JIRA_BUG, &[("outcome", "launch_failed")]),
+        1,
+        "and how it went is on the per-bug family, which is why this one carries no label"
+    );
+
+    let no_rerun = fixture_with_resolved_bug_and_no_new_build().await;
+    no_rerun
+        .service
+        .poll_once(&no_rerun.ctx)
+        .await
+        .expect("the pass runs");
+    assert_eq!(no_rerun.launcher.launches(), 0, "premise: D8 stopped it");
+    assert_eq!(
+        no_rerun.metrics.collect().counter(QA_INSIGHTS_JIRA_RERUN),
+        0,
+        "a bug that was never a rerun candidate must not inflate the rerun rate"
+    );
+}
+
+/// **A panicking metrics adapter does not fail the pass, and is called once.**
+///
+/// Two properties, and the second is what makes the first survivable here in
+/// particular: the per-bug emission fires once per open bug per pass, so
+/// without the latch a persistently broken adapter writes a panic line to
+/// stderr per bug — the "never logs per-emission" failure, at the worst
+/// possible multiplier.
+#[tokio::test]
+async fn a_broken_metrics_adapter_does_not_fail_a_poll_pass() {
+    #[derive(Default)]
+    struct Panicking {
+        calls: Mutex<usize>,
+    }
+    impl JiraPollMetrics for Panicking {
+        fn poll_pass(&self, _outcome: JiraPollOutcome, _duration: std::time::Duration) {
+            *self.calls.lock().unwrap() += 1;
+            panic!("this adapter is broken");
+        }
+        fn bug(&self, _outcome: JiraBugOutcome) {
+            *self.calls.lock().unwrap() += 1;
+            panic!("this adapter is broken");
+        }
+        fn auto_rerun(&self) {
+            *self.calls.lock().unwrap() += 1;
+            panic!("this adapter is broken");
+        }
+    }
+
+    let f = fixture_with_resolved_bug_and_new_build().await;
+    let broken = Arc::new(Panicking::default());
+    let service = JiraPollerService::new(
+        Arc::clone(&f.jira_service),
+        Arc::clone(&f.catalog) as Arc<dyn CatalogReader>,
+        Arc::clone(&f.platforms) as Arc<dyn EnvironmentReader>,
+        Arc::clone(&f.launcher) as Arc<dyn RunsLauncher>,
+        Some(Arc::clone(&broken) as Arc<dyn JiraPollMetrics>),
+    );
+
+    service
+        .poll_once(&f.ctx)
+        .await
+        .expect("a broken metrics adapter must not fail the pass");
+    service.poll_once(&f.ctx).await.expect("nor the next one");
+
+    assert_eq!(
+        *broken.calls.lock().unwrap(),
+        1,
+        "the latch must stop the adapter being called again after its first \
+         panic; this path emits once per bug, so an unlatched flood is per bug per pass"
+    );
+    assert!(
+        f.launcher.launches() >= 1,
+        "premise: the passes really ran and really launched"
+    );
+}
+
+/// **The recorded pass duration really is a clock around the pass.**
+///
+/// Every other poller metric assertion here is about counts and labels, and
+/// counts cannot see a *value*: a call site that recorded `Duration::ZERO`, or
+/// a constant, or an `Instant` taken in the wrong place would satisfy all of
+/// them and hand a dashboard a fabricated distribution. Measured in
+/// qa-environments during Task 40 — a mutation replacing the elapsed time with
+/// a six-second constant passed that gear's whole suite, and this family had
+/// the same hole.
+///
+/// The service is rebuilt over the fixture's own collaborators with a slow
+/// catalog swapped in, rather than a new fixture builder being added: what has
+/// to change is one of five constructor arguments, and the bug, the build and
+/// the JIRA double all have to be the ones `fixture_with_resolved_bug_and_new_build`
+/// already set up for the pass to reach the catalog at all.
+///
+/// Written as **two bracketing assertions rather than one equality**, because
+/// an equality would be a timing test:
+///
+/// * the catalog read inside the per-bug rerun chain sleeps 150 ms and the pass
+///   awaits it, so the sample cannot be in a bucket whose upper edge is 100 ms
+///   or below — that direction is deterministic, since a sleep can only
+///   overrun;
+/// * and it must not be in the `(5 s, 10 s]` bucket, which no in-memory fixture
+///   can honestly reach.
+///
+/// Probed edge by edge rather than through one call: `histogram_bucket_of`
+/// answers for the single bucket a value falls in, so asking about one edge
+/// says nothing about the buckets below it.
+#[tokio::test]
+async fn the_recorded_pass_duration_tracks_the_pass_it_measures() {
+    let delay = std::time::Duration::from_millis(150);
+    let f = fixture_with_resolved_bug_and_new_build().await;
+    let service = JiraPollerService::new(
+        Arc::clone(&f.jira_service),
+        Arc::new(SlowCatalog::new(Arc::clone(&f.catalog), delay)) as Arc<dyn CatalogReader>,
+        Arc::clone(&f.platforms) as Arc<dyn EnvironmentReader>,
+        Arc::clone(&f.launcher) as Arc<dyn RunsLauncher>,
+        Some(f.metrics.adapter()),
+    );
+
+    service.poll_once(&f.ctx).await.expect("the pass runs");
+    assert_eq!(
+        f.launcher.launches(),
+        1,
+        "premise: the pass really reached the catalog and launched the rerun"
+    );
+
+    let series = f.metrics.collect();
+    assert_eq!(
+        series.histogram_count(QA_INSIGHTS_JIRA_POLL_DURATION),
+        1,
+        "premise: exactly one pass was timed"
+    );
+    for edge in [0.01_f64, 0.05, 0.1] {
+        assert_eq!(
+            series.histogram_bucket_of(QA_INSIGHTS_JIRA_POLL_DURATION, edge),
+            Some(0),
+            "a pass whose catalog read slept for {delay:?} cannot have been measured at \
+             {edge} s or less, so that bucket must be empty -- a zero or a near-zero here \
+             means the clock is not around the pass"
+        );
+    }
+    assert_eq!(
+        series.histogram_bucket_of(QA_INSIGHTS_JIRA_POLL_DURATION, 6.0),
+        Some(0),
+        "and it cannot have taken between five and ten seconds either: an in-memory \
+         fixture does not, so a sample there is a fabricated or stale duration rather \
+         than a measured one"
     );
 }

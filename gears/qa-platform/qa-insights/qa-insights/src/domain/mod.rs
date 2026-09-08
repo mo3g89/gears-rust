@@ -6,6 +6,13 @@
 //! plan's schedule: the analytics cores over [`analytics::ExecRow`] in Tasks
 //! 20-24, and the notification client/sender/wiring in Tasks 37-40.
 //!
+//! [`metrics`] is the observability catalog — the literal Prometheus series
+//! names this gear exports and, in [`ports::metrics`], the typed traits the
+//! collect cycle, the collect callback and the JIRA poller emit through. A
+//! domain module rather than an infra one because the *label taxonomy* is a
+//! set of domain classifications: which per-bug failures the poller can
+//! swallow, and which of the collect callback's refusals happened.
+//!
 //! [`elevated`] is the one named exception to "every query is PEP-scoped":
 //! the single seam the ticker enumeration in `service::tenants` elevates
 //! through instead of asking the PDP. See its module doc.
@@ -22,6 +29,7 @@ pub mod error;
 pub mod error_attribution;
 pub mod jira;
 pub mod local_client;
+pub mod metrics;
 pub mod notify;
 pub mod ports;
 pub mod repos;

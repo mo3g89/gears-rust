@@ -39,6 +39,7 @@ use qa_product_sdk::plugin::{
     CredentialClassification, CredentialInput, EnvironmentHandle, QaProductPluginV1,
 };
 
+use crate::domain::ports::metrics::{ObservationMetrics, PluginMetrics};
 use crate::domain::ports::{
     NoopRunnerSecretWriter, PluginUnavailable, ProductPluginPort, RunnerSecretWriter,
 };
@@ -572,6 +573,43 @@ pub fn build_services_with_plugin_port(
     product_plugins: Arc<dyn ProductPluginPort>,
     max_variables: usize,
 ) -> Arc<ConcreteAppServices> {
+    build_services_with_plugin_port_and_metrics(
+        db,
+        authz,
+        credstore,
+        observer,
+        product_plugins,
+        None,
+        None,
+        max_variables,
+    )
+}
+
+/// [`build_services_with_plugin_port`] plus the metrics port, for the handful
+/// of tests that assert on what the observation cycle reported.
+///
+/// A separate funnel rather than a widened one: every other helper here wants
+/// `None`, and threading a seventh argument through five call sites to say "no
+/// metrics" five times would make the absence of an adapter something a test
+/// states rather than something it inherits. `None` is not "metrics off" — the
+/// service substitutes `NoopMetrics`, so an unmetered service emits every
+/// signal a metered one does.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one argument per collaborator `AppServices::new` wires, plus the one scalar \
+              knob; the container's own constructor carries the same allowance for the same \
+              reason"
+)]
+pub fn build_services_with_plugin_port_and_metrics(
+    db: Db,
+    authz: Arc<dyn AuthZResolverClient>,
+    credstore: Arc<dyn CredStoreClientV1>,
+    observer: Arc<dyn RunnerSecretWriter>,
+    product_plugins: Arc<dyn ProductPluginPort>,
+    metrics: Option<Arc<dyn ObservationMetrics>>,
+    plugin_metrics: Option<Arc<dyn PluginMetrics>>,
+    max_variables: usize,
+) -> Arc<ConcreteAppServices> {
     let db: Arc<DBProvider<DbError>> = Arc::new(DBProvider::new(db));
 
     Arc::new(AppServices::new(
@@ -583,8 +621,55 @@ pub fn build_services_with_plugin_port(
         credstore,
         observer,
         product_plugins,
+        metrics,
+        plugin_metrics,
         max_variables,
     ))
+}
+
+/// Services wired with [`TenantScopedAuthZ`], a caller-supplied product-plugin
+/// port **and** a caller-supplied metrics adapter — the shape the observation
+/// cycle's own metric tests want.
+pub fn build_services_tenant_scoped_with_plugin_and_metrics(
+    db: Db,
+    product_plugins: Arc<dyn ProductPluginPort>,
+    metrics: Arc<dyn ObservationMetrics>,
+) -> Arc<ConcreteAppServices> {
+    build_services_with_plugin_port_and_metrics(
+        db,
+        Arc::new(TenantScopedAuthZ),
+        Arc::new(RecordingCredStore::new()),
+        Arc::new(NoopRunnerSecretWriter),
+        product_plugins,
+        Some(metrics),
+        None,
+        crate::config::QaEnvironmentsConfig::default().max_variables,
+    )
+}
+
+/// Services wired with [`TenantScopedAuthZ`], a caller-supplied product-plugin
+/// port and a caller-supplied **plugin-boundary** metrics adapter -- the shape
+/// Task 40's plugin-call tests want.
+///
+/// A sibling of [`build_services_tenant_scoped_with_plugin_and_metrics`] rather
+/// than a widening of it, for the reason that funnel's own doc gives: the
+/// observation-cycle tests want `None` here and these want `None` there, and a
+/// helper taking both would make every call site state an absence.
+pub fn build_services_tenant_scoped_with_plugin_and_plugin_metrics(
+    db: Db,
+    product_plugins: Arc<dyn ProductPluginPort>,
+    plugin_metrics: Arc<dyn PluginMetrics>,
+) -> Arc<ConcreteAppServices> {
+    build_services_with_plugin_port_and_metrics(
+        db,
+        Arc::new(TenantScopedAuthZ),
+        Arc::new(RecordingCredStore::new()),
+        Arc::new(NoopRunnerSecretWriter),
+        product_plugins,
+        None,
+        Some(plugin_metrics),
+        crate::config::QaEnvironmentsConfig::default().max_variables,
+    )
 }
 
 /// Services wired with [`TenantScopedAuthZ`], a fresh [`RecordingCredStore`]
