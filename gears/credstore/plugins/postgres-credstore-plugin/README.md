@@ -29,20 +29,27 @@ backend. Adding encryption here would invent that precedent in a plugin.
 The consequence, on the record: **a `pg_dump` of the credstore database is a
 file of private keys**, exactly as a dump of the legacy database already is.
 
-## Do not enable `TRACE` logging for this gear
+## Logging is safe at every level, including `TRACE`
 
-`DEBUG` is safe: a break-tested leak test
-(`src/infra/storage/leak_tests.rs`) captures every event in the process — the
-plugin's own logs, `sqlx`'s statement logging, and the storage-failure path —
-and proves no secret byte appears, in raw, hex, or decimal-array form.
+A break-tested leak test (`src/infra/storage/leak_tests.rs`) captures every
+event in the process — the plugin's own logs, `sqlx`'s statement logging, and
+the storage-failure path — and proves no secret byte appears, in raw, hex, or
+decimal-array form.
 
-`TRACE` is not. `sea-orm` annotates every driver entry point with
-`#[instrument(level = "trace")]`, and the span it opens carries the whole
-`Statement` including its bound `values`, so a secret's bytes are rendered as a
-decimal array into any event emitted inside it. The plugin cannot suppress that
-— the value must be bound as a parameter, and `sea-orm` offers no hook to redact
-a span field. `tests/sea_orm_trace_exposure.rs` pins the behaviour so a
-`sea-orm` upgrade that changes it is noticed.
+**This section used to say the opposite about `TRACE`, and the change is worth
+recording.** Under `sea-orm` 1.1, every driver entry point carried
+`#[instrument(level = "trace")]` and the span it opened held the whole
+`Statement` including its bound `values`, so a secret's bytes were rendered as a
+decimal array into any event emitted inside it. The plugin could not suppress
+it: the value has to be bound as a parameter, and `sea-orm` offered no hook to
+redact a span field. `TRACE` was therefore unsafe and the leak test's net
+stopped at `DEBUG`.
+
+`sea-orm` 2.0 renders the SQL with placeholders and no values.
+`tests/sea_orm_trace_exposure.rs` — written as a characterization of the old
+exposure so that exactly this change would surface as a failure rather than a
+silent shift — now asserts the absence, and the leak test's `CAPTURE_LEVEL` is
+`TRACE`.
 
 ## What is persisted, and what is not
 
