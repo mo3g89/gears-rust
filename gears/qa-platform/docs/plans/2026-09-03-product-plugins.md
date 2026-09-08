@@ -4,7 +4,7 @@
 
 **Goal:** Make a product's behaviour an in-process Rust plugin resolved per product, so the QA platform can onboard a non-Kubernetes product without editing `qa-environments`, `qa-runs` or the UI.
 
-**Architecture:** A new `qa-product-sdk` crate defines one trait, `QaProductPluginV1`. Plugin gears register a GTS instance and a `ClientHub`-scoped implementation exactly as `postgres-credstore-plugin` does; `qa-catalog` owns the single resolver (`QaProductRegistry`), keyed on `qa_products.plugin_instance_id`. `qa-environments` loses every Kubernetes type — the k8s machinery moves to a `qa-plugin-k8s` library crate that only product plugins link. Observation becomes descriptor-driven with four semantic **role projections** into real columns, so the UI, `qa-insights` and `qa-runs`' `APP_VERSION`/`APP_BUILD` survive unchanged. All four QA gears share one process and one `ClientHub`, so one registration serves every consumer.
+**Architecture:** A new `qa-product-sdk` crate defines one trait, `QaProductPluginV1`. Plugin gears register a GTS instance and a `ClientHub`-scoped implementation exactly as `postgres-credstore-plugin` does; `qa-catalog` owns the single resolver (`QaProductRegistry`), keyed on `qa_products.plugin_instance_id`. `qa-environments` loses every Kubernetes type — the k8s machinery moves to a `qa-connector-k8s` library crate that only product plugins link. Observation becomes descriptor-driven with four semantic **role projections** into real columns, so the UI, `qa-insights` and `qa-runs`' `APP_VERSION`/`APP_BUILD` survive unchanged. All four QA gears share one process and one `ClientHub`, so one registration serves every consumer.
 
 **Tech Stack:** Rust 2024 (workspace MSRV 1.95.0; `rust-toolchain.toml` pins 1.97.0), ToolKit stack (`toolkit`, `toolkit-gts`, `toolkit-db` SecureORM, `toolkit-security`), SeaORM + `sea_orm_migration`, `types-registry-sdk` for GTS registration, `async-trait`, `cargo test`, React + TypeScript + Vitest for the UI.
 
@@ -16,7 +16,7 @@
 
 Copied verbatim from the spec. Every task's requirements implicitly include this section.
 
-- **ADR-0001, as amended by this work.** No qa-platform crate may depend on `kube` or `k8s-openapi` **except** `qa-plugin-k8s` and the product plugins that link it. After Task 19 the `platform-observation` Cargo feature does not exist. Verify with `cargo tree -p qa-environments -i kube` returning "package ID not found".
+- **ADR-0001, as amended by this work.** No qa-platform crate may depend on `kube` or `k8s-openapi` **except** `qa-connector-k8s` and the product plugins that link it. After Task 19 the `platform-observation` Cargo feature does not exist. Verify with `cargo tree -p qa-environments -i kube` returning "package ID not found".
 - **No credential-derived value is ever formatted.** Not `Display`, not `Debug`, not into a message, log line or DTO. Failures are *classified* by variant and carry a fixed `&'static str`. This is the rule `qa-environments/src/infra/observer/errors.rs` exists to enforce, after a measured leak on 2026-08-28 put a PEM private key on the platform page. (**D12**)
 - `**observed_schema()` may not declare `FieldKind::Secret` or `FieldKind::MultilineSecret`.** Violation is a boot failure, not a render-time leak.
 - **At most one `FieldDesc` may claim each `FieldRole`.** Violation is a boot failure. Ambiguity here makes `APP_VERSION` non-deterministic.
@@ -37,7 +37,7 @@ Copied verbatim from the spec. Every task's requirements implicitly include this
 | Path                                               | Responsibility                                                                                                                                                                                                                                                                        |
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `gears/qa-platform/qa-product-sdk/`                | The trait, the descriptor types, the failure type, the role projection, the leak-conformance harness, the GTS spec. Depends on nothing in qa-platform.                                                                                                                                |
-| `gears/qa-platform/plugins/qa-plugin-k8s/`         | Library crate. Kubeconfig parsing, client construction, ConfigMap reads, node/namespace health, Secret provisioning, and `errors.rs`' classification table. The **only** qa-platform crate that names Kubernetes types. Not a gear — no `#[toolkit::gear]`, no registration. (**D7**) |
+| `gears/qa-platform/connectors/qa-connector-k8s/`         | Library crate. Kubeconfig parsing, client construction, ConfigMap reads, node/namespace health, Secret provisioning, and `errors.rs`' classification table. The **only** qa-platform crate that names Kubernetes types. Not a gear — no `#[toolkit::gear]`, no registration. (**D7**) |
 | `gears/qa-platform/plugins/qa-vhp-product-plugin/` | Gear crate. VHP's install topology, env-var naming and runner shape. Registers `cf.core._.vhp_product.v1`.                                                                                                                                                                            |
 
 
@@ -64,7 +64,7 @@ Eight phases, twenty-five tasks (Tasks C0 and 9b were added during execution, se
 | ------------------ | -------- | ------------------------------------------------------------------------------------------ | --------------------- |
 | **A — Foundation** | 1–4      | `qa-product-sdk` compiles and is fully tested; nothing consumes it                         | yes                   |
 | **B — The rename** | 5–7      | `TargetPlatform` → `Environment` everywhere; zero behaviour change                         | yes                   |
-| **C — Plugins**    | C0, 8, 9, 9b, 10, 11 | `qa-plugin-k8s` + `qa-vhp-product-plugin` build and register; still unresolved by anything | yes                   |
+| **C — Plugins**    | C0, 8, 9, 9b, 10, 11 | `qa-connector-k8s` + `qa-vhp-product-plugin` build and register; still unresolved by anything | yes                   |
 | **D — Expand**     | 12–15    | New columns and the registry exist alongside the old ones; observation dual-writes         | yes                   |
 | **E — qa-runs**    | 16–18    | Golden `RunSpec` test, then dispatch through the plugin                                    | yes                   |
 | **F — Contract**   | 19–20    | Old columns dropped, `infra/observer/` deleted                                             | **NO — one-way door** |
@@ -1272,14 +1272,14 @@ Each becomes a row in the spec's §5.3 amendment table.
 
 ---
 
-### Task 8: `qa-plugin-k8s` library crate
+### Task 8: `qa-connector-k8s` library crate
 
 Lift, do not rewrite. Every line moved here is behaviour the subsystem already proved; a rewrite would put that proof at risk for no gain.
 
 **Files:**
 
-- Create: `gears/qa-platform/plugins/qa-plugin-k8s/Cargo.toml`, `src/lib.rs`
-- Move: `qa-environments/qa-environments/src/infra/observer/{kube_observer.rs, errors.rs, secret_writer.rs}` → `qa-plugin-k8s/src/`
+- Create: `gears/qa-platform/connectors/qa-connector-k8s/Cargo.toml`, `src/lib.rs`
+- Move: `qa-environments/qa-environments/src/infra/observer/{kube_observer.rs, errors.rs, secret_writer.rs}` → `qa-connector-k8s/src/`
 
 `domain/observation.rs` is **not** moved here. Its rules — `core-install-metadata`,
 `vp-gateway-hostnames`, `platformVersion` — are VHP install topology, not
@@ -1301,7 +1301,7 @@ Read `errors.rs`' module header before touching it. It records the measured leak
 
 - [ ] **Step 4: Verify the moved tests still pass**
 
-Run: `cargo test -p qa-plugin-k8s`
+Run: `cargo test -p qa-connector-k8s`
 Expected: every test that lived in `observer/` passes unchanged, including the `leak`-named ones.
 
 - [ ] **Step 5: Verify `qa-environments` still builds**
@@ -1313,8 +1313,8 @@ Run: `cargo test --workspace` — expected: green.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add -A gears/qa-platform/plugins/qa-plugin-k8s Cargo.toml
-git commit -m "feat(qa-plugin-k8s): lift the Kubernetes observer into a library crate"
+git add -A gears/qa-platform/connectors/qa-connector-k8s Cargo.toml
+git commit -m "feat(qa-connector-k8s): lift the Kubernetes observer into a library crate"
 ```
 
 ---
@@ -1327,7 +1327,7 @@ git commit -m "feat(qa-plugin-k8s): lift the Kubernetes observer into a library 
 
 **Interfaces:**
 
-- Consumes: `QaProductPluginV1` (Task 3), `qa-plugin-k8s` (Task 8).
+- Consumes: `QaProductPluginV1` (Task 3), `qa-connector-k8s` (Task 8).
 - Produces: `VhpProductPlugin`, implementing `credential_schema`, `observed_schema`, `validate_credentials`, `observe`.
 
 - [ ] **Step 1: Declare the schemas** in `schemas.rs`
@@ -1354,7 +1354,7 @@ observed_schema():
 
 - [ ] **Step 3: Write `observe`**
 
-Reads `core-install-metadata` for the version, `vp-gateway-hostnames` for the base domain, and node/namespace health, in one client. Failures classify through `qa-plugin-k8s`'s table. Version detection and health fail **independently** — a namespace-scoped kubeconfig detects a version perfectly and is forbidden from listing nodes, and coupling them would report that environment as having no version, which is false. This is existing behaviour (`ports/platform_observer.rs`' `HealthOutcome` doc) and it is preserved.
+Reads `core-install-metadata` for the version, `vp-gateway-hostnames` for the base domain, and node/namespace health, in one client. Failures classify through `qa-connector-k8s`'s table. Version detection and health fail **independently** — a namespace-scoped kubeconfig detects a version perfectly and is forbidden from listing nodes, and coupling them would report that environment as having no version, which is false. This is existing behaviour (`ports/platform_observer.rs`' `HealthOutcome` doc) and it is preserved.
 
 - [ ] **Step 4: Run the conformance harness**
 
@@ -1391,7 +1391,7 @@ git commit -m "feat(qa-vhp-product-plugin): schemas, VHP detection rules and obs
 Two facts, both measured rather than inferred:
 
 1. `KubeClient::find_configmap`, `find_configmap_or_missing` and
-   `scan_configmaps` have **zero coverage workspace-wide** — `qa-plugin-k8s`'
+   `scan_configmaps` have **zero coverage workspace-wide** — `qa-connector-k8s`'
    stub server routes only `/api/v1/nodes` and `/api/v1/namespaces` and panics
    on anything else. So `detect`'s targeted-lookup-then-label-scan fall-through
    is untested end to end, in the frozen rules whose whole value is fidelity.
@@ -1402,7 +1402,7 @@ Two facts, both measured rather than inferred:
    leaves all 35 tests passing.
 
 The deliverable is therefore not four tests. It is a `test-support` feature on
-`qa-plugin-k8s` exposing a route-table constructor with **no `kube` type in its
+`qa-connector-k8s` exposing a route-table constructor with **no `kube` type in its
 signature** (ADR-0001), coverage for the three untested methods, the four
 fall-through cases, and — the part that matters — a conformance test that plants
 the canary in the `ConfigMap` responses so a plugin echoing detected content
@@ -2385,7 +2385,7 @@ git add -A
 git commit -m "feat(qa-environments)!: drop the Kubernetes-shaped columns and delete infra/observer
 
 ADR-0001's containment is now structural: kube is a dependency of
-qa-plugin-k8s and of nothing else, so the platform-observation feature has
+qa-connector-k8s and of nothing else, so the platform-observation feature has
 nothing left to gate."
 ```
 

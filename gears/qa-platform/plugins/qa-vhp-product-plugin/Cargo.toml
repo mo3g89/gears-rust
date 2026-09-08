@@ -14,10 +14,10 @@ workspace = true
 qa-product-sdk = { path = "../../qa-product-sdk" }
 # ADR-0001: `kube`/`k8s-openapi` are named in exactly one crate in this
 # workspace, and this is not it. Every Kubernetes read below goes through
-# `qa-plugin-k8s`'s `KubeClient`, and every failure through its classifier —
+# `qa-connector-k8s`'s `KubeClient`, and every failure through its classifier —
 # which is also why nothing here can format an upstream error even by
 # accident: `PluginFailure::detail` is `&'static str`.
-qa-plugin-k8s = { path = "../qa-plugin-k8s" }
+qa-connector-k8s = { path = "../../connectors/qa-connector-k8s" }
 async-trait = { workspace = true }
 # `serde::Deserialize` for one `vp-gateway-hostnames` entry, and
 # `serde_json::from_str` to read it. `serde_json::Value` is also how the
@@ -40,7 +40,7 @@ url = { workspace = true }
 # that crate, which is what forces its own inventory registration to survive
 # linking; `inventory` because the macro submits through it; `anyhow` for the
 # `init` error type the `Gear` trait names. None of them reaches `kube`
-# (ADR-0001): the only edge to it in this crate's graph is `qa-plugin-k8s`.
+# (ADR-0001): the only edge to it in this crate's graph is `qa-connector-k8s`.
 toolkit = { workspace = true }
 types-registry-sdk = { workspace = true }
 types-registry = { workspace = true }
@@ -52,22 +52,22 @@ tokio = { workspace = true }
 # `SecretValue`, to build the resolved `CredentialSlot`s `observe` is driven
 # with. Not a runtime dependency: the plugin's own code never names the type,
 # it only passes what `EnvironmentHandle::resolved` hands it straight to
-# `qa-plugin-k8s`.
+# `qa-connector-k8s`.
 credstore-sdk = { workspace = true }
-# `qa-plugin-k8s`' API-server doubles: the route-table `KubeClient`
+# `qa-connector-k8s`' API-server doubles: the route-table `KubeClient`
 # constructor the `ConfigMap` fall-through tests drive, and the loopback stub
 # server whose kubeconfig makes `KubeClient::from_kubeconfig` *succeed* — which
 # is what puts `assert_no_leak` on this plugin's success path instead of
 # leaving it at the client build. They live in that crate rather than here
 # because ADR-0001 keeps `kube::Client::new` out of this one; nothing in the
 # doubles' signatures names a `kube` type.
-qa-plugin-k8s = { path = "../qa-plugin-k8s", features = ["test-support"] }
+qa-connector-k8s = { path = "../../connectors/qa-connector-k8s", features = ["test-support"] }
 # `qa_product_sdk::testing::assert_no_leak` — Layer 3 of the leak defence —
 # lives behind the SDK's `test-util` feature, so this crate's own test suite
 # has to ask for it. A production build of this plugin does not compile the
 # harness.
 qa-product-sdk = { path = "../../qa-product-sdk", features = ["test-util"] }
 # Builds the subscriber the two `warn!`-site tests install. What it writes
-# into is `qa_plugin_k8s::test_support::RawBuffer`, which records why
+# into is `qa_connector_k8s::test_support::RawBuffer`, which records why
 # `tracing-test` is the wrong capture for a leak assertion.
 tracing-subscriber = { workspace = true }

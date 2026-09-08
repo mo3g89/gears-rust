@@ -20,7 +20,7 @@ knowledge behind a plugin boundary — 355 files changed, +41364 / −12441 betw
 the two branch heads. The rework renamed the `TargetPlatform` aggregate to
 `Environment`, moved each gear's `local_client` from `infra/` to `domain/`, and
 added three crates that did not exist when the review was written
-(`qa-product-sdk`, `plugins/qa-plugin-k8s`, `plugins/qa-vhp-product-plugin`).
+(`qa-product-sdk`, `connectors/qa-connector-k8s`, `plugins/qa-vhp-product-plugin`).
 
 So the review's file paths and line numbers can no longer be trusted on their
 face, and two questions had to be answered before any fix could be planned:
@@ -76,7 +76,7 @@ together with #11.
 
 **#48 — feature-gated tests CI never runs.** Half resolved, by accident of the
 rework rather than by intent. The `platform-observation` feature is gone; the
-kube observer moved into `plugins/qa-plugin-k8s`, which carries no feature gate
+kube observer moved into `connectors/qa-connector-k8s`, which carries no feature gate
 and is an unconditional workspace member, so its 169 tests — including the
 kubeconfig-leak guards in `errors.rs` that the review singles out — now run
 under `cargo nextest run --workspace`. The `argo` half is untouched: 39 tests
@@ -132,7 +132,7 @@ The plugin layer is clean on the classes this review covers. Secrets travel as
 plaintext credential cannot be duplicated in memory
 (`qa-product-sdk/src/access.rs:33`). Kube errors are classified into a
 `PluginFailure` before they can cross a boundary
-(`qa-plugin-k8s/src/kube_client.rs:213-217`). `PluginRegistry::plugin_for` is
+(`qa-connector-k8s/src/kube_client.rs:213-217`). `PluginRegistry::plugin_for` is
 PEP-gated on `PRODUCT`/`GET` with the product read scoped
 (`qa-catalog/src/domain/service/plugin_registry.rs:188-197`). No new
 cross-tenant path, no new secret on the wire.

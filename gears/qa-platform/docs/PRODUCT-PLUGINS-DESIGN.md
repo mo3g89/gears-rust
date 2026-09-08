@@ -124,7 +124,7 @@ flowchart TB
             PSAAS["qa-saas-product-plugin<br/>(future)"]
         end
 
-        LIBK8S(["qa-plugin-k8s<br/>shared library crate<br/><b>the only crate that depends on kube</b>"])
+        LIBK8S(["qa-connector-k8s<br/>shared library crate<br/><b>the only crate that depends on kube</b>"])
         SDK(["qa-product-sdk<br/>trait, FieldDesc, RunAccess,<br/>leak-conformance harness"])
     end
 
@@ -161,7 +161,7 @@ flowchart TB
 
 The two things to read off this diagram:
 
-1. **`kube` has exactly one reverse dependency.** `qa-plugin-k8s` is the only
+1. **`kube` has exactly one reverse dependency.** `qa-connector-k8s` is the only
    crate in the workspace that names Kubernetes types, and only product plugins
    that target clusters link it. `qa-environments/src/infra/observer/` and the
    `platform-observation` Cargo feature are deleted. This is ADR-0001's
@@ -183,7 +183,7 @@ its value.
 
 | Was | Is |
 |-----|----|
-| "**`kube` has exactly one reverse dependency.** `qa-plugin-k8s` is the only crate in the workspace that names Kubernetes types" | **`qa-plugin-k8s` is the only qa-platform crate that names `kube`/`k8s-openapi` *unconditionally*.** `qa-runs` also names them, behind its non-default `argo` feature (`qa-runs/qa-runs/Cargo.toml:89` — `argo = ["dep:kube", "dep:k8s-openapi", "dep:regex", "dep:base64"]`), and **this plan does not remove that**: Task 18 modifies `dispatch_spec.rs`, `runvars.rs` and `params.rs` only, and Task 19 modifies `qa-environments` and the app manifest. So the post-Task-19 state is **two** qa-platform crates naming those types — one unconditional, one feature-gated — not one. The diagram above already shows this, in the `RUN --> ARGO` edge. |
+| "**`kube` has exactly one reverse dependency.** `qa-connector-k8s` is the only crate in the workspace that names Kubernetes types" | **`qa-connector-k8s` is the only qa-platform crate that names `kube`/`k8s-openapi` *unconditionally*.** `qa-runs` also names them, behind its non-default `argo` feature (`qa-runs/qa-runs/Cargo.toml:89` — `argo = ["dep:kube", "dep:k8s-openapi", "dep:regex", "dep:base64"]`), and **this plan does not remove that**: Task 18 modifies `dispatch_spec.rs`, `runvars.rs` and `params.rs` only, and Task 19 modifies `qa-environments` and the app manifest. So the post-Task-19 state is **two** qa-platform crates naming those types — one unconditional, one feature-gated — not one. The diagram above already shows this, in the `RUN --> ARGO` edge. |
 
 Why the original could not be true: the `argo` adapter is the subject of
 ADR-0001's 2026-08-27 waiver and stays until the serverless runtime exists,
@@ -204,8 +204,8 @@ product*, it is weaker, because after Task 19 there is no build of the
 read it alongside reading 1 rather than instead of it.
 
 This correction is the source fix for a claim that had propagated into three
-manifests and module docs (`plugins/qa-plugin-k8s/Cargo.toml`,
-`plugins/qa-plugin-k8s/src/lib.rs`, `apps/cf-gears-example-server/Cargo.toml`),
+manifests and module docs (`connectors/qa-connector-k8s/Cargo.toml`,
+`connectors/qa-connector-k8s/src/lib.rs`, `apps/cf-gears-example-server/Cargo.toml`),
 all corrected in the same batch.
 
 ### 4.2 Plugin resolution
@@ -793,7 +793,7 @@ separate from every behavioural one, and to keep **every commit green**.
 |---|------|-------------------|
 | 1 | `qa-product-sdk` crate: trait, `FieldDesc`, `RunAccess`, conformance harness | none — nothing consumes it yet |
 | 2 | **Rename `TargetPlatform` → `Environment`** everywhere, incl. `runvars.rs` collision clearing | none — pure rename, own commit |
-| 3 | `qa-plugin-k8s` library crate: today's observer lifted verbatim | none — old path still active |
+| 3 | `qa-connector-k8s` library crate: today's observer lifted verbatim | none — old path still active |
 | 4 | `qa-vhp-product-plugin`: `core-install-metadata`, `vp-gateway-hostnames`, `E2E_VHP_BASE_URL` naming | none — not yet resolved |
 | 5 | **EXPAND** — add `plugin_instance_id`, `credentials`, `observed_attrs` and the role columns *alongside* the existing ones; observation writes both | additive; old readers unaffected |
 | 6 | `qa-runs`: `RunAccess` / `RunnerSpec` replace the inline kubeconfig block, reading the **new** fields | behavioural, VHP-identical |

@@ -14,7 +14,7 @@
 //! other. Everything below is canary-free by construction, which is why it can
 //! be shared at all.
 
-use qa_plugin_k8s::test_support::{StubConfigMap, api_error_body, not_found_body};
+use qa_connector_k8s::test_support::{StubConfigMap, api_error_body, not_found_body};
 
 /// One canned answer: an HTTP status and a body.
 pub type Answer = (u16, Vec<u8>);

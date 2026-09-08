@@ -187,7 +187,7 @@ two-tier-lock coverage, ran nowhere. Review finding #47."
 ### Task 2: A test target for the two feature-gated adapters the image ships
 
 **Finding:** #48, narrowed. The review's `platform-observation` half is already
-resolved — the rework moved the kube observer into `plugins/qa-plugin-k8s`,
+resolved — the rework moved the kube observer into `connectors/qa-connector-k8s`,
 which has no feature gate and is an unconditional workspace member, so its 169
 tests now run under `cargo nextest run --workspace`. What survives is `argo`
 (39 tests under `qa-runs/src/infra/executor/argo/`) and `runner-secret` (13
@@ -2414,7 +2414,7 @@ API-server connection holds the task indefinitely.
 
 One that cancels a running watcher and asserts `run()` returns; one that points
 the follow at a stub server which accepts and never writes, and asserts the
-follow gives up within the deadline rather than hanging. `qa-plugin-k8s`'s
+follow gives up within the deadline rather than hanging. `qa-connector-k8s`'s
 `test_support.rs` has a loopback stub API server (`:413,464`) — read it before
 writing a new one.
 

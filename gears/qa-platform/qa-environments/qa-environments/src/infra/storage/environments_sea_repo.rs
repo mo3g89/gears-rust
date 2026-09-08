@@ -750,7 +750,7 @@ mod record_observation_tests {
     }
 
     /// A healthy `Checked` outcome, carrying legacy's own status spelling in
-    /// `detail` exactly as `qa-plugin-k8s` does.
+    /// `detail` exactly as `qa-connector-k8s` does.
     ///
     /// It takes no node count and no namespace count, and that is the
     /// signature change worth noticing: the plugin contract keeps only the

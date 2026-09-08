@@ -12,7 +12,7 @@
 //!
 //! The orchestration is `qa-environments/src/infra/observer/kube_observer.rs`'
 //! `observe`, `detect` and `detect_base_domain`, rewritten against
-//! [`qa_plugin_k8s::KubeClient`] instead of a bare `kube::Client`. That module
+//! [`qa_connector_k8s::KubeClient`] instead of a bare `kube::Client`. That module
 //! stays in place and stays working until Task 19 removes it; this is a copy,
 //! not a move, because Phase C must not change `qa-environments`' behaviour.
 //!
@@ -29,7 +29,7 @@
 //! ```
 //!
 //! Here a failure is a [`PluginFailure`] whose `detail` is `&'static str`, and
-//! both `?` sites in this file's `detect` surface whatever [`qa_plugin_k8s::classify`]
+//! both `?` sites in this file's `detect` surface whatever [`qa_connector_k8s::classify`]
 //! chose. Three things an operator used to read are therefore gone from the
 //! persisted message:
 //!
@@ -51,10 +51,10 @@
 //!
 //! # Why the two reads do not just get their own fixed details
 //!
-//! Because that trade is not the cheap one it looks like. [`qa_plugin_k8s::classify`]
+//! Because that trade is not the cheap one it looks like. [`qa_connector_k8s::classify`]
 //! maps every connect failure, every TLS/certificate failure and every other
 //! transport failure to the *same* [`FailureClass::Unreachable`]; what tells
-//! them apart is only the fixed `detail` text it picked. `qa-plugin-k8s`'
+//! them apart is only the fixed `detail` text it picked. `qa-connector-k8s`'
 //! `errors` module says so in its own header — the three-way split "lives where
 //! it was always read: in the fixed `detail` text". Overwriting `detail` here
 //! with "the targeted read failed" would buy back one fact and destroy three,
@@ -77,7 +77,7 @@
 //! both halves is a client that could never be built: there was no reading of
 //! either kind to report.
 
-use qa_plugin_k8s::{KubeClient, LabelSelector};
+use qa_connector_k8s::{KubeClient, LabelSelector};
 use qa_product_sdk::observation::{
     FailureClass, HealthOutcome, ObservationOutcome, ObservedAttrs, PluginFailure,
     PluginObservation,
@@ -210,7 +210,7 @@ fn vpadm_namespace(config: &serde_json::Value) -> String {
 ///
 /// # Errors
 ///
-/// The reads failing, classified through [`qa_plugin_k8s::classify`]; or both
+/// The reads failing, classified through [`qa_connector_k8s::classify`]; or both
 /// reads succeeding and finding no usable `platformVersion`.
 ///
 /// # Why each `?` also logs
@@ -218,7 +218,7 @@ fn vpadm_namespace(config: &serde_json::Value) -> String {
 /// This is where the two facts named in this module's header — *which* of the
 /// two reads failed, and the namespace the targeted one used — are recovered.
 /// They cannot go in the returned failure: `detail` holds one `&'static str`
-/// and [`qa_plugin_k8s::classify`]'s is the more diagnostic string, for the
+/// and [`qa_connector_k8s::classify`]'s is the more diagnostic string, for the
 /// reason set out above. So they go to the log instead, which is the surface
 /// that should have carried them all along, and the classified value that
 /// reaches the environment page is untouched.

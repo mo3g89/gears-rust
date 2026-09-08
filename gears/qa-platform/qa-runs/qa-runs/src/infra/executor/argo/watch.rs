@@ -1373,7 +1373,7 @@ mod tests {
     //! hand-rolled `tower::Service` rather than a live cluster — one that
     //! answers instantly (`responsive_client`), one whose response body never
     //! produces a frame (`silent_client`) — informed by
-    //! `qa-plugin-k8s::test_support::StubApiServer`'s loopback-listener shape
+    //! `qa-connector-k8s::test_support::StubApiServer`'s loopback-listener shape
     //! but not reusing it: that server always writes a full response the
     //! moment its route table returns, which cannot produce "accepts and
     //! never writes" — the shape review finding #21 needed a red test for.
@@ -1751,7 +1751,7 @@ mod tests {
 
     /// A `kube::Client` that answers every request with `200` and a
     /// [`PendingBody`] — "accepts and never writes". Informed by
-    /// `qa-plugin-k8s::test_support::StubApiServer`'s loopback-listener shape
+    /// `qa-connector-k8s::test_support::StubApiServer`'s loopback-listener shape
     /// (this module's own doc explains why that server could not be reused
     /// as-is: it always writes a full response the moment its route table
     /// returns, which cannot produce a body that never completes).

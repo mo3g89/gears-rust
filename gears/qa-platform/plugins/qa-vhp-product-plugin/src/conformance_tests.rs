@@ -6,7 +6,7 @@
 //! caught by this crate's own `cargo test` rather than by a server that will
 //! not start or a page that shows a private key.
 
-use qa_plugin_k8s::test_support::{
+use qa_connector_k8s::test_support::{
     StubApiServer, StubConfigMap, StubRequest, empty_namespace_list_body, empty_node_list_body,
 };
 use qa_product_sdk::descriptor::validate_schemas;
@@ -78,7 +78,7 @@ async fn the_vhp_plugin_leaks_no_credential_material() {
 // watching the whole suite stay green. `detect`, `gateway_hosts`, every
 // `ConfigMap` read and both `warn!` sites were ungated.
 //
-// What closes it: `qa_plugin_k8s::test_support::StubApiServer` is a real
+// What closes it: `qa_connector_k8s::test_support::StubApiServer` is a real
 // loopback API server, and its `kubeconfig()` is a *valid* document pointing
 // at it. Planted as `Canary::pem`, that document is what the plugin is handed
 // as its kubeconfig — so `from_kubeconfig` runs for real and succeeds, the

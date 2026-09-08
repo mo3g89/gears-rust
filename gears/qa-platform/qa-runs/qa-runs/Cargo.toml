@@ -75,7 +75,7 @@ integration = ["dep:testcontainers", "dep:testcontainers-modules"]
 #   cargo tree -p qa-runs --features argo -i kube -e normal
 #
 # `-e normal` is load-bearing since the product-plugin branch. Without it the
-# first command succeeds and prints `kube -> qa-plugin-k8s ->
+# first command succeeds and prints `kube -> qa-connector-k8s ->
 # qa-vhp-product-plugin -> [dev-dependencies] -> qa-runs`: a DEV edge, which
 # ships in nothing and is not what ADR-0001's criterion is about. `-e normal`
 # restricts the query to the edges a released binary actually has.
@@ -95,7 +95,7 @@ integration = ["dep:testcontainers", "dep:testcontainers-modules"]
 #
 # `tower`, `http-body` and `bytes` — `watch`'s own `#[cfg(test)]` module's
 # loopback `kube::Client` doubles (Task 17, review findings #20/#21; see that
-# module's doc for what they build and why `qa-plugin-k8s`'s own stub server
+# module's doc for what they build and why `qa-connector-k8s`'s own stub server
 # could not be reused as-is) — are **not** here. Fix round 1 moved them to
 # `[dev-dependencies]` below: a dev-dependency never ships, so it does not
 # need to be optional or named in this feature at all, and every real use of
@@ -297,7 +297,7 @@ tracing-test = { workspace = true, features = ["no-env-filter"] }
 # nothing in `[dependencies]` mentions a plugin. That is what keeps this edge a
 # test fixture rather than an architecture change.
 #
-# ADR-0001, measured rather than asserted. This plugin links `qa-plugin-k8s`,
+# ADR-0001, measured rather than asserted. This plugin links `qa-connector-k8s`,
 # so `cargo tree -p qa-runs -i kube` now shows a path into this crate — and the
 # tree itself labels it `[dev-dependencies]`. Restricted to real edges it is
 # unchanged:

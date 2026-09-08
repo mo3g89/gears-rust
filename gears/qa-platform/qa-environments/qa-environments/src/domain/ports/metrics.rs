@@ -19,7 +19,7 @@
 //! * **It would widen the contract every plugin author must satisfy.**
 //!   `qa-product-sdk` is deliberately narrow — its own feature documentation
 //!   argues that the crate gates its own code rather than growing its
-//!   dependency graph, and `qa-plugin-k8s` exists precisely so that the one
+//!   dependency graph, and `qa-connector-k8s` exists precisely so that the one
 //!   heavy dependency in this subsystem sits in a crate only the plugins that
 //!   need it link. Putting an `opentelemetry` dependency in the SDK would put
 //!   it in every plugin, including plugins written outside this repository.

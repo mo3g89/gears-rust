@@ -198,7 +198,7 @@ const KUBECONFIG_REQUIRED: &str =
 /// That is a behaviour change, and Phase C is a move: today's create dialog
 /// accepts any non-empty text and reports a malformed document through
 /// `observe`'s classified failure, which is where
-/// [`qa_plugin_k8s::classify_kubeconfig`] already contains it. Adding the
+/// [`qa_connector_k8s::classify_kubeconfig`] already contains it. Adding the
 /// check here would start refusing environments the platform accepts today,
 /// which is a decision for a task that says so.
 ///

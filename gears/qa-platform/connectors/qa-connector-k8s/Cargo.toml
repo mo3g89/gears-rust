@@ -1,11 +1,11 @@
 [package]
-name = "qa-plugin-k8s"
+name = "qa-connector-k8s"
 version = "0.1.0"
 publish = false
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Kubernetes mechanics shared by QA Platform product plugins whose target is a cluster: client construction from kubeconfig material, ConfigMap and node reads, Secret materialisation, and the failure classifier that keeps credential bytes off every published surface"
+description = "Kubernetes transport for QA Platform product plugins whose target is a cluster: client construction from kubeconfig material, ConfigMap and node reads, Secret materialisation, and the failure classifier that keeps credential bytes off every published surface. A library, not a plugin -- no gear, no GTS identity, nothing resolves it at runtime; product plugins link it."
 
 [lints]
 workspace = true
@@ -93,7 +93,7 @@ tracing-subscriber = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [features]
-# Gates `qa_plugin_k8s::test_support`: the route-table `KubeClient`
+# Gates `qa_connector_k8s::test_support`: the route-table `KubeClient`
 # constructor, the loopback stub API server, and the `ConfigMap`/`Status`
 # fixture builders. Every plugin crate that drives a `KubeClient` in its own
 # tests enables this in its `[dev-dependencies]`; a production build of a
@@ -120,7 +120,7 @@ test-support = [
 # exactly the same reason: the doubles this crate's tests drive are the ones
 # it publishes to other plugin crates, so the tests must exercise the gated
 # code rather than a `cfg(test)` copy of it.
-qa-plugin-k8s = { path = ".", features = ["test-support"] }
+qa-connector-k8s = { path = ".", features = ["test-support"] }
 tokio = { workspace = true }
 # Serialises this crate's own fixture `NodeList` body. The `ConfigMap` and
 # `Status` fixtures go through `test_support`'s builders instead, which is

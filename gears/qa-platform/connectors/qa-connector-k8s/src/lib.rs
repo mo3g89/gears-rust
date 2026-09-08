@@ -1,5 +1,10 @@
-//! Kubernetes mechanics for QA Platform product plugins whose target is a
+//! Kubernetes transport for QA Platform product plugins whose target is a
 //! cluster.
+//!
+//! A **connector**, not a plugin: this crate has no gear, no GTS identity and
+//! nothing resolves it at runtime. Product plugins link it the way they link
+//! any dependency. Renamed from `qa-plugin-k8s` on 2026-09-08 for that reason
+//! -- the old name claimed a kind it never was.
 //!
 //! # Why this crate exists
 //!
@@ -10,8 +15,9 @@
 //! it was wrong and shipped: **this is the only qa-platform crate that names
 //! those types unconditionally**, and only the product plugins that actually
 //! target clusters link it. It is *not* the only crate in the workspace that
-//! names them — `qa-environments` does behind `platform-observation` until
-//! Task 19, `qa-runs` does behind `argo` for as long as the Argo adapter
+//! names them — `qa-environments` does behind `runner-secret` (the feature
+//! Task 19b renamed `platform-observation` to), `qa-runs` behind `argo` for as
+//! long as the Argo adapter
 //! lives, and outside qa-platform so do `libs/toolkit-k8s-auth`,
 //! `chat-engine` and `mini-chat`.
 //!

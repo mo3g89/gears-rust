@@ -453,7 +453,7 @@ Two specifics:
   duration alone cannot distinguish one slow cluster from a hundred slightly
   slow ones.
 - Do not label by environment id or name. Label by the plugin's failure class
-  (`PluginFailure`'s `FailureClass`, `qa-plugin-k8s/src/errors.rs`), which is
+  (`PluginFailure`'s `FailureClass`, `qa-connector-k8s/src/errors.rs`), which is
   already a closed set and already the taxonomy the gear reasons in.
 
 - [ ] **Step 7: Commit**
@@ -476,7 +476,7 @@ name. Review finding #4."
 
 ### Task 40: The plugin boundary
 
-The three crates the rework added (`qa-product-sdk`, `plugins/qa-plugin-k8s`,
+The three crates the rework added (`qa-product-sdk`, `connectors/qa-connector-k8s`,
 `plugins/qa-vhp-product-plugin`) inherit #4 and nothing else — the review's
 classes are otherwise clean there.
 

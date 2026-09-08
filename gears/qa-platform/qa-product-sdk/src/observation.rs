@@ -51,7 +51,7 @@ pub enum FailureClass {
     /// configuration, not the target.
     ///
     /// Widened from "a defect in the plugin itself" on 2026-09-04, because
-    /// that had stopped being true of its live call sites: `qa-plugin-k8s`
+    /// that had stopped being true of its live call sites: `qa-connector-k8s`
     /// classifies an unreadable local kubeconfig, an unresolvable config path,
     /// a failed `Config::infer()`, a `409 Conflict` on a hand-made `Secret`,
     /// and every API status outside the four the other variants claim, all as

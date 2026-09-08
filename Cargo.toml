@@ -103,7 +103,7 @@ members = [
     "gears/qa-platform/qa-runs/qa-runs",
     "gears/qa-platform/qa-insights/qa-insights-sdk",
     "gears/qa-platform/qa-insights/qa-insights",
-    "gears/qa-platform/plugins/qa-plugin-k8s",
+    "gears/qa-platform/connectors/qa-connector-k8s",
     "gears/qa-platform/plugins/qa-vhp-product-plugin",
     "gears/system/account-management/account-management",
     "gears/system/account-management/account-management-sdk",

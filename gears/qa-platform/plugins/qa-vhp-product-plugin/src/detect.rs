@@ -18,7 +18,7 @@
 //! `core-install-metadata`, `vp-gateway-hostnames`, and the
 //! `GATEWAY_INTERNAL_CLUSTERIP_KEY` skip. What did not is the Kubernetes
 //! half (`ClusterHealth`, `NodeSummary`, `ClusterStatus`), which Task 8 lifted
-//! the other way into `qa-plugin-k8s`: that is what a cluster is, not what
+//! the other way into `qa-connector-k8s`: that is what a cluster is, not what
 //! vpadm installed on it. `NodeCounts` and the `serde` derives stayed behind
 //! in `qa-environments` with the readers that need them.
 //!

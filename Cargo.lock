@@ -10155,6 +10155,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "qa-connector-k8s"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cf-gears-credstore-sdk",
+ "http",
+ "hyper-util",
+ "k8s-openapi",
+ "kube",
+ "qa-connector-k8s",
+ "qa-product-sdk",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "qa-environments"
 version = "0.1.0"
 dependencies = [
@@ -10279,29 +10302,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qa-plugin-k8s"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "cf-gears-credstore-sdk",
- "http",
- "hyper-util",
- "k8s-openapi",
- "kube",
- "qa-plugin-k8s",
- "qa-product-sdk",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "tokio-rustls",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "qa-product-sdk"
 version = "0.1.0"
 dependencies = [
@@ -10403,7 +10403,7 @@ dependencies = [
  "cf-gears-types-registry",
  "cf-gears-types-registry-sdk",
  "inventory",
- "qa-plugin-k8s",
+ "qa-connector-k8s",
  "qa-product-sdk",
  "serde",
  "serde_json",

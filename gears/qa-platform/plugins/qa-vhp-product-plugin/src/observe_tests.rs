@@ -4,10 +4,10 @@
 //!
 //! # How the cluster reads are driven
 //!
-//! Through `qa_plugin_k8s::test_support`, which exists because of this module:
+//! Through `qa_connector_k8s::test_support`, which exists because of this module:
 //! ADR-0001 means this crate names no `kube` type, so it cannot hand
-//! [`qa_plugin_k8s::KubeClient`] the in-process `tower::Service` double
-//! `qa-plugin-k8s`' own tests use — building one requires `kube::Client::new`.
+//! [`qa_connector_k8s::KubeClient`] the in-process `tower::Service` double
+//! `qa-connector-k8s`' own tests use — building one requires `kube::Client::new`.
 //! Task 9b published that double from the crate that is allowed to name it,
 //! behind a `test-support` feature and with no `kube` type in any signature.
 //! Before that, `find_configmap`, `read_configmap` and `scan_configmaps` had
@@ -16,7 +16,7 @@
 //!
 //! What is covered, and by whom:
 //!
-//! * `qa-plugin-k8s` — the reads themselves: what each one sends (including
+//! * `qa-connector-k8s` — the reads themselves: what each one sends (including
 //!   the scan's label/field selector pair), what it makes of an answer, and
 //!   how a failed one classifies.
 //! * [`crate::detect`] — the VHP rules, against the real `sv-test` payloads.
@@ -38,7 +38,7 @@
 use std::sync::{Arc, Mutex};
 
 use credstore_sdk::SecretValue;
-use qa_plugin_k8s::test_support::{RawBuffer, StubConfigMap, StubRequest};
+use qa_connector_k8s::test_support::{RawBuffer, StubConfigMap, StubRequest};
 use qa_product_sdk::observation::project_roles;
 use qa_product_sdk::plugin::CredentialSlot;
 
@@ -442,7 +442,7 @@ async fn a_targeted_miss_falls_through_to_the_all_namespace_scan() {
     );
 
     // The two selectors *this plugin* chose, in the percent-encoded form they
-    // went out in. `qa-plugin-k8s` proves its `scan_configmaps` puts a caller's
+    // went out in. `qa-connector-k8s` proves its `scan_configmaps` puts a caller's
     // selectors on the wire intact, but it holds its own fixture copy of the
     // vpadm label — correctly, since a product-agnostic crate must not learn a
     // product's labels — so nothing there or anywhere else pinned

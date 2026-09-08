@@ -536,7 +536,8 @@ mod tests {
     /// `Display` quotes its input — is the branch under test.
     #[tokio::test]
     async fn a_readable_but_malformed_argo_kubeconfig_is_classified_not_echoed() {
-        let dir = std::env::temp_dir().join(format!("qa-plugin-k8s-writer-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("qa-connector-k8s-writer-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("argo-kubeconfig.yaml");
         // A bare scalar: valid YAML, not a kubeconfig. serde reports

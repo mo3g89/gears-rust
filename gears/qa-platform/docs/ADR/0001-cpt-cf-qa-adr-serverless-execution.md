@@ -125,7 +125,7 @@ corrects that; it records a strengthening and a weakening, because both happened
 here:
 
 * **Task 8** copied the Kubernetes mechanics out of `qa-environments/infra/observer/`
-  into a new library crate, `gears/qa-platform/plugins/qa-plugin-k8s`. A copy, not a
+  into a new library crate, `gears/qa-platform/connectors/qa-connector-k8s`. A copy, not a
   move: the original stays in place and stays active behind `platform-observation`
   until Task 19, because Phase C must not change `qa-environments`' behaviour. The new
   crate names `kube`/`k8s-openapi` **unconditionally** — there is deliberately no cargo
@@ -133,7 +133,7 @@ here:
   simply does not depend on the crate. Its own manifest and `lib.rs` argue that at
   length.
 * **Tasks 9-10** built `qa-vhp-product-plugin` on it. That plugin is now the carrier:
-  it is the only crate that depends on `qa-plugin-k8s`.
+  it is the only crate that depends on `qa-connector-k8s`.
 * **Task 11** put the plugin into `cf-gears-example-server`'s `qa-platform` feature
   (`qa-platform = [..., "dep:qa-vhp-product-plugin"]`), because a `qa-platform` build
   without it can store environments and do nothing with them.
@@ -147,7 +147,7 @@ error: package ID specification `kube` did not match any packages
 
 $ cargo tree -p cf-gears-example-server --features qa-platform -i kube
 kube v3.1.0
-└── qa-plugin-k8s v0.1.0
+└── qa-connector-k8s v0.1.0
     └── qa-vhp-product-plugin v0.1.0
         └── cf-gears-example-server v0.6.1
 ```
@@ -164,23 +164,23 @@ operator. It is now `qa-platform` itself.
 **Two corrections to how this containment has been described elsewhere**, because
 both statements are in the tree today and both read wider than the tree supports:
 
-* "`qa-plugin-k8s` is the only crate in the workspace that names Kubernetes types"
+* "`qa-connector-k8s` is the only crate in the workspace that names Kubernetes types"
   (`PRODUCT-PLUGINS-DESIGN.md` §4.1 reading 1, and, until 2026-09-04, repeated in two
-  manifests and in `qa-plugin-k8s/src/lib.rs`) **is not true and will not become true.**
+  manifests and in `qa-connector-k8s/src/lib.rs`) **is not true and will not become true.**
   All four are corrected as of 2026-09-04; §4.1 carries a dated *Correction* subsection
   that keeps its original sentence visible beside the true one, which is the source fix
   the other three had propagated from. Workspace-wide, `libs/toolkit-k8s-auth` names them
   unconditionally and `chat-engine`/`mini-chat` name them behind their own `k8s`
   features; none of those is in scope for this ADR, but "the only crate in the
   workspace" is the wrong phrase for what was meant. Inside qa-platform, three crates
-  name them right now — `qa-plugin-k8s` unconditionally, `qa-environments` behind
+  name them right now — `qa-connector-k8s` unconditionally, `qa-environments` behind
   `platform-observation`, `qa-runs` behind `argo`. After Task 19 deletes
   `platform-observation` there will still be **two**, not one: nothing in the plan
   removes `qa-runs`' `argo` adapter (`qa-runs/qa-runs/Cargo.toml:89`), which is the
   subject of the 2026-08-27 waiver and stays until the serverless runtime exists.
   §4.1's claim was therefore not just premature, it was wrong about the end state too —
   which is why the correction there is dated rather than a quiet edit.
-  The claim that is true, and is the one this amendment makes: **`qa-plugin-k8s` is
+  The claim that is true, and is the one this amendment makes: **`qa-connector-k8s` is
   the only qa-platform crate that names `kube`/`k8s-openapi` unconditionally, and the
   only edge into it is a product plugin whose target is a cluster.**
 * Under the feature list an actual deployment builds
@@ -191,7 +191,7 @@ both statements are in the tree today and both read wider than the tree supports
   $ cargo tree -p cf-gears-example-server --features "$(cat deploy/cargo-features.argo)" -i kube
   kube v3.1.0
   ├── qa-environments v0.1.0      # via platform-observation
-  ├── qa-plugin-k8s v0.1.0        # via qa-vhp-product-plugin, unconditional
+  ├── qa-connector-k8s v0.1.0        # via qa-vhp-product-plugin, unconditional
   └── qa-runs v0.1.0              # via argo
   ```
 
@@ -219,7 +219,7 @@ criterion for platform adoption)"* — it is **weaker**:
   `platform-observation` and `argo`, both off. The build was degraded — no
   observation, the mock executor — but it existed, and its existence is what the
   feature gate bought.
-* As of Task 11 it does not exist. `qa-plugin-k8s` has no gate and the plugin is
+* As of Task 11 it does not exist. `qa-connector-k8s` has no gate and the plugin is
   unconditional in the `qa-platform` feature, so there is no switch that produces a
   kube-free build of the product feature.
 * After Task 19 that becomes permanent rather than incidental: `platform-observation`
@@ -244,7 +244,7 @@ above rather than sitting beside it, in decreasing order of strength:
   and rename work, not a change to this property), which is only possible because
   `domain/` compiles with no `kube` in the tree. Unchanged by Phase C, and expires at
   Task 19 along with the feature it is about.
-* `qa-plugin-k8s` names `kube`/`k8s-openapi` with no feature gate, and
+* `qa-connector-k8s` names `kube`/`k8s-openapi` with no feature gate, and
   `qa-vhp-product-plugin` is its only dependent. A reader checks the whole qa-platform
   containment by reading two manifests. **Nothing enforces it**: a second crate adding
   a `kube` dependency would be caught by review or by nothing.

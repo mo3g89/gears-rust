@@ -25,10 +25,10 @@
 //! in `runvars.rs`, name each other.
 //!
 //! Task 8 took the *other* half of those files — what a Kubernetes cluster is,
-//! as opposed to what vpadm installed on it — into `qa-plugin-k8s`. That
+//! as opposed to what vpadm installed on it — into `qa-connector-k8s`. That
 //! division is why this crate holds no `kube` types and names no `kube`
 //! dependency (ADR-0001): every read below goes through
-//! [`qa_plugin_k8s::KubeClient`].
+//! [`qa_connector_k8s::KubeClient`].
 //!
 //! # The invariant every module here maintains
 //!
@@ -37,7 +37,7 @@
 //! leave this crate as [`PluginFailure`], whose `detail` is `&'static str` and
 //! therefore cannot be produced from runtime bytes; the one sanctioned
 //! exception is text a *remote* sent back, which
-//! [`qa_plugin_k8s::classify`] puts in `remote_message`. Layer 3 —
+//! [`qa_connector_k8s::classify`] puts in `remote_message`. Layer 3 —
 //! `qa_product_sdk::testing::assert_no_leak` — drives this plugin with planted
 //! credential material in this crate's own test suite and fails the build if
 //! any of it reaches a surface. See `conformance_tests.rs`.

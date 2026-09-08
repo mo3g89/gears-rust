@@ -71,7 +71,7 @@ bss-pricing = ["dep:bss_pricing"]
 # ADR-0001: this is what puts `kube`/`k8s-openapi` in a `--features
 # qa-platform` build, which it was not in before. That is the containment
 # PRODUCT-PLUGINS-DESIGN.md 4.1 amended ADR-0001 to: `kube` is named
-# unconditionally by exactly one qa-platform crate (`qa-plugin-k8s`) and
+# unconditionally by exactly one qa-platform crate (`qa-connector-k8s`) and
 # reaches a binary only through a product plugin that links it. Not "by one
 # crate in the workspace" — `qa-environments` and `qa-runs` still name it
 # behind `platform-observation` and `argo` respectively, and `--features
@@ -83,7 +83,7 @@ bss-pricing = ["dep:bss_pricing"]
 # below, which Task 19 deletes.
 #
 # The cost, recorded in ADR-0001's 2026-09-04 amendment rather than only here:
-# because `qa-plugin-k8s` has no feature gate and this list names the plugin
+# because `qa-connector-k8s` has no feature gate and this list names the plugin
 # unconditionally, there is no longer any way to build the `qa-platform`
 # feature without `kube`. Before Phase C there was, and that build is what the
 # feature gate bought.
