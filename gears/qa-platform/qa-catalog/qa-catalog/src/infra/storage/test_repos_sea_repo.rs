@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use qa_catalog_sdk::{NewTestRepository, TestRepository, TestRepositoryUpdate};
-use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::secure::{

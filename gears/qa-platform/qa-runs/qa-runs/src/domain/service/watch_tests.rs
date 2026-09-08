@@ -47,8 +47,8 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use toolkit_security::PlatformSecurityContext;
 use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -199,7 +199,7 @@ use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_runs_sdk::{RunState, RunTarget};
 use toolkit_security::pep_properties;
 

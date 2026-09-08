@@ -103,7 +103,7 @@ pub(in crate::domain::service) mod fakes {
     use authz_resolver_sdk::models::{
         EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
     };
-    use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError, PolicyEnforcer};
+    use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
     use qa_catalog_sdk::{
         BundleRequest, CustomPlan, CustomPlanEntry, Exclusivity, NewCustomPlan, NewTestRepository,
         Plan, Product, QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle,

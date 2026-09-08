@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use qa_catalog_sdk::SshKey;
-use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::secure::{DBRunner, SecureDeleteExt, SecureEntityExt, secure_insert};

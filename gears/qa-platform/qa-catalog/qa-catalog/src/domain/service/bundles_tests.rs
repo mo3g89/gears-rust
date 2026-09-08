@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use flate2::read::GzDecoder;
 use qa_catalog_sdk::{BundleRequest, TestBundle};
 use time::OffsetDateTime;
@@ -26,8 +26,8 @@ use super::test_support::{
 use crate::domain::error::DomainError;
 use crate::domain::ports::bundle_store::BundleStore;
 use crate::domain::repos::BundlesRepository;
-use toolkit_security::PlatformSecurityContext;
 use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 const FIXTURE_CONTENT: &str = "def test_a():\n    assert True\n";
 

@@ -355,28 +355,33 @@ mod tests {
         use sea_orm::DatabaseBackend;
 
         assert_eq!(
-            super::sql_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles"),
+            super::sql_for(DatabaseBackend::Postgres)
+                .expect("dispatch covers every backend this build compiles"),
             super::POSTGRES_UP,
             "Postgres must get POSTGRES_UP, not another dialect's blob"
         );
         assert_eq!(
-            super::sql_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles"),
+            super::sql_for(DatabaseBackend::MySql)
+                .expect("dispatch covers every backend this build compiles"),
             super::MYSQL_UP,
             "MySql must get MYSQL_UP, not another dialect's blob"
         );
         assert_eq!(
-            super::sql_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"),
+            super::sql_for(DatabaseBackend::Sqlite)
+                .expect("dispatch covers every backend this build compiles"),
             super::SQLITE_UP,
             "Sqlite must get SQLITE_UP, not another dialect's blob"
         );
 
-        let postgres = super::sql_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles");
+        let postgres = super::sql_for(DatabaseBackend::Postgres)
+            .expect("dispatch covers every backend this build compiles");
         assert!(
             postgres.contains("TIMESTAMPTZ"),
             "Postgres must get TIMESTAMPTZ for version_detected_at"
         );
 
-        let mysql = super::sql_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles");
+        let mysql = super::sql_for(DatabaseBackend::MySql)
+            .expect("dispatch covers every backend this build compiles");
         assert!(
             mysql.contains("version_detected_at TIMESTAMP NULL"),
             "MySQL must get the bare TIMESTAMP statement for version_detected_at"
@@ -388,7 +393,8 @@ mod tests {
              observation time, and this line is what catches it"
         );
 
-        let sqlite = super::sql_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles");
+        let sqlite = super::sql_for(DatabaseBackend::Sqlite)
+            .expect("dispatch covers every backend this build compiles");
         assert!(
             sqlite.contains("version_detected_at TEXT"),
             "SQLite must get TEXT for version_detected_at, having no native \

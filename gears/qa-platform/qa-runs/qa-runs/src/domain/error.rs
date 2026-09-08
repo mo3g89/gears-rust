@@ -1477,8 +1477,8 @@ mod tests {
     /// future change to any single arm fails exactly one test rather than
     /// being lost in a combined assertion.
     mod enforcer_error_mapping {
+        use authz_resolver_sdk::EnforcerError;
         use authz_resolver_sdk::pep::ConstraintCompileError;
-        use authz_resolver_sdk::{AuthZResolverError, EnforcerError};
 
         use super::*;
 

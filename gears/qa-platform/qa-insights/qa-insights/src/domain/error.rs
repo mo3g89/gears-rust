@@ -721,8 +721,8 @@ mod tests {
     //! `From<EnforcerError> for DomainError`, pinned one arm per test so a
     //! future change to any single arm fails exactly one test rather than
     //! being lost in a combined assertion.
+    use authz_resolver_sdk::EnforcerError;
     use authz_resolver_sdk::pep::ConstraintCompileError;
-    use authz_resolver_sdk::{AuthZResolverError, EnforcerError};
 
     use super::*;
 
@@ -772,10 +772,10 @@ mod tests {
     #[test]
     fn an_evaluation_failure_is_internal() {
         let e = EnforcerError::EvaluationFailed(
-                CanonicalError::service_unavailable()
-                    .with_detail("plugin not registered")
-                    .create(),
-            );
+            CanonicalError::service_unavailable()
+                .with_detail("plugin not registered")
+                .create(),
+        );
         assert!(matches!(DomainError::from(e), DomainError::Internal(_)));
     }
 

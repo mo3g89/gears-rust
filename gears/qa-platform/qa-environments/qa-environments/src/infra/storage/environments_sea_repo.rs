@@ -12,7 +12,8 @@ use qa_product_sdk::observation::{
     HealthOutcome as PluginHealthOutcome, HealthState,
     ObservationOutcome as PluginObservationOutcome, ObservedAttrs,
 };
-use sea_orm::sea_query::{Expr, Func};
+use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::Func;
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::odata::sea_orm_filter::paginate_odata;
@@ -513,7 +514,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
                         EnvironmentColumn::ObservedBaseUrl,
                         Func::coalesce([
                             Expr::value(roles.base_url.clone()),
-                            Expr::col(EnvironmentColumn::ObservedBaseUrl).into(),
+                            Expr::col(EnvironmentColumn::ObservedBaseUrl),
                         ])
                         .into(),
                     )
@@ -662,7 +663,7 @@ mod record_observation_tests {
     use crate::test_support::CapturedLogs;
 
     use super::{
-        EnvironmentColumn, EnvironmentEntity, Expr, ObservationWrite, PluginHealthOutcome,
+        EnvironmentColumn, EnvironmentEntity, ObservationWrite, PluginHealthOutcome,
         PluginObservationOutcome, attrs_or_skip,
     };
     use crate::domain::repos::{EnvironmentsRepository, PersistedCredentials};

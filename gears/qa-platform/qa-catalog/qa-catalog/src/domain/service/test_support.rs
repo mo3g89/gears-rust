@@ -4,10 +4,10 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError};
 use qa_catalog_sdk::{NewTestRepository, TestRepository, TestRepositoryUpdate};
 use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
@@ -19,8 +19,8 @@ use super::DbProvider;
 use super::authz_surface::ENFORCED;
 use crate::domain::error::DomainError;
 use crate::domain::repos::{RefreshTarget, SshKeysRepository, TestReposRepository};
-use toolkit_security::PlatformSecurityContext;
 use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 /// Build a `SecurityContext` for `tenant_id` with a fresh random subject.
 pub(super) fn ctx(tenant_id: Uuid) -> SecurityContext {

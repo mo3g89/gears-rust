@@ -5,7 +5,9 @@
 use async_trait::async_trait;
 use qa_runs_sdk::QueueState;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+    ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+};
 use time::OffsetDateTime;
 use toolkit_db::odata::sea_orm_filter::{PaginateOdataTryError, paginate_odata_try};
 use toolkit_db::secure::{DBRunner, SecureEntityExt, SecureUpdateExt, secure_insert};
@@ -384,8 +386,7 @@ impl QueueRepository for OrmQueueRepository {
             scope,
             id,
             QueueState::Queued,
-            Condition::all()
-                .add(QueueColumn::State.eq(QueueState::Dispatching.as_str())),
+            Condition::all().add(QueueColumn::State.eq(QueueState::Dispatching.as_str())),
             vec![(
                 QueueColumn::DispatchedAt,
                 Expr::value(None::<OffsetDateTime>),
@@ -515,9 +516,7 @@ impl QueueRepository for OrmQueueRepository {
             // The rotation. `id` is the only column here that nothing a row
             // does can change, which is exactly why it is the sort key - see
             // the trait doc on what happened when this ordered by `enqueued_at`.
-            filter = Condition::all()
-                .add(filter)
-                .add(QueueColumn::Id.gt(after));
+            filter = Condition::all().add(filter).add(QueueColumn::Id.gt(after));
         }
         let rows = QueueEntity::find()
             .filter(filter)
@@ -665,9 +664,7 @@ impl QueueRepository for OrmQueueRepository {
         limit: u64,
     ) -> Result<Vec<QueueRowRecord>, DomainError> {
         let filter = match platform_id {
-            Some(platform_id) => {
-                Condition::all().add(QueueColumn::EnvironmentId.eq(platform_id))
-            }
+            Some(platform_id) => Condition::all().add(QueueColumn::EnvironmentId.eq(platform_id)),
             None => Condition::all(),
         };
 
@@ -699,9 +696,7 @@ impl QueueRepository for OrmQueueRepository {
         query: &ODataQuery,
     ) -> Result<Page<QueueRowRecord>, DomainError> {
         let filter = match platform_id {
-            Some(platform_id) => {
-                Condition::all().add(QueueColumn::EnvironmentId.eq(platform_id))
-            }
+            Some(platform_id) => Condition::all().add(QueueColumn::EnvironmentId.eq(platform_id)),
             None => Condition::all(),
         };
         // Filter-first, then scope: `paginate_odata_try` takes a

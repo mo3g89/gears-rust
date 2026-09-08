@@ -20,7 +20,6 @@
 
 use async_trait::async_trait;
 use qa_insights_sdk::{NewSavedView, SavedView, SavedViewScope};
-use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::secure::{

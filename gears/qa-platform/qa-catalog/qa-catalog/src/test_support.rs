@@ -16,8 +16,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::AuthZResolverApi;
-use toolkit_security::PlatformSecurityContext;
-use toolkit_canonical_errors::CanonicalError;
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
@@ -29,8 +27,10 @@ use qa_product_sdk::QaProductPluginV1;
 use qa_product_sdk::observation::PluginFailure;
 use sea_orm_migration::MigratorTrait;
 use toolkit::client_hub::{ClientHub, ClientScope};
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::{ConnectOpts, DBProvider, Db, connect_db};
+use toolkit_security::PlatformSecurityContext;
 use toolkit_security::{SecurityContext, pep_properties};
 use uuid::Uuid;
 

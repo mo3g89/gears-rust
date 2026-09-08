@@ -29,7 +29,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
-use authz_resolver_sdk::error::AuthZResolverError;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
@@ -46,8 +45,8 @@ use crate::domain::service::test_support::TenantScopedAuthZ;
 use crate::domain::system_actor::TenantBound;
 use crate::infra::storage::results_sea_repo::OrmResultsRepository;
 use crate::infra::storage::test_db::{inmem_db, scope};
-use toolkit_security::PlatformSecurityContext;
 use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 /// Two tenants, and the **larger** UUID is deliberately not the interesting one:
 /// this test asserts on the whole set, so the ascending-index-order trap Task 33

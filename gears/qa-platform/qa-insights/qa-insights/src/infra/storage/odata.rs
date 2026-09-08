@@ -506,9 +506,7 @@ impl ODataFieldMapping<TestCaseResultsField> for TestCaseResultsODataMapper {
         match field {
             TestCaseResultsField::Id => Value::Uuid(Some(model.id)),
             TestCaseResultsField::RunId => Value::Uuid(Some(model.run_id)),
-            TestCaseResultsField::TestFile => {
-                Value::String(Some(model.test_file.clone()))
-            }
+            TestCaseResultsField::TestFile => Value::String(Some(model.test_file.clone())),
             TestCaseResultsField::Status => Value::String(Some(model.status.clone())),
         }
     }

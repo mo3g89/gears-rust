@@ -15,10 +15,10 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError};
 use qa_catalog_sdk::{
     CustomPlanEntry, NewCustomPlan, NewCustomPlanEntry, NewProduct, NewTestRepository,
     ProductUpdate, TestRepositoryUpdate,
@@ -27,14 +27,14 @@ use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::system_actor;
-use toolkit_security::PlatformSecurityContext;
-use toolkit_canonical_errors::CanonicalError;
 use crate::test_support::{
     DenyAllAuthZ, all_branch_rows, build_services, build_services_tenant_scoped,
     build_services_tenant_scoped_at, build_services_tenant_scoped_with_credstore,
     build_services_with_branch_listing, ctx, inmem_db, seed_expired_bundle, seed_product,
     seed_raw_custom_plan_row,
 };
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 fn new_repo(name: &str, product_id: Uuid) -> NewTestRepository {
     NewTestRepository {

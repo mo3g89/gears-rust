@@ -171,8 +171,7 @@ impl authz_resolver_sdk::AuthZResolverApi for TwoTenantAuthZ {
         &self,
         _ctx: PlatformSecurityContext,
         _request: authz_resolver_sdk::EvaluationRequest,
-    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError>
-    {
+    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError> {
         Ok(authz_resolver_sdk::EvaluationResponse {
             decision: true,
             context: authz_resolver_sdk::EvaluationResponseContext {
@@ -206,8 +205,7 @@ impl authz_resolver_sdk::AuthZResolverApi for GrantsJiraButNotResultsAuthZ {
         &self,
         _ctx: PlatformSecurityContext,
         request: authz_resolver_sdk::EvaluationRequest,
-    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError>
-    {
+    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError> {
         if request.resource.resource_type.starts_with("qa.jira") {
             Ok(permissive_response(&request))
         } else {

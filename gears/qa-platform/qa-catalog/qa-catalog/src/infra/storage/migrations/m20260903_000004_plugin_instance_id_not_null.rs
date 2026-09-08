@@ -191,7 +191,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_products_tenant_key ON qa_products(tena
 /// Pick the statements for a backend.
 ///
 /// Dispatch on `(backend, up)`. `sea_orm::DatabaseBackend` became
-/// `#[non_exhaustive]` in SeaORM 2.0 -- its variants are feature-gated -- so a
+/// `#[non_exhaustive]` in `SeaORM` 2.0 -- its variants are feature-gated -- so a
 /// catch-all arm is now required by the compiler. It returns an error naming
 /// the backend rather than handing the server another dialect's statement,
 /// which is the property the previous exhaustive match bought. That is the
@@ -204,11 +204,9 @@ fn statements_for(backend: sea_orm::DatabaseBackend, up: bool) -> Result<&'stati
         (sea_orm::DatabaseBackend::MySql, false) => Ok(MYSQL_DOWN),
         (sea_orm::DatabaseBackend::Sqlite, true) => Ok(SQLITE_UP),
         (sea_orm::DatabaseBackend::Sqlite, false) => Ok(SQLITE_DOWN),
-        other => {
-            return Err(DbErr::Migration(format!(
-                "unsupported database backend: {other:?}"
-            )));
-        }
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 

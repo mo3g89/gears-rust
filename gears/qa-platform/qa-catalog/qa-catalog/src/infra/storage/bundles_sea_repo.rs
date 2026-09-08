@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use qa_catalog_sdk::TestBundle;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, FromQueryResult, Order, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+    ActiveValue, ColumnTrait, EntityTrait, FromQueryResult, Order, QueryFilter, QueryOrder,
+    QuerySelect,
+};
 use time::OffsetDateTime;
 use toolkit_db::secure::{DBRunner, SecureDeleteExt, SecureEntityExt, secure_insert};
 use toolkit_security::AccessScope;
@@ -113,9 +116,7 @@ impl BundlesRepository for OrmBundlesRepository {
             .scope_with(scope)
             .project_all(runner, |query| {
                 query
-                    .filter(
-                        sea_orm::Condition::all().add(BundleColumn::ExpiresAt.lte(now)),
-                    )
+                    .filter(sea_orm::Condition::all().add(BundleColumn::ExpiresAt.lte(now)))
                     .select_only()
                     .column(BundleColumn::TenantId)
                     .distinct()

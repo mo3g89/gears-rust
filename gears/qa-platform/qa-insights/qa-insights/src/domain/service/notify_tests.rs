@@ -69,9 +69,9 @@ use crate::domain::service::test_support::{
 use crate::domain::service::{actions, resources};
 use crate::infra::storage::notify_sea_repo::OrmNotifyRepository;
 use crate::infra::storage::test_db::inmem_db;
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::secure::DBRunner;
 use toolkit_security::AccessScope;
-use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::PlatformSecurityContext;
 
 const TENANT: Uuid = Uuid::from_u128(0xA);
@@ -94,8 +94,7 @@ impl AuthZResolverApi for TwoTenantAuthZ {
         &self,
         _ctx: PlatformSecurityContext,
         _request: authz_resolver_sdk::EvaluationRequest,
-    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError>
-    {
+    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError> {
         Ok(authz_resolver_sdk::EvaluationResponse {
             decision: true,
             context: authz_resolver_sdk::EvaluationResponseContext {

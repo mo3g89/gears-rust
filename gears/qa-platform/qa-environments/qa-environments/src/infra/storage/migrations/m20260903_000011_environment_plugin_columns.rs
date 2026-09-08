@@ -600,9 +600,12 @@ mod tests {
     /// module doc: `migrated_db()` migrates an empty table, so this is the
     /// only way a test can watch the backfill do anything.
     async fn run_backfill(conn: &DatabaseConnection) {
-        conn.execute_unprepared(super::backfill_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"))
-            .await
-            .expect("the sqlite backfill must apply");
+        conn.execute_unprepared(
+            super::backfill_for(DatabaseBackend::Sqlite)
+                .expect("dispatch covers every backend this build compiles"),
+        )
+        .await
+        .expect("the sqlite backfill must apply");
     }
 
     async fn reload(conn: &DatabaseConnection) -> environment::Model {
@@ -1201,27 +1204,33 @@ mod tests {
     )]
     fn each_backend_gets_statements_of_the_right_column_type() {
         assert_eq!(
-            super::schema_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles"),
+            super::schema_for(DatabaseBackend::Postgres)
+                .expect("dispatch covers every backend this build compiles"),
             super::POSTGRES_SCHEMA
         );
         assert_eq!(
-            super::schema_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles"),
+            super::schema_for(DatabaseBackend::MySql)
+                .expect("dispatch covers every backend this build compiles"),
             super::MYSQL_SCHEMA
         );
         assert_eq!(
-            super::schema_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"),
+            super::schema_for(DatabaseBackend::Sqlite)
+                .expect("dispatch covers every backend this build compiles"),
             super::SQLITE_SCHEMA
         );
         assert_eq!(
-            super::backfill_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles"),
+            super::backfill_for(DatabaseBackend::Postgres)
+                .expect("dispatch covers every backend this build compiles"),
             super::POSTGRES_BACKFILL
         );
         assert_eq!(
-            super::backfill_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles"),
+            super::backfill_for(DatabaseBackend::MySql)
+                .expect("dispatch covers every backend this build compiles"),
             super::MYSQL_BACKFILL
         );
         assert_eq!(
-            super::backfill_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"),
+            super::backfill_for(DatabaseBackend::Sqlite)
+                .expect("dispatch covers every backend this build compiles"),
             super::SQLITE_BACKFILL
         );
 
@@ -1232,7 +1241,8 @@ mod tests {
         // avoid) and an `observed_attrs JSONB` in the SQLite one, which SQLite
         // accepts as an unknown type name with NUMERIC affinity while every
         // round-trip test still passes.
-        let postgres = super::schema_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles");
+        let postgres = super::schema_for(DatabaseBackend::Postgres)
+            .expect("dispatch covers every backend this build compiles");
         for (column, default) in [
             ("credentials", "'[]'"),
             ("observed_attrs", "'{}'"),
@@ -1249,7 +1259,8 @@ mod tests {
              timezone"
         );
 
-        let mysql = super::schema_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles");
+        let mysql = super::schema_for(DatabaseBackend::MySql)
+            .expect("dispatch covers every backend this build compiles");
         for (column, default) in [
             ("credentials", "('[]')"),
             ("observed_attrs", "('{}')"),
@@ -1273,7 +1284,8 @@ mod tests {
         );
         assert!(!mysql.contains("TIMESTAMPTZ"));
 
-        let sqlite = super::schema_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles");
+        let sqlite = super::schema_for(DatabaseBackend::Sqlite)
+            .expect("dispatch covers every backend this build compiles");
         for column in [
             "credentials TEXT NOT NULL DEFAULT '[]'",
             "observed_attrs TEXT NOT NULL DEFAULT '{}'",
@@ -1304,7 +1316,8 @@ mod tests {
             DatabaseBackend::MySql,
             DatabaseBackend::Sqlite,
         ] {
-            let backfill = super::backfill_for(backend).expect("dispatch covers every backend this build compiles");
+            let backfill = super::backfill_for(backend)
+                .expect("dispatch covers every backend this build compiles");
             assert_eq!(
                 backfill.matches("UPDATE qa_environments").count(),
                 4,
@@ -1321,8 +1334,20 @@ mod tests {
         // Each engine builds the JSON with its own constructor rather than by
         // string concatenation, so a credstore reference containing a quote
         // cannot produce a malformed document.
-        assert!(super::backfill_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles").contains("jsonb_build_object"));
-        assert!(super::backfill_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles").contains("JSON_OBJECT"));
-        assert!(super::backfill_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles").contains("json_object"));
+        assert!(
+            super::backfill_for(DatabaseBackend::Postgres)
+                .expect("dispatch covers every backend this build compiles")
+                .contains("jsonb_build_object")
+        );
+        assert!(
+            super::backfill_for(DatabaseBackend::MySql)
+                .expect("dispatch covers every backend this build compiles")
+                .contains("JSON_OBJECT")
+        );
+        assert!(
+            super::backfill_for(DatabaseBackend::Sqlite)
+                .expect("dispatch covers every backend this build compiles")
+                .contains("json_object")
+        );
     }
 }

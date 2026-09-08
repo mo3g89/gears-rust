@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use qa_environments_sdk::{NewVariable, Variable};
-use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::odata::sea_orm_filter::paginate_odata;

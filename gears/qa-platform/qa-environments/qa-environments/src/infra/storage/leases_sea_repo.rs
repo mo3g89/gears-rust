@@ -28,10 +28,7 @@ impl LeasesRepository for OrmLeasesRepository {
         environment_id: Uuid,
     ) -> Result<VersionedLease, DomainError> {
         let found = LeaseEntity::find()
-            .filter(
-                sea_orm::Condition::all()
-                    .add(LeaseColumn::EnvironmentId.eq(environment_id)),
-            )
+            .filter(sea_orm::Condition::all().add(LeaseColumn::EnvironmentId.eq(environment_id)))
             .secure()
             .scope_with(scope)
             .one(runner)

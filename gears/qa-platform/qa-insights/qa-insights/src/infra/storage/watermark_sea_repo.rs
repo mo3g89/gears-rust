@@ -203,11 +203,7 @@ async fn advance_existing<C: DBRunner>(
     let result = MarkEntity::update_many()
         .secure()
         .scope_with(scope)
-        .filter(
-            Condition::any()
-                .add(column.is_null())
-                .add(column.lt(at)),
-        )
+        .filter(Condition::any().add(column.is_null()).add(column.lt(at)))
         .col_expr(column, Expr::value(at))
         .col_expr(
             MarkColumn::UpdatedAt,

@@ -50,12 +50,14 @@
 use async_trait::async_trait;
 use qa_insights_sdk::{TestCaseResultRecord, TestResultRecord};
 use sea_orm::sea_query::{Expr, Func, SimpleExpr};
-use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, ExprTrait, FromQueryResult, Order, QueryFilter, QueryOrder, QuerySelect, QueryTrait};
+use sea_orm::{
+    ActiveValue, ColumnTrait, Condition, EntityTrait, ExprTrait, FromQueryResult, Order,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+};
 use time::OffsetDateTime;
 use toolkit_db::odata::sea_orm_filter::paginate_odata;
 use toolkit_db::secure::{
-    DBRunner, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureInsertManyExt,
-    validate_tenant_in_scope,
+    DBRunner, SecureDeleteExt, SecureEntityExt, SecureInsertManyExt, validate_tenant_in_scope,
 };
 use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
@@ -247,11 +249,8 @@ fn kpi_window(from: OffsetDateTime, to: Option<OffsetDateTime>) -> Condition {
 /// anyway, and [`ResultsRepository::flaky_groups`] records both what the guard
 /// says about the answer and that no test can catch its removal.
 fn status_count(statuses: &[&str]) -> SimpleExpr {
-    let matched: SimpleExpr = Expr::case(
-        ResultColumn::Status.is_in(statuses.iter().copied()),
-        1,
-    )
-    .into();
+    let matched: SimpleExpr =
+        Expr::case(ResultColumn::Status.is_in(statuses.iter().copied()), 1).into();
     Func::count(matched).into()
 }
 
@@ -745,9 +744,7 @@ impl ResultsRepository for OrmResultsRepository {
         let rows: Vec<test_case_result::Model> = CaseEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all().add(CaseColumn::RunId.is_in(run_ids.iter().copied())),
-            )
+            .filter(Condition::all().add(CaseColumn::RunId.is_in(run_ids.iter().copied())))
             .all(runner)
             .await
             .map_err(db_err)?;
@@ -907,9 +904,7 @@ impl ResultsRepository for OrmResultsRepository {
         let rows: Vec<RunStatusCountRow> = ResultEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all().add(ResultColumn::RunId.is_in(run_ids.iter().copied())),
-            )
+            .filter(Condition::all().add(ResultColumn::RunId.is_in(run_ids.iter().copied())))
             .project_all(runner, grouped_status_counts)
             .await
             .map_err(db_err)?;
@@ -1663,7 +1658,7 @@ fn new_case_am(
 
 #[cfg(test)]
 mod tests {
-    use sea_orm::{ColumnTrait, ActiveValue, Condition, EntityTrait};
+    use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait};
     use time::{Duration, OffsetDateTime};
     use uuid::Uuid;
 
@@ -1681,7 +1676,6 @@ mod tests {
     };
     use crate::infra::storage::results_sea_repo::OrmResultsRepository;
     use crate::infra::storage::test_db::{inmem_db, now, scope};
-    use sea_orm::sea_query::Expr;
     use toolkit_db::secure::{SecureEntityExt, secure_insert};
     use toolkit_odata::{CursorV1, ODataQuery};
     use toolkit_security::AccessScope;

@@ -399,14 +399,19 @@ mod tests {
         use sea_orm::DatabaseBackend;
 
         for backend in [DatabaseBackend::Postgres, DatabaseBackend::MySql] {
-            let sql = without_comments(super::sql_for(backend).expect("dispatch covers every backend this build compiles"));
+            let sql = without_comments(
+                super::sql_for(backend).expect("dispatch covers every backend this build compiles"),
+            );
             assert!(
                 sql.contains("VARCHAR(512)"),
                 "{backend:?} must get a VARCHAR(512) statement, not SQLite's TEXT"
             );
         }
 
-        let sqlite = without_comments(super::sql_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"));
+        let sqlite = without_comments(
+            super::sql_for(DatabaseBackend::Sqlite)
+                .expect("dispatch covers every backend this build compiles"),
+        );
         assert!(
             sqlite.contains("TEXT"),
             "SQLite must get the TEXT statement"

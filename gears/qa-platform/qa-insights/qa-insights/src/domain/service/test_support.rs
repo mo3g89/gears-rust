@@ -128,11 +128,11 @@ use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::PlatformSecurityContext;
 
 use async_trait::async_trait;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError};
 use qa_catalog_sdk::{SOURCE_REPO, UniverseTest};
 use qa_insights_sdk::CollectCount;
 use qa_runs_sdk::{

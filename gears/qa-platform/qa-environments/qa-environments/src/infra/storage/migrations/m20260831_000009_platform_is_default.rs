@@ -216,14 +216,19 @@ mod tests {
         use sea_orm::DatabaseBackend;
 
         for backend in [DatabaseBackend::Postgres, DatabaseBackend::MySql] {
-            let sql = without_comments(super::sql_for(backend).expect("dispatch covers every backend this build compiles"));
+            let sql = without_comments(
+                super::sql_for(backend).expect("dispatch covers every backend this build compiles"),
+            );
             assert!(
                 sql.contains("DEFAULT FALSE"),
                 "{backend:?} must get the server statement spelling the literal FALSE"
             );
         }
 
-        let sqlite = without_comments(super::sql_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"));
+        let sqlite = without_comments(
+            super::sql_for(DatabaseBackend::Sqlite)
+                .expect("dispatch covers every backend this build compiles"),
+        );
         assert!(
             sqlite.contains("DEFAULT 0"),
             "SQLite must get the integer-literal statement"

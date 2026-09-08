@@ -109,10 +109,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use authz_resolver_sdk::AuthZResolverApi;
-use toolkit_security::PlatformSecurityContext;
-use toolkit_canonical_errors::CanonicalError;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
-use authz_resolver_sdk::error::AuthZResolverError;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
@@ -125,6 +122,8 @@ use toolkit::api::{OpenApiInfo, OpenApiRegistryImpl};
 use toolkit::config::ConfigProvider;
 use toolkit::lifecycle::Runnable;
 use toolkit::{ClientHub, Gear, GearCtx, RestApiCapability};
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 use toolkit_security::{SecurityContext, pep_properties};
 
 use qa_insights::QaInsights;

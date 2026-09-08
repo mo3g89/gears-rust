@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::models::{EvaluationRequest, EvaluationResponse};
-use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_catalog_sdk::{NewProduct, Product, ProductUpdate};
 use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
@@ -26,8 +26,8 @@ use super::test_support::{
 use super::{actions, resources};
 use crate::domain::error::DomainError;
 use crate::domain::repos::ProductsRepository;
-use toolkit_security::PlatformSecurityContext;
 use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 // ---------------------------------------------------------------------------
 // Test doubles
