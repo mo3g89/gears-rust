@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 use tracing::{error, warn};
 
-use authz_resolver_sdk::AuthZResolverClient;
+use authz_resolver_sdk::AuthZResolverApi;
 use credstore_sdk::CredStoreClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
 
@@ -111,7 +111,7 @@ impl Gear for QaEnvironments {
         // Cross-gear clients from ClientHub.
         let authz = ctx
             .client_hub()
-            .get::<dyn AuthZResolverClient>()
+            .get::<dyn AuthZResolverApi>()
             .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
         // A pasted kubeconfig is written here before any row is created, so
         // credstore is a hard dependency of the create/update paths — declared

@@ -51,7 +51,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_insights_sdk::NotificationConfig;
 use qa_runs_sdk::ScheduleNotificationSettings;
 use toolkit_db::DBProvider;
@@ -71,6 +71,8 @@ use crate::infra::storage::notify_sea_repo::OrmNotifyRepository;
 use crate::infra::storage::test_db::inmem_db;
 use toolkit_db::secure::DBRunner;
 use toolkit_security::AccessScope;
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 const TENANT: Uuid = Uuid::from_u128(0xA);
 const OTHER_TENANT: Uuid = Uuid::from_u128(0x0B);
@@ -87,11 +89,12 @@ const SCHEDULE: Uuid = Uuid::from_u128(0x30);
 struct TwoTenantAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for TwoTenantAuthZ {
+impl AuthZResolverApi for TwoTenantAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: authz_resolver_sdk::EvaluationRequest,
-    ) -> Result<authz_resolver_sdk::EvaluationResponse, authz_resolver_sdk::AuthZResolverError>
+    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError>
     {
         Ok(authz_resolver_sdk::EvaluationResponse {
             decision: true,
@@ -244,7 +247,7 @@ const RUN_NAME: &str = "nightly-smoke-142";
 /// ([`a_multi_tenant_scope_does_not_return_another_tenants_settings`],
 /// [`an_unresolvable_run_is_skipped_rather_than_propagated`]) do not have to
 /// undo an unwanted save or registration.
-async fn build(authz: Arc<dyn AuthZResolverClient>, slack: Arc<FakeSlack>) -> Fixture {
+async fn build(authz: Arc<dyn AuthZResolverApi>, slack: Arc<FakeSlack>) -> Fixture {
     let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
     let runs = Arc::new(FakeRuns::default());
     let mail = Arc::new(InertMail::default());
@@ -1289,7 +1292,7 @@ async fn a_multi_tenant_scope_does_not_list_another_tenants_log_entries() {
 async fn the_claim_and_release_path_authorizes_a_write_not_a_read() {
     let authz = Arc::new(RecordingAuthZ::default());
     let f = build(
-        Arc::clone(&authz) as Arc<dyn AuthZResolverClient>,
+        Arc::clone(&authz) as Arc<dyn AuthZResolverApi>,
         Arc::new(FakeSlack::default()),
     )
     .await;

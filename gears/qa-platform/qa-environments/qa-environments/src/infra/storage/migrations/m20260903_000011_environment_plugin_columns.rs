@@ -354,21 +354,27 @@ UPDATE qa_environments
 /// `m20260828_000007_platform_observation::sql_for` — inline in the `match`,
 /// nothing could reach it, and swapping two adjacent arms is exactly the
 /// mistake that guard was added to catch there.
-const fn schema_for(backend: sea_orm::DatabaseBackend) -> &'static str {
+fn schema_for(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
     match backend {
-        sea_orm::DatabaseBackend::Postgres => POSTGRES_SCHEMA,
-        sea_orm::DatabaseBackend::MySql => MYSQL_SCHEMA,
-        sea_orm::DatabaseBackend::Sqlite => SQLITE_SCHEMA,
+        sea_orm::DatabaseBackend::Postgres => Ok(POSTGRES_SCHEMA),
+        sea_orm::DatabaseBackend::MySql => Ok(MYSQL_SCHEMA),
+        sea_orm::DatabaseBackend::Sqlite => Ok(SQLITE_SCHEMA),
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 
 /// Pick the backfill blob for a backend. See [`schema_for`] for why these are
 /// separate constants, and the module doc for why they are separate blobs.
-const fn backfill_for(backend: sea_orm::DatabaseBackend) -> &'static str {
+fn backfill_for(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
     match backend {
-        sea_orm::DatabaseBackend::Postgres => POSTGRES_BACKFILL,
-        sea_orm::DatabaseBackend::MySql => MYSQL_BACKFILL,
-        sea_orm::DatabaseBackend::Sqlite => SQLITE_BACKFILL,
+        sea_orm::DatabaseBackend::Postgres => Ok(POSTGRES_BACKFILL),
+        sea_orm::DatabaseBackend::MySql => Ok(MYSQL_BACKFILL),
+        sea_orm::DatabaseBackend::Sqlite => Ok(SQLITE_BACKFILL),
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 
@@ -377,8 +383,8 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
         let backend = manager.get_database_backend();
-        conn.execute_unprepared(schema_for(backend)).await?;
-        conn.execute_unprepared(backfill_for(backend)).await?;
+        conn.execute_unprepared(schema_for(backend)?).await?;
+        conn.execute_unprepared(backfill_for(backend)?).await?;
         Ok(())
     }
 
@@ -594,7 +600,7 @@ mod tests {
     /// module doc: `migrated_db()` migrates an empty table, so this is the
     /// only way a test can watch the backfill do anything.
     async fn run_backfill(conn: &DatabaseConnection) {
-        conn.execute_unprepared(super::backfill_for(DatabaseBackend::Sqlite))
+        conn.execute_unprepared(super::backfill_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"))
             .await
             .expect("the sqlite backfill must apply");
     }
@@ -614,7 +620,7 @@ mod tests {
     /// No `WHERE`: how `SeaORM` encodes a `Uuid` for `SQLite` is its business,
     /// and every caller inserts exactly one row.
     async fn raw_text(conn: &DatabaseConnection, column: &str) -> String {
-        conn.query_one(Statement::from_string(
+        conn.query_one_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             format!("SELECT {column} AS c FROM qa_environments"),
         ))
@@ -800,7 +806,7 @@ mod tests {
             ("cluster_status", "Healthy"),
         ] {
             let value: Option<String> = conn
-                .query_one(Statement::from_string(
+                .query_one_raw(Statement::from_string(
                     conn.get_database_backend(),
                     format!(
                         "SELECT {column} FROM qa_environments WHERE id = {};",
@@ -1112,7 +1118,7 @@ mod tests {
         // entity would refuse to parse, and the new columns are what is under
         // test.
         let row = conn
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT credentials, observed_attrs, config, observed_base_url,
                         health_state, health_detail
@@ -1195,27 +1201,27 @@ mod tests {
     )]
     fn each_backend_gets_statements_of_the_right_column_type() {
         assert_eq!(
-            super::schema_for(DatabaseBackend::Postgres),
+            super::schema_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles"),
             super::POSTGRES_SCHEMA
         );
         assert_eq!(
-            super::schema_for(DatabaseBackend::MySql),
+            super::schema_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles"),
             super::MYSQL_SCHEMA
         );
         assert_eq!(
-            super::schema_for(DatabaseBackend::Sqlite),
+            super::schema_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"),
             super::SQLITE_SCHEMA
         );
         assert_eq!(
-            super::backfill_for(DatabaseBackend::Postgres),
+            super::backfill_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles"),
             super::POSTGRES_BACKFILL
         );
         assert_eq!(
-            super::backfill_for(DatabaseBackend::MySql),
+            super::backfill_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles"),
             super::MYSQL_BACKFILL
         );
         assert_eq!(
-            super::backfill_for(DatabaseBackend::Sqlite),
+            super::backfill_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"),
             super::SQLITE_BACKFILL
         );
 
@@ -1226,7 +1232,7 @@ mod tests {
         // avoid) and an `observed_attrs JSONB` in the SQLite one, which SQLite
         // accepts as an unknown type name with NUMERIC affinity while every
         // round-trip test still passes.
-        let postgres = super::schema_for(DatabaseBackend::Postgres);
+        let postgres = super::schema_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles");
         for (column, default) in [
             ("credentials", "'[]'"),
             ("observed_attrs", "'{}'"),
@@ -1243,7 +1249,7 @@ mod tests {
              timezone"
         );
 
-        let mysql = super::schema_for(DatabaseBackend::MySql);
+        let mysql = super::schema_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles");
         for (column, default) in [
             ("credentials", "('[]')"),
             ("observed_attrs", "('{}')"),
@@ -1267,7 +1273,7 @@ mod tests {
         );
         assert!(!mysql.contains("TIMESTAMPTZ"));
 
-        let sqlite = super::schema_for(DatabaseBackend::Sqlite);
+        let sqlite = super::schema_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles");
         for column in [
             "credentials TEXT NOT NULL DEFAULT '[]'",
             "observed_attrs TEXT NOT NULL DEFAULT '{}'",
@@ -1298,7 +1304,7 @@ mod tests {
             DatabaseBackend::MySql,
             DatabaseBackend::Sqlite,
         ] {
-            let backfill = super::backfill_for(backend);
+            let backfill = super::backfill_for(backend).expect("dispatch covers every backend this build compiles");
             assert_eq!(
                 backfill.matches("UPDATE qa_environments").count(),
                 4,
@@ -1315,8 +1321,8 @@ mod tests {
         // Each engine builds the JSON with its own constructor rather than by
         // string concatenation, so a credstore reference containing a quote
         // cannot produce a malformed document.
-        assert!(super::backfill_for(DatabaseBackend::Postgres).contains("jsonb_build_object"));
-        assert!(super::backfill_for(DatabaseBackend::MySql).contains("JSON_OBJECT"));
-        assert!(super::backfill_for(DatabaseBackend::Sqlite).contains("json_object"));
+        assert!(super::backfill_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles").contains("jsonb_build_object"));
+        assert!(super::backfill_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles").contains("JSON_OBJECT"));
+        assert!(super::backfill_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles").contains("json_object"));
     }
 }

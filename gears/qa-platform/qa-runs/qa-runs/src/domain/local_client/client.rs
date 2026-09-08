@@ -347,7 +347,7 @@ mod tests {
 
     fn wire(error: &qa_runs_sdk::QaRunsError) -> (u16, String) {
         let problem = Problem::from_error(error).expect("a problem must serialize");
-        let status = problem.status;
+        let status = problem.status.expect("a problem always carries a status");
         (
             status,
             serde_json::to_string(&problem).expect("a problem must serialize"),

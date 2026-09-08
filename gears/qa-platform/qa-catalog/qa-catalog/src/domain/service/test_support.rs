@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
+use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError};
 use qa_catalog_sdk::{NewTestRepository, TestRepository, TestRepositoryUpdate};
 use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
@@ -19,6 +19,8 @@ use super::DbProvider;
 use super::authz_surface::ENFORCED;
 use crate::domain::error::DomainError;
 use crate::domain::repos::{RefreshTarget, SshKeysRepository, TestReposRepository};
+use toolkit_security::PlatformSecurityContext;
+use toolkit_canonical_errors::CanonicalError;
 
 /// Build a `SecurityContext` for `tenant_id` with a fresh random subject.
 pub(super) fn ctx(tenant_id: Uuid) -> SecurityContext {
@@ -82,11 +84,12 @@ pub(super) use crate::test_support::permissive_response;
 pub(super) struct PermissiveAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for PermissiveAuthZ {
+impl AuthZResolverApi for PermissiveAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(permissive_response(&request))
     }
 }
@@ -154,11 +157,12 @@ impl SelectiveGrantAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for SelectiveGrantAuthZ {
+impl AuthZResolverApi for SelectiveGrantAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let asked = (
             request.resource.resource_type.as_str(),
             request.action.name.as_str(),

@@ -86,11 +86,14 @@ ALTER TABLE qa_platforms ADD COLUMN version_detected_at TEXT NULL;
 /// `m20260814_000006_platform_default_branch::sql_for` — inline in the
 /// `match`, nothing could reach it, and swapping two adjacent arms is exactly
 /// the mistake that guard was added to catch there.
-const fn sql_for(backend: sea_orm::DatabaseBackend) -> &'static str {
+fn sql_for(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
     match backend {
-        sea_orm::DatabaseBackend::Postgres => POSTGRES_UP,
-        sea_orm::DatabaseBackend::MySql => MYSQL_UP,
-        sea_orm::DatabaseBackend::Sqlite => SQLITE_UP,
+        sea_orm::DatabaseBackend::Postgres => Ok(POSTGRES_UP),
+        sea_orm::DatabaseBackend::MySql => Ok(MYSQL_UP),
+        sea_orm::DatabaseBackend::Sqlite => Ok(SQLITE_UP),
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 
@@ -98,7 +101,7 @@ const fn sql_for(backend: sea_orm::DatabaseBackend) -> &'static str {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
-        let sql = sql_for(manager.get_database_backend());
+        let sql = sql_for(manager.get_database_backend())?;
         conn.execute_unprepared(sql).await?;
         Ok(())
     }
@@ -231,7 +234,7 @@ mod tests {
 
     /// One column of the planted row, as text (`NULL` reads as `None`).
     async fn col(conn: &DatabaseConnection, column: &str) -> Option<String> {
-        conn.query_one(Statement::from_string(
+        conn.query_one_raw(Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "SELECT {column} FROM qa_environments WHERE id = {};",
@@ -352,28 +355,28 @@ mod tests {
         use sea_orm::DatabaseBackend;
 
         assert_eq!(
-            super::sql_for(DatabaseBackend::Postgres),
+            super::sql_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles"),
             super::POSTGRES_UP,
             "Postgres must get POSTGRES_UP, not another dialect's blob"
         );
         assert_eq!(
-            super::sql_for(DatabaseBackend::MySql),
+            super::sql_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles"),
             super::MYSQL_UP,
             "MySql must get MYSQL_UP, not another dialect's blob"
         );
         assert_eq!(
-            super::sql_for(DatabaseBackend::Sqlite),
+            super::sql_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"),
             super::SQLITE_UP,
             "Sqlite must get SQLITE_UP, not another dialect's blob"
         );
 
-        let postgres = super::sql_for(DatabaseBackend::Postgres);
+        let postgres = super::sql_for(DatabaseBackend::Postgres).expect("dispatch covers every backend this build compiles");
         assert!(
             postgres.contains("TIMESTAMPTZ"),
             "Postgres must get TIMESTAMPTZ for version_detected_at"
         );
 
-        let mysql = super::sql_for(DatabaseBackend::MySql);
+        let mysql = super::sql_for(DatabaseBackend::MySql).expect("dispatch covers every backend this build compiles");
         assert!(
             mysql.contains("version_detected_at TIMESTAMP NULL"),
             "MySQL must get the bare TIMESTAMP statement for version_detected_at"
@@ -385,7 +388,7 @@ mod tests {
              observation time, and this line is what catches it"
         );
 
-        let sqlite = super::sql_for(DatabaseBackend::Sqlite);
+        let sqlite = super::sql_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles");
         assert!(
             sqlite.contains("version_detected_at TEXT"),
             "SQLite must get TEXT for version_detected_at, having no native \

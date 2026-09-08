@@ -119,11 +119,14 @@ ALTER TABLE qa_products ADD COLUMN plugin_instance_id TEXT NULL;
 /// tests only ever run `SQLite`, so swapping two adjacent, near-identical
 /// match arms leaves every test green while handing the server dialects the
 /// wrong statement.
-const fn alter_for(backend: sea_orm::DatabaseBackend) -> &'static str {
+fn alter_for(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
     match backend {
-        sea_orm::DatabaseBackend::Postgres => POSTGRES_UP,
-        sea_orm::DatabaseBackend::MySql => MYSQL_UP,
-        sea_orm::DatabaseBackend::Sqlite => SQLITE_UP,
+        sea_orm::DatabaseBackend::Postgres => Ok(POSTGRES_UP),
+        sea_orm::DatabaseBackend::MySql => Ok(MYSQL_UP),
+        sea_orm::DatabaseBackend::Sqlite => Ok(SQLITE_UP),
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 
@@ -144,7 +147,7 @@ fn backfill_sql() -> String {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
-        conn.execute_unprepared(alter_for(manager.get_database_backend()))
+        conn.execute_unprepared(alter_for(manager.get_database_backend())?)
             .await?;
         conn.execute_unprepared(&backfill_sql()).await?;
         Ok(())
@@ -279,14 +282,14 @@ mod tests {
         use sea_orm::DatabaseBackend;
 
         for backend in [DatabaseBackend::Postgres, DatabaseBackend::MySql] {
-            let sql = without_comments(super::alter_for(backend));
+            let sql = without_comments(super::alter_for(backend).expect("dispatch covers every backend this build compiles"));
             assert!(
                 sql.contains("VARCHAR(512)"),
                 "{backend:?} must get the bounded server type"
             );
         }
 
-        let sqlite = without_comments(super::alter_for(DatabaseBackend::Sqlite));
+        let sqlite = without_comments(super::alter_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"));
         assert!(
             sqlite.contains("TEXT"),
             "SQLite must get its own TEXT statement"
@@ -371,7 +374,7 @@ mod tests {
     /// halves keeps the test independent of how the driver encodes a `Uuid`
     /// or a timestamp on `SQLite`.
     async fn insert_legacy_product(conn: &DatabaseConnection, name: &str) {
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "INSERT INTO qa_products \
@@ -399,7 +402,7 @@ mod tests {
             .expect("the migration must apply to a populated table");
 
         let row = conn
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 conn.get_database_backend(),
                 "SELECT plugin_instance_id, name FROM qa_products WHERE name = 'vhp';",
             ))

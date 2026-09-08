@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 use qa_runs_sdk::{NewSchedule, Schedule, ScheduleNotificationSettings};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, Condition, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::secure::{
     DBRunner, SecureDeleteExt, SecureEntityExt, SecureUpdateExt, secure_insert,
@@ -46,7 +46,7 @@ pub struct OrmSchedulesRepository;
 /// including the two that also carry a guard — an inlined copy beside a helper
 /// with the same job reads as though the difference were meaningful.
 fn by_id(id: Uuid) -> Condition {
-    Condition::all().add(Expr::col(ScheduleColumn::Id).eq(id))
+    Condition::all().add(ScheduleColumn::Id.eq(id))
 }
 
 /// `WHERE id = $1` on `qa_schedule_ticks`.
@@ -55,7 +55,7 @@ fn by_id(id: Uuid) -> Condition {
 /// have distinct `Column` enums, and the whole value of the pair is that a
 /// schedule id cannot be filtered against the tick table by mistake.
 fn tick_by_id(id: Uuid) -> Condition {
-    Condition::all().add(Expr::col(TickColumn::Id).eq(id))
+    Condition::all().add(TickColumn::Id.eq(id))
 }
 
 /// The caller-decidable columns of a schedule, shared by the insert and the
@@ -255,7 +255,7 @@ impl SchedulesRepository for OrmSchedulesRepository {
         name: &str,
     ) -> Result<Option<Schedule>, DomainError> {
         let found = ScheduleEntity::find()
-            .filter(Condition::all().add(Expr::col(ScheduleColumn::Name).eq(name)))
+            .filter(Condition::all().add(ScheduleColumn::Name.eq(name)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -396,7 +396,7 @@ impl SchedulesRepository for OrmSchedulesRepository {
         scope: &AccessScope,
     ) -> Result<Vec<(Schedule, Uuid)>, DomainError> {
         let rows = ScheduleEntity::find()
-            .filter(Condition::all().add(Expr::col(ScheduleColumn::Enabled).eq(true)))
+            .filter(Condition::all().add(ScheduleColumn::Enabled.eq(true)))
             .secure()
             .scope_with(scope)
             // `id`, so a cross-tenant enumeration has one deterministic order
@@ -531,8 +531,8 @@ impl SchedulesRepository for OrmSchedulesRepository {
                     // three-valued logic would otherwise drop from a bare `<`.
                     .add(
                         Condition::any()
-                            .add(Expr::col(ScheduleColumn::LastFiredTick).is_null())
-                            .add(Expr::col(ScheduleColumn::LastFiredTick).lt(due_at)),
+                            .add(ScheduleColumn::LastFiredTick.is_null())
+                            .add(ScheduleColumn::LastFiredTick.lt(due_at)),
                     ),
             )
             .secure()

@@ -20,7 +20,7 @@
 use async_trait::async_trait;
 use qa_insights_sdk::{JiraBug, JiraConfig, JiraPollerConfig, NewJiraBug};
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{ActiveValue, Condition, EntityTrait};
+use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait};
 use time::OffsetDateTime;
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureEntityExt, SecureInsertExt, SecureOnConflict, SecureUpdateExt,
@@ -122,8 +122,8 @@ impl JiraRepository for OrmJiraRepository {
             .scope_with(scope)
             .filter(
                 Condition::all()
-                    .add(Expr::col(BugColumn::TenantId).eq(tenant_id))
-                    .add(Expr::col(BugColumn::Status).eq(STATUS_OPEN)),
+                    .add(BugColumn::TenantId.eq(tenant_id))
+                    .add(BugColumn::Status.eq(STATUS_OPEN)),
             )
             .all(runner)
             .await
@@ -154,10 +154,10 @@ impl JiraRepository for OrmJiraRepository {
             .scope_with(scope)
             .filter(
                 Condition::all()
-                    .add(Expr::col(BugColumn::TenantId).eq(tenant_id))
-                    .add(Expr::col(BugColumn::Status).eq(STATUS_OPEN))
-                    .add(Expr::col(BugColumn::RepoId).eq(plan.repo_id))
-                    .add(Expr::col(BugColumn::PlanPath).eq(plan.plan_path.as_str())),
+                    .add(BugColumn::TenantId.eq(tenant_id))
+                    .add(BugColumn::Status.eq(STATUS_OPEN))
+                    .add(BugColumn::RepoId.eq(plan.repo_id))
+                    .add(BugColumn::PlanPath.eq(plan.plan_path.as_str())),
             )
             .all(runner)
             .await
@@ -279,9 +279,9 @@ impl JiraRepository for OrmJiraRepository {
             .scope_with(scope)
             .filter(
                 Condition::all()
-                    .add(Expr::col(BugColumn::TenantId).eq(tenant_id))
-                    .add(Expr::col(BugColumn::TestName).eq(test_name))
-                    .add(Expr::col(BugColumn::Status).ne(STATUS_CLOSED)),
+                    .add(BugColumn::TenantId.eq(tenant_id))
+                    .add(BugColumn::TestName.eq(test_name))
+                    .add(BugColumn::Status.ne(STATUS_CLOSED)),
             )
             .one(runner)
             .await
@@ -328,9 +328,9 @@ impl JiraRepository for OrmJiraRepository {
             .scope_with(scope)
             .filter(
                 Condition::all()
-                    .add(Expr::col(BugColumn::TenantId).eq(tenant_id))
-                    .add(Expr::col(BugColumn::JiraKey).eq(jira_key))
-                    .add(Expr::col(BugColumn::Status).eq(STATUS_OPEN)),
+                    .add(BugColumn::TenantId.eq(tenant_id))
+                    .add(BugColumn::JiraKey.eq(jira_key))
+                    .add(BugColumn::Status.eq(STATUS_OPEN)),
             )
             .col_expr(BugColumn::Status, Expr::value(STATUS_RESOLVED))
             .col_expr(BugColumn::ResolvedAt, Expr::value(at))
@@ -367,8 +367,8 @@ impl JiraRepository for OrmJiraRepository {
             .scope_with(scope)
             .filter(
                 Condition::all()
-                    .add(Expr::col(BugColumn::TenantId).eq(tenant_id))
-                    .add(Expr::col(BugColumn::JiraKey).eq(jira_key)),
+                    .add(BugColumn::TenantId.eq(tenant_id))
+                    .add(BugColumn::JiraKey.eq(jira_key)),
             )
             .one(runner)
             .await
@@ -403,7 +403,7 @@ impl JiraRepository for OrmJiraRepository {
         let row = ConfigEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(Expr::col(ConfigColumn::TenantId).eq(tenant_id)))
+            .filter(Condition::all().add(ConfigColumn::TenantId.eq(tenant_id)))
             .one(runner)
             .await
             .map_err(db_err)?;
@@ -483,7 +483,7 @@ impl JiraRepository for OrmJiraRepository {
         let row = PollerEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(Expr::col(PollerColumn::TenantId).eq(tenant_id)))
+            .filter(Condition::all().add(PollerColumn::TenantId.eq(tenant_id)))
             .one(runner)
             .await
             .map_err(db_err)?;

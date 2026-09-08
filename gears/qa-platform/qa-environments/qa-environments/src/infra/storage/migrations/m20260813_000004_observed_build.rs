@@ -81,6 +81,11 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::Postgres => POSTGRES_UP,
             sea_orm::DatabaseBackend::MySql => MYSQL_UP,
             sea_orm::DatabaseBackend::Sqlite => SQLITE_UP,
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         };
 
         conn.execute_unprepared(sql).await?;
@@ -203,7 +208,7 @@ mod tests {
     /// a raw insert with an entity read makes the test depend on the two
     /// agreeing about how a `Uuid` is bound.
     async fn col(conn: &DatabaseConnection, column: &str) -> Option<String> {
-        conn.query_one(sea_orm::Statement::from_string(
+        conn.query_one_raw(sea_orm::Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "SELECT {column} FROM qa_environments WHERE id = {};",

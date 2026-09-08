@@ -47,6 +47,8 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use toolkit_security::PlatformSecurityContext;
+use toolkit_canonical_errors::CanonicalError;
 
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -197,7 +199,7 @@ use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError, PolicyEnforcer};
 use qa_runs_sdk::{RunState, RunTarget};
 use toolkit_security::pep_properties;
 
@@ -236,11 +238,12 @@ struct EnumerationGrantingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for EnumerationGrantingAuthZ {
+impl AuthZResolverApi for EnumerationGrantingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let subject_tenant = request
             .context
             .tenant_context
@@ -791,7 +794,7 @@ struct ResumeHarness {
 async fn resume_harness() -> ResumeHarness {
     let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
     let executor = Arc::new(MockRunExecutor::new());
-    let authz: Arc<dyn AuthZResolverClient> = Arc::new(EnumerationGrantingAuthZ {
+    let authz: Arc<dyn AuthZResolverApi> = Arc::new(EnumerationGrantingAuthZ {
         covering: vec![OWNER_TENANT],
     });
     let archive = Arc::new(RunLogArchive::new(

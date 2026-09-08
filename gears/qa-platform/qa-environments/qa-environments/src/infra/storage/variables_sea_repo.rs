@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use qa_environments_sdk::{NewVariable, Variable};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::odata::sea_orm_filter::paginate_odata;
 use toolkit_db::secure::{
@@ -69,7 +69,7 @@ impl VariablesRepository for OrmVariablesRepository {
         let scoped = EnvironmentVarEntity::find()
             .filter(
                 sea_orm::Condition::all()
-                    .add(Expr::col(EnvironmentVarColumn::EnvironmentId).eq(environment_id)),
+                    .add(EnvironmentVarColumn::EnvironmentId.eq(environment_id)),
             )
             .secure()
             .scope_with(scope);
@@ -127,7 +127,7 @@ impl VariablesRepository for OrmVariablesRepository {
         id: Uuid,
     ) -> Result<bool, DomainError> {
         let environment_result = EnvironmentVarEntity::delete_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentVarColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentVarColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .exec(runner)
@@ -139,7 +139,7 @@ impl VariablesRepository for OrmVariablesRepository {
         }
 
         let pipeline_result = PipelineEntity::delete_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(PipelineColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(PipelineColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .exec(runner)
@@ -166,9 +166,9 @@ async fn find_environment_var<C: DBRunner>(
     EnvironmentVarEntity::find()
         .filter(
             sea_orm::Condition::all()
-                .add(Expr::col(EnvironmentVarColumn::TenantId).eq(tenant_id))
-                .add(Expr::col(EnvironmentVarColumn::EnvironmentId).eq(environment_id))
-                .add(Expr::col(EnvironmentVarColumn::Name).eq(name)),
+                .add(EnvironmentVarColumn::TenantId.eq(tenant_id))
+                .add(EnvironmentVarColumn::EnvironmentId.eq(environment_id))
+                .add(EnvironmentVarColumn::Name.eq(name)),
         )
         .secure()
         .scope_with(scope)
@@ -187,8 +187,8 @@ async fn find_pipeline_var<C: DBRunner>(
     PipelineEntity::find()
         .filter(
             sea_orm::Condition::all()
-                .add(Expr::col(PipelineColumn::TenantId).eq(tenant_id))
-                .add(Expr::col(PipelineColumn::Name).eq(name)),
+                .add(PipelineColumn::TenantId.eq(tenant_id))
+                .add(PipelineColumn::Name.eq(name)),
         )
         .secure()
         .scope_with(scope)

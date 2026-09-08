@@ -124,13 +124,15 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
+use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError};
 use qa_catalog_sdk::{SOURCE_REPO, UniverseTest};
 use qa_insights_sdk::CollectCount;
 use qa_runs_sdk::{
@@ -653,11 +655,12 @@ pub fn permissive_response(request: &EvaluationRequest) -> EvaluationResponse {
 pub struct TenantScopedAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for TenantScopedAuthZ {
+impl AuthZResolverApi for TenantScopedAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(permissive_response(&request))
     }
 }
@@ -667,11 +670,12 @@ impl AuthZResolverClient for TenantScopedAuthZ {
 pub struct DenyAllAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for DenyAllAuthZ {
+impl AuthZResolverApi for DenyAllAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: false,
             context: EvaluationResponseContext::default(),
@@ -698,11 +702,12 @@ impl RecordingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for RecordingAuthZ {
+impl AuthZResolverApi for RecordingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.asked.lock().unwrap().push((
             request.resource.resource_type.clone(),
             request.action.name.clone(),
@@ -727,11 +732,12 @@ impl AuthZResolverClient for RecordingAuthZ {
 pub struct ResourceConstrainedAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for ResourceConstrainedAuthZ {
+impl AuthZResolverApi for ResourceConstrainedAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let mut response = permissive_response(&request);
         for constraint in &mut response.context.constraints {
             constraint.predicates.push(Predicate::In(InPredicate::new(
@@ -1241,7 +1247,7 @@ impl Fleet {
     pub async fn new(signing_secret: &str) -> Self {
         Self::build(
             signing_secret,
-            Arc::new(TenantScopedAuthZ) as Arc<dyn AuthZResolverClient>,
+            Arc::new(TenantScopedAuthZ) as Arc<dyn AuthZResolverApi>,
         )
         .await
     }
@@ -1258,12 +1264,12 @@ impl Fleet {
     pub async fn denying() -> Self {
         Self::build(
             "unused-denying-fleet-secret",
-            Arc::new(DenyAllAuthZ) as Arc<dyn AuthZResolverClient>,
+            Arc::new(DenyAllAuthZ) as Arc<dyn AuthZResolverApi>,
         )
         .await
     }
 
-    async fn build(signing_secret: &str, authz: Arc<dyn AuthZResolverClient>) -> Self {
+    async fn build(signing_secret: &str, authz: Arc<dyn AuthZResolverApi>) -> Self {
         let db = Arc::new(DbProvider::new(inmem_db().await));
 
         let deps = ServiceDeps {

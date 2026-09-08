@@ -86,7 +86,7 @@ async fn plant_environment(conn: &DatabaseConnection, id: u128, product: Option<
 }
 
 async fn scalar<T: TryGetable>(conn: &DatabaseConnection, sql: &str) -> T {
-    conn.query_one(Statement::from_string(
+    conn.query_one_raw(Statement::from_string(
         conn.get_database_backend(),
         sql.to_owned(),
     ))
@@ -105,7 +105,7 @@ async fn after_the_migration_an_environment_cannot_omit_its_product() {
     run_it(&conn).await.expect("the migration must run");
 
     let unbound = conn
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "INSERT INTO qa_environments \
@@ -200,7 +200,7 @@ async fn the_rebuild_recreates_the_unique_index() {
     // Present in `sqlite_master` is not the same as built on the right columns,
     // so the rule itself is exercised too.
     let duplicate = conn
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "INSERT INTO qa_environments \
@@ -282,7 +282,7 @@ async fn down_makes_the_column_nullable_again() {
         .expect("down must run");
     txn.commit().await.unwrap();
 
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         conn.get_database_backend(),
         format!(
             "INSERT INTO qa_environments \

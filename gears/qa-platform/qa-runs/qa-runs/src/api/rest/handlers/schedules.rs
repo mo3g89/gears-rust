@@ -259,7 +259,7 @@ mod tests {
     fn wire(req: NewScheduleReq) -> (u16, String) {
         let error = decode_payload(req).expect_err("this payload must be refused");
         let problem = Problem::from_error(&error).expect("a problem must serialize");
-        let status = problem.status;
+        let status = problem.status.expect("a problem always carries a status");
         (
             status,
             serde_json::to_string(&problem).expect("a problem must serialize"),
@@ -362,7 +362,7 @@ mod tests {
         let problem = Problem::from_error(&error).expect("a problem must serialize");
         let body = serde_json::to_string(&problem).expect("a problem must serialize");
 
-        assert_eq!(problem.status, 400, "{body}");
+        assert_eq!(problem.status, Some(400), "{body}");
         assert!(body.contains("cf.qa.runs.schedule.v1~"), "{body}");
         assert!(!body.contains("cf.qa.runs.run.v1~"), "{body}");
     }

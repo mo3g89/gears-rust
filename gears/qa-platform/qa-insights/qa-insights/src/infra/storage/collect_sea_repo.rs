@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use qa_insights_sdk::CollectCount;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, Condition, EntityTrait};
+use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait};
 use time::OffsetDateTime;
 use toolkit_db::secure::{
     DBRunner, SecureEntityExt, SecureInsertExt, SecureOnConflict, validate_tenant_in_scope,
@@ -142,8 +142,8 @@ impl CollectRepository for OrmCollectRepository {
             .scope_with(scope)
             .filter(
                 Condition::all()
-                    .add(Expr::col(CollectColumn::Branch).eq(branch))
-                    .add(Expr::col(CollectColumn::RepoId).is_in(repo_ids.iter().copied())),
+                    .add(CollectColumn::Branch.eq(branch))
+                    .add(CollectColumn::RepoId.is_in(repo_ids.iter().copied())),
             )
             .all(runner)
             .await

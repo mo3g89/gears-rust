@@ -222,7 +222,7 @@ mod tests {
         db: Arc<DBProvider<DomainError>>,
     }
 
-    async fn build(authz: Arc<dyn authz_resolver_sdk::AuthZResolverClient>) -> Fixture {
+    async fn build(authz: Arc<dyn authz_resolver_sdk::AuthZResolverApi>) -> Fixture {
         let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
         let service = Arc::new(JiraService::new(
             Arc::clone(&db),

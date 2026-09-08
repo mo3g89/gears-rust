@@ -879,7 +879,7 @@ mod canonical_mapping_tests {
     fn wire(e: DomainError) -> (u16, String) {
         let ce: CanonicalError = e.into();
         let problem = Problem::from_error(&ce).expect("a problem must serialize");
-        let status = problem.status;
+        let status = problem.status.expect("a problem always carries a status");
         (
             status,
             serde_json::to_string(&problem).expect("a problem must serialize"),
@@ -899,7 +899,7 @@ mod canonical_mapping_tests {
     fn both_renderings(e: DomainError) -> (u16, String, String) {
         let ce: CanonicalError = e.into();
         let problem = Problem::from_error(&ce).expect("a problem must serialize");
-        let status = problem.status;
+        let status = problem.status.expect("a problem always carries a status");
         let body = serde_json::to_string(&problem).expect("a problem must serialize");
         let debug_body = serde_json::to_string(
             &Problem::from_error_debug(&ce).expect("a problem must serialize"),
@@ -1533,9 +1533,11 @@ mod tests {
         /// Unchanged: the PDP RPC itself failing is a fault, not a decision.
         #[test]
         fn an_evaluation_failure_is_internal() {
-            let e = EnforcerError::EvaluationFailed(AuthZResolverError::ServiceUnavailable(
-                "plugin not registered".to_owned(),
-            ));
+            let e = EnforcerError::EvaluationFailed(
+                CanonicalError::service_unavailable()
+                    .with_detail("plugin not registered")
+                    .create(),
+            );
             assert!(matches!(DomainError::from(e), DomainError::Internal(_)));
         }
     }

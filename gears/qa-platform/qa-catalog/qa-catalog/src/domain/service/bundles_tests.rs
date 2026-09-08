@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError, PolicyEnforcer};
 use flate2::read::GzDecoder;
 use qa_catalog_sdk::{BundleRequest, TestBundle};
 use time::OffsetDateTime;
@@ -26,6 +26,8 @@ use super::test_support::{
 use crate::domain::error::DomainError;
 use crate::domain::ports::bundle_store::BundleStore;
 use crate::domain::repos::BundlesRepository;
+use toolkit_security::PlatformSecurityContext;
+use toolkit_canonical_errors::CanonicalError;
 
 const FIXTURE_CONTENT: &str = "def test_a():\n    assert True\n";
 
@@ -752,7 +754,7 @@ async fn create_bundle_rejects_path_traversal() {
 // delete per tenant under `system_actor::for_bundle_delete`
 // ---------------------------------------------------------------------------
 
-/// [`AuthZResolverClient`] double that records every request it is asked to
+/// [`AuthZResolverApi`] double that records every request it is asked to
 /// decide and always grants tenant-scoped access — the harness for
 /// [`tenants_with_expired_bundles_does_not_consult_the_policy_engine`]: a
 /// request that slipped through to `evaluate` is recorded here regardless of
@@ -769,11 +771,12 @@ impl RecordingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for RecordingAuthZ {
+impl AuthZResolverApi for RecordingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.requests
             .lock()
             .unwrap()
@@ -790,7 +793,7 @@ async fn build_service_with_authz(
     repos: Arc<MockTestReposRepository>,
     store: Arc<InMemoryBundleStore>,
     repos_dir: PathBuf,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
 ) -> BundlesService<MockBundlesRepository, MockTestReposRepository> {
     let enforcer = PolicyEnforcer::new(authz);
     let db = test_db_provider().await;

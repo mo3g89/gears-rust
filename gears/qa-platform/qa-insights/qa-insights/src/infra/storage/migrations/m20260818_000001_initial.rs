@@ -1212,6 +1212,9 @@ fn up_ddl(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
              3072-byte key limit. See this module's header, \"MySQL key-width budget\"."
                 .to_owned(),
         )),
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 
@@ -1571,7 +1574,7 @@ mod tests {
 
     /// Collect the `name` column of a one-column query.
     async fn name_column(conn: &DatabaseConnection, sql: String) -> Vec<String> {
-        conn.query_all(Statement::from_string(
+        conn.query_all_raw(Statement::from_string(
             sea_orm_migration::sea_orm::DatabaseBackend::Sqlite,
             sql,
         ))
@@ -1636,7 +1639,7 @@ mod tests {
     /// `key = 1` filters the trailing rowid/PK columns `index_xinfo` appends,
     /// which `index_info` does not list.
     async fn index_columns(conn: &DatabaseConnection, index: &str) -> Vec<String> {
-        conn.query_all(Statement::from_string(
+        conn.query_all_raw(Statement::from_string(
             sea_orm_migration::sea_orm::DatabaseBackend::Sqlite,
             format!(
                 "SELECT name || CASE desc WHEN 1 THEN ' DESC' ELSE '' END AS name \
@@ -1666,7 +1669,7 @@ mod tests {
 
     /// Read one scalar back as text, whatever its declared type.
     async fn scalar(conn: &DatabaseConnection, sql: &str) -> String {
-        conn.query_one(Statement::from_string(
+        conn.query_one_raw(Statement::from_string(
             sea_orm_migration::sea_orm::DatabaseBackend::Sqlite,
             sql.to_owned(),
         ))
@@ -2420,7 +2423,7 @@ mod tests {
 
         let pg_names = |sql: String| async {
             let sql = sql;
-            pg.query_all(Statement::from_string(DatabaseBackend::Postgres, sql))
+            pg.query_all_raw(Statement::from_string(DatabaseBackend::Postgres, sql))
                 .await
                 .unwrap()
                 .iter()

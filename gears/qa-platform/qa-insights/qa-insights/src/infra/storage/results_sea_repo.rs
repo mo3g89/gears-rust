@@ -50,14 +50,12 @@
 use async_trait::async_trait;
 use qa_insights_sdk::{TestCaseResultRecord, TestResultRecord};
 use sea_orm::sea_query::{Expr, Func, SimpleExpr};
-use sea_orm::{
-    ActiveValue, Condition, EntityTrait, FromQueryResult, Order, QueryFilter, QueryOrder,
-    QuerySelect, QueryTrait,
-};
+use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, ExprTrait, FromQueryResult, Order, QueryFilter, QueryOrder, QuerySelect, QueryTrait};
 use time::OffsetDateTime;
 use toolkit_db::odata::sea_orm_filter::paginate_odata;
 use toolkit_db::secure::{
-    DBRunner, SecureDeleteExt, SecureEntityExt, SecureInsertExt, validate_tenant_in_scope,
+    DBRunner, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureInsertManyExt,
+    validate_tenant_in_scope,
 };
 use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
@@ -166,8 +164,8 @@ pub struct OrmResultsRepository;
 /// touches every analytics core.
 fn effective_ts() -> SimpleExpr {
     Func::coalesce([
-        Expr::col(ResultColumn::RunFinishedAt).into(),
-        Expr::col(ResultColumn::RunCreatedAt).into(),
+        Expr::col(ResultColumn::RunFinishedAt),
+        Expr::col(ResultColumn::RunCreatedAt),
     ])
     .into()
 }
@@ -211,14 +209,14 @@ fn effective_ts() -> SimpleExpr {
 /// `recent_failures`' `ORDER BY` still uses [`effective_ts`] and still needs a
 /// sort; this reduces the rows fed to it rather than removing it.
 fn kpi_window(from: OffsetDateTime, to: Option<OffsetDateTime>) -> Condition {
-    let mut finished = Condition::all().add(Expr::col(ResultColumn::RunFinishedAt).gte(from));
+    let mut finished = Condition::all().add(ResultColumn::RunFinishedAt.gte(from));
     let mut unfinished = Condition::all()
-        .add(Expr::col(ResultColumn::RunFinishedAt).is_null())
-        .add(Expr::col(ResultColumn::RunCreatedAt).gte(from));
+        .add(ResultColumn::RunFinishedAt.is_null())
+        .add(ResultColumn::RunCreatedAt.gte(from));
 
     if let Some(to) = to {
-        finished = finished.add(Expr::col(ResultColumn::RunFinishedAt).lt(to));
-        unfinished = unfinished.add(Expr::col(ResultColumn::RunCreatedAt).lt(to));
+        finished = finished.add(ResultColumn::RunFinishedAt.lt(to));
+        unfinished = unfinished.add(ResultColumn::RunCreatedAt.lt(to));
     }
 
     Condition::any().add(finished).add(unfinished)
@@ -250,7 +248,7 @@ fn kpi_window(from: OffsetDateTime, to: Option<OffsetDateTime>) -> Condition {
 /// says about the answer and that no test can catch its removal.
 fn status_count(statuses: &[&str]) -> SimpleExpr {
     let matched: SimpleExpr = Expr::case(
-        Expr::col(ResultColumn::Status).is_in(statuses.iter().copied()),
+        ResultColumn::Status.is_in(statuses.iter().copied()),
         1,
     )
     .into();
@@ -283,7 +281,7 @@ fn smaller_of(left: &SimpleExpr, right: &SimpleExpr) -> SimpleExpr {
 /// notions of "latest".
 fn sort_key(filter: &UniverseFilter) -> SimpleExpr {
     if filter.finished_only {
-        Expr::col(ResultColumn::RunFinishedAt).into()
+        Expr::col(ResultColumn::RunFinishedAt)
     } else {
         effective_ts()
     }
@@ -300,17 +298,17 @@ fn universe_condition(filter: &UniverseFilter) -> Condition {
     let mut cond = Condition::all();
 
     if let Some(version) = &filter.product_version {
-        cond = cond.add(Expr::col(ResultColumn::ProductVersion).eq(version.as_str()));
+        cond = cond.add(ResultColumn::ProductVersion.eq(version.as_str()));
     }
     if let Some(branch) = &filter.branch {
-        cond = cond.add(Expr::col(ResultColumn::Branch).eq(branch.as_str()));
+        cond = cond.add(ResultColumn::Branch.eq(branch.as_str()));
     }
     if filter.finished_only {
-        cond = cond.add(Expr::col(ResultColumn::RunFinishedAt).is_not_null());
+        cond = cond.add(ResultColumn::RunFinishedAt.is_not_null());
     }
     if let Some(since) = filter.since {
         cond = cond.add(if filter.finished_only {
-            Expr::col(ResultColumn::RunFinishedAt).gte(since)
+            ResultColumn::RunFinishedAt.gte(since)
         } else {
             Expr::expr(effective_ts()).gte(since)
         });
@@ -324,8 +322,8 @@ fn universe_condition(filter: &UniverseFilter) -> Condition {
         for plan in &filter.plans {
             plans = plans.add(
                 Condition::all()
-                    .add(Expr::col(ResultColumn::RepoId).eq(plan.repo_id))
-                    .add(Expr::col(ResultColumn::PlanPath).eq(plan.plan_path.as_str())),
+                    .add(ResultColumn::RepoId.eq(plan.repo_id))
+                    .add(ResultColumn::PlanPath.eq(plan.plan_path.as_str())),
             );
         }
         cond = cond.add(plans);
@@ -439,14 +437,14 @@ impl ResultsRepository for OrmResultsRepository {
         // absence — so this is an application invariant and nothing in the
         // database will notice if it is dropped.
         ResultEntity::delete_many()
-            .filter(Condition::all().add(Expr::col(ResultColumn::RunId).eq(run_id)))
+            .filter(Condition::all().add(ResultColumn::RunId.eq(run_id)))
             .secure()
             .scope_with(scope)
             .exec(runner)
             .await
             .map_err(db_err)?;
         CaseEntity::delete_many()
-            .filter(Condition::all().add(Expr::col(CaseColumn::RunId).eq(run_id)))
+            .filter(Condition::all().add(CaseColumn::RunId.eq(run_id)))
             .secure()
             .scope_with(scope)
             .exec(runner)
@@ -509,7 +507,7 @@ impl ResultsRepository for OrmResultsRepository {
         let rows = ResultEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(Expr::col(ResultColumn::RunId).eq(run_id)))
+            .filter(Condition::all().add(ResultColumn::RunId.eq(run_id)))
             .all(runner)
             .await
             .map_err(db_err)?;
@@ -529,7 +527,7 @@ impl ResultsRepository for OrmResultsRepository {
         let rows: Vec<test_case_result::Model> = CaseEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(Expr::col(CaseColumn::RunId).eq(run_id)))
+            .filter(Condition::all().add(CaseColumn::RunId.eq(run_id)))
             .all(runner)
             .await
             .map_err(db_err)?;
@@ -691,7 +689,7 @@ impl ResultsRepository for OrmResultsRepository {
 
                 query
                     .filter(
-                        Expr::tuple([Expr::col(ResultColumn::TestFile).into(), sort_key(filter)])
+                        Expr::tuple([Expr::col(ResultColumn::TestFile), sort_key(filter)])
                             .in_subquery(latest_per_file),
                     )
                     .order_by(sort_key(filter), Order::Desc)
@@ -748,7 +746,7 @@ impl ResultsRepository for OrmResultsRepository {
             .secure()
             .scope_with(scope)
             .filter(
-                Condition::all().add(Expr::col(CaseColumn::RunId).is_in(run_ids.iter().copied())),
+                Condition::all().add(CaseColumn::RunId.is_in(run_ids.iter().copied())),
             )
             .all(runner)
             .await
@@ -781,7 +779,7 @@ impl ResultsRepository for OrmResultsRepository {
             .scope_with(scope)
             .filter(
                 Condition::all()
-                    .add(Expr::col(ResultColumn::PlanPath).eq(plan_path))
+                    .add(ResultColumn::PlanPath.eq(plan_path))
                     .add(kpi_window(since, None)),
             )
             .order_by(effective_ts(), Order::Desc)
@@ -813,9 +811,9 @@ impl ResultsRepository for OrmResultsRepository {
             .scope_with(scope)
             .filter(
                 Condition::all()
-                    .add(Expr::col(ResultColumn::TenantId).eq(tenant_id))
-                    .add(Expr::col(ResultColumn::PlanPath).eq(plan_path))
-                    .add(Expr::col(ResultColumn::ProductVersion).is_not_null()),
+                    .add(ResultColumn::TenantId.eq(tenant_id))
+                    .add(ResultColumn::PlanPath.eq(plan_path))
+                    .add(ResultColumn::ProductVersion.is_not_null()),
             )
             .order_by(effective_ts(), Order::Desc)
             .order_by(Expr::col(ResultColumn::CreatedAt), Order::Desc)
@@ -859,8 +857,8 @@ impl ResultsRepository for OrmResultsRepository {
             .scope_with(scope)
             .filter(
                 Condition::all()
-                    .add(Expr::col(ResultColumn::RunFinishedAt).gte(from))
-                    .add(Expr::col(ResultColumn::RunFinishedAt).lt(to)),
+                    .add(ResultColumn::RunFinishedAt.gte(from))
+                    .add(ResultColumn::RunFinishedAt.lt(to)),
             )
             .project_all(runner, |query| {
                 query
@@ -910,7 +908,7 @@ impl ResultsRepository for OrmResultsRepository {
             .secure()
             .scope_with(scope)
             .filter(
-                Condition::all().add(Expr::col(ResultColumn::RunId).is_in(run_ids.iter().copied())),
+                Condition::all().add(ResultColumn::RunId.is_in(run_ids.iter().copied())),
             )
             .project_all(runner, grouped_status_counts)
             .await
@@ -944,7 +942,7 @@ impl ResultsRepository for OrmResultsRepository {
         let rows: Vec<RunStatusCountRow> = ResultEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(Expr::col(ResultColumn::RunFinishedAt).gte(since)))
+            .filter(Condition::all().add(ResultColumn::RunFinishedAt.gte(since)))
             .project_all(runner, grouped_status_counts)
             .await
             .map_err(db_err)?;
@@ -1039,7 +1037,7 @@ impl ResultsRepository for OrmResultsRepository {
             .scope_with(scope)
             .filter(
                 Condition::all()
-                    .add(Expr::col(ResultColumn::Status).is_in(statuses.iter().copied()))
+                    .add(ResultColumn::Status.is_in(statuses.iter().copied()))
                     .add(kpi_window(since, None)),
             )
             .order_by(effective_ts(), Order::Desc)
@@ -1233,7 +1231,7 @@ impl ResultsRepository for OrmResultsRepository {
             // Legacy's `tr.test_file IS NOT NULL` (`:491`). `''` is this schema's
             // spelling of that `NULL` — the column is `NOT NULL DEFAULT ''` — so
             // this admits exactly the rows legacy's predicate does.
-            .filter(Condition::all().add(Expr::col(ResultColumn::TestFile).ne("")))
+            .filter(Condition::all().add(ResultColumn::TestFile.ne("")))
             .project_all(runner, move |query| {
                 query
                     .select_only()
@@ -1665,7 +1663,7 @@ fn new_case_am(
 
 #[cfg(test)]
 mod tests {
-    use sea_orm::{ActiveValue, Condition, EntityTrait};
+    use sea_orm::{ColumnTrait, ActiveValue, Condition, EntityTrait};
     use time::{Duration, OffsetDateTime};
     use uuid::Uuid;
 
@@ -1857,7 +1855,7 @@ mod tests {
         let cases = CaseEntity::find()
             .secure()
             .scope_with(&scope(tenant))
-            .filter(Condition::all().add(Expr::col(CaseColumn::RunId).eq(run_id)))
+            .filter(Condition::all().add(CaseColumn::RunId.eq(run_id)))
             .all(&conn)
             .await
             .unwrap();
@@ -2444,7 +2442,7 @@ mod tests {
         let cases = CaseEntity::find()
             .secure()
             .scope_with(&scope(tenant))
-            .filter(Condition::all().add(Expr::col(CaseColumn::RunId).eq(run_id)))
+            .filter(Condition::all().add(CaseColumn::RunId.eq(run_id)))
             .all(&conn)
             .await
             .unwrap();
@@ -2491,7 +2489,7 @@ mod tests {
             CaseEntity::find()
                 .secure()
                 .scope_with(&scope(tenant))
-                .filter(Condition::all().add(Expr::col(CaseColumn::RunId).eq(run_id)))
+                .filter(Condition::all().add(CaseColumn::RunId.eq(run_id)))
                 .all(&conn)
                 .await
                 .unwrap()
@@ -3569,7 +3567,7 @@ mod tests {
         let mut rows = ResultEntity::find()
             .secure()
             .scope_with(&scope(tenant))
-            .filter(Condition::all().add(Expr::col(ResultColumn::RunId).eq(run_id)))
+            .filter(Condition::all().add(ResultColumn::RunId.eq(run_id)))
             .all(&conn)
             .await
             .unwrap();

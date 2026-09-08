@@ -113,7 +113,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sea_orm::sea_query::{Expr, SimpleExpr};
-use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, ExprTrait, QueryFilter};
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 use toolkit_db::secure::{ScopeError, SecureDeleteExt, SecureUpdateExt};

@@ -1,5 +1,6 @@
 use thiserror::Error;
 use toolkit_macros::domain_model;
+use toolkit_canonical_errors::CanonicalError;
 use uuid::Uuid;
 
 /// Domain-specific errors using thiserror
@@ -299,9 +300,11 @@ mod tests {
     /// Unchanged: the PDP RPC itself failing is a fault, not a decision.
     #[test]
     fn an_evaluation_failure_is_internal() {
-        let e = EnforcerError::EvaluationFailed(AuthZResolverError::ServiceUnavailable(
-            "plugin not registered".to_owned(),
-        ));
+        let e = EnforcerError::EvaluationFailed(
+                CanonicalError::service_unavailable()
+                    .with_detail("plugin not registered")
+                    .create(),
+            );
         assert!(matches!(DomainError::from(e), DomainError::Internal(_)));
     }
 

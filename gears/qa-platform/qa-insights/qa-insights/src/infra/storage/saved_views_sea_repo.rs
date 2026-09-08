@@ -21,7 +21,7 @@
 use async_trait::async_trait;
 use qa_insights_sdk::{NewSavedView, SavedView, SavedViewScope};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, Condition, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::secure::{
     DBRunner, SecureDeleteExt, SecureEntityExt, secure_insert, secure_update_with_scope,
@@ -85,8 +85,8 @@ impl SavedViewsRepository for OrmSavedViewsRepository {
             .scope_with(scope_ctx)
             .filter(
                 Condition::all()
-                    .add(Expr::col(ViewColumn::Scope).eq(scope.as_str()))
-                    .add(Expr::col(ViewColumn::PlanKey).eq(key_for_plan(plan))),
+                    .add(ViewColumn::Scope.eq(scope.as_str()))
+                    .add(ViewColumn::PlanKey.eq(key_for_plan(plan))),
             )
             .all(runner)
             .await
@@ -190,7 +190,7 @@ impl SavedViewsRepository for OrmSavedViewsRepository {
         id: Uuid,
     ) -> Result<bool, DomainError> {
         let result = ViewEntity::delete_many()
-            .filter(Condition::all().add(Expr::col(ViewColumn::Id).eq(id)))
+            .filter(Condition::all().add(ViewColumn::Id.eq(id)))
             .secure()
             .scope_with(scope_ctx)
             .exec(runner)
@@ -215,13 +215,13 @@ impl SavedViewsRepository for OrmSavedViewsRepository {
             .scope_with(scope_ctx)
             .filter(
                 Condition::all()
-                    .add(Expr::col(ViewColumn::TenantId).eq(tenant_id))
-                    .add(Expr::col(ViewColumn::OwnerId).eq(key.owner_id))
-                    .add(Expr::col(ViewColumn::Scope).eq(key.scope.as_str()))
+                    .add(ViewColumn::TenantId.eq(tenant_id))
+                    .add(ViewColumn::OwnerId.eq(key.owner_id))
+                    .add(ViewColumn::Scope.eq(key.scope.as_str()))
                     // The same derivation the writers use, which is the whole
                     // reason `SavedViewKey` carries no `plan_key` of its own.
-                    .add(Expr::col(ViewColumn::PlanKey).eq(key_for_plan(key.plan)))
-                    .add(Expr::col(ViewColumn::Name).eq(key.name)),
+                    .add(ViewColumn::PlanKey.eq(key_for_plan(key.plan)))
+                    .add(ViewColumn::Name.eq(key.name)),
             )
             .one(runner)
             .await

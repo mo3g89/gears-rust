@@ -126,11 +126,12 @@ impl RunLogsRepository for OrmRunsRepository {
         text: &str,
         lines: i64,
     ) -> Result<(), DomainError> {
+        use sea_orm::ExprTrait;
         // A SCOPED UPDATE FIRST, THEN AN INSERT IF THERE WAS NOTHING TO
         // UPDATE. See the module doc for why, and for why the "$1" bound
         // here is a `CONCAT` function call and not a `||` operator.
         let updated = LogEntity::update_many()
-            .filter(Condition::all().add(Expr::col(LogColumn::RunId).eq(run_id)))
+            .filter(Condition::all().add(LogColumn::RunId.eq(run_id)))
             .secure()
             .scope_with(scope)
             .col_expr(

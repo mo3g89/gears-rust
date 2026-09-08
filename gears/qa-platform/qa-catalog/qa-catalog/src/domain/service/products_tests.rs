@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::models::{EvaluationRequest, EvaluationResponse};
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError, PolicyEnforcer};
 use qa_catalog_sdk::{NewProduct, Product, ProductUpdate};
 use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
@@ -26,6 +26,8 @@ use super::test_support::{
 use super::{actions, resources};
 use crate::domain::error::DomainError;
 use crate::domain::repos::ProductsRepository;
+use toolkit_security::PlatformSecurityContext;
+use toolkit_canonical_errors::CanonicalError;
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -173,11 +175,12 @@ impl RecordingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for RecordingAuthZ {
+impl AuthZResolverApi for RecordingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.requests
             .lock()
             .unwrap()
@@ -262,7 +265,7 @@ async fn build_service(
 
 async fn build_service_with_presence(
     repo: Arc<MockProductsRepository>,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
     presence: Arc<ScriptedPresence>,
 ) -> ProductsService<MockProductsRepository> {
     let enforcer = PolicyEnforcer::new(authz);
@@ -275,7 +278,7 @@ async fn build_service_with_presence(
 /// returns rather than the requests the service made.
 async fn build_service_with_authz(
     repo: Arc<MockProductsRepository>,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
 ) -> ProductsService<MockProductsRepository> {
     build_service_with_presence(repo, authz, ScriptedPresence::answering(true)).await
 }

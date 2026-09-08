@@ -175,6 +175,11 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::Postgres => POSTGRES_UP,
             sea_orm::DatabaseBackend::MySql => MYSQL_UP,
             sea_orm::DatabaseBackend::Sqlite => SQLITE_UP,
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         };
 
         conn.execute_unprepared(sql).await?;

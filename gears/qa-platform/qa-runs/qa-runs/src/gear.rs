@@ -18,7 +18,7 @@ use toolkit_db::DBProvider;
 use tracing::warn;
 use tracing::{debug, error, info};
 
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_catalog_sdk::QaCatalogClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
 use qa_runs_sdk::QaRunsClientV1;
@@ -314,7 +314,7 @@ impl Gear for QaRuns {
 
         let authz = ctx
             .client_hub()
-            .get::<dyn AuthZResolverClient>()
+            .get::<dyn AuthZResolverApi>()
             .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
         let catalog = ctx
             .client_hub()

@@ -15,8 +15,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use authz_resolver_sdk::AuthZResolverClient;
-use authz_resolver_sdk::AuthZResolverError;
+use authz_resolver_sdk::AuthZResolverApi;
+use toolkit_security::PlatformSecurityContext;
+use toolkit_canonical_errors::CanonicalError;
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
@@ -172,11 +173,12 @@ pub fn permissive_response(request: &EvaluationRequest) -> EvaluationResponse {
 pub struct TenantScopedAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for TenantScopedAuthZ {
+impl AuthZResolverApi for TenantScopedAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(permissive_response(&request))
     }
 }
@@ -208,11 +210,12 @@ pub struct SystemActorGrantAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for SystemActorGrantAuthZ {
+impl AuthZResolverApi for SystemActorGrantAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let is_system =
             request.subject.id == crate::domain::system_actor::QA_CATALOG_SYSTEM_ACTOR_UUID;
 
@@ -241,11 +244,12 @@ impl AuthZResolverClient for SystemActorGrantAuthZ {
 pub struct DenyAllAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for DenyAllAuthZ {
+impl AuthZResolverApi for DenyAllAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: false,
             context: EvaluationResponseContext::default(),
@@ -340,7 +344,7 @@ impl BundleStore for NoopBundleStore {
 /// repositories, not mocks — wired to `db` and `authz`, with inert
 /// sync-engine/bundle-store ports and the in-memory credstore double (the
 /// scoping tests exercise row-level DB isolation, not the git/blob planes).
-pub fn build_services(db: Db, authz: Arc<dyn AuthZResolverClient>) -> Arc<ConcreteAppServices> {
+pub fn build_services(db: Db, authz: Arc<dyn AuthZResolverApi>) -> Arc<ConcreteAppServices> {
     build_services_with_engine(db, authz, Arc::new(NoopSyncEngine), throwaway_repos_dir())
 }
 
@@ -481,7 +485,7 @@ impl QaProductPluginV1 for FixturePlugin {
 /// catalogue endpoint's own tests build their own registry.
 fn fixture_plugin_registry(
     db: Arc<DBProvider<DomainError>>,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
 ) -> Arc<QaProductRegistry<OrmProductsRepository>> {
     let hub = Arc::new(ClientHub::new());
     for instance_id in [FIXTURE_PLUGIN_INSTANCE_ID, FIXTURE_PLUGIN_INSTANCE_ID_B] {
@@ -502,7 +506,7 @@ fn fixture_plugin_registry(
 /// Like [`build_services`] but with a caller-supplied [`RepoSyncPort`].
 fn build_services_with_engine(
     db: Db,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
     sync_engine: Arc<dyn RepoSyncPort>,
     repos_dir: PathBuf,
 ) -> Arc<ConcreteAppServices> {

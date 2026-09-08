@@ -131,7 +131,7 @@ fn a_delete_never_quotes_the_run_behind_the_row() {
 
     let error = as_queue_error(Some(queue_id), DomainError::RunNotFound { id: run_id });
     let problem = Problem::from_error(&error).expect("a problem must serialize");
-    assert_eq!(problem.status, 404);
+    assert_eq!(problem.status, Some(404));
     let body = serde_json::to_string(&problem).expect("a problem must serialize");
 
     assert!(body.contains(QUEUE_GTS), "{body}");
@@ -162,7 +162,7 @@ fn force_starts_capacity_refusal_names_the_queue_entry_and_keeps_its_knob() {
     let queue_id = Uuid::from_u128(0x0E01);
     let error = as_queue_error(Some(queue_id), DomainError::ConcurrencyLimit { limit: 50 });
     let problem = Problem::from_error(&error).expect("a problem must serialize");
-    assert_eq!(problem.status, 429);
+    assert_eq!(problem.status, Some(429));
     let body = serde_json::to_string(&problem).expect("a problem must serialize");
 
     assert!(body.contains(QUEUE_GTS), "{body}");

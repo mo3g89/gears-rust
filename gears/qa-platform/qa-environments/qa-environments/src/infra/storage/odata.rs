@@ -187,15 +187,15 @@ impl ODataFieldMapping<EnvironmentFilterField> for EnvironmentODataMapper {
 
     fn extract_cursor_value(model: &EnvironmentModel, field: EnvironmentFilterField) -> Value {
         match field {
-            EnvironmentFilterField::Id => Value::Uuid(Some(Box::new(model.id))),
-            EnvironmentFilterField::Name => Value::String(Some(Box::new(model.name.clone()))),
-            EnvironmentFilterField::ProductId => Value::Uuid(Some(Box::new(model.product_id))),
+            EnvironmentFilterField::Id => Value::Uuid(Some(model.id)),
+            EnvironmentFilterField::Name => Value::String(Some(model.name.clone())),
+            EnvironmentFilterField::ProductId => Value::Uuid(Some(model.product_id)),
             EnvironmentFilterField::IsDefault => Value::Bool(Some(model.is_default)),
             EnvironmentFilterField::ObservedVersion => {
-                Value::String(model.observed_version.clone().map(Box::new))
+                Value::String(model.observed_version.clone())
             }
             EnvironmentFilterField::CreatedAt => {
-                Value::TimeDateTimeWithTimeZone(Some(Box::new(model.created_at)))
+                Value::TimeDateTimeWithTimeZone(Some(model.created_at))
             }
         }
     }
@@ -297,10 +297,10 @@ impl ODataFieldMapping<VariableFilterField> for PipelineVarODataMapper {
 
     fn extract_cursor_value(model: &PipelineVarModel, field: VariableFilterField) -> Value {
         match field {
-            VariableFilterField::Id => Value::Uuid(Some(Box::new(model.id))),
-            VariableFilterField::Name => Value::String(Some(Box::new(model.name.clone()))),
+            VariableFilterField::Id => Value::Uuid(Some(model.id)),
+            VariableFilterField::Name => Value::String(Some(model.name.clone())),
             VariableFilterField::CreatedAt => {
-                Value::TimeDateTimeWithTimeZone(Some(Box::new(model.created_at)))
+                Value::TimeDateTimeWithTimeZone(Some(model.created_at))
             }
         }
     }
@@ -326,10 +326,10 @@ impl ODataFieldMapping<VariableFilterField> for EnvironmentVarODataMapper {
 
     fn extract_cursor_value(model: &EnvironmentVarModel, field: VariableFilterField) -> Value {
         match field {
-            VariableFilterField::Id => Value::Uuid(Some(Box::new(model.id))),
-            VariableFilterField::Name => Value::String(Some(Box::new(model.name.clone()))),
+            VariableFilterField::Id => Value::Uuid(Some(model.id)),
+            VariableFilterField::Name => Value::String(Some(model.name.clone())),
             VariableFilterField::CreatedAt => {
-                Value::TimeDateTimeWithTimeZone(Some(Box::new(model.created_at)))
+                Value::TimeDateTimeWithTimeZone(Some(model.created_at))
             }
         }
     }

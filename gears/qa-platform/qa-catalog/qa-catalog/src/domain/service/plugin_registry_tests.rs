@@ -702,7 +702,7 @@ use crate::test_support::DenyAllAuthZ;
 async fn metered_registry(
     row: Option<Product>,
     registered: &[(&str, &str)],
-    authz: Arc<dyn authz_resolver_sdk::AuthZResolverClient>,
+    authz: Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
     metrics: Arc<dyn PluginResolutionMetrics>,
 ) -> QaProductRegistry<StubProductsRepository> {
     let hub = Arc::new(ClientHub::new());
@@ -882,12 +882,12 @@ async fn a_product_that_cannot_be_read_is_a_refusal_not_a_failure() {
     for (what, authz, row) in [
         (
             "a product outside the caller's tenant reads as absent",
-            Arc::new(PermissiveAuthZ) as Arc<dyn authz_resolver_sdk::AuthZResolverClient>,
+            Arc::new(PermissiveAuthZ) as Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
             None,
         ),
         (
             "and a denied product read is the same kind of answer",
-            Arc::new(DenyAllAuthZ) as Arc<dyn authz_resolver_sdk::AuthZResolverClient>,
+            Arc::new(DenyAllAuthZ) as Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
             Some(product(Uuid::from_u128(0x5001), PLUGIN_A)),
         ),
     ] {

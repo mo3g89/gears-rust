@@ -55,7 +55,7 @@
 use async_trait::async_trait;
 use qa_insights_sdk::{NotificationConfig, NotificationLogEntry};
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{ActiveValue, Condition, EntityTrait, Order, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, Order, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
@@ -198,10 +198,10 @@ impl NotifyRepository for OrmNotifyRepository {
         ClaimEntity::delete_many()
             .filter(
                 Condition::all()
-                    .add(Expr::col(ClaimColumn::TenantId).eq(tenant_id))
-                    .add(Expr::col(ClaimColumn::RunId).eq(run_id))
-                    .add(Expr::col(ClaimColumn::NotificationKind).eq(kind))
-                    .add(Expr::col(ClaimColumn::EventType).eq(event)),
+                    .add(ClaimColumn::TenantId.eq(tenant_id))
+                    .add(ClaimColumn::RunId.eq(run_id))
+                    .add(ClaimColumn::NotificationKind.eq(kind))
+                    .add(ClaimColumn::EventType.eq(event)),
             )
             .secure()
             .scope_with(scope)
@@ -253,7 +253,7 @@ impl NotifyRepository for OrmNotifyRepository {
         let rows = LogEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(Expr::col(LogColumn::TenantId).eq(tenant_id)))
+            .filter(Condition::all().add(LogColumn::TenantId.eq(tenant_id)))
             .order_by(Expr::col(LogColumn::CreatedAt), Order::Desc)
             // Total, so a repeated read of entries sharing a `created_at`
             // cannot reorder them and page a row twice.
@@ -283,7 +283,7 @@ impl NotifyRepository for OrmNotifyRepository {
         let row = ConfigEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(Expr::col(ConfigColumn::TenantId).eq(tenant_id)))
+            .filter(Condition::all().add(ConfigColumn::TenantId.eq(tenant_id)))
             .one(runner)
             .await
             .map_err(db_err)?;

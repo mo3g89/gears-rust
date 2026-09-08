@@ -173,11 +173,14 @@ ALTER TABLE qa_platforms ADD COLUMN default_branch TEXT NULL;
 /// part of the contract and not plumbing.
 ///
 /// Found as an uncovered surface by Task 13b's code-quality review (mutant M7).
-const fn sql_for(backend: sea_orm::DatabaseBackend) -> &'static str {
+fn sql_for(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
     match backend {
-        sea_orm::DatabaseBackend::Postgres => POSTGRES_UP,
-        sea_orm::DatabaseBackend::MySql => MYSQL_UP,
-        sea_orm::DatabaseBackend::Sqlite => SQLITE_UP,
+        sea_orm::DatabaseBackend::Postgres => Ok(POSTGRES_UP),
+        sea_orm::DatabaseBackend::MySql => Ok(MYSQL_UP),
+        sea_orm::DatabaseBackend::Sqlite => Ok(SQLITE_UP),
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 
@@ -185,7 +188,7 @@ const fn sql_for(backend: sea_orm::DatabaseBackend) -> &'static str {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
-        let sql = sql_for(manager.get_database_backend());
+        let sql = sql_for(manager.get_database_backend())?;
         conn.execute_unprepared(sql).await?;
         Ok(())
     }
@@ -396,14 +399,14 @@ mod tests {
         use sea_orm::DatabaseBackend;
 
         for backend in [DatabaseBackend::Postgres, DatabaseBackend::MySql] {
-            let sql = without_comments(super::sql_for(backend));
+            let sql = without_comments(super::sql_for(backend).expect("dispatch covers every backend this build compiles"));
             assert!(
                 sql.contains("VARCHAR(512)"),
                 "{backend:?} must get a VARCHAR(512) statement, not SQLite's TEXT"
             );
         }
 
-        let sqlite = without_comments(super::sql_for(DatabaseBackend::Sqlite));
+        let sqlite = without_comments(super::sql_for(DatabaseBackend::Sqlite).expect("dispatch covers every backend this build compiles"));
         assert!(
             sqlite.contains("TEXT"),
             "SQLite must get the TEXT statement"
@@ -484,7 +487,7 @@ mod tests {
     /// a raw insert with an entity read makes the test depend on the two
     /// agreeing about how a `Uuid` is bound.
     async fn col(conn: &DatabaseConnection, column: &str) -> Option<String> {
-        conn.query_one(sea_orm::Statement::from_string(
+        conn.query_one_raw(sea_orm::Statement::from_string(
             conn.get_database_backend(),
             format!(
                 "SELECT {column} FROM qa_environments WHERE id = {};",

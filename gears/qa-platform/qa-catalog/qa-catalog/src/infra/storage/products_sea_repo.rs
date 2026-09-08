@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use qa_catalog_sdk::{NewProduct, Product, ProductUpdate};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::secure::{
     DBRunner, SecureDeleteExt, SecureEntityExt, secure_insert, secure_update_with_scope,
@@ -30,7 +30,7 @@ impl ProductsRepository for OrmProductsRepository {
         id: Uuid,
     ) -> Result<Option<Product>, DomainError> {
         let found = ProductEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(ProductColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(ProductColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -95,7 +95,7 @@ impl ProductsRepository for OrmProductsRepository {
         update: ProductUpdate,
     ) -> Result<Option<Product>, DomainError> {
         let existing = ProductEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(ProductColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(ProductColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -145,7 +145,7 @@ impl ProductsRepository for OrmProductsRepository {
         id: Uuid,
     ) -> Result<bool, DomainError> {
         let result = ProductEntity::delete_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(ProductColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(ProductColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .exec(runner)

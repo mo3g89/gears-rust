@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
+use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError};
 use qa_catalog_sdk::{
     CustomPlanEntry, NewCustomPlan, NewCustomPlanEntry, NewProduct, NewTestRepository,
     ProductUpdate, TestRepositoryUpdate,
@@ -27,6 +27,8 @@ use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::system_actor;
+use toolkit_security::PlatformSecurityContext;
+use toolkit_canonical_errors::CanonicalError;
 use crate::test_support::{
     DenyAllAuthZ, all_branch_rows, build_services, build_services_tenant_scoped,
     build_services_tenant_scoped_at, build_services_tenant_scoped_with_credstore,
@@ -1016,7 +1018,7 @@ async fn refreshed_branch_rows_carry_their_own_repo_tenant() {
     );
 }
 
-/// [`AuthZResolverClient`] double that records every request it is asked to
+/// [`AuthZResolverApi`] double that records every request it is asked to
 /// decide and always grants tenant-scoped access — the harness for
 /// [`branch_refresh_enumeration_does_not_consult_the_policy_engine`]: a
 /// request that slipped through to `evaluate` is recorded here regardless of
@@ -1033,11 +1035,12 @@ impl RecordingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for RecordingAuthZ {
+impl AuthZResolverApi for RecordingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.requests
             .lock()
             .unwrap()

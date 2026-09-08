@@ -1457,7 +1457,7 @@ async fn the_ttl_sweep_expires_a_foreign_row_under_its_own_tenant() {
             ),
         ])))
         .queue(Arc::new(FakeQueue::with(vec![stale_owner, stale_other])))
-        .authz(Arc::clone(&covering) as Arc<dyn authz_resolver_sdk::AuthZResolverClient>)
+        .authz(Arc::clone(&covering) as Arc<dyn authz_resolver_sdk::AuthZResolverApi>)
         .build()
         .await;
 
@@ -1905,7 +1905,7 @@ async fn the_dispatcher_writes_under_the_rows_own_tenant() {
             max_concurrent_runs: 0,
             queue_ttl_seconds: 0,
         })
-        .authz(Arc::clone(&covering) as Arc<dyn authz_resolver_sdk::AuthZResolverClient>)
+        .authz(Arc::clone(&covering) as Arc<dyn authz_resolver_sdk::AuthZResolverApi>)
         .build()
         .await;
 

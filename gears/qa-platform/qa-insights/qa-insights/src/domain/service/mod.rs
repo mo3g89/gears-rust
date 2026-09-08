@@ -108,7 +108,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use authz_resolver_sdk::pep::ResourceType;
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use time::Duration;
 use toolkit_db::DBProvider;
 use toolkit_macros::domain_model;
@@ -803,7 +803,7 @@ pub(crate) fn refuse_scope_beyond_tenant(
 /// measured.)
 pub(crate) struct ServiceDeps {
     pub(crate) db: Arc<DbProvider>,
-    pub(crate) authz: Arc<dyn AuthZResolverClient>,
+    pub(crate) authz: Arc<dyn AuthZResolverApi>,
     /// The qa-runs reads, behind [`RunsReader`]. `infra::clients::QaRunsReader`
     /// in production; a fake in this layer's tests.
     pub(crate) runs: Arc<dyn RunsReader>,
@@ -1125,7 +1125,7 @@ where
         // `deps.db` are moved into the reconciler.
         //
         // One `PolicyEnforcer` per service rather than one shared behind an
-        // `Arc`: it is a thin handle over the `Arc<dyn AuthZResolverClient>`
+        // `Arc`: it is a thin handle over the `Arc<dyn AuthZResolverApi>`
         // (`PolicyEnforcer::new` takes it by value), so a clone is a refcount
         // bump and not a second client.
         let reads = Arc::new(results::ResultsService::new(

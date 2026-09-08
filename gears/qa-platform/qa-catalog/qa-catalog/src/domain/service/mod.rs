@@ -43,7 +43,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use authz_resolver_sdk::AuthZResolverClient;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::ResourceType;
 use credstore_sdk::CredStoreClientV1;
@@ -342,7 +342,7 @@ where
 /// infrastructure handles plus the typed config values the services enforce.
 pub struct ServiceDeps {
     pub(crate) db: Arc<DbProvider>,
-    pub(crate) authz: Arc<dyn AuthZResolverClient>,
+    pub(crate) authz: Arc<dyn AuthZResolverApi>,
     pub(crate) credstore: Arc<dyn CredStoreClientV1>,
     pub(crate) sync_engine: Arc<dyn RepoSyncPort>,
     pub(crate) bundle_store: Arc<dyn BundleStore>,

@@ -239,6 +239,11 @@ regex = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 
 [dev-dependencies]
+# `Problem::from_error_debug` moved behind this feature in the new
+# toolkit-canonical-errors. `domain::error`'s drift guard asserts the debug
+# renderer leaks nothing either, so the test tier needs it -- and only the
+# test tier: a production build never enables it.
+toolkit-canonical-errors = { workspace = true, features = ["debug-problem"] }
 # The in-memory metric exporter (`InMemoryMetricExporter`) the adapter's tests
 # and the two call-site tests read their series back from — it lives behind
 # `opentelemetry_sdk`'s `testing` feature.

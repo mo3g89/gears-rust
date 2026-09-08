@@ -34,7 +34,7 @@
 
 use async_trait::async_trait;
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{ActiveValue, Condition, EntityTrait};
+use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait};
 use time::OffsetDateTime;
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureEntityExt, SecureInsertExt, SecureUpdateExt,
@@ -205,8 +205,8 @@ async fn advance_existing<C: DBRunner>(
         .scope_with(scope)
         .filter(
             Condition::any()
-                .add(Expr::col(column).is_null())
-                .add(Expr::col(column).lt(at)),
+                .add(column.is_null())
+                .add(column.lt(at)),
         )
         .col_expr(column, Expr::value(at))
         .col_expr(

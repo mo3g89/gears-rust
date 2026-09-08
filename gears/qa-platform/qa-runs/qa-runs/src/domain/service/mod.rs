@@ -61,7 +61,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::pep::ResourceType;
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_catalog_sdk::QaCatalogClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
 use tokio_util::sync::CancellationToken;
@@ -704,7 +704,7 @@ pub(crate) struct QueueLimits {
 /// infrastructure handles plus the typed config values the services enforce.
 pub(crate) struct ServiceDeps {
     pub(crate) db: Arc<DbProvider>,
-    pub(crate) authz: Arc<dyn AuthZResolverClient>,
+    pub(crate) authz: Arc<dyn AuthZResolverApi>,
     pub(crate) catalog: Arc<dyn QaCatalogClientV1>,
     pub(crate) environments: Arc<dyn QaEnvironmentsClientV1>,
     /// The product-plugin resolver, consumed by [`dispatch::DispatchService`]

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::models::{EvaluationRequest, EvaluationResponse};
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError, PolicyEnforcer};
 use qa_environments_sdk::{NewVariable, RESERVED_VARIABLE_NAMES, Variable};
 use toolkit_db::secure::DBRunner;
 use toolkit_security::AccessScope;
@@ -27,6 +27,8 @@ use super::test_support::{MockEnvironmentsRepository, ctx, permissive_response, 
 use super::{VariablesService, actions};
 use crate::domain::error::DomainError;
 use crate::domain::repos::VariablesRepository;
+use toolkit_security::PlatformSecurityContext;
+use toolkit_canonical_errors::CanonicalError;
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -141,11 +143,12 @@ impl RecordingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for RecordingAuthZ {
+impl AuthZResolverApi for RecordingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.requests
             .lock()
             .unwrap()

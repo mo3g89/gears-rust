@@ -225,7 +225,7 @@ impl Migration {
     /// back what was there rather than a hardcoded `ON`.
     async fn foreign_keys_enabled(conn: &SchemaManagerConnection<'_>) -> Result<bool, DbErr> {
         let row = conn
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 conn.get_database_backend(),
                 "PRAGMA foreign_keys;".to_owned(),
             ))
@@ -280,7 +280,7 @@ impl Migration {
     /// Task 20a survive, so the message has to say what to do about them.
     async fn refuse_productless_rows(conn: &SchemaManagerConnection<'_>) -> Result<(), DbErr> {
         let rows = conn
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 conn.get_database_backend(),
                 "SELECT id FROM qa_environments WHERE product_id IS NULL;".to_owned(),
             ))
@@ -326,6 +326,11 @@ impl MigrationTrait for Migration {
                 .await?;
             }
             DatabaseBackend::Sqlite => Self::rebuild_sqlite(conn, SQLITE_UP).await?,
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         }
         Ok(())
     }
@@ -346,6 +351,11 @@ impl MigrationTrait for Migration {
                 .await?;
             }
             DatabaseBackend::Sqlite => Self::rebuild_sqlite(conn, SQLITE_DOWN).await?,
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         }
         Ok(())
     }

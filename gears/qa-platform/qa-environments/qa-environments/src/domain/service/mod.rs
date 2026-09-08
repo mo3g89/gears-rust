@@ -28,7 +28,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use authz_resolver_sdk::AuthZResolverClient;
+use authz_resolver_sdk::AuthZResolverApi;
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::ResourceType;
 use credstore_sdk::CredStoreClientV1;
@@ -302,7 +302,7 @@ where
         variables_repo: Arc<V>,
         leases_repo: Arc<L>,
         db: Arc<DbProvider>,
-        authz: Arc<dyn AuthZResolverClient>,
+        authz: Arc<dyn AuthZResolverApi>,
         credstore: Arc<dyn CredStoreClientV1>,
         observer: Arc<dyn RunnerSecretWriter>,
         product_plugins: Arc<dyn ProductPluginPort>,

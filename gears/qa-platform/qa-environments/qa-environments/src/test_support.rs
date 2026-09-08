@@ -15,8 +15,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use authz_resolver_sdk::AuthZResolverClient;
-use authz_resolver_sdk::AuthZResolverError;
+use authz_resolver_sdk::AuthZResolverApi;
+use toolkit_security::PlatformSecurityContext;
+use toolkit_canonical_errors::CanonicalError;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
@@ -148,11 +149,12 @@ pub fn permissive_response(request: &EvaluationRequest) -> EvaluationResponse {
 pub struct TenantScopedAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for TenantScopedAuthZ {
+impl AuthZResolverApi for TenantScopedAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(permissive_response(&request))
     }
 }
@@ -188,11 +190,12 @@ impl RecordingAuthZ {
 }
 
 #[async_trait]
-impl AuthZResolverClient for RecordingAuthZ {
+impl AuthZResolverApi for RecordingAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.requests
             .lock()
             .unwrap()
@@ -207,11 +210,12 @@ impl AuthZResolverClient for RecordingAuthZ {
 pub struct DenyAllAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for DenyAllAuthZ {
+impl AuthZResolverApi for DenyAllAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: false,
             context: EvaluationResponseContext::default(),
@@ -518,7 +522,7 @@ impl RunnerSecretWriter for FailingSecretObserver {
 /// Build the real `ConcreteAppServices` DI container — `SeaORM`-backed
 /// repositories, not mocks — wired to `db` and `authz`, using the gear's
 /// configured default `max_variables` cap (see `QaEnvironmentsConfig`).
-pub fn build_services(db: Db, authz: Arc<dyn AuthZResolverClient>) -> Arc<ConcreteAppServices> {
+pub fn build_services(db: Db, authz: Arc<dyn AuthZResolverApi>) -> Arc<ConcreteAppServices> {
     build_services_with_limit(
         db,
         authz,
@@ -531,7 +535,7 @@ pub fn build_services(db: Db, authz: Arc<dyn AuthZResolverClient>) -> Arc<Concre
 /// `list_for_env` truncation behavior.
 pub fn build_services_with_limit(
     db: Db,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
     max_variables: usize,
 ) -> Arc<ConcreteAppServices> {
     build_services_full(
@@ -547,7 +551,7 @@ pub fn build_services_with_limit(
 /// and assert against it (and, now, to supply a [`RunnerSecretWriter`] double).
 pub fn build_services_full(
     db: Db,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
     credstore: Arc<dyn CredStoreClientV1>,
     observer: Arc<dyn RunnerSecretWriter>,
     max_variables: usize,
@@ -567,7 +571,7 @@ pub fn build_services_full(
 /// [`no_plugin_port`].
 pub fn build_services_with_plugin_port(
     db: Db,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
     credstore: Arc<dyn CredStoreClientV1>,
     observer: Arc<dyn RunnerSecretWriter>,
     product_plugins: Arc<dyn ProductPluginPort>,
@@ -602,7 +606,7 @@ pub fn build_services_with_plugin_port(
 )]
 pub fn build_services_with_plugin_port_and_metrics(
     db: Db,
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: Arc<dyn AuthZResolverApi>,
     credstore: Arc<dyn CredStoreClientV1>,
     observer: Arc<dyn RunnerSecretWriter>,
     product_plugins: Arc<dyn ProductPluginPort>,

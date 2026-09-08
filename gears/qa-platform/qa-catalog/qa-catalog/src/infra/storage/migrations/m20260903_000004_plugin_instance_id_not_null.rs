@@ -190,18 +190,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_products_tenant_key ON qa_products(tena
 
 /// Pick the statements for a backend.
 ///
-/// An exhaustive `match` on purpose: `sea_orm::DatabaseBackend` is
-/// `non_exhaustive`-free, so a new dialect is a compile error here rather than
-/// a wildcard that hands the server dialects the wrong statement. That is the
+/// Dispatch on `(backend, up)`. `sea_orm::DatabaseBackend` became
+/// `#[non_exhaustive]` in SeaORM 2.0 -- its variants are feature-gated -- so a
+/// catch-all arm is now required by the compiler. It returns an error naming
+/// the backend rather than handing the server another dialect's statement,
+/// which is the property the previous exhaustive match bought. That is the
 /// argument `m20260903_000003`'s `alter_for` makes, and this follows it.
-const fn statements_for(backend: sea_orm::DatabaseBackend, up: bool) -> &'static str {
+fn statements_for(backend: sea_orm::DatabaseBackend, up: bool) -> Result<&'static str, DbErr> {
     match (backend, up) {
-        (sea_orm::DatabaseBackend::Postgres, true) => POSTGRES_UP,
-        (sea_orm::DatabaseBackend::Postgres, false) => POSTGRES_DOWN,
-        (sea_orm::DatabaseBackend::MySql, true) => MYSQL_UP,
-        (sea_orm::DatabaseBackend::MySql, false) => MYSQL_DOWN,
-        (sea_orm::DatabaseBackend::Sqlite, true) => SQLITE_UP,
-        (sea_orm::DatabaseBackend::Sqlite, false) => SQLITE_DOWN,
+        (sea_orm::DatabaseBackend::Postgres, true) => Ok(POSTGRES_UP),
+        (sea_orm::DatabaseBackend::Postgres, false) => Ok(POSTGRES_DOWN),
+        (sea_orm::DatabaseBackend::MySql, true) => Ok(MYSQL_UP),
+        (sea_orm::DatabaseBackend::MySql, false) => Ok(MYSQL_DOWN),
+        (sea_orm::DatabaseBackend::Sqlite, true) => Ok(SQLITE_UP),
+        (sea_orm::DatabaseBackend::Sqlite, false) => Ok(SQLITE_DOWN),
+        other => {
+            return Err(DbErr::Migration(format!(
+                "unsupported database backend: {other:?}"
+            )));
+        }
     }
 }
 
@@ -261,7 +268,7 @@ impl Migration {
     /// back what was there.
     async fn foreign_keys_enabled(conn: &SchemaManagerConnection<'_>) -> Result<bool, DbErr> {
         let row = conn
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 conn.get_database_backend(),
                 "PRAGMA foreign_keys;".to_owned(),
             ))
@@ -280,7 +287,7 @@ impl Migration {
     /// how a migration stops compiling three releases later.
     async fn offending_ids(conn: &SchemaManagerConnection<'_>) -> Result<Option<String>, DbErr> {
         let rows = conn
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 conn.get_database_backend(),
                 "SELECT id FROM qa_products WHERE plugin_instance_id IS NULL;".to_owned(),
             ))
@@ -325,7 +332,7 @@ impl MigrationTrait for Migration {
         }
 
         let backend = manager.get_database_backend();
-        let statements = statements_for(backend, true);
+        let statements = statements_for(backend, true)?;
         if backend == sea_orm::DatabaseBackend::Sqlite {
             Self::rebuild_sqlite(conn, statements).await?;
         } else {
@@ -337,7 +344,7 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
         let backend = manager.get_database_backend();
-        let statements = statements_for(backend, false);
+        let statements = statements_for(backend, false)?;
         if backend == sea_orm::DatabaseBackend::Sqlite {
             Self::rebuild_sqlite(conn, statements).await?;
         } else {

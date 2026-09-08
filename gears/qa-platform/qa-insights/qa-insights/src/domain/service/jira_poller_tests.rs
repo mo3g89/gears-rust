@@ -51,6 +51,8 @@ use crate::infra::metrics::probe::MetricsProbe;
 use crate::infra::storage::jira_sea_repo::OrmJiraRepository;
 use crate::infra::storage::results_sea_repo::OrmResultsRepository;
 use crate::infra::storage::test_db::{inmem_db, scope};
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::PlatformSecurityContext;
 
 const TENANT: Uuid = Uuid::from_u128(0x0A);
 
@@ -389,7 +391,7 @@ async fn build_with_category(category: &str, configured: bool) -> Fixture {
 async fn build_with_authz(
     category: &str,
     configured: bool,
-    authz: Arc<dyn authz_resolver_sdk::AuthZResolverClient>,
+    authz: Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
 ) -> Fixture {
     let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
     build_on(
@@ -417,7 +419,7 @@ async fn build_on(
     rendezvous: Option<Arc<Rendezvous>>,
     category: &str,
     configured: bool,
-    authz: Arc<dyn authz_resolver_sdk::AuthZResolverClient>,
+    authz: Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
 ) -> Fixture {
     let jira_client = Arc::new(FakeJiraStatus {
         category: StatusCategory::new(category),
@@ -809,11 +811,12 @@ async fn a_bug_still_open_in_jira_is_neither_resolved_nor_rerun() {
 struct TwoTenantAuthZ;
 
 #[async_trait]
-impl authz_resolver_sdk::AuthZResolverClient for TwoTenantAuthZ {
+impl authz_resolver_sdk::AuthZResolverApi for TwoTenantAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: authz_resolver_sdk::EvaluationRequest,
-    ) -> Result<authz_resolver_sdk::EvaluationResponse, authz_resolver_sdk::AuthZResolverError>
+    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError>
     {
         Ok(authz_resolver_sdk::EvaluationResponse {
             decision: true,
@@ -1120,11 +1123,12 @@ struct DenyOneAuthZ {
 }
 
 #[async_trait]
-impl authz_resolver_sdk::AuthZResolverClient for DenyOneAuthZ {
+impl authz_resolver_sdk::AuthZResolverApi for DenyOneAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: authz_resolver_sdk::EvaluationRequest,
-    ) -> Result<authz_resolver_sdk::EvaluationResponse, authz_resolver_sdk::AuthZResolverError>
+    ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError>
     {
         if request.resource.resource_type == self.resource && request.action.name == self.action {
             return Ok(authz_resolver_sdk::EvaluationResponse {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::models::{EvaluationRequest, EvaluationResponse};
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
+use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError};
 use qa_environments_sdk::{Environment, EnvironmentPatch, NewEnvironment};
 use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
@@ -17,6 +17,8 @@ use uuid::Uuid;
 use super::DbProvider;
 use crate::domain::error::DomainError;
 use crate::domain::repos::{EnvironmentsRepository, PersistedCredentials};
+use toolkit_security::PlatformSecurityContext;
+use toolkit_canonical_errors::CanonicalError;
 
 /// Build a `SecurityContext` for `tenant_id` with a fresh random subject.
 pub(super) fn ctx(tenant_id: Uuid) -> SecurityContext {
@@ -195,11 +197,12 @@ pub(super) use crate::test_support::permissive_response;
 pub(super) struct PermissiveAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for PermissiveAuthZ {
+impl AuthZResolverApi for PermissiveAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(permissive_response(&request))
     }
 }

@@ -31,7 +31,7 @@ use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError};
+use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError};
 use qa_catalog_sdk::{
     BundleRequest, CustomPlan, CustomPlanEntry, Exclusivity, NewCustomPlan, NewTestRepository,
     Plan, Product, QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle,
@@ -62,6 +62,8 @@ use crate::domain::service::{AppServices, FlushReport, LogArchive, QueueLimits, 
 use crate::gear::ConcreteAppServices;
 use crate::infra::executor::mock::MockRunExecutor;
 use crate::infra::logs::RunLogBroadcaster;
+use toolkit_security::PlatformSecurityContext;
+use toolkit_canonical_errors::CanonicalError;
 use crate::infra::storage::entity::schedule_tick;
 use crate::infra::storage::test_db::{inmem_db, scope};
 use crate::infra::storage::{OrmQueueRepository, OrmRunsRepository, OrmSchedulesRepository};
@@ -182,11 +184,12 @@ fn permissive_response(request: &EvaluationRequest) -> EvaluationResponse {
 pub struct PermissiveAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for PermissiveAuthZ {
+impl AuthZResolverApi for PermissiveAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(permissive_response(&request))
     }
 }
@@ -1910,11 +1913,12 @@ fn subject_tenant(request: &EvaluationRequest) -> Option<Uuid> {
 }
 
 #[async_trait]
-impl AuthZResolverClient for SchedulerAuthZ {
+impl AuthZResolverApi for SchedulerAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         self.asked.lock().unwrap().push(Asked::new(
             &request.resource.resource_type,
             &request.action.name,
@@ -2154,7 +2158,7 @@ impl Fleet {
             Arc::new(OrmSchedulesRepository),
             ServiceDeps {
                 db: Arc::clone(&self.db),
-                authz: Arc::clone(&self.authz) as Arc<dyn AuthZResolverClient>,
+                authz: Arc::clone(&self.authz) as Arc<dyn AuthZResolverApi>,
                 catalog: Arc::clone(&self.catalog) as Arc<dyn qa_catalog_sdk::QaCatalogClientV1>,
                 environments: Arc::clone(&self.environments)
                     as Arc<dyn qa_environments_sdk::QaEnvironmentsClientV1>,

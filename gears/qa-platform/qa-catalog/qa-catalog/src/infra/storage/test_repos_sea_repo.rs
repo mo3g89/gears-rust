@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 use qa_catalog_sdk::{NewTestRepository, TestRepository, TestRepositoryUpdate};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::secure::{
     DBRunner, SecureDeleteExt, SecureEntityExt, secure_insert, secure_update_with_scope,
@@ -35,7 +35,7 @@ impl TestReposRepository for OrmTestReposRepository {
         id: Uuid,
     ) -> Result<Option<TestRepository>, DomainError> {
         let found = RepoEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(RepoColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(RepoColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -103,7 +103,7 @@ impl TestReposRepository for OrmTestReposRepository {
         invalidate_working_copy: bool,
     ) -> Result<Option<TestRepository>, DomainError> {
         let existing = RepoEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(RepoColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(RepoColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -158,7 +158,7 @@ impl TestReposRepository for OrmTestReposRepository {
         id: Uuid,
     ) -> Result<bool, DomainError> {
         let result = RepoEntity::delete_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(RepoColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(RepoColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .exec(runner)
@@ -177,7 +177,7 @@ impl TestReposRepository for OrmTestReposRepository {
         sync_error: Option<String>,
     ) -> Result<Option<TestRepository>, DomainError> {
         let existing = RepoEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(RepoColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(RepoColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -222,7 +222,7 @@ impl TestReposRepository for OrmTestReposRepository {
         let now = OffsetDateTime::now_utc();
 
         BranchEntity::delete_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(BranchColumn::RepoId).eq(repo_id)))
+            .filter(sea_orm::Condition::all().add(BranchColumn::RepoId.eq(repo_id)))
             .secure()
             .scope_with(scope)
             .exec(runner)
@@ -269,7 +269,7 @@ impl TestReposRepository for OrmTestReposRepository {
         repo_id: Uuid,
     ) -> Result<Vec<String>, DomainError> {
         let rows = BranchEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(BranchColumn::RepoId).eq(repo_id)))
+            .filter(sea_orm::Condition::all().add(BranchColumn::RepoId.eq(repo_id)))
             .secure()
             .scope_with(scope)
             .order_by(BranchColumn::Name, sea_orm::Order::Asc)

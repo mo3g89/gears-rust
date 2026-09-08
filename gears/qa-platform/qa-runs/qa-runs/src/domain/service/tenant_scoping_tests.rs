@@ -73,7 +73,7 @@ async fn services() -> (Arc<ConcreteAppServices>, Arc<DbProvider>) {
 async fn services_with(
     catalog: Arc<FakeCatalog>,
     environments: Arc<FakeEnvironments>,
-    authz: Arc<dyn authz_resolver_sdk::AuthZResolverClient>,
+    authz: Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
 ) -> (Arc<ConcreteAppServices>, Arc<DbProvider>) {
     let db = Arc::new(DBProvider::<DomainError>::new(inmem_db().await));
     let services = Arc::new(AppServices::new(
@@ -489,7 +489,7 @@ async fn the_reconciler_reads_are_invisible_to_another_tenant() {
         toolkit::api::canonical_prelude::Problem::from_error(&problem)
             .expect("a problem must serialize")
             .status,
-        404,
+        Some(404),
         "and it must be indistinguishable from a run that does not exist, \
          which is what closes the cross-tenant existence oracle: {problem}"
     );

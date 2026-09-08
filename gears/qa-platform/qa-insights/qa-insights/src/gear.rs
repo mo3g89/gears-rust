@@ -85,7 +85,7 @@ use toolkit::{DatabaseCapability, Gear, GearCtx, RestApiCapability};
 use toolkit_db::DBProvider;
 use tracing::{debug, error, info, warn};
 
-use authz_resolver_sdk::AuthZResolverClient;
+use authz_resolver_sdk::AuthZResolverApi;
 use oagw_sdk::api::ServiceGatewayClientV1;
 use qa_catalog_sdk::QaCatalogClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
@@ -454,7 +454,7 @@ impl Gear for QaInsights {
 
         let authz = ctx
             .client_hub()
-            .get::<dyn AuthZResolverClient>()
+            .get::<dyn AuthZResolverApi>()
             .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
 
         // `deps` above already orders qa-runs ahead of this gear, which is what
@@ -515,7 +515,7 @@ impl Gear for QaInsights {
         // every doc in this file discusses separately because it is consumed into
         // a `PolicyEnforcer` rather than held. There are therefore **four**
         // `deps` clients (qa-runs, qa-catalog, qa-environments, oagw) and
-        // **five** lookups (those four plus `AuthZResolverClient`), and a
+        // **five** lookups (those four plus `AuthZResolverApi`), and a
         // deployment that links this gear has to register all five: a fifth,
         // optional `event_broker` lookup lived here from Task 40 until it was
         // deleted, once it was established that no deployment ever registered

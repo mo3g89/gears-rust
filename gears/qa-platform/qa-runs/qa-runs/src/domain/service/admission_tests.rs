@@ -92,6 +92,9 @@ pub(in crate::domain::service) mod fakes {
     //! qa-environments and qa-catalog, plus the wiring that assembles an
     //! admission and a dispatch service over them.
 
+    use toolkit_canonical_errors::CanonicalError;
+    use toolkit_security::PlatformSecurityContext;
+
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
@@ -100,7 +103,7 @@ pub(in crate::domain::service) mod fakes {
     use authz_resolver_sdk::models::{
         EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
     };
-    use authz_resolver_sdk::{AuthZResolverClient, AuthZResolverError, PolicyEnforcer};
+    use authz_resolver_sdk::{AuthZResolverApi, AuthZResolverError, PolicyEnforcer};
     use qa_catalog_sdk::{
         BundleRequest, CustomPlan, CustomPlanEntry, Exclusivity, NewCustomPlan, NewTestRepository,
         Plan, Product, QaCatalogClientV1, QaCatalogError, SshKey, SyncRequest, TestBundle,
@@ -287,7 +290,7 @@ pub(in crate::domain::service) mod fakes {
     ///
     /// A real `AccessScope` does not expose the resource type it was compiled for,
     /// and `PolicyEnforcer` is not a seam these tests can reach behind — so the
-    /// marker is injected where the type *is* visible: the `AuthZResolverClient`
+    /// marker is injected where the type *is* visible: the `AuthZResolverApi`
     /// double sees `request.resource.resource_type`. Each repository double then
     /// asserts the marker matches its own table. That is a property of the test
     /// harness rather than of production, and it is stated as such: what it
@@ -397,11 +400,12 @@ pub(in crate::domain::service) mod fakes {
     }
 
     #[async_trait]
-    impl AuthZResolverClient for SystemGrantingAuthZ {
+    impl AuthZResolverApi for SystemGrantingAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             let constraints = match tenant_of(&request) {
                 Some(id) => constraint_for(&[id], &request.resource.resource_type),
                 // The covering grant for `qa_runs.system`.
@@ -451,11 +455,12 @@ pub(in crate::domain::service) mod fakes {
     }
 
     #[async_trait]
-    impl AuthZResolverClient for RecordingAuthZ {
+    impl AuthZResolverApi for RecordingAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             let tenant = tenant_of(&request);
             if tenant.is_none() {
                 self.nil_tenant_requests.lock().unwrap().push((
@@ -578,11 +583,12 @@ pub(in crate::domain::service) mod fakes {
     }
 
     #[async_trait]
-    impl AuthZResolverClient for CoveringSystemAuthZ {
+    impl AuthZResolverApi for CoveringSystemAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             self.asked
                 .lock()
                 .unwrap()
@@ -612,11 +618,12 @@ pub(in crate::domain::service) mod fakes {
     pub(in crate::domain::service) struct DenyingAuthZ;
 
     #[async_trait]
-    impl AuthZResolverClient for DenyingAuthZ {
+    impl AuthZResolverApi for DenyingAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             _request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             Ok(EvaluationResponse {
                 decision: false,
                 context: EvaluationResponseContext::default(),
@@ -635,11 +642,12 @@ pub(in crate::domain::service) mod fakes {
     }
 
     #[async_trait]
-    impl AuthZResolverClient for DenyingActionAuthZ {
+    impl AuthZResolverApi for DenyingActionAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             if request.action.name == self.action {
                 return Ok(EvaluationResponse {
                     decision: false,
@@ -3103,7 +3111,7 @@ pub(in crate::domain::service) mod fakes {
         catalog: Arc<FakeCatalog>,
         product_plugins: Arc<FakeProductPlugins>,
         executor: Option<Arc<dyn RunExecutor>>,
-        authz: Option<Arc<dyn AuthZResolverClient>>,
+        authz: Option<Arc<dyn AuthZResolverApi>>,
         limits: QueueLimits,
         orphan_timeout_seconds: u64,
         /// The dispatcher's emission port. `None` builds the same
@@ -3174,7 +3182,7 @@ pub(in crate::domain::service) mod fakes {
 
         pub(in crate::domain::service) fn authz(
             mut self,
-            authz: Arc<dyn AuthZResolverClient>,
+            authz: Arc<dyn AuthZResolverApi>,
         ) -> Self {
             self.authz = Some(authz);
             self
@@ -3210,7 +3218,7 @@ pub(in crate::domain::service) mod fakes {
                 .unwrap_or_else(|| Arc::new(crate::infra::executor::mock::MockRunExecutor::new()));
             let authz = self
                 .authz
-                .unwrap_or_else(|| Arc::new(SystemGrantingAuthZ) as Arc<dyn AuthZResolverClient>);
+                .unwrap_or_else(|| Arc::new(SystemGrantingAuthZ) as Arc<dyn AuthZResolverApi>);
             let enforcer = PolicyEnforcer::new(authz);
             let locks = PlatformLocks::default();
             let metrics: Arc<dyn DispatchMetrics> = self

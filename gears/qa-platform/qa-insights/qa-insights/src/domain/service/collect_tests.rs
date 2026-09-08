@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use toolkit_db::DBProvider;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
@@ -693,7 +693,7 @@ async fn trigger_asks_the_pdp_for_exactly_qa_test_result_collect() {
         OrmCollectRepository,
         catalog as Arc<dyn CatalogReader>,
         Arc::clone(&launcher) as Arc<dyn RunsLauncher>,
-        PolicyEnforcer::new(Arc::clone(&recorder) as Arc<dyn AuthZResolverClient>),
+        PolicyEnforcer::new(Arc::clone(&recorder) as Arc<dyn AuthZResolverApi>),
         DefaultCollectBranch("main".to_owned()),
         CollectReportBaseUrl("http://insights.example".to_owned()),
         CollectReportSigningSecret(SECRET.to_owned()),

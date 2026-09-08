@@ -16,7 +16,7 @@ use toolkit::{DatabaseCapability, Gear, GearCtx, RestApiCapability};
 use toolkit_db::DBProvider;
 use tracing::{debug, error, info, warn};
 
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use credstore_sdk::CredStoreClientV1;
 use qa_catalog_sdk::{QaCatalogClientV1, QaProductPluginResolverV1};
 use uuid::Uuid;
@@ -133,7 +133,7 @@ impl Gear for QaCatalog {
         // Cross-gear clients from ClientHub.
         let authz = ctx
             .client_hub()
-            .get::<dyn AuthZResolverClient>()
+            .get::<dyn AuthZResolverApi>()
             .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
         let credstore = ctx
             .client_hub()

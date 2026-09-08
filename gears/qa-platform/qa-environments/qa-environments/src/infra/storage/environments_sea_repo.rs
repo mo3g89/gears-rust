@@ -13,7 +13,7 @@ use qa_product_sdk::observation::{
     ObservationOutcome as PluginObservationOutcome, ObservedAttrs,
 };
 use sea_orm::sea_query::{Expr, Func};
-use sea_orm::{ActiveValue, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::odata::sea_orm_filter::paginate_odata;
 use toolkit_db::secure::{
@@ -50,7 +50,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         id: Uuid,
     ) -> Result<Option<Environment>, DomainError> {
         let found = EnvironmentEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -242,7 +242,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         credentials: Option<PersistedCredentials>,
     ) -> Result<Option<Environment>, DomainError> {
         let existing = EnvironmentEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -379,8 +379,8 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
             .col_expr(EnvironmentColumn::IsDefault, Expr::value(false))
             .filter(
                 sea_orm::Condition::all()
-                    .add(Expr::col(EnvironmentColumn::ProductId).eq(product_id))
-                    .add(Expr::col(EnvironmentColumn::Id).ne(except_id)),
+                    .add(EnvironmentColumn::ProductId.eq(product_id))
+                    .add(EnvironmentColumn::Id.ne(except_id)),
             )
             .secure()
             .scope_with(scope)
@@ -398,7 +398,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         id: Uuid,
     ) -> Result<bool, DomainError> {
         let result = EnvironmentEntity::delete_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .exec(runner)
@@ -459,7 +459,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         let now = OffsetDateTime::now_utc();
 
         let update = EnvironmentEntity::update_many()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentColumn::Id.eq(id)))
             .secure()
             .scope_with(scope);
 
@@ -650,7 +650,7 @@ fn attrs_or_skip(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod record_observation_tests {
     use qa_environments_sdk::NewEnvironment;
-    use sea_orm::{EntityTrait, QueryFilter};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     use toolkit_db::secure::{DBRunner, SecureEntityExt};
     use toolkit_security::AccessScope;
     use uuid::Uuid;
@@ -793,7 +793,7 @@ mod record_observation_tests {
     /// would drop the four columns under test.
     async fn fetch_row(conn: &impl DBRunner, scope: &AccessScope, id: Uuid) -> environment::Model {
         EnvironmentEntity::find()
-            .filter(sea_orm::Condition::all().add(Expr::col(EnvironmentColumn::Id).eq(id)))
+            .filter(sea_orm::Condition::all().add(EnvironmentColumn::Id.eq(id)))
             .secure()
             .scope_with(scope)
             .one(conn)

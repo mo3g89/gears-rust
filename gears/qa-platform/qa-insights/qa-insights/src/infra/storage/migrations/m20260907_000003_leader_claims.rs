@@ -118,6 +118,9 @@ fn up_ddl(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
              \"MySQL key-width budget\"."
                 .to_owned(),
         )),
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 
@@ -182,7 +185,7 @@ mod tests {
                  '{holder}', '2026-09-07 00:00:00', '2026-09-07 00:01:00')"
             )
         };
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             row(
                 "11111111-1111-1111-1111-111111111111",
@@ -193,7 +196,7 @@ mod tests {
         .expect("the first claim on a free role must be accepted");
 
         let second = conn
-            .execute(Statement::from_string(
+            .execute_raw(Statement::from_string(
                 sea_orm::DatabaseBackend::Sqlite,
                 row(
                     "22222222-2222-2222-2222-222222222222",
@@ -227,7 +230,7 @@ mod tests {
                 "qa-insights-reconciler",
             ),
         ] {
-            conn.execute(Statement::from_string(
+            conn.execute_raw(Statement::from_string(
                 sea_orm::DatabaseBackend::Sqlite,
                 format!(
                     "INSERT INTO qa_leader_claims \
@@ -278,7 +281,7 @@ mod tests {
             let conn = conn.clone();
             async move {
                 let mut out = conn
-                    .query_all(Statement::from_string(backend, sql))
+                    .query_all_raw(Statement::from_string(backend, sql))
                     .await
                     .unwrap()
                     .iter()

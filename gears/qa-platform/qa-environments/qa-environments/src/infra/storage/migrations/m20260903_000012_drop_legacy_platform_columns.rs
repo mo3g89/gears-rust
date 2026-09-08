@@ -214,11 +214,14 @@ const SQLITE_JSON: Json = Json {
 /// `m20260828_000007_platform_observation::sql_for`'s precedent: inline,
 /// nothing could reach it, and swapping two adjacent arms is the mistake that
 /// guard exists to catch.
-const fn json_for(backend: DatabaseBackend) -> &'static Json {
+fn json_for(backend: DatabaseBackend) -> Result<&'static Json, DbErr> {
     match backend {
-        DatabaseBackend::Postgres => &POSTGRES_JSON,
-        DatabaseBackend::MySql => &MYSQL_JSON,
-        DatabaseBackend::Sqlite => &SQLITE_JSON,
+        DatabaseBackend::Postgres => Ok(&POSTGRES_JSON),
+        DatabaseBackend::MySql => Ok(&MYSQL_JSON),
+        DatabaseBackend::Sqlite => Ok(&SQLITE_JSON),
+        other => Err(DbErr::Migration(format!(
+            "unsupported database backend: {other:?}"
+        ))),
     }
 }
 
@@ -249,7 +252,7 @@ impl Migration {
         predicate: &str,
     ) -> Result<Option<String>, DbErr> {
         let rows = conn
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 conn.get_database_backend(),
                 format!("SELECT id FROM qa_environments WHERE {predicate};"),
             ))
@@ -339,7 +342,7 @@ impl Migration {
         // literal, so it must not push the count past one.
         let bucket_one = format!("{is_array} AND {length} = 0 AND NOT {LEGACY_EMPTY}");
         let spread = conn
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 conn.get_database_backend(),
                 format!(
                     "SELECT COUNT(DISTINCT product_id) FROM qa_environments WHERE {bucket_one};"
@@ -392,7 +395,7 @@ fn rederive_for(json: &Json) -> String {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
-        let json = json_for(manager.get_database_backend());
+        let json = json_for(manager.get_database_backend())?;
 
         Self::refuse_unrepairable_rows(conn, json).await?;
         conn.execute_unprepared(&rederive_for(json)).await?;
@@ -409,16 +412,26 @@ impl MigrationTrait for Migration {
     /// Best-effort. See the module doc for what it cannot recover.
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
-        let json = json_for(manager.get_database_backend());
+        let json = json_for(manager.get_database_backend())?;
         let timestamp = match manager.get_database_backend() {
             DatabaseBackend::Postgres => "TIMESTAMPTZ",
             DatabaseBackend::MySql => "TIMESTAMP",
             DatabaseBackend::Sqlite => "TEXT",
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         };
         let json_column = match manager.get_database_backend() {
             DatabaseBackend::Postgres => "JSONB",
             DatabaseBackend::MySql => "JSON",
             DatabaseBackend::Sqlite => "TEXT",
+            other => {
+                return Err(DbErr::Migration(format!(
+                    "unsupported database backend: {other:?}"
+                )));
+            }
         };
 
         conn.execute_unprepared(&format!(
