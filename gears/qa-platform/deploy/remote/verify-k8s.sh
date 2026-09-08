@@ -1129,12 +1129,32 @@ fi
 otel_service="$(sed -n 's/^    service_name: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$WORKDIR/otel.block" | head -1)"
 otel_endpoint="$(sed -n 's/^      endpoint: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$WORKDIR/otel.block" | head -1)"
 # The LAST `enabled:` in the block is the metrics one; tracing's comes first.
-# Both are read rather than one, so a transform that rewrote the wrong block
-# is visible here instead of being reported as success.
+# Both are read, and BOTH ARE ASSERTED BELOW -- reading tracing without
+# checking it would make this comment a claim the step does not perform, which
+# is the defect class this whole phase kept producing.
 otel_tracing="$(sed -n 's/^    enabled: *\(.*\)$/\1/p' "$WORKDIR/otel.block" | head -1)"
 otel_metrics="$(sed -n 's/^    enabled: *\(.*\)$/\1/p' "$WORKDIR/otel.block" | sed -n '2p')"
 if [ -z "$otel_metrics" ]; then
     echo "FAIL: the rendered opentelemetry block has no metrics 'enabled:' line -- found only [$(tr '\n' ' ' < "$WORKDIR/otel.block")]. The block's shape changed and this check can no longer tell enabled from disabled; fix the config or this check, but do not leave it reporting on a shape that is gone." >&2
+    exit 1
+fi
+# TRACING MUST STILL BE OFF, and this is the assertion the comment above
+# promises. Nothing in this chart turns tracing on: `values.yaml` exposes only
+# `opentelemetry.metrics`, and the configmap's fourth transform rewrites the
+# two-line `  metrics:\n    enabled: false` sentinel. So a rendered config with
+# tracing enabled means either the metrics transform matched the TRACING block
+# -- both carry the identical line `    enabled: false`, which is exactly why
+# the sentinel is two lines -- or someone hand-edited the committed config.
+#
+# Checked in BOTH states of the metrics flag, deliberately. The failure this
+# catches is loudest in the disabled branch: a transform that rewrote tracing
+# instead of metrics leaves metrics reading `false`, and without this check the
+# step would print its cheerful "metrics are DISABLED (the chart default)" PASS
+# over a stack whose operator asked for metrics and got a tracing pipeline.
+# `test_metrics_config.py`'s `check_enabled` holds the same property at render
+# time; this holds it against what the server actually loaded.
+if [ "$otel_tracing" != "false" ]; then
+    echo "FAIL: opentelemetry.tracing.enabled is '$otel_tracing', expected 'false'. No value in this chart turns tracing on, so either the metrics transform in gears-config-configmap.yaml matched the tracing block (both blocks carry the identical line '    enabled: false' -- that is why the metrics sentinel is two lines), or the committed config was hand-edited. Either way the metrics flag read from this file ('$otel_metrics') cannot be trusted to mean what it says." >&2
     exit 1
 fi
 if [ "$otel_service" != "qa-platform" ]; then
