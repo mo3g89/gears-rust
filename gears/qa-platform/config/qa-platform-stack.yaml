@@ -719,8 +719,48 @@ gears:
       priority: 100
 
 # OpenTelemetry configuration (resource identity, tracing, metrics)
+#
+# THE METRICS HALF IS NOW LOAD-BEARING. The four qa-platform gears declare 22
+# metric families between them (the catalog is docs/DESIGN.md 3.9, enumerated
+# from the constants in each gear's `domain::metrics`), and this block is the
+# only switch that decides whether any of them leaves the process.
+#
+# THEY ARE PUSHED, NOT SCRAPED, and that is the whole reason this is a config
+# block rather than a container port. `libs/toolkit/src/telemetry/init.rs`'
+# `init_metrics_provider` builds an `SdkMeterProvider` with an
+# `opentelemetry_otlp::MetricExporter` and a periodic reader; nothing in this
+# repository serves a `/metrics` route and no chart here carries a scrape
+# annotation. A metrics port on the gears Deployment would answer nothing, and
+# adding one would invent a second convention beside this one.
+#
+# WHAT `enabled: false` MEANS, precisely, because it is not "metrics are
+# broken": `init_metrics_provider` returns before building anything and the
+# process-global meter provider stays the built-in no-op, so every instrument
+# each gear's `build_default_adapter` obtains is a no-op and every emission is
+# silent. The gears run identically either way -- each gear's own
+# "no pipeline configured" test is the evidence -- so the cost of leaving this
+# off is that nothing is observable, not that anything misbehaves.
+#
+# TURNING IT ON NEEDS A COLLECTOR AT `endpoint`. Under `cargo run` that is a
+# local one, which is why the loopback address below is right here and wrong in
+# a pod (its own 127.0.0.1 is the pod); the Helm chart rewrites both the flag
+# and the address from `.Values.opentelemetry.metrics`, the same way it rewrites
+# `collect_report_base_url` above and for the same reason. With the flag on and
+# nothing listening, the periodic reader logs an export failure every interval
+# and the gears still serve -- an operator-visible nuisance, not an outage.
 opentelemetry:
+  # WITHOUT THIS EVERY DATA POINT IS ATTRIBUTED TO `cf-gears`, which is
+  # `OpenTelemetryResource`'s own default (`libs/toolkit/src/telemetry/config.rs`,
+  # `default_service_name`) and is the host binary's generic name, not this
+  # stack's. Two deployments pushing into one collector would be
+  # indistinguishable in every query, which makes the catalog unusable for the
+  # thing it exists for.
+  resource:
+    service_name: "qa-platform"
   tracing:
     enabled: false
   metrics:
     enabled: false
+    exporter:
+      kind: otlp_grpc
+      endpoint: "http://127.0.0.1:4317"

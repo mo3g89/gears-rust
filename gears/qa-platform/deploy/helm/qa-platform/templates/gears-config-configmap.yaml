@@ -103,4 +103,51 @@ data:
 {{- if not (contains $secretFrom $cfg) }}
 {{- fail (printf "files/qa-platform-stack.yaml no longer contains %q -- the committed dev signing key would ship to this cluster, and it is the only access control on the anonymous collect-report route. Update this template together with the config." $secretFrom) }}
 {{- end }}
-{{ $cfg | replace $collectFrom $collectTo | replace $secretFrom $secretTo | indent 4 }}
+{{- $cfg = $cfg | replace $collectFrom $collectTo | replace $secretFrom $secretTo }}
+{{/*
+  THE FOURTH TRANSFORM: the OpenTelemetry metrics switch and its collector
+  address. Applied ONLY when .Values.opentelemetry.metrics.enabled is true, so
+  a default install renders the committed file's `false` unchanged and this
+  block is a no-op it costs nothing to leave in.
+
+  WHY THIS IS A CONFIG REWRITE AND NOT A CONTAINER PORT. The four gears'
+  22 metric families are PUSHED over OTLP by a periodic reader
+  (libs/toolkit's `init_metrics_provider` builds an
+  `opentelemetry_otlp::MetricExporter`); nothing in this repository serves a
+  `/metrics` route and no chart in it carries a scrape annotation. A metrics
+  port here would expose nothing and would be a second convention beside the
+  one mini-chat's configmap already established. See the committed config's own
+  `opentelemetry:` header.
+
+  BOTH HALVES ARE REWRITTEN TOGETHER, on purpose. Flipping the flag while
+  leaving the loopback address is the worst of the three states: the reader
+  starts, pushes at every interval into the pod's OWN 127.0.0.1, and logs an
+  export failure forever while every dashboard stays empty -- a stack that
+  looks instrumented and is not. `required` below refuses that combination at
+  render time instead.
+
+  `fail`-guarded like the three transforms above: a silent no-op here means the
+  operator asked for metrics, helm reported success, and the gears came up with
+  the meter provider still a no-op -- which is indistinguishable from a working
+  pipeline whose collector is down, and is exactly the false-green this chart's
+  other guards exist to prevent.
+
+  deploy/helm/tests/test_metrics_config.py holds all of it: the default-off
+  render, the enabled render, and that the ConfigMap this produces is the one
+  the gears Deployment mounts.
+*/}}
+{{- if .Values.opentelemetry.metrics.enabled }}
+{{- $otelFrom := "  metrics:\n    enabled: false" }}
+{{- $otelTo := "  metrics:\n    enabled: true" }}
+{{- if not (contains $otelFrom $cfg) }}
+{{- fail (printf "files/qa-platform-stack.yaml no longer contains the metrics enable block this transform rewrites (%q) -- opentelemetry.metrics.enabled was set, and the gears would come up with the built-in no-op meter provider and export nothing while helm reported success. Update this template together with the config." $otelFrom) }}
+{{- end }}
+{{- $otelEndpointFrom := "endpoint: \"http://127.0.0.1:4317\"" }}
+{{- $endpoint := required "opentelemetry.metrics.endpoint is required when opentelemetry.metrics.enabled is true -- the committed default is the loopback address, and a pod's 127.0.0.1 is the pod. Set it to the OTLP collector's in-cluster address, e.g. --set opentelemetry.metrics.endpoint=http://otel-collector.observability.svc.cluster.local:4317" .Values.opentelemetry.metrics.endpoint }}
+{{- $otelEndpointTo := printf "endpoint: %q" $endpoint }}
+{{- if not (contains $otelEndpointFrom $cfg) }}
+{{- fail (printf "files/qa-platform-stack.yaml no longer contains the metrics exporter endpoint this transform rewrites (%q) -- the gears would push OTLP into their own pod's loopback address and every export would fail. Update this template together with the config." $otelEndpointFrom) }}
+{{- end }}
+{{- $cfg = $cfg | replace $otelFrom $otelTo | replace $otelEndpointFrom $otelEndpointTo }}
+{{- end }}
+{{ $cfg | indent 4 }}
