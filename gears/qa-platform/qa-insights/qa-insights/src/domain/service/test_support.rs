@@ -1282,6 +1282,13 @@ impl Fleet {
             default_collect_branch: DEFAULT_BRANCH.to_owned(),
             collect_report_base_url: "https://qa-insights.example.test".to_owned(),
             collect_report_signing_secret: signing_secret.to_owned(),
+            // `None` on both, not a probe: this fixture erases its doubles
+            // into trait objects and retains no handle to any of them, so a
+            // probe installed here would be unreadable from a test. The
+            // metric call sites are asserted where their services are built
+            // directly — `collect_tests` and `jira_poller_tests`.
+            collect_metrics: None,
+            jira_poll_metrics: None,
         };
 
         let services = Arc::new(AppServices::new(

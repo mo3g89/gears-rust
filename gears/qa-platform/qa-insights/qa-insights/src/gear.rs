@@ -96,6 +96,7 @@ use crate::api::rest::routes;
 use crate::config::QaInsightsConfig;
 use crate::domain::error::DomainError;
 use crate::domain::local_client::QaInsightsLocalClient;
+use crate::domain::ports::metrics::{CollectMetrics, JiraPollMetrics};
 use crate::domain::ports::{MailClient, RunsLauncher, RunsReader, SlackClient};
 use crate::domain::service::reconcile::ReconcileOutcome;
 use crate::domain::service::{AppServices, ServiceDeps};
@@ -528,6 +529,21 @@ impl Gear for QaInsights {
         // struct's own header for why this is one adapter and not two.
         let qa_runs_reader = Arc::new(QaRunsReader::new(qa_runs));
 
+        // Built unconditionally, and there is deliberately no "metrics
+        // enabled" branch: `build_default_adapter` reads the process-global
+        // meter provider, which `toolkit`'s `telemetry::init_metrics_provider`
+        // leaves as the built-in `NoopMeterProvider` whenever metrics are
+        // disabled or no pipeline is configured at all. A branch here would be
+        // a second, weaker copy of that rule, and the failure it invites is
+        // silent in both directions — a configured pipeline with nothing
+        // emitting into it, or one port wired and the other dark.
+        //
+        // One adapter, two ports: the collect service and the JIRA poller
+        // report through the same instruments, so the two halves of this
+        // gear's background story cannot disagree about which meter they are
+        // on.
+        let metrics = crate::infra::metrics::build_default_adapter();
+
         let services = Arc::new(AppServices::new(
             OrmResultsRepository,
             OrmWatermarkRepository,
@@ -595,6 +611,9 @@ impl Gear for QaInsights {
                 // Task 30 fix round 1's: the HMAC key that authenticates the
                 // callback's tenant claim.
                 collect_report_signing_secret: cfg.collect_report_signing_secret.clone(),
+                // Task 38 of the observability plan.
+                collect_metrics: Some(Arc::clone(&metrics) as Arc<dyn CollectMetrics>),
+                jira_poll_metrics: Some(metrics as Arc<dyn JiraPollMetrics>),
             },
         ));
 
@@ -1709,6 +1728,81 @@ mod tests {
         assert_eq!(
             cadence.interval_seconds, MIN_COLLECT_INTERVAL_SECONDS,
             "the raw 1 must never reach serve"
+        );
+    }
+
+    /// `Gear::init`'s own source, isolated so a wiring assertion can be made
+    /// against it without booting the gear.
+    ///
+    /// A source scan, and the reason is the same one every other composition
+    /// assertion in this file gives: `init` needs a database, a `ClientHub` and
+    /// five resolved cross-gear clients before it will run a single line, and
+    /// the harness that supplies those is `tests/ingest_idempotence.rs`, which
+    /// cannot see whether a *field* was wired.
+    fn init_source() -> &'static str {
+        let src = include_str!("gear.rs");
+        let start = src
+            .find("    async fn init(")
+            .expect("gear.rs declares Gear::init");
+        let tail = &src[start..];
+        let end = tail
+            .find("\n}\n")
+            .expect("the impl block containing init is closed");
+        &tail[..end]
+    }
+
+    /// **The metrics adapter is installed unconditionally, into both ports.**
+    ///
+    /// The two defects this guards are opposite and both silent. Wrapping the
+    /// construction in a "metrics enabled" branch would leave the gear with a
+    /// pipeline configured and nothing emitting into it; passing the adapter to
+    /// one field and not the other would leave one of the two measured paths
+    /// dark while the dashboard for the other looked healthy. Neither is a
+    /// compile error — both `ServiceDeps` fields are `Option`, so omitting one
+    /// is legal, and every test in this crate would still pass.
+    ///
+    /// **Nothing here needs a "metrics off" branch**, which is why the absence
+    /// of one is assertable at all: `infra::metrics::build_default_adapter`
+    /// reads the process-global meter provider, which `toolkit`'s
+    /// `telemetry::init_metrics_provider` leaves as the built-in
+    /// `NoopMeterProvider` when metrics are disabled — and never replaces at
+    /// all when no pipeline is configured. That the resulting adapter is safe
+    /// to build and emit through is
+    /// `infra::metrics::tests::the_default_adapter_emits_silently_with_no_pipeline_configured`.
+    ///
+    /// The no-branch half reads **code only**, with comments stripped first:
+    /// `init` legitimately explains in prose why it does not consult that
+    /// config key, and a scan of the raw text would flag its own justification
+    /// the moment somebody wrote one. `no_api_in_domain_tests` documents the
+    /// same trap and strips comments for the same reason.
+    ///
+    /// Every assertion message below is one unbroken literal: a
+    /// `\\`-continued string collapses to a run of spaces once rustfmt has
+    /// re-indented it, which is how such a message reads on failure.
+    #[test]
+    fn init_installs_one_metrics_adapter_into_both_ports() {
+        let body = init_source();
+        assert_eq!(
+            body.matches("build_default_adapter()").count(),
+            1,
+            "init must build the adapter once and share the Arc: {body}"
+        );
+        assert!(
+            body.contains("collect_metrics: Some("),
+            "premise: the collect port must be wired, or nothing measures the collect cycle or its signed callback in production while every test still passes: {body}"
+        );
+        assert!(
+            body.contains("jira_poll_metrics: Some("),
+            "premise: the poller port must be wired, or the per-bug failures this gear swallows stay invisible in production: {body}"
+        );
+        let code: String = body
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("metrics.enabled"),
+            "init must not branch on whether a pipeline is configured: an uninstalled provider already makes every instrument a no-op, and a branch here would be a second, weaker copy of that rule: {code}"
         );
     }
 }

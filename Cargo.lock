@@ -9215,6 +9215,8 @@ dependencies = [
  "gts",
  "hex",
  "http",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "qa-catalog",
  "qa-catalog-sdk",
  "qa-environments",

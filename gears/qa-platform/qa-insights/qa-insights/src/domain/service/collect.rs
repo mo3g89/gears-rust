@@ -378,6 +378,8 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use aws_lc_rs::hmac;
 use time::OffsetDateTime;
@@ -388,9 +390,12 @@ use qa_insights_sdk::CollectCount;
 
 use crate::domain::analytics::universe::normalize_test_path;
 use crate::domain::error::DomainError;
+use crate::domain::ports::metrics::{
+    CollectMetrics, CollectOutcome, CollectReportOutcome, NoopMetrics,
+};
 use crate::domain::ports::{CatalogReader, RunsLauncher};
 use crate::domain::repos::CollectRepository;
-use crate::domain::service::{DbProvider, actions, refuse_scope_beyond_tenant, resources};
+use crate::domain::service::{DbProvider, actions, emit, refuse_scope_beyond_tenant, resources};
 use crate::domain::system_actor::{TenantBound, for_collect_report};
 
 /// Trim `branch`, treat the empty result as absent — legacy's
@@ -507,6 +512,16 @@ pub struct CollectService<C> {
     default_collect_branch: DefaultCollectBranch,
     collect_report_base_url: CollectReportBaseUrl,
     collect_report_signing_secret: CollectReportSigningSecret,
+    /// Where this service's telemetry goes. Never `Option`: [`NoopMetrics`]
+    /// is the default a caller that wires nothing gets, so every emission
+    /// below is unconditional and the "silent when no adapter is installed"
+    /// promise is structural rather than a branch somebody has to remember.
+    metrics: Arc<dyn CollectMetrics>,
+    /// Latched by [`emit`] the first time an emission panics, after which this
+    /// service stops calling its adapter. Per service, not global — see
+    /// [`emit`]'s own doc for why a process-wide latch would be wrong both in
+    /// production and under a threaded test run.
+    metrics_silenced: AtomicBool,
 }
 
 /// Legacy's `DEFAULT_COLLECT_BRANCH` (`manager/src/services/collect.rs:19`),
@@ -590,18 +605,29 @@ impl<C> CollectService<C>
 where
     C: CollectRepository,
 {
+    /// `metrics` is `None` for every caller that does not measure this
+    /// service — which is most of its tests — and resolves to
+    /// [`NoopMetrics`]. The parameter is an `Option` rather than a required
+    /// `Arc<dyn CollectMetrics>` so that the one production call site
+    /// (`AppServices::new`) is the only place that has to name an adapter, and
+    /// so that "no adapter" is spelled the same way at every construction
+    /// site instead of each one inventing its own no-op.
+    ///
+    /// **No longer `const`.** `Arc::new(NoopMetrics)` is not a constant
+    /// expression; nothing called this in a constant context.
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
-        reason = "each parameter type is now distinct after fix round 2's newtypes: \
+        reason = "each parameter type is distinct after fix round 2's newtypes: \
                   DefaultCollectBranch, CollectReportBaseUrl and CollectReportSigningSecret \
                   exist specifically so the three-String transposition hazard that reason used \
                   to (wrongly) claim was already impossible cannot recur. Arc<DbProvider>, C, \
-                  two Arc<dyn ..> and PolicyEnforcer are the remaining five; a params struct \
-                  would still have exactly one construction site and would unpack it again \
-                  immediately, buying nothing the type system does not already enforce."
+                  two Arc<dyn ..>, PolicyEnforcer and the metrics port are the remaining six; a \
+                  params struct would still have exactly one production construction site and \
+                  would unpack it again immediately, buying nothing the type system does not \
+                  already enforce."
     )]
-    pub const fn new(
+    pub fn new(
         db: Arc<DbProvider>,
         collect: C,
         catalog: Arc<dyn CatalogReader>,
@@ -610,6 +636,7 @@ where
         default_collect_branch: DefaultCollectBranch,
         collect_report_base_url: CollectReportBaseUrl,
         collect_report_signing_secret: CollectReportSigningSecret,
+        metrics: Option<Arc<dyn CollectMetrics>>,
     ) -> Self {
         Self {
             db,
@@ -620,7 +647,22 @@ where
             default_collect_branch,
             collect_report_base_url,
             collect_report_signing_secret,
+            metrics: metrics.unwrap_or_else(|| Arc::new(NoopMetrics)),
+            metrics_silenced: AtomicBool::new(false),
         }
+    }
+
+    /// Emit one collect-report outcome, guarded by this service's own latch.
+    ///
+    /// A method rather than an inline [`emit`] call at each of the six
+    /// outcomes: `record_count` refuses on five paths, and a helper is what
+    /// makes each of them one line at the point of refusal rather than a
+    /// four-line block that invites somebody to add a sixth refusal without
+    /// one.
+    fn report(&self, outcome: CollectReportOutcome) {
+        emit(&self.metrics_silenced, || {
+            self.metrics.collect_report(outcome);
+        });
     }
 
     /// Record the exact case count the runner reports for one file —
@@ -698,22 +740,68 @@ where
         test_file: &str,
         case_count: i64,
     ) -> Result<(), DomainError> {
+        let result = self
+            .write_reported_count(tenant, repo_id, branch, signature, test_file, case_count)
+            .await;
+        let outcome = match &result {
+            Ok(()) => CollectReportOutcome::Recorded,
+            Err((outcome, _)) => *outcome,
+        };
+        self.report(outcome);
+        result.map_err(|(_, error)| error)
+    }
+
+    /// [`Self::record_count`]'s body, returning the metric label alongside the
+    /// error rather than only the error.
+    ///
+    /// # Why the label cannot be derived from the returned error
+    ///
+    /// [`Self::verify_signature`] deliberately answers all three of its
+    /// refusal paths with one [`DomainError::Forbidden`], so that a caller
+    /// cannot use the response as an oracle for which guess was closer — its
+    /// own doc states that in as many words. That is the right answer for the
+    /// *response* and it destroys exactly the distinction an operator needs:
+    /// "no secret is configured in this deployment" and "somebody is guessing
+    /// at this endpoint" arrive as the same value. So the classification is
+    /// carried out of the refusal, beside the error, instead of being
+    /// reconstructed from it — the two never disagree because there is only
+    /// one of them.
+    ///
+    /// Splitting the function is also what keeps the accepted path counted: a
+    /// single body emitting at each `return` would need an emission on the
+    /// success tail too, which is exactly the one a later edit forgets.
+    async fn write_reported_count(
+        &self,
+        tenant: TenantBound,
+        repo_id: Uuid,
+        branch: &str,
+        signature: &str,
+        test_file: &str,
+        case_count: i64,
+    ) -> Result<(), (CollectReportOutcome, DomainError)> {
         let tenant_id = tenant.get();
-        self.verify_signature(repo_id, branch, tenant_id, signature)?;
+        self.verify_signature(repo_id, branch, tenant_id, signature)
+            .map_err(|refusal| (CollectReportOutcome::from(refusal), DomainError::Forbidden))?;
 
         if branch.trim().is_empty() {
-            return Err(DomainError::Validation {
-                field: "branch".to_owned(),
-                message: "branch is required".to_owned(),
-            });
+            return Err((
+                CollectReportOutcome::Invalid,
+                DomainError::Validation {
+                    field: "branch".to_owned(),
+                    message: "branch is required".to_owned(),
+                },
+            ));
         }
 
         let file = normalize_test_path(test_file.trim());
         if file.is_empty() {
-            return Err(DomainError::Validation {
-                field: "test_file".to_owned(),
-                message: "test_file is required".to_owned(),
-            });
+            return Err((
+                CollectReportOutcome::Invalid,
+                DomainError::Validation {
+                    field: "test_file".to_owned(),
+                    message: "test_file is required".to_owned(),
+                },
+            ));
         }
 
         // Only now — signature verified, shape checked — is the system actor
@@ -733,7 +821,10 @@ where
         // proven this gear itself signed for this exact
         // `(repo_id, branch, tenant_id)` triple.
         let scope = AccessScope::for_tenant(tenant_id);
-        let conn = self.db.conn()?;
+        let conn = self
+            .db
+            .conn()
+            .map_err(|error| (CollectReportOutcome::Failed, error))?;
 
         let count = CollectCount {
             repo_id,
@@ -752,6 +843,9 @@ where
         self.collect
             .upsert_count(&conn, &scope, tenant_id, count)
             .await
+            // A storage failure is this gear's own; nothing else reaches this
+            // tail, because every caller-facing refusal returned above.
+            .map_err(|error| (CollectReportOutcome::Failed, error))
     }
 
     /// Launch the collect job on demand — `POST /qa/v1/analytics/collect`.
@@ -848,6 +942,33 @@ where
     /// [`super::analytics::AnalyticsService::load_universe_and_rows`]'s own
     /// reason: a broken sibling must not look like an idle deployment.
     pub async fn run_collect_cycle(
+        &self,
+        ctx: &SecurityContext,
+        branch: &str,
+    ) -> Result<usize, DomainError> {
+        let started = Instant::now();
+        let result = self.collect_every_repository(ctx, branch).await;
+        let outcome = match &result {
+            Ok(_) => CollectOutcome::Completed,
+            Err(error) => CollectOutcome::from(error),
+        };
+        // Read before the emission, so a slow adapter cannot inflate the
+        // duration it is being handed.
+        let elapsed = started.elapsed();
+        emit(&self.metrics_silenced, || {
+            self.metrics.collect_cycle(outcome, elapsed);
+        });
+        result
+    }
+
+    /// [`Self::run_collect_cycle`]'s body, unmeasured.
+    ///
+    /// The split is what makes the cycle the measured unit: the wrapper reads
+    /// the clock once around this whole call, so one cycle is one sample on
+    /// both instruments however many repositories it launched into, and the
+    /// per-repository failures this loop swallows cannot each become their own
+    /// observation.
+    async fn collect_every_repository(
         &self,
         ctx: &SecurityContext,
         branch: &str,
@@ -965,25 +1086,29 @@ where
     ///
     /// # Errors
     ///
-    /// [`DomainError::Forbidden`] on any failure to verify. This function
-    /// does not distinguish "unconfigured secret", "malformed signature" and
-    /// "wrong signature" in its return value, on purpose: all three mean the
-    /// same thing to the caller of [`Self::record_count`] — the request may
-    /// not write under the tenant it claims — and a response that
-    /// distinguished them would hand an attacker a free oracle for which
-    /// guess was closer.
+    /// [`SignatureRefusal`], naming which of the three paths refused.
+    ///
+    /// **The caller still cannot distinguish them, and that has not
+    /// changed**: [`Self::write_reported_count`] answers all three with one
+    /// [`DomainError::Forbidden`], for the reason this paragraph used to give
+    /// as the reason for returning that error directly — all three mean the
+    /// same thing to a caller (the request may not write under the tenant it
+    /// claims), and a response that distinguished them would hand an attacker
+    /// a free oracle for which guess was closer. What the typed return adds is
+    /// a classification for the *operator*, on the metric only; see
+    /// [`SignatureRefusal`]'s own header.
     fn verify_signature(
         &self,
         repo_id: Uuid,
         branch: &str,
         tenant_id: Uuid,
         signature: &str,
-    ) -> Result<(), DomainError> {
+    ) -> Result<(), SignatureRefusal> {
         if !signing_secret_is_configured(&self.collect_report_signing_secret.0) {
-            return Err(DomainError::Forbidden);
+            return Err(SignatureRefusal::SecretUnconfigured);
         }
         let Ok(tag) = hex::decode(signature) else {
-            return Err(DomainError::Forbidden);
+            return Err(SignatureRefusal::Malformed);
         };
         let key = hmac::Key::new(
             hmac::HMAC_SHA256,
@@ -994,7 +1119,57 @@ where
             signing_payload(repo_id, branch, tenant_id).as_bytes(),
             &tag,
         )
-        .map_err(|_| DomainError::Forbidden)
+        .map_err(|_| SignatureRefusal::Mismatch)
+    }
+}
+
+/// Which of [`CollectService::verify_signature`]'s three refusal paths a
+/// report took.
+///
+/// # This exists because the response deliberately cannot say
+///
+/// All three become one [`DomainError::Forbidden`] at
+/// [`CollectService::write_reported_count`], which is that method's whole
+/// point: a response that distinguished them would hand an attacker a free
+/// oracle for which guess was closer. The distinction is real and an operator
+/// needs it — a deployment with no secret configured and a deployment under a
+/// guessing attack are opposite incidents with opposite fixes — so it is
+/// carried in this type, out of the request path and into the metric, and
+/// nowhere else.
+///
+/// **Crate-private on purpose.** Nothing outside this crate has a use for it,
+/// and its whole reason for existing is that this information must not leave
+/// the process through the response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignatureRefusal {
+    /// `collect_report_signing_secret` is absent, or shorter than
+    /// [`MIN_SIGNING_SECRET_LEN`] once trimmed. Fail-closed: this refuses
+    /// every report, including a correctly computed one.
+    SecretUnconfigured,
+    /// The `sig` parameter is not hex, so there is no tag to compare.
+    Malformed,
+    /// The tag decoded and does not match this deployment's secret over the
+    /// `(repo_id, branch, tenant_id)` triple presented.
+    Mismatch,
+}
+
+/// The metric label for one refusal.
+///
+/// **Here rather than in `domain::ports::metrics`** — beside the enum it
+/// projects, following the placement qa-runs' Task 36 review settled on for
+/// the same shape. Two reasons beyond the dependency arrow: [`SignatureRefusal`]
+/// is crate-private, so an impl written in the ports module would attach a
+/// crate-private type to a public one, which is neither usable nor
+/// documentable outside the crate from the module that advertises it; and the
+/// "a fourth refusal path is a compile error here" guarantee only helps if it
+/// is where the author adding one is already looking.
+impl From<SignatureRefusal> for CollectReportOutcome {
+    fn from(refusal: SignatureRefusal) -> Self {
+        match refusal {
+            SignatureRefusal::SecretUnconfigured => Self::SecretUnconfigured,
+            SignatureRefusal::Malformed => Self::SignatureMalformed,
+            SignatureRefusal::Mismatch => Self::SignatureInvalid,
+        }
     }
 }
 
