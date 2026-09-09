@@ -374,6 +374,12 @@ lint:
 
 ## Validate GTS identifiers in .md and .json files (DE0903)
 # Uses gts-validator binary (install via: cargo install gts-validator)
+#
+# `tsconfig*.json` is excluded because tsconfig is JSONC by specification --
+# TypeScript's own format permits comments, and Vite's template ships them
+# ("/* Bundler mode */") -- so the validator's strict JSON parser reports a
+# scan error on a file that is not malformed. No tsconfig can contain a GTS
+# id, so nothing is lost by not scanning it.
 
 gts-docs:
 	$(call print_target_banner)
@@ -385,6 +391,7 @@ gts-docs:
 		--exclude "docs/web-docs/*" \
 		--exclude "gears/chat-engine/*" \
 		--exclude "**/helm/*/templates/*" \
+		--exclude "**/tsconfig*.json" \
 		docs gears libs examples
 
 install-tools:
@@ -571,6 +578,41 @@ web-docs-preview:
 	$(call print_target_banner)
 	@bash tools/scripts/docs-preview.sh
 
+# -------- qa-platform UI --------
+
+.PHONY: ui-install ui-lint ui-test ui-build ui-contract
+
+UI_DIR := gears/qa-platform/qa-platform-ui
+
+## Install UI dependencies from the lockfile
+ui-install:
+	@command -v npm >/dev/null || (echo "npm is required for the qa-platform UI" && exit 1)
+	cd $(UI_DIR) && npm ci
+
+## Lint the UI
+ui-lint: ui-install
+	cd $(UI_DIR) && npm run lint
+
+## Run the UI unit tests (vitest). Added with the first test suite in this project
+## (Task 10's `src/api/adapters.test.ts`): a suite reachable only through `npx vitest` is
+## a suite no later task and no CI job will run, and `ui-lint`/`ui-build` are already the
+## vocabulary this repo gates the UI with. Kept separate from `ui-build` rather than made
+## a prerequisite, so a type error and a failing assertion stay distinguishable.
+ui-test: ui-install
+	cd $(UI_DIR) && npm test
+
+## Type-check and build the UI
+ui-build: ui-install
+	cd $(UI_DIR) && npm run build
+
+## Regenerate UI types from a running gears stack and fail if they drift. Requires the compose
+## stack up on localhost:8087 (`docker compose up -d` in gears/qa-platform/deploy/compose) — it
+## hits a live /openapi.json, so it is not wired into a CI job that has no gears.
+ui-contract: ui-install
+	cd $(UI_DIR) && npm run gen:api
+	git diff HEAD --exit-code -- $(UI_DIR)/src/api/generated/openapi.d.ts \
+	  || (echo "UI wire types are stale: regenerate with 'make ui-contract' and commit" && exit 1)
+
 # -------- Development and auto fix --------
 
 .PHONY: dev dev-fmt dev-clippy dev-test
@@ -666,7 +708,7 @@ OPENAPI_BUILD_FEATURE_ARGS := $(if $(GEAR),$(GEAR_OPENAPI_FEATURE_ARGS),$(OPENAP
 
 # -------- Tests --------
 
-.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-types-registry-db test-cluster-pg test-rg-pg test-pricing-pg test-coord-pg test-fixtures-narrow test-fips
+.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-types-registry-db test-cluster-pg test-rg-pg test-pricing-pg test-coord-pg test-fixtures-narrow test-fips test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git test-qa-platform-features
 
 # Run all tests, or a single gear when GEAR=<gear> is set.
 # When GEAR= is set, cargo gears ls packages finds matching crates + their
@@ -807,6 +849,116 @@ test-coord-pg: install-tools
 ## consumer is the example server's release build, which never runs a test.
 test-fixtures-narrow: install-tools
 	cargo nextest run -p cf-gears-bss-fixtures --no-default-features --test production_surface
+
+## Run the qa-runs gear's real-Postgres suite (Docker required; the fixture
+## spins up its own postgres container per test via testcontainers -- see
+## `infra::storage::test_db::pg_db`).
+##
+## These are the only tests that can falsify Task 16b step 1's SERIALIZABLE
+## escalation and step 3's counter repair. The rest of the gear's tier is
+## in-memory SQLite, which admits one writer at a time, so the races they cover
+## cannot occur there with a fix or without one -- which is exactly why this
+## target has to exist rather than relying on `make test`.
+##
+## `--retries 1` for the reason `test-cluster-pg` has it, arrived at the same
+## way: one failure of this target was observed on a busy host and could not be
+## reproduced in eighteen subsequent runs, so which test failed is not known.
+## Every test here spins up its own container and the contended ones assert
+## outcomes that depend on a bounded retry budget absorbing an abort, so both the
+## container setup and the assertions are load-sensitive. A genuine logic
+## regression fails both attempts; this absorbs a busy host without masking one.
+## An earlier round decided against this on the grounds that most sibling targets
+## omit it; that was decided before a failure had been seen.
+test-qa-runs-pg: install-tools
+	cargo nextest run -p qa-runs --features integration --retries 1
+
+## Run qa-insights' real-Postgres integration tier.
+## Five of these are dialect guards over the analytics reads: Postgres refuses a
+## selected column that is not grouped or aggregated, where SQLite picks an
+## arbitrary row and says nothing — so a grouping key dropped from
+## `grouped_status_counts` passes the SQLite tier and fails at runtime on a
+## deployment. The gear ships to Postgres in the Helm chart, so this is the tier
+## that can falsify that change.
+## `--lib` because the tests need `pub(crate)` services and `#[cfg(test)]`
+## fixtures, exactly as qa-runs' do.
+test-qa-insights-pg: install-tools
+	cargo nextest run -p qa-insights --features integration --lib --retries 1
+
+## Run qa-catalog's real-git-transport integration tier.
+## `tests/multi_branch.rs` (4) and `tests/gix_sync_integration.rs` (2) are the
+## only coverage of the real git transport, the multi-branch snapshot layout,
+## and concurrent syncs through the two-tier locks. They clone a local fixture
+## repo through the real transport, which spawns `git upload-pack`, so a `git`
+## binary must be on PATH. These live in `tests/`, not in-lib, so the flag is
+## `--tests` (all test-target files), not `--lib`. Not `--test`, which is
+## singular and takes one target name — it would run only one of the two files.
+test-qa-catalog-git: install-tools
+	@command -v git >/dev/null || (echo "git is required for test-qa-catalog-git" && exit 1)
+	cargo nextest run -p qa-catalog --features integration --tests
+
+## Run the unit tier of the two feature-gated adapters the shipped image
+## enables (`deploy/cargo-features.argo`: runner-secret, qa-runs-argo).
+## `make test-no-macros` is `cargo nextest run --workspace` with per-crate
+## DEFAULT features, so `#[cfg(feature = "argo")]` and
+## `#[cfg(feature = "runner-secret")]` code is neither compiled nor run there.
+## 39 tests under qa-runs::infra::executor::argo and 13 under
+## qa-environments' runner-secret writer are what this adds.
+## `--lib` only: `qa-runs/tests/argo_cluster.rs`'s 4 are `#[ignore]`d and want
+## a live cluster.
+##
+## Also runs `cf-gears-example-server`'s `qa_product_plugin_boot` integration
+## test, for the same reason: that file is `#![cfg(feature = "qa-platform")]`
+## and the binary's default features are empty, so a default-feature
+## `--workspace` run (`test-no-macros`) compiles it to zero tests and would
+## not notice the `use qa_vhp_product_plugin as _;` / `use
+## qa_vhi_product_plugin as _;` inventory-registration lines being deleted.
+## Without `--features qa-platform` here, nothing in CI ever executes it.
+##
+## `QA_REQUIRE_SSH_TOOLS=1` turns a missing `ssh-agent`/`ssh-add`/`ssh-keygen`
+## or `sshd` from a silent skip into a failure. The switch was built for
+## exactly this and was, until 2026-09-09, set nowhere -- so the SSH suites
+## (`qa-connector-ssh`'s keystone "the private key never reaches disk" tests
+## among them) could report green on an image without `openssh-client` while
+## proving nothing. The runtime image installs it (ADR-0005 as amended), so
+## here their absence is a real defect, not an environment quirk. It is set on
+## the whole target rather than one line because the same tools gate
+## `qa-connector-ssh`, `qa-vhi-product-plugin` and the boot test alike.
+##
+## The SSH-driven crates are named explicitly rather than left to the three
+## feature-gated runs above: neither `qa-runs` nor `qa-environments` depends
+## on `qa-connector-ssh`, so before this they were reached only by a plain
+## `--workspace` run, which does not set the variable.
+test-qa-platform-features: install-tools
+	QA_REQUIRE_SSH_TOOLS=1 cargo nextest run -p qa-runs --features argo --lib
+	QA_REQUIRE_SSH_TOOLS=1 cargo nextest run -p qa-environments --features runner-secret --lib
+	QA_REQUIRE_SSH_TOOLS=1 cargo nextest run -p qa-connector-ssh -p qa-vhi-product-plugin
+	QA_REQUIRE_SSH_TOOLS=1 cargo nextest run -p cf-gears-example-server --test qa_product_plugin_boot --features qa-platform
+
+.PHONY: helm-tests
+
+## Run the qa-platform Helm chart guards. No cluster needed -- these are
+## `helm template` plus file reads -- so the `lint` job holds them.
+## Includes `test_no_system_gear_changes.py`, the guard FOOTPRINT names for the
+## reverted system-gear changes, and `test_nginx_template.sh`, which is what
+## proves the SSE access-log redaction.
+##
+## Only test_no_system_gear_changes.py is pytest-shaped (it defines a
+## `test_*` function); `test_chart_file_sync.py`, `test_features.py`,
+## `test_metrics_config.py`, `test_no_environment_hardcode.py` and
+## `test_pins.py` are standalone scripts -- a `main()` run via
+## `if __name__ == "__main__"` -- so `python3 -m pytest tests/` collects zero
+## items from them and would silently skip five of the seven guards. Each is
+## invoked directly so all seven actually run; a non-zero exit from any of them
+## fails this target.
+helm-tests:
+	@command -v helm >/dev/null || (echo "helm is required for helm-tests" && exit 1)
+	cd gears/qa-platform/deploy/helm && python3 -m pytest tests/ -q
+	python3 gears/qa-platform/deploy/helm/tests/test_chart_file_sync.py
+	python3 gears/qa-platform/deploy/helm/tests/test_features.py
+	python3 gears/qa-platform/deploy/helm/tests/test_metrics_config.py
+	python3 gears/qa-platform/deploy/helm/tests/test_no_environment_hardcode.py
+	python3 gears/qa-platform/deploy/helm/tests/test_pins.py
+	bash gears/qa-platform/deploy/helm/tests/test_nginx_template.sh
 
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
 ## Covers:
@@ -1263,7 +1415,7 @@ ci_docs: lychee gts-docs
 	$(call print_target_banner)
 
 # Run CI pipeline locally, requires docker
-ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg test-types-registry-db lychee gts-docs dylint
+ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg test-types-registry-db test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git test-qa-platform-features helm-tests lychee gts-docs dylint
 	$(call print_target_banner)
 
 ## Build the cf-gears-example-server release binary, or a single gear when GEAR=<gear> is set

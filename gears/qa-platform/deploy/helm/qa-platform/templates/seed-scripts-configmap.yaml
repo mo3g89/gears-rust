@@ -1,0 +1,22 @@
+{{/* Carries files/seed-tenant.sh verbatim (copied into this chart's
+     files/ so .Files.Get can reach it -- Helm's .Files is scoped to the
+     chart directory and cannot read files outside it via ../, the same
+     constraint postgres-initdb-configmap.yaml's and certs-scripts-configmap.yaml's
+     copies hit). Do not edit the embedded copy here: edit the source under
+     the chart's own files/ directory and re-copy it. The two copies are kept byte-identical by
+     deploy/helm/tests/test_chart_file_sync.py.
+
+     Mounted into job-tenant-seed.yaml at /scripts, read-only, and run as
+     `bash /scripts/seed-tenant.sh` -- the same entrypoint the compose
+     `tenant-seed` service uses. See that script's own header for why it
+     must run strictly after db-migrate. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qa-platform-seed-scripts
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: tenant-seed
+data:
+  seed-tenant.sh: |
+{{ .Files.Get "files/seed-tenant.sh" | indent 4 }}

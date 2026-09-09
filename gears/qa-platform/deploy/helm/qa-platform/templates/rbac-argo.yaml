@@ -1,0 +1,105 @@
+{{/* Cross-namespace RBAC for the gears' Argo-facing code, granting the SAME
+     workflows/pods verbs as deploy/argo/qa-runs-rbac.yaml (adapted from the
+     source system's k8s/manager/rbac.yaml, three verbs dropped there
+     already) for qa-runs' executor:
+       - workflows (argoproj.io): get/list/watch/create/patch. No `delete` --
+         `ttlStrategy.secondsAfterCompletion` is what reclaims a finished
+         Workflow, and granting `delete` here would widen the running gear's
+         permissions for no adapter code path that uses it.
+       - pods: get/list -- pod discovery by the
+         `workflows.argoproj.io/workflow={name}` label and the execution-node
+         annotation.
+       - pods/log: get -- log streaming, the only source of per-test results
+         in this deployment.
+     NOT granted, for qa-runs, and each is a decision rather than an omission:
+       - configmaps: nothing in the adapter reads one.
+       - cronworkflows: qa-runs owns its own leader-elected scheduler
+         (ADR-0001), so it never creates a CronWorkflow.
+
+     ONE POD, ONE SERVICEACCOUNT: qa-platform-gears runs every gear in this
+     stack, including qa-environments, which is a DIFFERENT consumer of this
+     same Role with a genuine need for `secrets` -- see the separate rule
+     below and its own comment. qa-runs' own executor still never opens a
+     Secret's contents (run_executor.rs:85-86, "qa-runs never reads a
+     secret's contents" -- it only ever emits a secretKeyRef and lets the
+     KUBELET resolve it), so that claim about qa-runs' OWN code path stays
+     true; qa-runs' process merely gains an access its own code never
+     exercises, which is what sharing one ServiceAccount across every gear in
+     the pod costs here.
+
+     This Role/RoleBinding live in the ARGO namespace, not the release
+     namespace -- Argo Workflows and the Workflows qa-runs creates live there
+     (.Values.argo.namespace), while the ServiceAccount the RoleBinding grants
+     access to (qa-platform-gears) lives in the release namespace. That is why
+     the RoleBinding's subject carries an explicit `namespace:` rather than
+     inheriting {{ .Release.Namespace }} implicitly, and it is why this
+     resource cannot live in the same `helm uninstall` blast radius as
+     everything else in the release -- Helm still tracks and removes it (it
+     carries this release's ownership annotations), it just does so in a
+     different namespace than the rest of the manifest. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: qa-platform-gears-executor
+  namespace: {{ .Values.argo.namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  {{/* qa-environments, NOT qa-runs -- decision D4's runner-credential writer
+       (`runner_secret_writer::ensure_runner_secret` in
+       qa-environments/src/infra/runner_secret_writer.rs) writes one
+       Secret per stored credential into THIS namespace (.Values.argo.namespace) via
+       `Api::<Secret>::namespaced(client, argo_namespace)` and a server-side
+       apply patch (`PatchParams::apply(FIELD_MANAGER)` /
+       `Patch::Apply(&secret)`). Under compose the gears held a cluster-admin
+       kubeconfig and this never surfaced; with this scoped ServiceAccount
+       the write is Forbidden on every cycle, and the documented symptom
+       (job-db-migrate.yaml's sibling concern for the OTHER hook-ordering
+       race, D4's own design notes for this one) is every workflow run
+       hanging on FailedMount while observation keeps working and the stack
+       otherwise looks healthy -- nothing in this Role's other rules touches
+       this code path at all, so nothing else would ever surface it either.
+
+       ONLY create + patch, not get/update/delete: Kubernetes' own
+       server-side-apply RBAC rule is that a caller needs `patch` always,
+       plus `create` only for the FIRST apply against an object that does not
+       exist yet (confirmed by reading the exact call above -- a single
+       `Patch::Apply`, never a read-modify-write, so `get`/`update` add
+       nothing this writer's own code path uses; `delete` likewise, since
+       this writer never removes a Secret it manages). */}}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: qa-platform-gears-executor
+  namespace: {{ .Values.argo.namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: qa-platform-gears-executor
+subjects:
+  - kind: ServiceAccount
+    name: qa-platform-gears
+    # Explicit and required: this RoleBinding's own namespace is
+    # .Values.argo.namespace, but the ServiceAccount it grants access to
+    # lives in the RELEASE namespace. Without this, Kubernetes defaults the
+    # subject's namespace to the RoleBinding's own -- silently binding a
+    # ServiceAccount named qa-platform-gears that may not even exist in argo,
+    # granting the real one nothing and failing in a way that names neither.
+    namespace: {{ .Release.Namespace }}

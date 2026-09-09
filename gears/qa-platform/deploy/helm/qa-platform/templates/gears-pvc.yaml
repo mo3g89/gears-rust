@@ -1,0 +1,23 @@
+{{/* qa-catalog's git clones and content bundles, mounted at
+     /var/lib/cf-gears/data (see gears-deployment.yaml and
+     qa-platform.Dockerfile's WORKDIR comment for why that path). A plain PVC,
+     not a StatefulSet volumeClaimTemplate, because gears-deployment.yaml is a
+     Deployment -- replicaCount stays 1 (see qa-platform-stack.yaml's
+     jira-poller warning for why a second replica is not simply safe to add),
+     so one claim referenced by name is sufficient and simpler than a
+     template that would only ever produce one claim anyway. */}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qa-platform-gears-data
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.gears.persistence.storageClass }}
+  storageClassName: {{ .Values.gears.persistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.gears.persistence.size }}

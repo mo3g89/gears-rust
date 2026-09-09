@@ -1,0 +1,59 @@
+[package]
+name = "qa-vhi-product-plugin"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The QA Platform product plugin for Virtuozzo Hybrid Infrastructure: its credential and observed schemas, the SSH-driven vinfra observation, and the run access it prepares"
+
+[lints]
+workspace = true
+
+[dependencies]
+qa-product-sdk = { path = "../../qa-product-sdk" }
+# Every SSH read `observe` makes -- opening the session, running a command,
+# classifying a transport failure -- goes through this connector, the same
+# arrangement `qa-connector-k8s` has for cluster-targeted products (ADR-0001's
+# shape, one host-reaching library named in exactly one crate's dependents).
+qa-connector-ssh = { path = "../../connectors/qa-connector-ssh" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+# ── The gear (`gear.rs`) and nothing else ─────────────────────────────────────
+#
+# `toolkit` for the `#[toolkit::gear]` macro, `GearCtx` and `ClientHub`;
+# `types-registry-sdk` for the client the GTS instance is published through;
+# `types-registry` because `deps = [types_registry]` expands to a re-export of
+# that crate, which is what forces its own inventory registration to survive
+# linking; `inventory` because the macro submits through it; `anyhow` for the
+# `init` error type the `Gear` trait names.
+toolkit = { workspace = true }
+types-registry-sdk = { workspace = true }
+types-registry = { workspace = true }
+inventory = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+# `SecretValue`, to build the resolved `CredentialSlot`s this crate's own
+# tests are driven with. Not a runtime dependency: the plugin's own code
+# never names the type, it only passes what `EnvironmentHandle::resolved`
+# hands it straight down.
+credstore-sdk = { workspace = true }
+# `qa_product_sdk::testing::assert_no_leak` — Layer 3 of the leak defence —
+# lives behind the SDK's `test-util` feature, so this crate's own test suite
+# has to ask for it. A production build of this plugin does not compile the
+# harness.
+qa-product-sdk = { path = "../../qa-product-sdk", features = ["test-util"] }
+# `qa_connector_ssh::test_support::SshdFixture` -- the throwaway `sshd` this
+# crate's own observation tests drive a real session against -- and
+# `test_support::RawBuffer`, the verbatim log capture the four `warn!`-site
+# tests read (see that type's own doc for why `tracing-test` is the wrong
+# capture for an assertion about what a line may carry).
+qa-connector-ssh = { path = "../../connectors/qa-connector-ssh", features = ["test-support"] }
+# Builds the subscriber those tests install `RawBuffer` into. VHP's own
+# `warn!`-site tests carry the identical dependency for the identical reason.
+tracing-subscriber = { workspace = true }

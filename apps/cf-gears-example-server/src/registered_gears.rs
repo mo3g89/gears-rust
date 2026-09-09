@@ -42,6 +42,20 @@ use rg_tr_plugin as _;
 #[cfg(feature = "static-authn")]
 use static_authn_plugin as _;
 
+// Mirrors the `static-authn` entry above in every respect: the Cargo
+// dependency key is `oidc-authn-plugin` (renaming package
+// `cf-gears-oidc-authn-plugin`), so the extern crate arrives here as
+// `oidc_authn_plugin`. The plugin crate already existed and was wired into no
+// binary; Task 13 added the `oidc-authn` feature, the optional dependency and
+// this import so `gears.oidc-authn-plugin` in a config file can resolve at
+// all. Without the import the gear never registers via inventory, so no
+// plugin lands in the ClientHub and api-gateway's `init` fails with "auth is
+// enabled but no AuthN Resolver client is available"
+// (gears/system/api-gateway/src/gear.rs:412-415) -- the config section alone
+// links nothing.
+#[cfg(feature = "oidc-authn")]
+use oidc_authn_plugin as _;
+
 #[cfg(feature = "static-authz")]
 use static_authz_plugin as _;
 
@@ -53,6 +67,15 @@ use static_license_plugin as _;
 
 #[cfg(feature = "static-credstore")]
 use static_credstore_plugin as _;
+
+// Same `inventory` registration hook as every other plugin above: without this
+// import the crate is linked but its `#[toolkit::gear]` registration never
+// runs, so `gears.postgres-credstore-plugin` in a config file resolves to
+// nothing -- no migration, no GTS instance, and `credstore.config.vendor`
+// pointing at this plugin's vendor would fail with "no credstore plugin found
+// for vendor".
+#[cfg(feature = "postgres-credstore")]
+use postgres_credstore_plugin as _;
 
 // === Optional Gears ===
 
@@ -67,6 +90,37 @@ use mini_chat::infra::plugins::static_model_policy as _;
 
 #[cfg(feature = "chat-engine")]
 use chat_engine as _;
+
+#[cfg(feature = "qa-platform")]
+use qa_environments as _;
+
+#[cfg(feature = "qa-platform")]
+use qa_catalog as _;
+
+#[cfg(feature = "qa-platform")]
+use qa_runs as _;
+
+#[cfg(feature = "qa-platform")]
+use qa_insights as _;
+
+// The VHP product plugin, and the same `inventory` hook as every plugin
+// above: without this import the crate is linked but its `#[toolkit::gear]`
+// registration never runs, so the `gears.qa-vhp-product-plugin` stanza in
+// config/qa-platform.yaml configures nothing, no GTS instance is published
+// under `cf.core._.vhp_product.v1`, and (once Task 12 lands) every product
+// naming that plugin instance resolves to nothing. The config section alone
+// links nothing -- see the note on `oidc_authn_plugin` above, written after
+// exactly that failure.
+#[cfg(feature = "qa-platform")]
+use qa_vhp_product_plugin as _;
+
+// The VHI product plugin, wired in for exactly the reason the VHP import
+// above is: without it the crate is linked but its `#[toolkit::gear]`
+// registration never runs, no `gears.qa-vhi-product-plugin` stanza
+// configures anything, and no GTS instance is published under
+// `cf.core._.vhi_product.v1`.
+#[cfg(feature = "qa-platform")]
+use qa_vhi_product_plugin as _;
 
 // === Example Features ===
 

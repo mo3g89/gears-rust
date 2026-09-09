@@ -1,0 +1,86 @@
+# RBAC for the qa-runs gear's own Argo executor.
+#
+# Two identities are involved and conflating them is the first mistake to make:
+#
+#   * The **workflow pod's** identity, which needs `create` on
+#     `workflowtaskresults.argoproj.io` or every run fails with `exit code 64`
+#     *after* producing all of its output. The `argo-workflows` Helm chart
+#     creates that account (`argo-workflow`) when installed with
+#     `workflow.serviceAccount.create=true` and `workflow.rbac.create=true`, and
+#     qa-runs names it through `qa-runs.argo.workflow_service_account`.
+#     Nothing in this file concerns it.
+#
+#   * The **qa-runs process'** identity, which is what this file grants. It is
+#     the account whose credentials `qa-runs.argo.kubeconfig_path` points at, or
+#     the projected service-account token when qa-runs runs in-cluster.
+#
+# Adapted from the source system's `k8s/manager/rbac.yaml:8-25`, with three
+# differences:
+#
+#   * `cronworkflows` is dropped: qa-runs owns its own leader-elected scheduler
+#     (ADR-0001, "Consequences"), so it never creates a `CronWorkflow`.
+#   * `configmaps` is dropped: nothing in the adapter reads one.
+#   * `secrets` is dropped, and that is a decision rather than an omission. The
+#     adapter derives a `Secret` *name* from a credstore reference and lets the
+#     kubelet resolve it; it never reads or writes secret material, which is
+#     what keeps `run_executor.rs:85-86` true. Whoever materialises those
+#     Secrets needs these verbs; qa-runs does not.
+#
+# `delete` on `workflows` is deliberately absent: the adapter never deletes one
+# — `ttlStrategy.secondsAfterCompletion` is what reclaims them. Note that
+# `tests/argo_cluster.rs` *does* delete the workflows it creates, so running
+# those ignored tests with a kubeconfig bound to this Role leaves them behind
+# until their TTL expires. That is the test's problem, not the adapter's, and
+# granting `delete` here to fix it would widen the running gear's permissions
+# for a test's convenience.
+#
+# `watch` on `workflows` is listed for a future switch to a `kube::runtime`
+# watcher. **The adapter does not use it today** — it polls `get` on the
+# configured cadence — so a deployment that cannot grant it still works.
+#
+# Apply into the namespace the workflows live in (`qa-runs.argo.namespace`):
+#   kubectl apply -n argo -f qa-runs-rbac.yaml
+#
+# Verify, without needing qa-runs to be running:
+#   for v in get list watch create patch; do
+#     kubectl auth can-i $v workflows.argoproj.io -n argo \
+#       --as=system:serviceaccount:argo:qa-runs
+#   done
+#   kubectl auth can-i get pods/log -n argo --as=system:serviceaccount:argo:qa-runs
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: qa-runs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: qa-runs-executor
+rules:
+  # start, list_active, watch, cancel.
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  # Pod discovery by `workflows.argoproj.io/workflow={name}` (`argo.rs:1597`),
+  # and the pod annotation that carries the execution node's name.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # Log streaming — the only source of per-test results in this deployment,
+  # because there is no runner-facing progress endpoint.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: qa-runs-executor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: qa-runs-executor
+subjects:
+  - kind: ServiceAccount
+    name: qa-runs

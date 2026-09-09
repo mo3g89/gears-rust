@@ -1,0 +1,52 @@
+{{/* Carries files/keycloak-tls/gen-cert.sh verbatim (copied into this
+     chart's files/keycloak-tls/ so .Files.Get can reach it -- Helm's .Files is
+     scoped to the chart directory and cannot read files outside it via ../,
+     same constraint as postgres-initdb-configmap.yaml's copy of the initdb
+     script). Do not edit the embedded script here: edit the source under
+     the chart's own files/ directory and re-copy it. The two copies are kept
+     byte-identical by deploy/helm/tests/test_chart_file_sync.py, which is a
+     table-driven generalisation of the guard that used to cover only the
+     initdb script.
+
+     THIS CONFIGMAP IS ITSELF A HOOK, AND MUST STAY ONE. certs-job.yaml's Job
+     is a `pre-install,pre-upgrade` hook that MOUNTS this ConfigMap. Helm
+     creates normal (non-hook) resources only AFTER every pre-install hook has
+     run to completion, so an unannotated ConfigMap here does not exist yet
+     when the Job's pod is scheduled: the pod sits in ContainerCreating with
+     `configmap "qa-platform-certs-scripts" not found`, and because that Job
+     is `backoffLimit: 0` / `restartPolicy: Never` it never fails either --
+     the whole `helm install` blocks until --timeout and then reports a failed
+     release. An UPGRADE hides this completely, because the ConfigMap is left
+     over from the previous release, which is exactly why only a fresh install
+     would have hit it.
+
+     The annotations below are the same triple certs-job.yaml puts on the
+     Job's ServiceAccount, Role and RoleBinding -- weight -11 so this is
+     created before the Job itself (weight -10), and before-hook-creation so a
+     leftover copy from the previous release is replaced rather than
+     conflicted with. No hook-succeeded/hook-failed delete policy: like the
+     ServiceAccount and Role, this outlives the Job on purpose, so a human
+     debugging a failed cert run can still read the script the pod ran.
+
+     IF YOU ADD ANOTHER PRE-INSTALL HOOK THAT MOUNTS A CONFIGMAP OR SECRET,
+     that resource needs this same treatment. Checked at the time of writing:
+     the only other ConfigMaps mounted by hooks are qa-platform-seed-scripts
+     (job-tenant-seed.yaml) and qa-platform-gears-config
+     (job-db-migrate.yaml), and both of those Jobs are POST-install hooks --
+     by which point every normal resource, those two ConfigMaps included, has
+     already been created. Those two are correct as plain resources; this one
+     was not. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qa-platform-certs-scripts
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: certs
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-11"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  gen-cert.sh: |
+{{ .Files.Get "files/keycloak-tls/gen-cert.sh" | indent 4 }}

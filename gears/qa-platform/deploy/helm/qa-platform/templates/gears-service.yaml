@@ -1,0 +1,23 @@
+{{/* Fixed interface: qa-platform-gears:8087. Reachable in-cluster only --
+     unlike docker-compose.yml's gears service this is not bound to a host
+     loopback at all, it simply has no NodePort/LoadBalancer type, so the only
+     ports a caller outside the cluster ever reaches are the ui Service's
+     (Task 8). A pod in another namespace (an Argo workflow pod fetching a
+     test bundle) reaches this Service at its fully-qualified name,
+     qa-platform-gears.<release namespace>.svc.cluster.local:8087 -- see
+     gears-argo-configmaps.yaml's bundle_base_url. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: qa-platform-gears
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+spec:
+  selector:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+  ports:
+    - name: http
+      port: {{ .Values.gears.port }}
+      targetPort: http

@@ -1,0 +1,346 @@
+{{/* Pre-install/pre-upgrade hook: mints the dev CA and its two leaves with
+     gen-cert.sh (unmodified, from certs-scripts-configmap.yaml), then writes
+     them into the qa-platform-tls Secret that keycloak-*, gears-*, and ui-*
+     templates (later tasks) mount from. hook-weight -10 runs this before
+     every other hook in this chart, and before-hook-creation deletes any
+     leftover Job of the same name from a prior release before creating a
+     new one -- otherwise a re-run would hit "Job is immutable" on the
+     second `helm upgrade`.
+
+     SPLIT INTO TWO IMAGES, ON PURPOSE. gen-cert.sh needs bash + openssl;
+     applying the resulting Secret needs kubectl. No single image gives a
+     reproducible, first-party answer for both:
+       - `images.postgres` (already pinned, already pulled by this chart)
+         is exactly what the compose stack's own gen-cert.sh already runs
+         under, and its header explains why (postgres:16 ships openssl,
+         the keycloak image does not) -- reused here as an initContainer
+         rather than adding a second cert-generation image to trust.
+       - `images.kubectl` is `registry.k8s.io/kubectl`, the Kubernetes
+         project's own distroless kubectl image, pinned to an immutable
+         version tag (see values.yaml's comment for how that tag was
+         chosen and verified). Distroless means NO shell and NO openssl in
+         that image -- confirmed by extracting every layer and finding no
+         `sh`/`bash`/`busybox` binary anywhere -- so it cannot run gen-cert.sh
+         and cannot chain two kubectl invocations through a temp file
+         either. That is why the manifest below is built entirely in the
+         initContainer (plain `base64`, no kubectl needed to construct it)
+         and the kubectl container's whole job is ONE exec-form command:
+         `kubectl apply --server-side -f /tls/secret.yaml`. One command, no
+         shell, no pipe -- its own process exit code IS the container's exit
+         code, nothing to lose track of. The `--server-side` flag is load
+         bearing for RBAC, not a style choice; see the Role's comment.
+
+     THE CA IS REUSED ACROSS INSTALLS AND UPGRADES, NOT REGENERATED EVERY
+     TIME. `/tls` is an emptyDir, so it starts empty on every run of this
+     Job -- and gen-cert.sh's entire CA-reuse/`leaf_ok` idempotence (its
+     `if [[ -s "$CA_CRT" && -s "$CA_KEY" ]] && openssl x509 -checkend 0`
+     guard, and the two `leaf_ok` guards under it) could therefore NEVER
+     fire: every `helm upgrade`, including one that changes nothing, minted
+     a brand-new dev CA and a brand-new leaf. Two costs, both real: a human
+     who trusted the CA in a browser had to re-trust it after every deploy,
+     and the qa-platform-tls Secret's contents changed on every upgrade,
+     which rewrites the Secret without rolling the UI pod that has the old
+     leaf projected into it.
+
+     The fix is to hand the PREVIOUS material back to gen-cert.sh before it
+     runs, so its own idempotence works as designed. That is done with the
+     `tls-existing` volume below: the qa-platform-tls Secret mounted with
+     `optional: true`, and copied into the emptyDir by the initContainer's
+     first step. `optional: true` is what makes the FIRST install work --
+     the Secret does not exist yet, the mount is simply empty, nothing is
+     copied and gen-cert.sh generates from scratch exactly as before.
+
+     WHY A VOLUME AND NOT `kubectl get secret`, since a kubectl container is
+     right there: that container is registry.k8s.io/kubectl, which is
+     DISTROLESS -- no shell -- so it cannot redirect `kubectl get -o
+     jsonpath=...` into a file, and kubectl has no "write each key to its own
+     file" output mode. Reading the Secret through the API would mean adding
+     a shell-bearing kubectl image, which is precisely the second image this
+     Job's whole split exists to avoid. The kubelet mounts a Secret volume on
+     the pod's behalf, so this ALSO needs no RBAC at all: the Role above
+     keeps its create/patch-only grant on secrets and gains no `get`, which
+     is strictly less privilege than reading it through the API would need.
+     (A hook-annotated PVC was the other candidate; it would need its own
+     hook weight and `helm.sh/resource-policy: keep` to survive the hook
+     delete policy, and would add a second piece of persistent state to a
+     chart that already has two PVCs.) */}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: qa-platform-certs
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: certs
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-11"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+{{/* THE VERB SET BELOW IS DERIVED FROM THE APPLY MODE ON THE `apply-secret`
+     CONTAINER -- CHECK THE TWO AGAINST EACH OTHER RATHER THAN TAKING THIS ON
+     TRUST. That container runs `kubectl apply --server-side` (see its own
+     comment, which names the flag on the line above its args). Server-side
+     apply sends ONE PATCH of content-type `application/apply-patch+yaml`;
+     the API server merges it and creates the object if it is absent. It
+     issues NO GET. So the verbs it needs are exactly `patch` (the merge) and
+     `create` (the absent-object path, taken on a first install) -- and no
+     `get`.
+
+     THE MISSING `get` IS LOAD-BEARING, AND THIS PAIRING WAS ONCE WRONG. An
+     earlier revision carried this same `create,patch` pair while the
+     container ran CLIENT-SIDE `kubectl apply -f`. Client-side apply is a
+     three-way merge: it GETs the live object to read its current
+     configuration before merging, and does so even when the object does not
+     exist yet. The first real install therefore died in this pre-install
+     hook with `secrets "qa-platform-tls" is forbidden: ... cannot get
+     resource "secrets"`, and took the whole release with it -- nothing after
+     the hook was ever applied.
+
+     WHY THAT SURVIVED THREE REVIEWS, so the next reader does not repeat the
+     mistake: the identical `create,patch` reasoning IS correct for the GEARS'
+     Role, whose writer performs a server-side `Patch::Apply`
+     (runner_secret_writer::ensure_runner_secret). The sentence was transplanted
+     from there to this Role, whose container ran a different mechanism, and
+     every review checked the verbs against the SENTENCE instead of against
+     the command the container actually executes. The correct repair was to
+     move the container onto the mechanism the verbs already described -- NOT
+     to widen the verbs.
+     Adding `get` would hand this ServiceAccount read access to every Secret
+     in the namespace in order to accommodate a client-side merge nobody
+     deliberately chose.
+
+     Namespace-scoped by construction (a Role, not a ClusterRole): this Job
+     writes one Secret in this release's namespace and has no business
+     touching any other. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: qa-platform-certs
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: certs
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-11"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: qa-platform-certs
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: certs
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-11"
+    "helm.sh/hook-delete-policy": before-hook-creation
+subjects:
+  - kind: ServiceAccount
+    name: qa-platform-certs
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: qa-platform-certs
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qa-platform-certs
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: certs
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qa-platform
+        app.kubernetes.io/component: certs
+    spec:
+      serviceAccountName: qa-platform-certs
+      restartPolicy: Never
+      # gen-cert.sh chowns the CA key and the ui leaf's key to root, and the
+      # keycloak leaf and its key to uid 1000 (matching the keycloak/gears
+      # images it targets in compose) -- both chowns require root inside the
+      # initContainer. postgres:16 itself runs as root by default, but this
+      # is set explicitly rather than relied on implicitly.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      initContainers:
+        - name: gen-cert
+          image: "{{ .Values.images.postgres.repository }}:{{ .Values.images.postgres.tag }}"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              # `set -u` (not `-euo pipefail`): every command below whose
+              # failure matters is followed by an explicit `status=$?` check,
+              # by design -- gen-cert.sh's own umask/chown sequence, and the
+              # `printf`/`base64` calls that build the Secret manifest, must
+              # each be diagnosable on its own rather than folded into one
+              # opaque non-zero exit from `set -e`. Do not "simplify" this
+              # back to `-e`: that would trade named failures for a bare
+              # "something failed", which is exactly the ambiguity the
+              # global no-lost-exit-code constraint exists to prevent.
+              set -u
+
+              # RESTORE FIRST, GENERATE SECOND. /tls is an emptyDir and starts
+              # empty; /tls-existing is the qa-platform-tls Secret from the
+              # PREVIOUS release, mounted `optional: true` so it is simply an
+              # empty (or absent) directory on a first install. Copying its
+              # contents in is what lets gen-cert.sh's own CA-reuse and
+              # leaf_ok guards see the material they are written to check for
+              # -- see this file's header. Nothing here is fatal on its own:
+              # if there is nothing to restore, gen-cert.sh generates from
+              # scratch, which is the correct first-install behaviour.
+              #
+              # `cp -L`: a Secret volume's entries are symlinks into a
+              # ..data/ directory, and the copies must be real files because
+              # gen-cert.sh chmods and chowns them. The Secret mount itself is
+              # read-only; these copies are not.
+              restored=0
+              for f in ca.crt ca.key ui.crt ui.key keycloak.crt keycloak.key; do
+                if [ -s "/tls-existing/$f" ]; then
+                  cp -L "/tls-existing/$f" "/tls/$f"
+                  status=$?
+                  if [ "$status" -ne 0 ]; then
+                    echo "certs-init: copying /tls-existing/$f into /tls failed with exit $status" >&2
+                    exit "$status"
+                  fi
+                  restored=$((restored + 1))
+                fi
+              done
+              if [ "$restored" -eq 0 ]; then
+                echo "certs-init: no previous TLS material found under /tls-existing -- gen-cert.sh will mint a new dev CA and leaves (expected on a first install)"
+              else
+                echo "certs-init: restored $restored file(s) from the existing qa-platform-tls Secret -- gen-cert.sh will keep whatever is still valid"
+              fi
+
+              bash /scripts/gen-cert.sh
+              status=$?
+              if [ "$status" -ne 0 ]; then
+                echo "certs-init: gen-cert.sh failed with exit $status" >&2
+                exit "$status"
+              fi
+
+              # Build the Secret manifest here, not with
+              # `kubectl create secret --dry-run=client -o yaml`: the
+              # container that runs `kubectl apply` (registry.k8s.io/kubectl)
+              # is distroless -- no shell, so it cannot pipe or chain a
+              # second kubectl invocation, and no kubectl binary exists here
+              # to render one. Plain `base64` needs no shell trick to avoid:
+              # each encode is its own command, checked on its own line, and
+              # `$(...)` command substitution's exit status is that command's
+              # own -- never a pipeline's -- so nothing is lost here either.
+              SECRET_MANIFEST=/tls/secret.yaml
+              {
+                printf '%s\n' \
+                  'apiVersion: v1' \
+                  'kind: Secret' \
+                  'metadata:' \
+                  '  name: qa-platform-tls' \
+                  '  labels:' \
+                  '    app.kubernetes.io/name: qa-platform' \
+                  '    app.kubernetes.io/component: certs' \
+                  'type: Opaque' \
+                  'data:'
+              } > "$SECRET_MANIFEST"
+              status=$?
+              if [ "$status" -ne 0 ]; then
+                echo "certs-init: writing $SECRET_MANIFEST header failed with exit $status" >&2
+                exit "$status"
+              fi
+
+              for f in ca.crt ca.key ui.crt ui.key keycloak.crt keycloak.key; do
+                encoded="$(base64 -w0 "/tls/$f")"
+                status=$?
+                if [ "$status" -ne 0 ]; then
+                  echo "certs-init: base64 encoding /tls/$f failed with exit $status" >&2
+                  exit "$status"
+                fi
+                printf '  %s: %s\n' "$f" "$encoded" >> "$SECRET_MANIFEST"
+                status=$?
+                if [ "$status" -ne 0 ]; then
+                  echo "certs-init: writing $f into $SECRET_MANIFEST failed with exit $status" >&2
+                  exit "$status"
+                fi
+              done
+
+              echo "certs-init: wrote $SECRET_MANIFEST"
+          env:
+            - name: TLS_DIR
+              value: /tls
+            - name: PUBLIC_HOST
+              value: {{ include "qa-platform.publicHost" . | quote }}
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+            - name: tls-existing
+              mountPath: /tls-existing
+              readOnly: true
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      containers:
+        - name: apply-secret
+          image: "{{ .Values.images.kubectl.repository }}:{{ .Values.images.kubectl.tag }}"
+          # Exec form, no shell: this image has none.
+          #
+          # `--server-side` IS NOT OPTIONAL AND MUST NOT BE DROPPED. It is
+          # what makes the Role above (`create,patch`, deliberately no `get`)
+          # sufficient: server-side apply is a single PATCH that the API
+          # server merges, creating the object when it is absent, without ever
+          # GETting the live object. Plain `kubectl apply -f` is CLIENT-SIDE
+          # apply, which GETs the live object first and fails this Job with
+          # `cannot get resource "secrets"` -- that is exactly how the first
+          # real install died. Dropping this flag means widening the Role, and
+          # the Role's comment explains why that is the wrong trade.
+          #
+          # It remains create-or-update, so this one call is still correct on
+          # both the first `helm install` (Secret absent -- the create path)
+          # and every `helm upgrade` (Secret already exists from a prior
+          # release -- the merge path).
+          #
+          # `--field-manager` is set explicitly so the per-field ownership
+          # server-side apply records is legible in `kubectl get secret
+          # qa-platform-tls -o yaml --show-managed-fields` and attributable to
+          # this Job, rather than to the default manager name `kubectl`, which
+          # every ad-hoc kubectl invocation on the node also writes under.
+          args:
+            - apply
+            - --server-side
+            - --field-manager=qa-platform-certs
+            - -f
+            - /tls/secret.yaml
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tls
+          emptyDir: {}
+        # The PREVIOUS release's material, read-only, and `optional: true` so
+        # a first install (where this Secret does not exist yet -- THIS Job is
+        # what creates it) mounts an empty directory instead of leaving the
+        # pod stuck in ContainerCreating on a missing Secret. No `items`
+        # narrowing here, unlike ui-deployment.yaml's mount: this pod is the
+        # one that legitimately handles the CA private key, and it needs every
+        # key back to reuse any of them.
+        - name: tls-existing
+          secret:
+            secretName: qa-platform-tls
+            optional: true
+        - name: scripts
+          configMap:
+            name: qa-platform-certs-scripts
+            defaultMode: 0755

@@ -1,0 +1,25 @@
+[package]
+name = "qa-runs-sdk"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SDK for qa-runs gear: client trait, models, and error definitions"
+
+[lints]
+workspace = true
+
+[dependencies]
+# `Exclusivity` only, re-exported so `LaunchRequest::exclusive` and a caller
+# naming its own field's type do not need a second dependency to do it — the
+# same one-way pattern `qa-environments-sdk` uses for `qa-product-sdk`'s
+# `ObservedAttrs`/`HealthState`. One-way: qa-catalog-sdk knows nothing about
+# qa-runs-sdk.
+qa-catalog-sdk = { path = "../../qa-catalog/qa-catalog-sdk" }
+
+uuid = { workspace = true }
+time = { workspace = true }
+async-trait = { workspace = true }
+toolkit-canonical-errors = { workspace = true }
+toolkit-security = { workspace = true }

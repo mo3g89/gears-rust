@@ -1,0 +1,284 @@
+//! Local client adapter: implements the object-safe `QaEnvironmentsClientV1`
+//! by delegating to `AppServices`, converting `DomainError` into
+//! `QaEnvironmentsError` (`CanonicalError`) via the `From` impl in
+//! `api::rest::error`.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use qa_environments_sdk::{
+    AcquireOutcome, Environment, EnvironmentPatch, LeaseMode, LeaseState, NewEnvironment,
+    NewVariable, QaEnvironmentsClientV1, QaEnvironmentsError, Variable,
+};
+use toolkit_odata::{CursorV1, ODataQuery, Page};
+use toolkit_security::SecurityContext;
+use tracing::warn;
+use uuid::Uuid;
+
+use crate::domain::error::DomainError;
+use crate::gear::ConcreteAppServices;
+
+/// Local implementation of the object-safe `QaEnvironmentsClientV1`.
+pub struct QaEnvironmentsLocalClient {
+    services: Arc<ConcreteAppServices>,
+}
+
+impl QaEnvironmentsLocalClient {
+    #[must_use]
+    pub fn new(services: Arc<ConcreteAppServices>) -> Self {
+        Self { services }
+    }
+}
+
+/// Follow a paginated service read to exhaustion, concatenating the pages.
+///
+/// The SDK's two collection reads are `Vec`-shaped and the services behind them
+/// are `Page`-shaped, so something has to bridge the two; this is it, once,
+/// rather than the same loop written twice. Each round trip is bounded by
+/// `PAGE_LIMITS`; the aggregate is not, which is the SDK contract those two
+/// methods' docs defend.
+///
+/// Terminates when a page reports no `next_cursor`, or -- defensively -- when a
+/// cursor comes back that does not decode. The latter cannot happen against
+/// this gear's own pager (it emits what `CursorV1::encode` produced), and
+/// stopping is the right answer if it ever does: looping on an undecodable
+/// cursor would not terminate.
+///
+/// **But it stops with a partial list, which is the failure mode
+/// `qa-insights`' `EnvironmentReader` header argues against** ("a cap that
+/// silently dropped an environment would silently unlabel a bar"), so it is not
+/// silent: the arm warns with the token that failed. Task 24 review finding 6.
+async fn drain_pages<T, F, Fut>(mut read: F) -> Result<Vec<T>, QaEnvironmentsError>
+where
+    F: FnMut(ODataQuery) -> Fut,
+    Fut: std::future::Future<Output = Result<Page<T>, DomainError>>,
+{
+    let mut query = ODataQuery::default();
+    let mut all = Vec::new();
+    loop {
+        let page = read(query).await?;
+        all.extend(page.items);
+        let Some(token) = page.page_info.next_cursor else {
+            return Ok(all);
+        };
+        let cursor = match CursorV1::decode(&token) {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                warn!(
+                    %error,
+                    collected = all.len(),
+                    "qa-environments SDK drain stopped early: a page returned a cursor this \
+                     build cannot decode, so the list handed to the caller is PARTIAL"
+                );
+                return Ok(all);
+            }
+        };
+        query = ODataQuery::default().with_cursor(cursor);
+    }
+}
+
+#[async_trait]
+impl QaEnvironmentsClientV1 for QaEnvironmentsLocalClient {
+    // ==================== Environments ====================
+
+    async fn get_environment(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<Environment, QaEnvironmentsError> {
+        self.services
+            .environments
+            .get_environment(ctx, id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// **Every** environment the caller may see, drained page by page.
+    ///
+    /// The service read became paginated with review finding #55, and the SDK
+    /// contract did not: `qa-insights`' `EnvironmentReader`
+    /// (`infra/clients/qa_environments.rs`) resolves environment *names* for
+    /// chart labels by set difference against this list, and its own header
+    /// spells out that *"a cap that silently dropped an environment would
+    /// silently unlabel a bar"*. Truncating here to whatever
+    /// `PAGE_LIMITS.default` happens to be would do exactly that, invisibly.
+    ///
+    /// So the loop, rather than one call: each round trip is bounded (which is
+    /// what the finding was about — an unbounded `SELECT` materialising the
+    /// whole table into one `Vec`), and the SDK contract is unchanged. The
+    /// aggregate result is still one `Vec` of the tenant's environments, which
+    /// is a read of tens of rows for the reason that file argues at length.
+    async fn list_environments(
+        &self,
+        ctx: &SecurityContext,
+    ) -> Result<Vec<Environment>, QaEnvironmentsError> {
+        drain_pages(|query| async move {
+            self.services
+                .environments
+                .list_environments(ctx, &query)
+                .await
+        })
+        .await
+    }
+
+    async fn create_environment(
+        &self,
+        ctx: &SecurityContext,
+        new: NewEnvironment,
+    ) -> Result<Environment, QaEnvironmentsError> {
+        self.services
+            .environments
+            .create_environment(ctx, new)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn update_environment(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+        patch: EnvironmentPatch,
+    ) -> Result<Environment, QaEnvironmentsError> {
+        self.services
+            .environments
+            .update_environment(ctx, id, patch)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn delete_environment(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<(), QaEnvironmentsError> {
+        self.services
+            .environments
+            .delete_environment(ctx, id)
+            .await
+            .map_err(Into::into)
+    }
+
+    // ==================== Variables ====================
+
+    /// Every variable that would assemble into a run's environment, drained the
+    /// same way [`Self::list_environments`] is and for the same reason:
+    /// `qa-runs`' `runvars` splits this response into its two precedence tiers,
+    /// and a variable missing from it is a variable the run silently does not
+    /// get.
+    ///
+    /// **The drain terminates after one call whenever `environment_id` is
+    /// `Some`**, because `VariablesService::list_for_env` returns no cursor in
+    /// that case — the response is the union of two tables and a single-table
+    /// cursor cannot address it. See that method's doc.
+    ///
+    /// **Corrected 2026-09-07, Task 24 review finding 1.** This doc used to say
+    /// the bound that then applies is `PAGE_LIMITS.default` and that this "is
+    /// not a new ceiling". It was a new ceiling and the claim was false: the old
+    /// unpaged code returned everything and truncated at `max_variables`
+    /// (`config.rs`: **500**), while `PAGE_LIMITS.default` is **200** — and this
+    /// is the call `qa-runs`' `dispatch_spec` assembles a run's variables from,
+    /// where the rows lost at a pipeline-first boundary are the
+    /// *environment-specific overrides*. The fix is in `list_for_env`, which now
+    /// asks for `max_variables` rows rather than a page, so this call site needs
+    /// no limit of its own: the ceiling belongs where `max_variables` is
+    /// visible, and a second copy of it here — in a layer that cannot see the
+    /// config — would be a weaker duplicate of the same rule.
+    ///
+    /// # With `environment_id` `None`, nothing bounds the aggregate
+    ///
+    /// Stated 2026-09-07, final review finding 3, because the paragraph above
+    /// leaves the opposite impression. `max_variables` truncates a single
+    /// response; on the pipeline-only path the response is a cursor page whose
+    /// limit is `PAGE_LIMITS.default` (200) against a shipped `max_variables` of
+    /// 500, so the truncation never fires, the cursor is real, and this drain
+    /// follows it to the end of `qa_pipeline_variables` for the tenant. There is
+    /// no page cap in [`drain_pages`] either. `qa-runs`' `dispatch_spec` calls
+    /// this with `run.platform_id`, so a run with no environment now assembles
+    /// from *every* pipeline variable the tenant has, where the pre-paging code
+    /// gave it at most 500.
+    ///
+    /// That is the intended direction rather than a second regression: this
+    /// method's contract is completeness — the thing `qa-insights`'
+    /// `EnvironmentReader` argues for and the reason `drain_pages` exists — and
+    /// more rows can only add a variable a run should already have had. Only
+    /// `list_for_env`'s truncation ever removes one, and only when a deployment
+    /// sets `max_variables` below a page.
+    async fn list_variables(
+        &self,
+        ctx: &SecurityContext,
+        environment_id: Option<Uuid>,
+    ) -> Result<Vec<Variable>, QaEnvironmentsError> {
+        drain_pages(|query| async move {
+            self.services
+                .variables
+                .list_for_env(ctx, environment_id, &query)
+                .await
+        })
+        .await
+    }
+
+    async fn upsert_variable(
+        &self,
+        ctx: &SecurityContext,
+        var: NewVariable,
+    ) -> Result<Variable, QaEnvironmentsError> {
+        self.services
+            .variables
+            .upsert(ctx, var)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn delete_variable(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<(), QaEnvironmentsError> {
+        self.services
+            .variables
+            .delete(ctx, id)
+            .await
+            .map_err(Into::into)
+    }
+
+    // ==================== Leases ====================
+
+    async fn acquire_lease(
+        &self,
+        ctx: &SecurityContext,
+        environment_id: Uuid,
+        run_id: Uuid,
+        mode: LeaseMode,
+    ) -> Result<AcquireOutcome, QaEnvironmentsError> {
+        self.services
+            .leases
+            .acquire(ctx, environment_id, run_id, mode)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn release_lease(
+        &self,
+        ctx: &SecurityContext,
+        environment_id: Uuid,
+        run_id: Uuid,
+    ) -> Result<LeaseState, QaEnvironmentsError> {
+        self.services
+            .leases
+            .release(ctx, environment_id, run_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_lease(
+        &self,
+        ctx: &SecurityContext,
+        environment_id: Uuid,
+    ) -> Result<LeaseState, QaEnvironmentsError> {
+        self.services
+            .leases
+            .get(ctx, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+}

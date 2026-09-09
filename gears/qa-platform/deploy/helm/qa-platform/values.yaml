@@ -1,0 +1,219 @@
+# THE ONE KNOB THAT RE-POINTS THE WHOLE LOGIN CHAIN. Keycloak's KC_HOSTNAME, the
+# gears' issuer_pattern, the realm's redirectUris/webOrigins, the UI bundle's
+# baked-in VITE_OIDC_ISSUER and the certificate's SAN all derive from this, and
+# deploy/helm/tests/test_pins.py fails if any of them stops doing so.
+#
+# REQUIRED, AND DELIBERATELY EMPTY. This carried one particular development
+# cluster's address as its default, which made `helm install` against any other
+# cluster silently build a UI bundle and a certificate for someone else's host --
+# a failure that surfaces as a broken login, not as an error. `_helpers.tpl`'s
+# `required` now refuses to render without it.
+#
+#   --set publicOrigin=https://qa.example.com
+#
+# scheme://host[:port], no path, no trailing slash.
+publicOrigin: ""
+
+# nginx `resolver` needs an ADDRESS, not a name, because `location /qa/v1/` reaches
+# the gears through a VARIABLE `proxy_pass` and so resolves the upstream at REQUEST
+# time.
+#
+# LEAVE THIS EMPTY UNLESS YOU HAVE A REASON NOT TO. Empty means the UI pod derives
+# it from its own /etc/resolv.conf at start-up
+# (qa-platform-ui/docker-entrypoint.d/15-resolver-from-resolv-conf.envsh), which is
+# correct on every cluster without being told -- and under Docker too, where the
+# same file names Docker's embedded DNS. This used to default to 10.43.0.10, one
+# k3s installation's kube-dns ClusterIP; a default kubeadm cluster is 10.96.0.10
+# and anything else is arbitrary, so the default was wrong everywhere but one
+# machine and failed as a 502 on every API call rather than as an error.
+#
+# Set it only to pin a specific resolver:
+#   --set clusterDns="$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')"
+clusterDns: ""
+
+argo:
+  namespace: argo
+  workflowServiceAccount: argo-workflow
+  # qa-runs' ArgoExecutorConfig fields Task 7's fragment ConfigMap renders
+  # (deploy/compose/render-argo.sh's own defaults, restated here so the chart
+  # has one source for them rather than a second copy baked into the
+  # template). kubeconfig_path is deliberately NOT one of these -- see
+  # gears-argo-configmaps.yaml.
+  workflowTtlSeconds: 3600
+  statusPollSeconds: 3
+  # `ArgoExecutorConfig::log_follow_idle_seconds`'s own default (`config.rs`) --
+  # 600, not the 8 hours an earlier round of Task 17 shipped: see that field's
+  # doc for why 600 (anchored on `orphan_timeout_seconds`, this codebase's own
+  # "how long is silence long enough to call it dead") replaced the SSE
+  # constant's number this adapter's own follow loop is not actually bound by
+  # the same way. Without a row here the deployment default IS this value with
+  # no operator override -- a deployment whose pods legitimately go quieter
+  # than 600s needs to raise this, not just live with the shipped number.
+  logFollowIdleSeconds: 600
+  # Must equal whatever provisions the workflow pod's bundle-download
+  # credential (deploy/argo/provision-workflow-secret.sh's own defaults, or
+  # its in-cluster equivalent) -- the adapter only ever emits a
+  # secretKeyRef naming these, it never reads the value.
+  workflowSecretName: qa-platform-workflow-oidc
+  workflowSecretKey: client_secret
+  workflowClientId: qa-platform-workflow
+
+# qa-runs' own gear config -- `QaRunsConfig`, not `ArgoExecutorConfig`. Rendered
+# into the SAME fragment as the `argo:` block above (see
+# gears-argo-configmaps.yaml), because that fragment is the only insertion point
+# this chart has into `gears.qa-runs.config` and this chart always inserts it:
+# gears/qa-platform/config/qa-platform-stack.yaml is embedded VERBATIM by
+# gears-config-configmap.yaml (`.Files.Get`, one transform, byte-pinned by
+# tests/test_chart_file_sync.py), so a key that is not in that committed file
+# cannot be templated into it.
+#
+# `${VAR:-default}` in the committed file is NOT an alternative here, and this
+# was checked rather than assumed: `${VAR}` expansion is opt-in per config
+# struct and runs AFTER deserialization on `String` fields marked
+# `#[expand_vars]` (libs/toolkit/src/context.rs, `config_expanded_or_default`);
+# `QaRunsConfig` derives neither, qa-runs loads through plain
+# `ctx.config_or_default()` (`qa-runs/src/gear.rs`), and
+# `max_concurrent_runs` is a `u32` -- so a placeholder written there would fail
+# to deserialize, not expand. entrypoint.sh does targeted `sed` on named
+# anchors, not an envsubst pass, so it does not reach it either.
+qaRuns:
+  # `QaRunsConfig::max_concurrent_runs` -- the cluster-wide concurrent-run cap,
+  # 50 by default (`cpt-cf-qa-nfr-scale`'s own number; see that field's doc).
+  #
+  # **`0` is the explicit "unbounded" opt-out, and this row is what makes it
+  # reachable.** Without it the shipped 50 was the only value any deployment
+  # could have -- whole-branch review I1 -- which mattered because enabling the
+  # cap also puts a cross-plane `executor.list_active()` call on the front of
+  # every launch, whose failure direction is to REFUSE the launch. A deployment
+  # that relied on unlimited concurrency, or that would rather over-commit than
+  # fail a launch during an Argo outage, sets this to 0:
+  #   --set qaRuns.maxConcurrentRuns=0
+  maxConcurrentRuns: 50
+
+images:
+  gears:
+    repository: cf-gears-qa-platform
+    tag: latest
+    pullPolicy: IfNotPresent
+  ui:
+    repository: cf-gears-qa-platform-ui
+    tag: latest
+    pullPolicy: IfNotPresent
+  # The pytest runner image qa-runs' Argo adapter submits Workflow pods with.
+  # deploy/runner/build-and-import.sh is what has to land this tag in the
+  # cluster's containerd; nothing in this chart builds or imports it.
+  runner:
+    repository: qa-platform-pytest-runner
+    tag: "1"
+    pullPolicy: IfNotPresent
+  postgres:
+    repository: postgres
+    tag: "16"
+  keycloak:
+    repository: quay.io/keycloak/keycloak
+    tag: "26.0"
+  # First-party, Kubernetes-project-published, immutable version tag --
+  # NEVER `latest` on a hook that runs on every install/upgrade.
+  #
+  # OVERRIDE THIS TO MATCH YOUR CLUSTER. kubectl's skew policy tolerates +/-1
+  # minor from the API server, so this default works on 1.35-1.37 and not
+  # beyond. Read your server's minor with `kubectl version` and set
+  # `--set images.kubectl.tag=vX.Y.Z` if it is outside that window.
+  #
+  # The tag was chosen as an exact match for the cluster this chart was first
+  # developed against (k3s v1.36.3) and verified by pulling it; an exact match
+  # is the safest choice where you can make one, not merely an allowed one.
+  # This image is
+  # distroless (no shell, no openssl) by design -- see certs-job.yaml's
+  # comment on why the cert-generation step runs in `images.postgres`
+  # instead, and this one is only ever given a pre-built manifest to apply.
+  kubectl:
+    repository: registry.k8s.io/kubectl
+    tag: v1.36.3
+
+postgres:
+  user: qa
+  password: qa
+  persistence:
+    size: 20Gi
+    storageClass: ""
+
+gears:
+  replicaCount: 1
+  port: 8087
+  logLevel: info
+  persistence:
+    size: 20Gi
+    storageClass: ""
+  # Set true only if Task 1 measured the pod->node hostPort hairpin as broken.
+  hostAliases:
+    enabled: false
+
+ui:
+  replicaCount: 1
+  hostPort:
+    http: 80
+    https: 443
+
+keycloak:
+  # Keycloak runs at its DEFAULT root path. Do not add KC_HTTP_RELATIVE_PATH:
+  # entrypoint.sh:137 refuses to start on a PUBLIC_ISSUER_ORIGIN carrying a path,
+  # and the SPA already owns /auth/callback. See ui.keycloakPrefixes.
+  adminUser: admin
+  adminPassword: admin
+
+# Set by deploy-k8s.sh with --set-file, from render-realm.sh's output. Keycloak
+# 26.0.8 will not expand a placeholder in an import file -- measured, it aborts
+# start-up -- so the realm has to arrive already rendered for this origin.
+keycloakRealmJson: ""
+
+# THE ONLY ACCESS CONTROL ON THE COLLECT-REPORT ROUTE, and so a real secret.
+# `POST /qa/v1/collect/{repo_id}` is registered `.public()` and is genuinely
+# anonymous on this deployment shape (qa-insights' routes/collect.rs says so at
+# length); the `sig` query parameter qa-insights signs with this key is what
+# stops an anonymous caller writing case counts for any tenant it names.
+# qa-insights refuses every report, fail-closed, when this is empty or shorter
+# than 16 characters -- which is the state every deployment was in until
+# 2026-09-03, and half the reason `qa_test_case_collect` was empty.
+#
+# EMPTY IS SAFE HERE, unlike publicOrigin. gears-config-configmap.yaml
+# substitutes a per-render `randAlphaNum 32` for the committed dev literal, and
+# a rotating value cannot break a signature: the URL is signed and the report
+# verified by the same running gears process. Set it to keep the key stable
+# across upgrades (auditable, and identical in `helm template` output):
+#
+#   --set collectReportSigningSecret="$(openssl rand -hex 24)"
+collectReportSigningSecret: ""
+
+# Only consumed when gears.hostAliases.enabled is true (i.e. only if Task 1
+# measured the pod->node hostPort hairpin as broken). deploy-k8s.sh resolves the
+# ui Service's ClusterIP and passes it with --set.
+uiServiceClusterIP: ""
+
+# WHETHER THE 22 METRIC FAMILIES LEAVE THE PROCESS AT ALL, and where they go.
+# The catalog -- series name, type, labels, and what each supports -- is
+# docs/DESIGN.md 3.9.
+#
+# METRICS ARE PUSHED OVER OTLP, NOT SCRAPED, so there is no port to open and no
+# scrape annotation to add: libs/toolkit's `init_metrics_provider` builds an
+# OTLP exporter behind a periodic reader, and nothing in this repository serves
+# a `/metrics` route. `endpoint` is where that reader pushes.
+#
+# OFF BY DEFAULT, and off is a working state rather than a broken one: with
+# `enabled: false` the process-global meter provider stays the built-in no-op,
+# every instrument is a no-op, and the gears behave identically. Nothing is
+# observable, and nothing misbehaves.
+#
+# `endpoint` IS REQUIRED WHEN `enabled` IS TRUE -- gears-config-configmap.yaml
+# refuses to render the pair otherwise. The committed config's value is the
+# loopback address, which is right under `cargo run` beside a local collector
+# and wrong in a pod, whose 127.0.0.1 is itself; enabling without re-pointing
+# it produces a stack that looks instrumented, logs an export failure every
+# interval and fills no dashboard.
+#
+#   --set opentelemetry.metrics.enabled=true \
+#   --set opentelemetry.metrics.endpoint=http://otel-collector.observability.svc.cluster.local:4317
+opentelemetry:
+  metrics:
+    enabled: false
+    endpoint: ""

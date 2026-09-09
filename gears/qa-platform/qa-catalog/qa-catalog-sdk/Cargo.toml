@@ -1,0 +1,23 @@
+[package]
+name = "qa-catalog-sdk"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SDK for qa-catalog gear: client trait, models, and error definitions"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The plugin contract, for `QaProductPluginResolverV1`'s return type. This is
+# the only dependency this SDK has on another qa-platform crate, and it is
+# one-way: `qa-product-sdk` knows nothing about the catalog.
+qa-product-sdk = { path = "../../qa-product-sdk" }
+
+uuid = { workspace = true }
+time = { workspace = true }
+async-trait = { workspace = true }
+toolkit-canonical-errors = { workspace = true }
+toolkit-security = { workspace = true }

@@ -1,0 +1,43 @@
+[package]
+name = "qa-connector-ssh"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SSH transport for QA Platform product plugins whose target is a host rather than a cluster: a short-lived ssh-agent that never writes the key to disk, remote command execution with secrets delivered on stdin, and the failure classifier that keeps credential bytes off every published surface. A library, not a plugin -- no gear, no GTS identity, nothing resolves it at runtime."
+
+[lints]
+workspace = true
+
+[dependencies]
+qa-product-sdk = { path = "../../qa-product-sdk" }
+credstore-sdk = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "time"] }
+# OpenSSH private-key header parsing: distinguishes a passphrase-protected key
+# from an unencrypted one before `ssh-add` is spawned (`agent::openssh_key_cipher`).
+base64 = { workspace = true }
+# ── The `test-support` feature's one dependency ───────────────────────────────
+#
+# Optional, compiled only when `test-support` is on. `tracing-subscriber`
+# builds nothing here; it supplies the `MakeWriter` impl `test_support::RawBuffer`
+# needs so a caller can install it as a subscriber's writer. Same arrangement,
+# and same reason, as `qa-connector-k8s`' own optional copy.
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+# Gates `qa_connector_ssh::test_support`: the throwaway `sshd` fixture. Every
+# crate that drives a real SSH session in its own tests enables this in its
+# `[dev-dependencies]`; a production build compiles none of it. It gates this
+# crate's *code*, not the dependency tree -- `tempfile` is needed by the agent
+# unconditionally -- which is the same honest limit `qa-connector-k8s`'
+# `test-support` records about its own gate -- with the one exception of
+# `tracing-subscriber`, which `RawBuffer` genuinely needs and which is therefore
+# an optional dependency turned on by this feature.
+test-support = ["dep:tracing-subscriber"]
+
+[dev-dependencies]
+qa-connector-ssh = { path = ".", features = ["test-support"] }
+tokio = { workspace = true }

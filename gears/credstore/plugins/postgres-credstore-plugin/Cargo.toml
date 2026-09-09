@@ -1,0 +1,68 @@
+[package]
+name = "cf-gears-postgres-credstore-plugin"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CredStore plugin that persists secret values in a relational database so they survive a container restart"
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["constructorfabric", "cf-gears"]
+categories = ["security"]
+metadata.docs.rs.all-features = true
+
+[lib]
+name = "postgres_credstore_plugin"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Local dependencies
+credstore-sdk = { package = "cf-gears-credstore-sdk", version = "0.2.4", path = "../../credstore-sdk" }
+types-registry-sdk = { package = "cf-gears-types-registry-sdk", version = "0.3.2", path = "../../../system/types-registry/types-registry-sdk" }
+types-registry = { workspace = true }
+
+# ToolKit dependencies
+toolkit = { workspace = true }
+toolkit-macros = { workspace = true }
+toolkit-security = { workspace = true }
+toolkit-db = { workspace = true }
+
+# Async runtime
+async-trait = { workspace = true }
+
+# Storage
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+time = { workspace = true }
+
+# Data structures
+uuid = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Required by toolkit::gear macro
+inventory = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+# In-memory SQLite for the repository/service tests (same pattern as the
+# credstore gear's `repo_tests.rs`).
+toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
+serde-saphyr = { workspace = true }
+# Captures every `tracing` event emitted during a test (including sqlx's own
+# query logs) so the planted-leak test can assert secret bytes never reach one.
+tracing-subscriber = { workspace = true }
+# Bridges `log`-crate records (sqlx logs its statements through `log`) into the
+# `tracing` dispatcher, so the leak test's net covers driver logging too.
+tracing-log = { workspace = true }

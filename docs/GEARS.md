@@ -83,6 +83,23 @@ Provide the single public API entrypoint for Gears, including request routing, a
 
 The architecture diagram uses placeholder business gears `A-E` to illustrate that multiple independent product domains can coexist on the same platform contracts. Each business gear owns its domain models, user journeys, and business rules, while shared platform gears provide reusable execution, AI, governance, and integration capabilities.
 
+### QA Platform
+#### Responsibility
+Test-management control plane for Virtuozzo products: register an environment, sync a test repository, launch runs against it, and read the results back as analytics. Four gears — `qa-environments`, `qa-catalog`, `qa-runs`, `qa-insights` — plus a React SPA and a Helm chart. Everything product-specific lives behind one trait, `QaProductPluginV1`, resolved per product from ClientHub, so adding a product is adding a crate rather than editing the core.
+#### High Level Scenarios
+- [x] p1 - product plugins: credential schema, observation, run access, resolved per product (VHP over Kubernetes, VHI over SSH)
+- [x] p1 - environments: CRUD with credstore-referenced credentials, observation and health, leases (shared/exclusive), environment and pipeline variables
+- [x] p1 - catalog: test repositories with git sync and branch cache, plan discovery, custom plans, SSH keys, test bundles
+- [x] p1 - runs: launch, per-environment FIFO queue, dispatch, cancel/rerun, cron schedules, typed result ingestion, live and archived logs
+- [x] p1 - insights: per-file and per-case history, dashboard, analytics, saved views, JIRA correlation, Slack and email notifications
+- [x] p1 - execution behind the `RunExecutor` port; Argo Workflows adapter behind the non-default `argo` feature
+- [x] p1 - Helm chart deploying gears, UI, Postgres, Keycloak and the Argo wiring
+#### More details
+- [PRD](../gears/qa-platform/docs/PRD.md)
+- [Design](../gears/qa-platform/docs/DESIGN.md)
+- [E2E scenarios](../gears/qa-platform/docs/E2E-SCENARIOS.md)
+- [API](../gears/qa-platform/docs/openapi.json)
+
 ## Gen AI Gears
 
 **Gen AI Gears** provide the core AI capabilities of Gears and represent the primary value layer for building AI-powered SaaS applications. These gears encapsulate domain-specific GenAI functionality such as conversational orchestration, model inference, retrieval-augmented generation (RAG), agent execution, prompt management, and tool invocation. They are responsible for transforming user intent and contextual data into AI-generated outputs while enforcing platform-level constraints such as tenancy, security, policy, and usage limits.

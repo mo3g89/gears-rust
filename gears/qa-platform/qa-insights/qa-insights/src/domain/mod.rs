@@ -1,0 +1,37 @@
+//! Domain layer: pure rules, ports, repository traits, and services.
+//!
+//! [`error`] arrived at Task 9; [`analytics`] and [`repos`] at Task 11;
+//! [`ports`], [`service`] and [`system_actor`] at Task 13; [`jira`] at Task 31;
+//! [`local_client`] at Task 34; [`notify`] at Task 36. The rest arrives on the
+//! plan's schedule: the analytics cores over [`analytics::ExecRow`] in Tasks
+//! 20-24, and the notification client/sender/wiring in Tasks 37-40.
+//!
+//! [`metrics`] is the observability catalog — the literal Prometheus series
+//! names this gear exports and, in [`ports::metrics`], the typed traits the
+//! collect cycle, the collect callback and the JIRA poller emit through. A
+//! domain module rather than an infra one because the *label taxonomy* is a
+//! set of domain classifications: which per-bug failures the poller can
+//! swallow, and which of the collect callback's refusals happened.
+//!
+//! [`elevated`] is the one named exception to "every query is PEP-scoped":
+//! the single seam the ticker enumeration in `service::tenants` elevates
+//! through instead of asking the PDP. See its module doc.
+
+pub mod analytics;
+pub mod elevated;
+pub mod error;
+/// Resource attribution for the JIRA refusals the blanket
+/// `DomainError -> CanonicalError` mapping cannot type by itself.
+///
+/// A domain module rather than part of `api::rest::error`, because
+/// [`local_client`] -- an in-process call that never touches HTTP -- needs it
+/// and must not import the transport layer. `api::rest::error` re-exports it.
+pub mod error_attribution;
+pub mod jira;
+pub mod local_client;
+pub mod metrics;
+pub mod notify;
+pub mod ports;
+pub mod repos;
+pub mod service;
+pub mod system_actor;
