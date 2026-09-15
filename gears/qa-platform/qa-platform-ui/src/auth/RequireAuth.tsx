@@ -9,15 +9,14 @@
  * guard existed an unauthenticated tab polled `/qa/v1` forever. Measured on
  * this stack, unauthenticated, before the guard: `/runs` issued **20 requests
  * in 25 seconds** on an unseeded deployment and **34 in 25 seconds** once
- * `smoke.sh` had seeded it — every one a 401, with no end condition. That is
+ * the stack had been seeded — every one a 401, with no end condition. That is
  * what wedged the gateway's rate limiter for twelve hours.
  *
  * The fix is not a smarter retry. It is that an unauthenticated app must not
  * mount the queries at all: `children` — and therefore `AppShell` and every
  * hook under it — is simply not rendered until there is a token. The
- * regression assertion lives in `deploy/compose/ui-gate.js` (phase 0), which
- * counts the `/qa/v1` requests an unauthenticated browser makes and fails if
- * there are any.
+ * invariant to hold on to: an unauthenticated browser must issue ZERO `/qa/v1`
+ * requests.
  *
  * The second half of the rule is in `./tokenState`, for a token that goes bad
  * while the app is already running.

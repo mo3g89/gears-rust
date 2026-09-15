@@ -420,7 +420,7 @@ mod tests {
         );
     }
 
-    /// **`GET /qa/v1/queue` publishes `environment_id`, not `platform_id`, as
+    /// **`GET /qa/v1/queue` publishes `environment_id`, not `environment_id`, as
     /// its plain query parameter.**
     ///
     /// Important-4 of the Task 25 review, Mutation B: reverting
@@ -430,7 +430,7 @@ mod tests {
     /// [`crate::api::rest::dto::QueueQuery::environment_id`], which the
     /// mutation never touches. Under that mutation the published document
     /// would advertise a parameter the endpoint silently ignores: a Task 26
-    /// caller would send `platform_id` exactly as the (wrong) document says,
+    /// caller would send `environment_id` exactly as the (wrong) document says,
     /// and get an unfiltered queue back with no error.
     #[test]
     fn the_queue_endpoint_publishes_environment_id_not_platform_id_as_its_parameter() {
@@ -485,7 +485,7 @@ mod tests {
             );
             assert!(
                 properties.get("platform_id").is_none(),
-                "{schema_name} must not publish a platform_id property at all - it is refused, \
+                "{schema_name} must not publish a environment_id property at all - it is refused, \
                  not accepted: {properties}"
             );
         }

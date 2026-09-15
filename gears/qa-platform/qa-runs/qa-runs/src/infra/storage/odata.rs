@@ -54,9 +54,8 @@ pub enum RunFilterField {
     /// ([`RunDto::environment_id`](crate::api::rest::dto::RunDto::environment_id))
     /// and the `RunColumn::EnvironmentId` variant
     /// [`RunODataMapper::map_field`] below maps it to — variant, wire name and
-    /// `Column` **variant** name all agree. The **physical column** is still
-    /// `platform_id` (`entity/run.rs:39`'s `#[sea_orm(column_name =
-    /// "platform_id")]`) — ruling B3, unmoved by this rename.
+    /// `Column` **variant** name all agree, and so does the **physical
+    /// column**: `environment_id` throughout.
     EnvironmentId,
     Source,
     ScheduleId,
@@ -171,9 +170,8 @@ pub enum QueueFilterField {
     /// Renamed from `PlatformId` (ruling G-3), matching
     /// [`RunFilterField::EnvironmentId`] and `QueueColumn::EnvironmentId`
     /// ([`QueueODataMapper::map_field`] below) — variant, wire name and
-    /// `Column` **variant** name all agree. The **physical column** is still
-    /// `platform_id` (`entity/run_queue.rs:29`'s `#[sea_orm(column_name =
-    /// "platform_id")]`) — ruling B3, unmoved by this rename.
+    /// `Column` **variant** name all agree, and so does the **physical
+    /// column**: `environment_id` throughout.
     EnvironmentId,
     /// One of the seven frozen queue-state names, as persisted - note
     /// `cancelled` with two `l`s, which is not the run state's spelling.
@@ -371,7 +369,7 @@ mod tests {
     }
 
     /// **The `$filter`/`$orderby` wire name is `environment_id`, on both
-    /// collections, not `platform_id`.** Ruling G-3: the `OData` field used to
+    /// collections, not `environment_id`.** Ruling G-3: the `OData` field used to
     /// diverge from the REST field of the same concept deliberately; that
     /// divergence is gone, and this is the test that would catch it coming
     /// back, either by a literal reverting or by a `#[serde]`-style rename
@@ -395,7 +393,7 @@ mod tests {
 
         // Minor-2 of the Task 25 review: the assertions above are about
         // *advertisement* (`name`/`FIELDS`). The CHANGELOG's claim is about
-        // *refusal* - that a `$filter=platform_id eq ...` no longer parses -
+        // *refusal* - that a `$filter=environment_id eq ...` no longer parses -
         // which is decided by `FilterField::from_name`, not `FIELDS`.
         // `from_name` has a last-path-segment fallback the `FIELDS` scan
         // above never exercises, so it needs its own assertion.

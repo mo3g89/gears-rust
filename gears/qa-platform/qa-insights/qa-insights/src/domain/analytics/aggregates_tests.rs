@@ -762,20 +762,20 @@ const CARRIED: &str = "tests/carried/test_carried.py";
 ///
 /// # Why every value in it is distinct
 ///
-/// `component`, `tags`, `plan`, `plan_name`, `versions`, `last_platform_id`,
+/// `component`, `tags`, `plan`, `plan_name`, `versions`, `last_environment_id`,
 /// `last_build` and `last_run_finished_at` are copied straight across
 /// (`:1412-1423`), and a copy is the kind of wiring a test only catches if the
 /// fixture can tell the fields apart. So no two same-typed fields share a value:
-/// three distinct `Uuid`s (`repo_id`, the latest row's `platform_id`, its
+/// three distinct `Uuid`s (`repo_id`, the latest row's `environment_id`, its
 /// `run_id`), six distinct strings, two distinct `Vec<String>`s and two distinct
-/// instants. A transposition — `last_platform_id` sourced from `run_id`, `tags`
+/// instants. A transposition — `last_environment_id` sourced from `run_id`, `tags`
 /// from `versions`, `plan_name` from `component` — fails rather than passing on a
 /// coincidence.
 ///
 /// Two properties need more than one row to pin, which is why `run 1` carries
 /// three:
 ///
-/// * `last_build`, `last_platform_id` and `last_run_finished_at` must come from
+/// * `last_build`, `last_environment_id` and `last_run_finished_at` must come from
 ///   the **latest** row (`run 2`), so `run 1`'s rows carry a different build, a
 ///   different platform and an earlier instant. Sourcing any of them from an older
 ///   row fails.
@@ -797,7 +797,7 @@ fn carried_lists() -> AnalyticsLists {
     let rows = vec![
         ExecRow {
             build: Some("9.1.0-4412".to_owned()),
-            platform_id: Some(Uuid::from_u128(0xb2)),
+            environment_id: Some(Uuid::from_u128(0xb2)),
             ..row_at(
                 run(2),
                 CARRIED,
@@ -807,7 +807,7 @@ fn carried_lists() -> AnalyticsLists {
         },
         ExecRow {
             build: Some("8.0.0-1111".to_owned()),
-            platform_id: Some(Uuid::from_u128(0xb9)),
+            environment_id: Some(Uuid::from_u128(0xb9)),
             ..row_at(
                 run(1),
                 CARRIED,
@@ -879,7 +879,7 @@ fn a_list_item_carries_its_tally_its_case_status_and_its_deduplicated_tickets() 
 ///
 /// Every assertion here is a field no other test in this module touches, and all
 /// of them are rendered columns: dropping `last_build` to `None`, or sourcing
-/// `last_platform_id` from `run_id`, changes the screen and nothing else fails.
+/// `last_environment_id` from `run_id`, changes the screen and nothing else fails.
 #[test]
 fn a_list_item_carries_every_field_it_renders() {
     let lists = carried_lists();
@@ -909,7 +909,7 @@ fn a_list_item_carries_every_field_it_renders() {
     // from run 2 rather than from run 1 or from the head of the slice.
     assert_eq!(item.last_status, "FAILED");
     assert_eq!(item.last_run_id, Some(run(2)));
-    assert_eq!(item.last_platform_id, Some(Uuid::from_u128(0xb2)));
+    assert_eq!(item.last_environment_id, Some(Uuid::from_u128(0xb2)));
     assert_eq!(item.last_build.as_deref(), Some("9.1.0-4412"));
     assert_eq!(
         item.last_run_finished_at,
@@ -1409,13 +1409,13 @@ fn vectored(test_file: &str, vectors: &[&str]) -> UniverseTest {
     }
 }
 
-/// One row dated [`TODAY`], attributed to `platform_id`.
+/// One row dated [`TODAY`], attributed to `environment_id`.
 ///
 /// `exec_row_at` stamps one fixed platform on every row, which would make every
 /// platform-group test a single-group test.
-fn platform_row(test_file: &str, status: &str, platform_id: Option<Uuid>) -> ExecRow {
+fn platform_row(test_file: &str, status: &str, environment_id: Option<Uuid>) -> ExecRow {
     ExecRow {
-        platform_id,
+        environment_id,
         ..exec_row_at(test_file, status, ts())
     }
 }
@@ -2002,14 +2002,14 @@ fn every_platform_group_counts_the_whole_universe() {
         platforms,
         vec![
             PlatformGroupSummary {
-                platform_id: PLATFORM_A,
+                environment_id: PLATFORM_A,
                 total: 3,
                 passed: 1,
                 failed: 1,
                 not_run: 1,
             },
             PlatformGroupSummary {
-                platform_id: PLATFORM_B,
+                environment_id: PLATFORM_B,
                 total: 3,
                 passed: 0,
                 failed: 1,
@@ -2036,7 +2036,7 @@ fn a_row_without_a_platform_joins_no_platform_group() {
     let platforms = build_grouped_summaries(&universe, &rows).platform;
 
     assert_eq!(platforms.len(), 1);
-    assert_eq!(platforms[0].platform_id, PLATFORM_A);
+    assert_eq!(platforms[0].environment_id, PLATFORM_A);
 }
 
 /// `group_map_to_vec:2212` returns the [`BTreeMap`](std::collections::BTreeMap)'s

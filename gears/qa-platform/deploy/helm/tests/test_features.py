@@ -5,7 +5,7 @@ the relationship instead: every base feature must appear in the argo list.
 
 The drift this guards against has happened: `postgres-credstore` was added to the
 Dockerfile ARG and would have been absent from every --argo build while looking
-deployed (see docker-compose.argo.yml's header)."""
+deployed (see deploy/cargo-features.argo)."""
 import pathlib
 import re
 import sys

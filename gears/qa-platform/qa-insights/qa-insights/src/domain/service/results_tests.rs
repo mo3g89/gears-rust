@@ -70,7 +70,7 @@ impl Fixture {
                 jira_key: None,
                 product_version: None,
                 app_build: None,
-                platform_id: None,
+                environment_id: None,
                 repo_id: None,
                 plan_path: None,
                 branch: None,

@@ -364,7 +364,7 @@ impl TryFrom<UpsertCustomPlanReq> for sdk::NewCustomPlan {
 pub struct ProductDto {
     pub id: Uuid,
     pub name: String,
-    /// Durable short code (legacy `Product::key`).
+    /// Durable short code.
     pub key: String,
     pub description: String,
     pub folder: Option<String>,
@@ -843,8 +843,8 @@ mod tests {
     /// **The inversion of a test that used to forbid this.** Until 2026-08-14 an
     /// `an_upsert_request_omitting_plan_path_still_deserializes` test asserted that
     /// a body with no `plan_path` was accepted; the user then chose to make the
-    /// field mandatory on write, because legacy's `CustomPlanTest::plan_id` is
-    /// non-optional and optional-on-write was itself the divergence.
+    /// field mandatory on write, because an entry without its plan names
+    /// nothing, and optional-on-write was itself the divergence.
     ///
     /// It is inverted rather than deleted so the **API break is pinned**: the body
     /// still deserializes (the DTO field is `Option`, deliberately — see

@@ -40,7 +40,7 @@
 //! `qa_insights_sdk::TestResultRecord` both say one fewer than the column count.
 //! Counted here as columns, because columns are what this file declares.
 //!
-//! `qa_test_results` carries `product_version`, `app_build`, `platform_id`,
+//! `qa_test_results` carries `product_version`, `app_build`, `environment_id`,
 //! `repo_id`, `plan_path`, `branch`, `run_finished_at` and `run_created_at`,
 //! none of which legacy's `test_results` has (`001_initial.sql:65-74`, plus the
 //! two `ALTER`s at `:166-167`).
@@ -154,7 +154,7 @@
 //!
 //! ## No foreign keys, in either direction
 //!
-//! `run_id`, `repo_id` and `platform_id` all name rows in *other gears'*
+//! `run_id`, `repo_id` and `environment_id` all name rows in *other gears'*
 //! schemas — qa-runs, qa-catalog and qa-environments respectively — and DESIGN
 //! §3.7 forbids cross-schema foreign keys. There is nothing inside this schema
 //! for a child to reference either: `qa_test_results` and
@@ -430,7 +430,7 @@ CREATE TABLE IF NOT EXISTS qa_test_results (
     -- Denormalized from the run. A UUID, not legacy's platform *name*: legacy's
     -- TEXT is an artifact of a system that had no platform ids until the Phase A
     -- backfill added `platforms_meta.id` (:218-228).
-    platform_id UUID NULL,
+    environment_id UUID NULL,
     -- Denormalized from the run: the repository half of the plan identity.
     -- NULL for a target with no plan (a custom-plan or collect run). There is no
     -- plan UUID in this port -- legacy's own `plan_id` is a path-derived slug
@@ -627,8 +627,8 @@ CREATE TABLE IF NOT EXISTS qa_jira_bugs (
     plan_path VARCHAR(1024) NOT NULL,
     app_version VARCHAR(255) NULL,
     -- Legacy is `platform TEXT` (:84), the platform *name*; see the note on
-    -- `qa_test_results.platform_id` for why this port stores the id.
-    platform_id UUID NULL,
+    -- `qa_test_results.environment_id` for why this port stores the id.
+    environment_id UUID NULL,
     -- Free JIRA workflow text, not a closed set. Legacy default 'Open' (:85).
     status VARCHAR(64) NOT NULL DEFAULT 'Open',
     summary TEXT NOT NULL,
@@ -811,6 +811,15 @@ CREATE TABLE IF NOT EXISTS qa_ingest_watermarks (
     updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_ingest_watermarks_tenant ON qa_ingest_watermarks(tenant_id);
+CREATE TABLE IF NOT EXISTS qa_leader_claims (
+    id UUID PRIMARY KEY NOT NULL,
+    tenant_id UUID NOT NULL,
+    role VARCHAR(64) NOT NULL,
+    holder UUID NOT NULL,
+    claimed_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_leader_claims_role ON qa_leader_claims(tenant_id, role);
 ";
 
 /// The `MySQL` schema this gear *would* have, and **which `up()` refuses to
@@ -823,195 +832,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_ingest_watermarks_tenant ON qa_ingest_w
 /// "`MySQL` key-width budget (`InnoDB`, `utf8mb4`, 3072-byte limit)", for the
 /// per-index arithmetic and for what a real `MySQL` port would have to decide.
 ///
-/// Unread outside `#[cfg(test)]` for exactly that reason — `up()` no longer
-/// names it. `expect` rather than `allow` so that the day something *does* read
-/// it in a shipped build, this attribute is what goes red.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read only by the two dialect-parity tests; up() refuses the MySql arm"
-    )
-)]
-const MYSQL_UP: &str = r"
-CREATE TABLE IF NOT EXISTS qa_test_results (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    run_id VARCHAR(36) NOT NULL,
-    test_file VARCHAR(1024) NOT NULL DEFAULT '',
-    test_name VARCHAR(512) NOT NULL,
-    status VARCHAR(16) NOT NULL,
-    duration VARCHAR(64) NULL,
-    launch_id VARCHAR(255) NULL,
-    jira_key VARCHAR(64) NULL,
-    product_version VARCHAR(255) NULL,
-    app_build VARCHAR(255) NULL,
-    platform_id VARCHAR(36) NULL,
-    repo_id VARCHAR(36) NULL,
-    plan_path VARCHAR(1024) NULL,
-    branch VARCHAR(512) NULL,
-    run_finished_at TIMESTAMP NULL,
-    run_created_at TIMESTAMP NULL,
-    ingest_ordinal INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    KEY idx_qa_test_results_tenant_run (tenant_id, run_id),
-    KEY idx_qa_test_results_tenant_test (tenant_id, test_file, test_name),
-    KEY idx_qa_test_results_tenant_finished (tenant_id, run_finished_at DESC)
-);
-
-CREATE TABLE IF NOT EXISTS qa_test_case_results (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    run_id VARCHAR(36) NOT NULL,
-    test_file VARCHAR(1024) NOT NULL,
-    nodeid VARCHAR(1024) NOT NULL DEFAULT '',
-    name VARCHAR(512) NOT NULL,
-    status VARCHAR(16) NOT NULL,
-    duration VARCHAR(64) NULL,
-    reason TEXT NULL,
-    ticket VARCHAR(64) NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    KEY idx_qa_test_case_results_tenant_run (tenant_id, run_id),
-    KEY idx_qa_test_case_results_tenant_run_file (tenant_id, run_id, test_file),
-    KEY idx_qa_test_case_results_tenant_status (tenant_id, status)
-);
-
-CREATE TABLE IF NOT EXISTS qa_test_case_collect (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    repo_id VARCHAR(36) NOT NULL,
-    branch VARCHAR(512) NOT NULL,
-    test_file VARCHAR(1024) NOT NULL,
-    case_count INTEGER NOT NULL DEFAULT 0,
-    collected_at TIMESTAMP NOT NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_test_case_collect_target (tenant_id, repo_id, branch, test_file),
-    KEY idx_qa_test_case_collect_tenant_repo_branch (tenant_id, repo_id, branch)
-);
-
-CREATE TABLE IF NOT EXISTS qa_analytics_saved_views (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    owner_id VARCHAR(36) NOT NULL,
-    scope VARCHAR(64) NOT NULL,
-    repo_id VARCHAR(36) NULL,
-    plan_path VARCHAR(1024) NULL,
-    plan_key VARCHAR(1061) NOT NULL DEFAULT '',
-    name VARCHAR(255) NOT NULL,
-    query_json JSON NOT NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_analytics_saved_views_unique (tenant_id, owner_id, scope, plan_key, name)
-);
-
-CREATE TABLE IF NOT EXISTS qa_jira_bugs (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    jira_key VARCHAR(64) NOT NULL,
-    test_name VARCHAR(512) NOT NULL,
-    repo_id VARCHAR(36) NOT NULL,
-    plan_path VARCHAR(1024) NOT NULL,
-    app_version VARCHAR(255) NULL,
-    platform_id VARCHAR(36) NULL,
-    status VARCHAR(64) NOT NULL DEFAULT 'Open',
-    summary TEXT NOT NULL,
-    resolved_at TIMESTAMP NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_jira_bugs_tenant_key (tenant_id, jira_key),
-    KEY idx_qa_jira_bugs_tenant_test_plan (tenant_id, test_name, repo_id, plan_path),
-    KEY idx_qa_jira_bugs_tenant_status (tenant_id, status)
-);
-
-CREATE TABLE IF NOT EXISTS qa_jira_config (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    url VARCHAR(1024) NOT NULL DEFAULT '',
-    project_key VARCHAR(64) NOT NULL DEFAULT '',
-    email VARCHAR(320) NOT NULL DEFAULT '',
-    api_token_credstore_ref VARCHAR(512) NOT NULL DEFAULT '',
-    issue_type VARCHAR(64) NULL,
-    enabled BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_jira_config_tenant (tenant_id)
-);
-
-CREATE TABLE IF NOT EXISTS qa_jira_poller_config (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    poll_interval_seconds BIGINT NOT NULL DEFAULT 300,
-    auto_rerun_on_resolve BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_jira_poller_config_tenant (tenant_id)
-);
-
-CREATE TABLE IF NOT EXISTS qa_notification_config (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    slack_webhook_credstore_ref VARCHAR(512) NOT NULL DEFAULT '',
-    slack_channel VARCHAR(255) NOT NULL DEFAULT '',
-    manager_ui_base_url VARCHAR(1024) NOT NULL DEFAULT '',
-    slack_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-    notify_on_failure BOOLEAN NOT NULL DEFAULT TRUE,
-    notify_on_success BOOLEAN NOT NULL DEFAULT FALSE,
-    notify_on_schedule_completion BOOLEAN NOT NULL DEFAULT FALSE,
-    scheduled_run_slack_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-    scheduled_run_slack_templates JSON NOT NULL DEFAULT ('{}'),
-    run_queue_queued_slack_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-    email_smtp_host VARCHAR(255) NOT NULL DEFAULT '',
-    email_smtp_port INTEGER NOT NULL DEFAULT 587,
-    email_from VARCHAR(320) NOT NULL DEFAULT '',
-    -- Parenthesised expression default (MySQL 8.0.13+): the literal form is
-    -- rejected on a TEXT column, so this is how the Postgres/SQLite
-    -- `DEFAULT ''` is spelled here. Same for `qa_notification_log.detail`.
-    email_recipients TEXT NOT NULL DEFAULT (''),
-    email_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_notification_config_tenant (tenant_id)
-);
-
-CREATE TABLE IF NOT EXISTS qa_run_notifications (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    run_id VARCHAR(36) NOT NULL,
-    notification_kind VARCHAR(64) NOT NULL,
-    event_type VARCHAR(64) NOT NULL,
-    sent_at TIMESTAMP NOT NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_run_notifications_claim (tenant_id, run_id, notification_kind, event_type)
-);
-
-CREATE TABLE IF NOT EXISTS qa_notification_log (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    run_id VARCHAR(36) NULL,
-    channel VARCHAR(32) NOT NULL,
-    event_type VARCHAR(64) NOT NULL DEFAULT '',
-    outcome VARCHAR(32) NOT NULL,
-    detail TEXT NOT NULL DEFAULT (''),
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    KEY idx_qa_notification_log_tenant_created (tenant_id, created_at DESC)
-);
-
-CREATE TABLE IF NOT EXISTS qa_ingest_watermarks (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    last_reconciled_finished_at TIMESTAMP NULL,
-    last_swept_at TIMESTAMP NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_ingest_watermarks_tenant (tenant_id)
-);
-";
-
 const SQLITE_UP: &str = r"
 CREATE TABLE IF NOT EXISTS qa_test_results (
     id TEXT PRIMARY KEY NOT NULL,
@@ -1025,7 +845,7 @@ CREATE TABLE IF NOT EXISTS qa_test_results (
     jira_key TEXT NULL,
     product_version TEXT NULL,
     app_build TEXT NULL,
-    platform_id TEXT NULL,
+    environment_id TEXT NULL,
     repo_id TEXT NULL,
     plan_path TEXT NULL,
     branch TEXT NULL,
@@ -1094,7 +914,7 @@ CREATE TABLE IF NOT EXISTS qa_jira_bugs (
     repo_id TEXT NOT NULL,
     plan_path TEXT NOT NULL,
     app_version TEXT NULL,
-    platform_id TEXT NULL,
+    environment_id TEXT NULL,
     status TEXT NOT NULL DEFAULT 'Open',
     summary TEXT NOT NULL,
     resolved_at TEXT NULL,
@@ -1186,6 +1006,15 @@ CREATE TABLE IF NOT EXISTS qa_ingest_watermarks (
     updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_ingest_watermarks_tenant ON qa_ingest_watermarks(tenant_id);
+CREATE TABLE IF NOT EXISTS qa_leader_claims (
+    id TEXT PRIMARY KEY NOT NULL,
+    tenant_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    holder TEXT NOT NULL,
+    claimed_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_leader_claims_role ON qa_leader_claims(tenant_id, role);
 ";
 
 /// The `CREATE` blob for a backend, or a refusal.
@@ -1236,6 +1065,7 @@ impl MigrationTrait for Migration {
         // constraint, kept so a future child table cannot be dropped last by
         // accident.
         let sql = r"
+DROP TABLE IF EXISTS qa_leader_claims;
 DROP TABLE IF EXISTS qa_ingest_watermarks;
 DROP TABLE IF EXISTS qa_notification_log;
 DROP TABLE IF EXISTS qa_run_notifications;
@@ -1299,32 +1129,17 @@ mod tests {
 
     /// Tables in this gear's database that **this** migration does not own.
     ///
-    /// [`migrated_db`] applies the whole [`Migrator`](super::super::Migrator),
-    /// not just this file, so every inventory assertion below is over the
-    /// gear's entire schema. Naming the others here keeps those assertions
-    /// *exact* — a stray table still fails them — while saying out loud which
-    /// migration each one belongs to.
-    ///
-    /// * `evbk_consumer_offsets` — `m20260818_000002_offset_store`, superseded:
-    ///   it held a transactional broker consumer's durable progress, and that
-    ///   consumer was deleted along with the event-broker dependency it
-    ///   needed. `event-broker-sdk` owned the table's shape; the gear owns the
-    ///   DDL because the migration has already run on deployed databases and
-    ///   cannot be edited out from under them (see that file's header).
-    /// * `qa_leader_claims` — `m20260907_000003_leader_claims`: the JIRA
-    ///   poller's single-holder claim row, and the one place in this gear
-    ///   where leadership is a correctness requirement rather than an
-    ///   optimisation. `crate::infra::leader`'s header says which of the
-    ///   three roles it covers and why the other two do not need it.
+    /// Empty: this gear's schema is declared by this one migration, so the
+    /// inventory assertions below are over the whole database and a stray
+    /// table fails them.
     ///
     /// A migration that adds a table adds a line here. That is deliberate
     /// friction: the alternative is filtering the inventory down to a prefix,
     /// which would stop these tests noticing a table nobody meant to create.
-    const TABLES_OWNED_BY_LATER_MIGRATIONS: [&str; 2] =
-        ["evbk_consumer_offsets", "qa_leader_claims"];
+    const TABLES_OWNED_BY_LATER_MIGRATIONS: [&str; 0] = [];
 
-    /// The eleven tables, in the order `up()` declares them.
-    const TABLES: [&str; 11] = [
+    /// The twelve tables, in the order `up()` declares them.
+    const TABLES: [&str; 12] = [
         "qa_test_results",
         "qa_test_case_results",
         "qa_test_case_collect",
@@ -1336,6 +1151,7 @@ mod tests {
         "qa_run_notifications",
         "qa_notification_log",
         "qa_ingest_watermarks",
+        "qa_leader_claims",
     ];
 
     /// Deterministic fixture UUID text. Literal strings rather than `Uuid`
@@ -1406,7 +1222,6 @@ mod tests {
     #[test]
     fn every_dialect_declares_the_same_columns_in_the_same_order() {
         let pg = columns_by_table(super::POSTGRES_UP);
-        let my = columns_by_table(super::MYSQL_UP);
         let sq = columns_by_table(super::SQLITE_UP);
 
         assert_eq!(
@@ -1419,7 +1234,6 @@ mod tests {
             pg.iter().all(|(_, c)| c.len() >= 6),
             "the parser produced a suspiciously short column list: {pg:?}"
         );
-        assert_eq!(pg, my, "POSTGRES_UP and MYSQL_UP disagree");
         assert_eq!(pg, sq, "POSTGRES_UP and SQLITE_UP disagree");
     }
 
@@ -1500,17 +1314,15 @@ mod tests {
     #[test]
     fn every_dialect_declares_the_same_indexes() {
         let pg = indexes(super::POSTGRES_UP);
-        let my = indexes(super::MYSQL_UP);
         let sq = indexes(super::SQLITE_UP);
 
         assert_eq!(
             pg.len(),
-            18,
-            "expected 18 indexes; the parser found {} and every comparison \
+            19,
+            "expected 19 indexes; the parser found {} and every comparison \
              below would then be over the wrong set: {pg:?}",
             pg.len()
         );
-        assert_eq!(pg, my, "POSTGRES_UP and MYSQL_UP declare different indexes");
         assert_eq!(
             pg, sq,
             "POSTGRES_UP and SQLITE_UP declare different indexes"
@@ -1532,8 +1344,8 @@ mod tests {
             .collect();
         assert_eq!(
             unique.len(),
-            8,
-            "expected 8 unique indexes, found {}: {unique:?}",
+            9,
+            "expected 9 unique indexes, found {}: {unique:?}",
             unique.len()
         );
         for (name, _, cols) in unique {
@@ -1704,6 +1516,7 @@ mod tests {
             "qa_notification_config",
             "qa_notification_log",
             "qa_run_notifications",
+            "qa_leader_claims",
             "qa_test_case_collect",
             "qa_test_case_results",
             "qa_test_results",

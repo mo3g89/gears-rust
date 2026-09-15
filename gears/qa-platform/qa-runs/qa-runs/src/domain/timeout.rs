@@ -72,7 +72,7 @@ pub const fn kind_timeout_fallback(kind: RunKind) -> u64 {
 /// `{"timeout_seconds": 18446744073709551615}` minted a run the sweep could never
 /// reclaim — and an **exclusive** one holds the platform's global lease
 /// (`qa_environment_leases`, renamed from `qa_platform_leases`, is keyed on a
-/// bare `platform_id`, so the lease is not tenant-partitioned) until somebody
+/// bare `environment_id`, so the lease is not tenant-partitioned) until somebody
 /// cancels it by hand, blocking every later
 /// run on that platform. `saturating_i64`'s own doc used to argue that saturation
 /// was right because the input's "only sensible reading is 'no practical

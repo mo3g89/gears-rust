@@ -520,8 +520,12 @@ describe('environmentFromDto', () => {
   });
 
   it('reads an unobserved environment as an empty map and `unknown`, never undefined', () => {
+    // The schema declares `observed_attrs` and `health_state` required — the
+    // columns are NOT NULL with defaults, so the gear always sends them. This
+    // stays as a defensive assertion about the adapter, not a claim about the
+    // wire, which is why the fixture has to go through `unknown` to exist.
     const fresh = { ...dto, observed_attrs: undefined, health_state: undefined,
-                    health_detail: undefined } as typeof dto;
+                    health_detail: undefined } as unknown as typeof dto;
     const info = environmentFromDto(fresh);
     expect(info.observed_attrs).toEqual({});
     expect(info.health_state).toBe('unknown');
@@ -853,7 +857,7 @@ describe('dashboardFromDto', () => {
     expect(stats.failed_recent[0].workflow_name).toBe('r1');
     // Fix round 2: this fixture's `failed_recent[0]` has always carried
     // `environment_id: 'p1'` (Task 26 fix round 1's field rename), but nothing asserted
-    // it — `FailedTestCardDto` still declares a stale `platform_id?: string | null` in
+    // it — `FailedTestCardDto` once declared a stale `platform_id?: string | null` in
     // the frozen generated schema, so a regression back to reading it would typecheck
     // clean and silently null out every card's environment. Proved by mutation: reverting
     // `failedCardFromDto`'s `dto.environment_id` to `dto.platform_id` survived the whole
@@ -1085,26 +1089,21 @@ describe('analyticsPlanId', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Environment reads the frozen generated schema cannot protect (Task 26 fix
-// round 2, closing the reviewer's own follow-up finding).
+// Environment reads, asserted against fixtures rather than against the type.
 //
-// `api/generated/openapi.d.ts` was never regenerated after Task 25's wire rename
-// (a decision, U5, not an oversight — see `EnvironmentDtoWithPluginFields`'s doc in
-// `adapters.ts`), so it still declares `platform_id`/`last_platform(_id)`/`platform`
-// on `TestResultDto`, `PlanTestAnalyticsDto`, `AnalyticsListItemDto`,
-// `GroupedSummariesDto`'s environment rows and `JiraBugDto`. That means
-// `dto.platform_id` (or `dto.last_platform`) is a PERFECTLY WELL-TYPED read of a field
-// the gear no longer sends — `tsc` cannot catch a regression back to it, proved by
-// reverting `adapters.ts:1962` from `dto.environment_id` to `dto.platform_id` and
-// running `make ui-build`: zero errors. Only a fixture shaped like what qa-insights
-// actually serves now (`qa-insights/.../api/rest/dto.rs`, not this frozen schema),
-// asserting the environment field arrives POPULATED rather than null/undefined,
-// closes the gap — each test below was confirmed to fail against the stale-field
-// mutation it guards before being written.
+// These were written when `api/generated/openapi.d.ts` still declared the
+// retired `platform_id`/`last_platform(_id)`/`platform` names, which made
+// `dto.platform_id` a perfectly well-typed read of a field the gear no longer
+// sent — `tsc` could not catch a regression back to it. The schema is
+// regenerated now and the type does catch that, so these are no longer the only
+// guard. They stay because a fixture shaped like what qa-insights actually
+// serves, asserting the environment arrives POPULATED rather than
+// null/undefined, outlives any particular generated file: each was confirmed to
+// fail against the stale-field mutation it guards before being written.
 // ---------------------------------------------------------------------------
 
 describe('testRunResultFromDto', () => {
-  it('reads the environment off `environment_id`, which the frozen schema still calls `platform_id`', () => {
+  it('reads the environment off `environment_id`, which is the field the gear serves', () => {
     const result = testRunResultFromDto({
       run_id: 'run-1',
       repo_id: 'repo-1',
@@ -1121,7 +1120,7 @@ describe('testRunResultFromDto', () => {
 });
 
 describe('testAnalyticsFromDto', () => {
-  it('reads the environment off `last_environment`, which the frozen schema still calls `last_platform`', () => {
+  it('reads the environment off `last_environment`, which is the field the gear serves', () => {
     const analytics = testAnalyticsFromDto({
       test_name: 'tests/a.py',
       last_environment: 'env-1',
@@ -1138,7 +1137,7 @@ describe('testAnalyticsFromDto', () => {
 });
 
 describe('jiraBugFromDto', () => {
-  it('reads the environment off `environment_id`, which the frozen schema still calls `platform_id`', () => {
+  it('reads the environment off `environment_id`, which is the field the gear serves', () => {
     const bug = jiraBugFromDto({
       id: 'bug-1',
       jira_key: 'VHP-1',
@@ -1218,7 +1217,7 @@ describe('analyticsOverviewFromDto', () => {
       tag: [],
       // `GroupedSummariesDto` was itself renamed from a `platform`-keyed field at
       // Task 25 (row `PlatformGroupSummaryDto` -> `EnvironmentGroupSummaryDto`); the
-      // frozen schema still calls both the array and its two id/name fields by the
+      // schema once called both the array and its two id/name fields by the
       // retired names.
       environment: [
         { environment_id: 'env-1', environment: 'sv-test', total: 1, passed: 1, failed: 0, not_run: 0 },
@@ -1226,12 +1225,12 @@ describe('analyticsOverviewFromDto', () => {
     },
   } as never;
 
-  it("reads a list item's environment off `last_environment`, which the frozen schema still calls `last_platform`", () => {
+  it("reads a list item's environment off `last_environment`, which is the field the gear serves", () => {
     const overview = analyticsOverviewFromDto(dto, {});
     expect(overview.lists.passed[0].last_platform).toBe('env-1');
   });
 
-  it('reads the grouped environment bar off `environment`/`environment_id`, which the frozen schema still calls `platform`/`platform_id`', () => {
+  it('reads the grouped environment bar off `environment`/`environment_id`, which is the field the gear serves', () => {
     const overview = analyticsOverviewFromDto(dto, {});
     expect(overview.grouped.platform[0].value).toBe('sv-test');
   });

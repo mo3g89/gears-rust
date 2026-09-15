@@ -28,7 +28,7 @@ pub trait VariablesRepository: Send + Sync {
     /// One page of a single environment's variables, ordered by name.
     ///
     /// `environment_id` is pinned by the repository rather than expressible as
-    /// a `$filter`: the physical column is `platform_id`, and the endpoint's
+    /// a `$filter`: the physical column is `environment_id`, and the endpoint's
     /// own `environment_id` parameter carries an authorization precheck a
     /// `$filter` would skip. See
     /// [`VariableFilterField`](crate::infra::storage::odata::VariableFilterField)'s

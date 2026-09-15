@@ -7,7 +7,7 @@
 # only does `opts.database(dbname)` when building connection options -- there
 # is no CREATE DATABASE / create_database / database_exists anywhere under
 # libs/. A missing per-gear database is a connection error at gear init.
-# POSTGRES_DB (compose) provisions exactly one database ("postgres"), so the
+# POSTGRES_DB provisions exactly one database ("postgres"), so the
 # other eight named by gears/qa-platform/config/qa-platform-stack.yaml's `dbname:` fields have
 # to be created here before the gears container starts.
 set -euo pipefail

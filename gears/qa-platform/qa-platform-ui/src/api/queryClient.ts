@@ -26,7 +26,7 @@ export const queryClient = new QueryClient({
        * broken session. Measured on this stack before this rule and
        * `RequireAuth` existed, by counting an unauthenticated headless browser's
        * requests on `/runs`: **20 `/qa/v1` requests in 25 seconds** on an
-       * unseeded deployment and **34 in 25 seconds** once `smoke.sh` had seeded
+       * unseeded deployment and **34 in 25 seconds** once the stack had been seeded
        * it — every one a 401, with no end condition, because `refetchInterval`
        * keeps polling through errors and `retry: 1` doubled each cycle. The
        * gateway's rate limiter answered 429 with a twelve-hour `retry_after` to

@@ -65,9 +65,9 @@ impl From<DomainError> for CanonicalError {
             // RFC-9457 body of every 400 this arm raises.
             //
             // Corrected (Task 25 review, Important-3): this comment used to
-            // state, as live policy, that `platform_id` on qa-runs' and
+            // state, as live policy, that `environment_id` on qa-runs' and
             // qa-insights' wire keeps its name because it mirrors a physical
-            // column those gears did not rename, citing `RunDto::platform_id`
+            // column those gears did not rename, citing `RunDto::environment_id`
             // for the reasoning in full. Both halves are now false: Task 25
             // renamed that wire to `environment_id` in both gears (their
             // physical columns still did not move, and still do not need to

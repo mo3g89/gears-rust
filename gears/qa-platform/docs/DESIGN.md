@@ -757,9 +757,28 @@ Each gear owns its own schema and no gear reads another's tables; cross-gear rea
 clients. Every table carries `tenant_id` and every query runs through `SecureORM` with that column
 as the tenant scope.
 
-Three tables map a Rust field named `environment_id` onto a column named `platform_id`
-(`qa_environments` leases, `qa_runs`, `qa_run_queue`, `qa_schedules`, `qa_jira_bugs`,
-`qa_test_results`). The column name is the persisted one; the domain vocabulary is `environment`.
+Every gear's schema is declared by **one** migration. That is a property of a platform that
+installs from scratch rather than a rule for the future: the chains were collapsed before the
+first installation, when no deployment had run any of them, and from that point each list is
+append-only again. What the collapse removed was the record of how the schema was reached — a
+table rename, an expand/contract pair around the plugin columns, a dozen single-column
+additions — none of which a new database performs.
+
+The column an environment is referenced by is `environment_id` throughout:
+`qa_environment_variables`, `qa_environment_leases`, `qa_runs`, `qa_run_queue`,
+`qa_schedules`, `qa_test_results` and `qa_jira_bugs`. The wire, the OData filter names, the
+Rust fields and the columns all spell it the same way.
+
+**`platform_id` on the wire is refused, not accepted.** The launch body, the schedule body
+and `GET /qa/v1/queue` each answer 400 naming the field if a caller still sends the old key,
+rather than dropping it silently — a dropped `platform_id` on the queue read would return the
+whole deployment's queue instead of one environment's.
+
+**Postgres and SQLite, and no MySQL.** qa-insights has no MySQL schema — five of its
+indexes exceed InnoDB's 3072-byte key limit — and `cpt-cf-qa-fr-packaging` deploys all four
+gears in one process, so no deployment can omit it. The other three gears therefore refuse
+the MySQL backend too rather than carrying a dialect nothing can reach. Postgres is what the
+Helm chart runs; SQLite is what the test tier uses.
 
 #### qa-environments schema
 
@@ -788,18 +807,18 @@ Three tables map a Rust field named `environment_id` onto a column named `platfo
 | `health_checked_at` | timestamptz? | |
 | `created_at`, `updated_at` | timestamptz | |
 
-**`qa_environment_leases`** — who holds an environment. PK `platform_id`.
+**`qa_environment_leases`** — who holds an environment. PK `environment_id`.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `platform_id` | uuid | PK; the environment |
+| `environment_id` | uuid | PK; the environment |
 | `tenant_id` | uuid | |
 | `mode` | text | `shared` or `exclusive` |
 | `holders` | jsonb | run ids currently holding |
 | `version` | bigint | optimistic concurrency token |
 | `updated_at` | timestamptz | |
 
-**`qa_environment_variables`** — `id`, `tenant_id`, `platform_id` (the environment), `name`,
+**`qa_environment_variables`** — `id`, `tenant_id`, `environment_id`, `name`,
 `value`, `created_at`, `updated_at`.
 
 **`qa_pipeline_variables`** — `id`, `tenant_id`, `name`, `value`, `created_at`, `updated_at`.
@@ -842,7 +861,7 @@ private key is never in this table.
 | `target_test_file` | text? | single-file target |
 | `target_custom_plan_id` | uuid? | |
 | `target_collect_url` | text? | collect target; carries no environment |
-| `platform_id` | uuid? | the environment; null for collect runs |
+| `environment_id` | uuid? | the environment; null for collect runs |
 | `test_version` | text? | resolved branch or ref of the test repository |
 | `app_version`, `app_build` | text? | the observed product version under test |
 | `state` | text | one of the ten run states |
@@ -862,7 +881,7 @@ private key is never in this table.
 | `passed`, `failed`, `skipped`, `in_progress`, `total` | int | tallies folded by ingest |
 | `created_at`, `updated_at` | timestamptz | |
 
-**`qa_run_queue`** — `id`, `tenant_id`, `platform_id` (the environment), `run_id`, `run_kind`,
+**`qa_run_queue`** — `id`, `tenant_id`, `environment_id`, `run_id`, `run_kind`,
 `source`, `exclusive`, `state` (`queued`, `dispatching`, `running`, `done`, `failed`, `cancelled`,
 `expired`), `error?`, `enqueued_at`, `dispatched_at?`, `finished_at?`, `created_at`, `updated_at`.
 
@@ -874,7 +893,7 @@ private key is never in this table.
 (Text), `lines`, `updated_at`.
 
 **`qa_schedules`** — `id`, `tenant_id`, `name`, `run_kind`, the same four target columns,
-`platform_id?`, `branch?`, `cron`, `exclusive_choice`, `enabled`, `include_tags`, `exclude_tags`,
+`environment_id?`, `branch?`, `cron`, `exclusive_choice`, `enabled`, `include_tags`, `exclude_tags`,
 `parameters`, `slack_notifications_enabled`, `slack_channel?`, `slack_notification_events`,
 `last_fired_tick?`, `created_at`, `updated_at`.
 
@@ -886,7 +905,7 @@ double-fire visible rather than silent.
 
 **`qa_test_results`** — per test **file**, historical: `id`, `tenant_id`, `run_id`, `test_file`,
 `test_name`, `status`, `duration?`, `launch_id?`, `jira_key?`, `product_version?`, `app_build?`,
-`platform_id?` (the environment), plus timestamps.
+`environment_id?`, plus timestamps.
 
 **`qa_test_case_results`** — per test **case**: `id`, `tenant_id`, `run_id`, `test_file`, `nodeid`,
 `name`, `status`, `duration?`, `reason?`, `ticket?`, `created_at`, `updated_at`.
@@ -903,7 +922,7 @@ double-fire visible rather than silent.
 `plan_key`, `name`, `query_json`, timestamps.
 
 **`qa_jira_bugs`** — `id`, `tenant_id`, `jira_key`, `test_name`, `repo_id`, `plan_path`,
-`app_version?`, `platform_id?`, `status`, `summary`, `resolved_at?`, timestamps. One row per bug
+`app_version?`, `environment_id?`, `status`, `summary`, `resolved_at?`, timestamps. One row per bug
 per test identity.
 
 **`qa_jira_config`** — `id`, `tenant_id`, `url`, `project_key`, `email`,
@@ -1079,18 +1098,33 @@ change to all four copies of the scan.
 
 ### 3.11 Observability
 
+All 22 metric families, one row per family — the series name exactly as it is exported, so an
+operator can match what a query returns against this table without expanding a shorthand:
+
 | Metric | Gear | Measures |
 |--------|------|----------|
-| `qa_environments_observation_total` / `_duration_seconds` | environments | one environment observation |
-| `qa_environments_observation_cycle_total` / `_duration_seconds` | environments | a full re-observation sweep |
-| `qa_environments_plugin_call_total` / `_duration_seconds` | environments | calls into a product plugin |
-| `qa_catalog_plugin_resolution_total` / `_duration_seconds` | catalog | resolving a plugin from ClientHub |
-| `qa_runs_dispatch_total` / `_duration_seconds` | runs | a dispatcher sweep |
+| `qa_catalog_plugin_resolution_duration_seconds` | catalog | resolving a plugin from ClientHub |
+| `qa_catalog_plugin_resolution_total` | catalog | resolving a plugin from ClientHub |
+| `qa_environments_observation_cycle_duration_seconds` | environments | a full re-observation sweep |
+| `qa_environments_observation_cycle_total` | environments | a full re-observation sweep |
+| `qa_environments_observation_duration_seconds` | environments | one environment observation |
+| `qa_environments_observation_total` | environments | one environment observation |
+| `qa_environments_plugin_call_duration_seconds` | environments | calls into a product plugin |
+| `qa_environments_plugin_call_total` | environments | calls into a product plugin |
+| `qa_insights_collect_duration_seconds` | insights | a collect run |
+| `qa_insights_collect_report_total` | insights | collect reports accepted from a runner |
+| `qa_insights_collect_total` | insights | a collect run |
+| `qa_insights_jira_bug_total` | insights | bugs observed by the JIRA loop |
+| `qa_insights_jira_poll_duration_seconds` | insights | a JIRA poll |
+| `qa_insights_jira_poll_total` | insights | a JIRA poll |
+| `qa_insights_jira_rerun_total` | insights | reruns the JIRA loop triggered |
 | `qa_runs_dispatch_decision_total` | runs | admission outcomes |
-| `qa_runs_queue_wait_total` / `_duration_seconds` | runs | queue residency |
-| `qa_runs_ingest_total` / `_duration_seconds` | runs | folding one execution event |
-| `qa_insights_collect_total` / `_duration_seconds`, `qa_insights_collect_report_total` | insights | collect runs |
-| `qa_insights_jira_poll_total` / `_duration_seconds`, `qa_insights_jira_bug_total`, `qa_insights_jira_rerun_total` | insights | JIRA loop |
+| `qa_runs_dispatch_duration_seconds` | runs | a dispatcher sweep |
+| `qa_runs_dispatch_total` | runs | a dispatcher sweep |
+| `qa_runs_ingest_duration_seconds` | runs | folding one execution event |
+| `qa_runs_ingest_total` | runs | folding one execution event |
+| `qa_runs_queue_wait_duration_seconds` | runs | queue residency |
+| `qa_runs_queue_wait_total` | runs | queue residency |
 
 Two gaps are stated rather than implied:
 

@@ -4,12 +4,12 @@
  *
  * Why this and nothing else here: every other part of `src/auth` is either the
  * `oidc-client-ts` library's behaviour (testing it would test the library) or a
- * React render (covered by `deploy/compose/ui-gate.js`, which drives the real
- * flow through a real browser against a real Keycloak). This module is neither
+ * React render (exercised end-to-end against a real Keycloak rather than
+ * here). This module is neither
  * — it is our own counter, and getting it wrong is how a revoked session turns
  * into an unbounded request storm. That is not hypothetical on this
  * deployment: an unauthenticated tab left on `/runs` was measured issuing 20
- * `/qa/v1` requests in 25s (34 once `smoke.sh` had seeded the stack), all 401,
+ * `/qa/v1` requests in 25s (34 once the stack had been seeded), all 401,
  * with no end condition (see the task report).
  *
  * No DOM here on purpose: `vitest.config.ts` runs in the `node` environment,

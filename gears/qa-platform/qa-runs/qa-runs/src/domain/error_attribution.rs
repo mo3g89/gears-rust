@@ -193,7 +193,7 @@ pub(crate) fn as_schedule_error(e: DomainError) -> CanonicalError {
 ///   row-to-run association is already readable by anyone who can list the row.
 /// * **`Validation`** — the same field-without-a-resource problem
 ///   [`as_schedule_error`] documents. `QueueQuery::reject_legacy_field`
-///   raises one for a caller still sending `platform_id` (ruling G-4); this
+///   raises one for a caller still sending `environment_id` (ruling G-4); this
 ///   arm is what keeps that refusal attributed to the queue entry rather than
 ///   silently becoming a run's.
 ///

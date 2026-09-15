@@ -1027,7 +1027,7 @@ fn failed_result(
         jira_key: None,
         product_version: Some("5.0.1".to_owned()),
         app_build: None,
-        platform_id: Some(Uuid::from_u128(0x11)),
+        environment_id: Some(Uuid::from_u128(0x11)),
         repo_id: Some(repo_id),
         plan_path: Some(plan_path.to_owned()),
         branch: None,
@@ -1057,7 +1057,7 @@ fn new_bug(jira_key: &str, test_name: &str, repo_id: Uuid, plan_path: &str) -> N
         repo_id,
         plan_path: plan_path.to_owned(),
         app_version: None,
-        platform_id: None,
+        environment_id: None,
         summary: "s".to_owned(),
     }
 }

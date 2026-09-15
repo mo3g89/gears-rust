@@ -1,9 +1,7 @@
 {{/* One container running all four qa-platform gears
-     (cf-gears-example-server, built by qa-platform.Dockerfile). Env, mounts
-     and RBAC mirror docker-compose.yml's `gears` service plus
-     docker-compose.argo.yml's overlay -- except there is no overlay here:
-     this chart runs the real Argo executor unconditionally, because
-     in-cluster IS the Argo deployment.
+     (cf-gears-example-server, built by qa-platform.Dockerfile). This chart
+     runs the real Argo executor unconditionally -- there is no mock-executor
+     variant to switch between, because in-cluster IS the Argo deployment.
 
      NO readOnlyRootFilesystem, and this is deliberate rather than an
      oversight. entrypoint.sh (line ~95) writes its rendered config to
@@ -18,9 +16,9 @@
      IF YOU ARE READING THIS BECAUSE THIS POD IS CrashLoopBackOff ON A FRESH
      INSTALL: that is expected, not a broken chart. Helm creates this
      Deployment before it ever runs the db-migrate/tenant-seed post-install
-     hooks (job-db-migrate.yaml, job-tenant-seed.yaml), the reverse of
-     compose's ordering, so this pod's first few boots race a database that
-     has neither schema nor a seeded tenant row and abort in oagw's
+     hooks (job-db-migrate.yaml, job-tenant-seed.yaml), so this pod's first
+     few boots race a database that has neither schema nor a seeded tenant row
+     and abort in oagw's
      post_init. It self-heals once both hooks complete. Full rationale --
      including why deploy-k8s.sh must NOT pass `--wait` to
      `helm upgrade --install` (with `--wait`, this pod's inability to reach
@@ -153,8 +151,8 @@ spec:
               mountPath: /var/lib/cf-gears/data
             # ca.crt only, never keycloak.crt/keycloak.key or ca.key -- the
             # Secret's `items` list below projects exactly this one key into
-            # the directory, the same "expose ca.crt and nothing else"
-            # property docker-compose.yml's volume.subpath comment measures.
+            # the directory, so the private material never appears in this
+            # container's filesystem at all.
             - name: tls-ca
               mountPath: /etc/keycloak-tls
               readOnly: true

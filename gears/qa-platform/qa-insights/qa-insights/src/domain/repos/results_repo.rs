@@ -41,7 +41,7 @@ pub struct NewTestResult {
     /// analytics *projection* to [`Self::product_version`]'s *filter*; see
     /// [`qa_insights_sdk::TestResultRecord::app_build`].
     pub app_build: Option<String>,
-    pub platform_id: Option<Uuid>,
+    pub environment_id: Option<Uuid>,
     pub repo_id: Option<Uuid>,
     pub plan_path: Option<String>,
     pub branch: Option<String>,
@@ -351,7 +351,7 @@ pub struct PlanExecRow {
     /// Legacy's `r.platform`, a name; this schema stores the id. `None` for a
     /// run that named no platform. Read by `api_plan_tests` only — the other
     /// two responses carry no platform field.
-    pub platform_id: Option<Uuid>,
+    pub environment_id: Option<Uuid>,
     /// `t.jira_key`. Read by `api_plan_tests` only, and by no other analytics
     /// read in this gear — see this type's header.
     pub jira_key: Option<String>,

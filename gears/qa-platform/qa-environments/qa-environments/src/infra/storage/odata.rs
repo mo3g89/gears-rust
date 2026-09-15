@@ -27,7 +27,7 @@
 //! | table | index |
 //! |---|---|
 //! | `qa_environments` | `PRIMARY KEY (id)`; `UNIQUE idx_qa_environments_tenant_name (tenant_id, name)` |
-//! | `qa_environment_variables` | `PRIMARY KEY (id)`; `UNIQUE idx_qa_environment_vars_tenant_unique (tenant_id, platform_id, name)`; `idx_qa_environment_vars_environment (platform_id)` |
+//! | `qa_environment_variables` | `PRIMARY KEY (id)`; `UNIQUE idx_qa_environment_vars_tenant_unique (tenant_id, environment_id, name)`; `idx_qa_environment_vars_environment (environment_id)` |
 //! | `qa_pipeline_variables` | `PRIMARY KEY (id)`; `UNIQUE idx_qa_pipeline_vars_unique (tenant_id, name)` |
 //!
 //! Every read on this gear's collections is `.secure().scope_with(scope)`d,
@@ -233,7 +233,7 @@ impl ODataFieldMapping<EnvironmentFilterField> for EnvironmentODataMapper {
 ///      quietly answer an empty list instead — the existence-oracle shape this
 ///      crate already has a migration and two module docs about
 ///      (`m20260813_000005_tenant_scoped_variable_index`).
-///   3. The **physical column is `platform_id`**
+///   3. The **physical column is `environment_id`**
 ///      (`entity/environment_variable.rs`'s
 ///      `#[sea_orm(column_name = "platform_id")]`, kept deliberately: the
 ///      tables were renamed, the columns were not). `qa-runs`'
@@ -247,7 +247,7 @@ impl ODataFieldMapping<EnvironmentFilterField> for EnvironmentODataMapper {
 /// * **`tenant_id`** — never, for [`EnvironmentFilterField`]'s reason.
 ///
 /// The tiebreaker is `name` ascending on both tables: with the tenant pinned by
-/// the scope (and, on the per-environment table, `platform_id` pinned by the
+/// the scope (and, on the per-environment table, `environment_id` pinned by the
 /// repository), `name` is the residual column of each table's unique index and
 /// is unique within that residual — an index-ordered, total cursor key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

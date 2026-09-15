@@ -350,7 +350,7 @@ async fn build_with_metrics(
 
 /// A platformless run whose target is `Collect`, holding no lease and no claim
 /// — the shape qa-insights' hourly cycle launches (`RunTarget::Collect` carries
-/// no `platform_id`, and `service::launch` bypasses admission for the kind).
+/// no `environment_id`, and `service::launch` bypasses admission for the kind).
 async fn collect_harness() -> Harness {
     let run = qa_runs_sdk::Run {
         target: qa_runs_sdk::RunTarget::Collect {

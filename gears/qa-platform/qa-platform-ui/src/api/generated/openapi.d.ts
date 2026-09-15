@@ -4,6 +4,22 @@
  */
 
 export interface paths {
+    "/authz-resolver/v1/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["auth_z_resolver_api_rest_evaluate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/credstore/v1/secrets": {
         parameters: {
             query?: never;
@@ -52,91 +68,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/file-parser/v1/info": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get information about available file parsers */
-        get: operations["file_parser.get_parser_info"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/file-parser/v1/parse-local": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Parse a file from a local path */
-        post: operations["file_parser.parse_local"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/file-parser/v1/parse-local/markdown": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Parse a local file and stream Markdown */
-        post: operations["file_parser.parse_local_markdown"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/file-parser/v1/upload": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Upload and parse a file */
-        post: operations["file_parser.upload"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/file-parser/v1/upload/markdown": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Upload and parse a file, streaming Markdown */
-        post: operations["file_parser.upload_markdown"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/gear-orchestrator/v1/gears": {
         parameters: {
             query?: never;
@@ -149,86 +80,6 @@ export interface paths {
          * @description Returns a list of all compiled-in and out-of-process gears with their capabilities, dependencies, running instances, and deployment mode.
          */
         get: operations["gear_orchestrator.list_gears"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/nodes-registry/v1/nodes": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List all nodes
-         * @description Get a list of all nodes in the deployment. Use ?details=true to include sysinfo and syscap. Use ?force_refresh=true to invalidate syscap cache.
-         */
-        get: operations["nodes_registry.list_nodes"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/nodes-registry/v1/nodes/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get node by ID
-         * @description Get detailed information about a specific node. Use ?details=true to include sysinfo and syscap. Use ?force_refresh=true to invalidate syscap cache.
-         */
-        get: operations["nodes_registry.get_node"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/nodes-registry/v1/nodes/{id}/syscap": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get node system capabilities
-         * @description Get system capabilities (hardware, software features) for a specific node. Use ?force_refresh=true to invalidate cache and refresh all capabilities.
-         */
-        get: operations["nodes_registry.get_node_syscap"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/nodes-registry/v1/nodes/{id}/sysinfo": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get node system information
-         * @description Get detailed system information (OS, CPU, memory, etc.) for a specific node
-         */
-        get: operations["nodes_registry.get_node_sysinfo"];
         put?: never;
         post?: never;
         delete?: never;
@@ -410,7 +261,7 @@ export interface paths {
         };
         /**
          * Analytics overview
-         * @description Eight computed sections over one product's test universe, in one payload: a pass/fail/not-run summary, the same universe as three sorted lists, a per-test day heatmap, a daily trend, the distribution of each test's latest build, the flaky tests, the Quality Vector breakdown and three group breakdowns. The universe is every test file qa-catalog resolves from the product's plans, and it is the denominator of every number here - a test with no execution row is not_run rather than absent, so total does not move with the data. product_id, version and scope are required; scope=plan additionally requires plan_id, which is the plan's path within its repository. An unknown product_id is an empty overview of zeros rather than a 404, because this gear reads the universe from qa-catalog and that read is not an existence oracle for a product. branch selects the branch whose plans define the universe AND narrows the executions to runs on that branch. Absent is the asymmetric case, and it is deliberate: the universe then comes from each repository's own default branch while every branch's executions stay in scope. days_heatmap defaults to 7 and is clamped to 1-30; days_trend defaults to 90 and is clamped to 7-365, and the flaky window is days_trend rather than a third setting. Both clamps are silent. The executions read is bounded to the wider of the two windows, so pass_count, fail_count, total_runs and the build distribution count that window rather than all of history, and widening days_trend widens them. group_by plus group_value narrow the summary, the lists, both charts, the build distribution and the flaky list to one component or tag; they deliberately do NOT narrow the three group breakdowns or the Quality Vector totals, which stay over the whole universe so the chart remains a comparison. group_by=platform narrows nothing at all, and a blank group_value narrows nothing, both of which are the behaviour of the system being replaced. summary.case_expected sums, per test file, the collect job's exact case count where the collect job has reported one for that file on this request's branch (branch, or the configured default collect branch - main unless overridden - when absent), and a static count parsed from the test source otherwise; the static count does not expand @pytest.mark.parametrize, so it is a lower bound wherever the exact count is not available, and a deployment that has never run a collect job still renders a non-zero total from the static counts alone. The platform breakdown carries a platform_id and a platform name resolved from qa-environments; the name is null for a platform the caller cannot see, and those bars sort last. Run identities are ids rather than names - there is no bulk run-name lookup to make one without a request per row. Requires the qa.test_result/list grant, the same one the dashboard and the test-result collections need, plus whatever qa-catalog requires to list a universe.
+         * @description Eight computed sections over one product's test universe, in one payload: a pass/fail/not-run summary, the same universe as three sorted lists, a per-test day heatmap, a daily trend, the distribution of each test's latest build, the flaky tests, the Quality Vector breakdown and three group breakdowns. The universe is every test file qa-catalog resolves from the product's plans, and it is the denominator of every number here - a test with no execution row is not_run rather than absent, so total does not move with the data. product_id, version and scope are required; scope=plan additionally requires plan_id, which is the plan's path within its repository. An unknown product_id is an empty overview of zeros rather than a 404, because this gear reads the universe from qa-catalog and that read is not an existence oracle for a product. branch selects the branch whose plans define the universe AND narrows the executions to runs on that branch. Absent is the asymmetric case, and it is deliberate: the universe then comes from each repository's own default branch while every branch's executions stay in scope. days_heatmap defaults to 7 and is clamped to 1-30; days_trend defaults to 90 and is clamped to 7-365, and the flaky window is days_trend rather than a third setting. Both clamps are silent. The executions read is bounded to the wider of the two windows, so pass_count, fail_count, total_runs and the build distribution count that window rather than all of history, and widening days_trend widens them. group_by plus group_value narrow the summary, the lists, both charts, the build distribution and the flaky list to one component or tag; they deliberately do NOT narrow the three group breakdowns or the Quality Vector totals, which stay over the whole universe so the chart remains a comparison. group_by=environment narrows nothing at all, and a blank group_value narrows nothing, both of which are the behaviour of the system being replaced. summary.case_expected sums, per test file, the collect job's exact case count where the collect job has reported one for that file on this request's branch (branch, or the configured default collect branch - main unless overridden - when absent), and a static count parsed from the test source otherwise; the static count does not expand @pytest.mark.parametrize, so it is a lower bound wherever the exact count is not available, and a deployment that has never run a collect job still renders a non-zero total from the static counts alone. The environment breakdown carries an environment_id and an environment name resolved from qa-environments; the name is null for an environment the caller cannot see, and those bars sort last. Run identities are ids rather than names - there is no bulk run-name lookup to make one without a request per row. Requires the qa.test_result/list grant, the same one the dashboard and the test-result collections need, plus whatever qa-catalog requires to list a universe.
          */
         get: operations["qa_insights.analytics_overview"];
         put?: never;
@@ -470,7 +321,7 @@ export interface paths {
         };
         /**
          * Plan test analytics
-         * @description Aggregated per-test analytics for one plan: the most recent execution's status, platform, version, run and JIRA reference, plus pass/fail/total counts over every execution inside the read window. plan_id is matched against the plan's path and, unlike scope=plan on GET /qa/v1/analytics/overview, against every repository the caller can see - there is no product_id here to fix one repository, and this is the same reading a caller's one plan_id string already gets from that endpoint: AnalyticsListItemDto ships repo_id too, but plan_id itself has only ever been the path half. pass_count and fail_count match the runner's literal PASSED/FAILED status and nothing else, so an ERROR execution counts toward the total but toward neither. The read is bounded to the trailing 90 days, the same NFR-driven default GET /qa/v1/analytics/build-tests uses, because the system being replaced reads this table with no window at all and this one is sized in the millions of rows. Ordered by test name. A plan_id naming nothing is an empty array rather than a 404. Requires the qa.test_result/list grant.
+         * @description Aggregated per-test analytics for one plan: the most recent execution's status, environment, version, run and JIRA reference, plus pass/fail/total counts over every execution inside the read window. plan_id is matched against the plan's path and, unlike scope=plan on GET /qa/v1/analytics/overview, against every repository the caller can see - there is no product_id here to fix one repository, and this is the same reading a caller's one plan_id string already gets from that endpoint: AnalyticsListItemDto ships repo_id too, but plan_id itself has only ever been the path half. pass_count and fail_count match the runner's literal PASSED/FAILED status and nothing else, so an ERROR execution counts toward the total but toward neither. The read is bounded to the trailing 90 days, the same NFR-driven default GET /qa/v1/analytics/build-tests uses, because the system being replaced reads this table with no window at all and this one is sized in the millions of rows. Ordered by test name. A plan_id naming nothing is an empty array rather than a 404. Requires the qa.test_result/list grant.
          */
         get: operations["qa_insights.analytics_plan_tests"];
         put?: never;
@@ -610,7 +461,7 @@ export interface paths {
         };
         /**
          * Dashboard aggregate
-         * @description Run activity and the test counters behind it, in one payload. Live run state (active, queued, the recent list) is read from qa-runs on every request and is never cached here, because qa-runs owns it; the counters are computed over this gear's ingested results. days sets the length of the daily pass/fail trend: it defaults to 14 and is silently clamped to 3-90, so days=365 answers with 90 points rather than an error. Every day in the window is present, including days nothing ran. total_runs counts the runs this gear holds results for, which is not the same as every run ever launched - a run whose results have not been ingested yet is absent, and asynchronous ingest makes that a normal transient state. The recent list holds ten runs and the active list holds at most ten, using the same predicate as the active count, so a caller reading 23 active gets ten entries. The 24-hour block - failed_recent, failed_24h_count, failed_prev_24h_count, pass_rate_24h and pass_rate_prev_24h - has a window of its own and does not move with days; it counts a wider row set than the trends do, because a run that has not finished yet contributes to it. A pass rate is a ratio between 0 and 1 over passed-plus-failed rows, so skipped tests do not lower it, and it is null rather than 0 when the window held nothing to divide by. flaky_tests has a third window - seven days, also fixed - and holds at most ten tests that both passed and failed in it, flakiest first, where flakiest means the larger count of the smaller of the two status groups; a test that only passed or only failed is absent rather than listed with a zero, so an empty array is the ordinary answer on a healthy suite. quality_vectors_pass_rate has a fourth window, also seven days and also fixed, and holds one entry per Quality Vector declared by any test file with a row in that window, highest total first; a file declaring two vectors contributes its executions to both, so the totals across that array are not a row count, and an entry whose counters are all zero means every file carrying that vector was skipped. Three fields of the legacy dashboard payload are deliberately absent rather than reported as zero, because nothing computes them yet: total_plans, total_schedules and platforms_summary. Requires the qa.test_result/list grant, the same one the test-result collections need.
+         * @description Run activity and the test counters behind it, in one payload. Live run state (active, queued, the recent list) is read from qa-runs on every request and is never cached here, because qa-runs owns it; the counters are computed over this gear's ingested results. days sets the length of the daily pass/fail trend: it defaults to 14 and is silently clamped to 3-90, so days=365 answers with 90 points rather than an error. Every day in the window is present, including days nothing ran. total_runs counts the runs this gear holds results for, which is not the same as every run ever launched - a run whose results have not been ingested yet is absent, and asynchronous ingest makes that a normal transient state. The recent list holds ten runs and the active list holds at most ten, using the same predicate as the active count, so a caller reading 23 active gets ten entries. The 24-hour block - failed_recent, failed_24h_count, failed_prev_24h_count, pass_rate_24h and pass_rate_prev_24h - has a window of its own and does not move with days; it counts a wider row set than the trends do, because a run that has not finished yet contributes to it. A pass rate is a ratio between 0 and 1 over passed-plus-failed rows, so skipped tests do not lower it, and it is null rather than 0 when the window held nothing to divide by. flaky_tests has a third window - seven days, also fixed - and holds at most ten tests that both passed and failed in it, flakiest first, where flakiest means the larger count of the smaller of the two status groups; a test that only passed or only failed is absent rather than listed with a zero, so an empty array is the ordinary answer on a healthy suite. quality_vectors_pass_rate has a fourth window, also seven days and also fixed, and holds one entry per Quality Vector declared by any test file with a row in that window, highest total first; a file declaring two vectors contributes its executions to both, so the totals across that array are not a row count, and an entry whose counters are all zero means every file carrying that vector was skipped. Three fields of the payload are deliberately absent rather than reported as zero, because nothing computes them yet: total_plans, total_schedules and environments_summary. product_id narrows every measured number on this payload to one product - the counts, both lists, the per-run trend, the daily trend, the 24-hour block, flaky_tests and quality_vectors_pass_rate all narrow with it, and none of them stays deployment-wide. The attribution is through the run's own target: a run naming a repository (directly, whether it is running a plan, a single test, or enumerating a repository's cases) is attributed to that repository's product; a run naming a custom plan spans repositories and is attributed to none. unattributable_runs is the one field product_id does not narrow, and it is not a measurement of the selected product: it counts the runs in the same window that belong to no product at all, whichever product they would otherwise have been under, so it is not the selected product's own dropped runs - there is no way to identify those, which is what makes the runs unattributable in the first place. It is 0 without product_id only because nothing was dropped then, not because those runs stop existing. Omitting product_id preserves today's deployment-wide behaviour exactly, and an unattributable run is included in that deployment-wide answer as it always was. Requires the qa.test_result/list grant every request needs, and a product-scoped request additionally requires qa.test_repo/list: resolving which repositories the selected product owns is a qa-catalog read of its own, refused independently of the first grant.
          */
         get: operations["qa_insights.dashboard"];
         put?: never;
@@ -633,86 +484,6 @@ export interface paths {
          * @description Code coverage per product: one point per product, from the latest completed run that reported coverage, carrying product_key, version, a build label of the two joined by a slash, and line, branch and function percentages. Takes no parameters. A build with no measured coverage is absent from the array rather than reported as zero. The array is empty in every deployment today, and not only where coverage collection is switched off: nothing in this system measures a coverage point yet, and no number is folded out of the ingested test results to fill the gap. Requires the qa.test_result/list grant, the same one the dashboard and the test-result collections need.
          */
         get: operations["qa_insights.dashboard_coverage"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/qa/v1/insights/rebuild": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Replay a time window from qa-runs
-         * @description Re-read every run that finished in [from, to) from qa-runs and rewrite this gear's projection of it, run by run. For a window whose results are known to be wrong or missing. Requires the qa.test_result/rebuild grant. The window is half-open, so adjoining windows neither skip a run nor replay one, and `to` must be strictly after `from`. It does not move the reconciler's watermark, in either direction: this is a repair for a known window, not a reset. It deletes nothing it does not immediately rewrite, so rows for runs qa-runs no longer has are left standing. The window is capped by the configured reconcile page size; a window holding more runs than that replays the oldest page and logs a warning, so narrow it and repeat.
-         */
-        post: operations["qa_insights.rebuild"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/qa/v1/jira/bugs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * File or find JIRA bugs for a run's failed tests
-         * @description File a JIRA issue for every FAILED test of run_id, or - when test_name is given - for just that one test if it failed. A test already registered locally, or one JIRA's own search already tracks, is not re-filed: the entry for it carries created: false and the existing key. A test this call cannot file for (JIRA is not configured or disabled, the test has no plan identity in this run's projection, or the JIRA call itself failed) is silently dropped from the response rather than failing the whole request - a partial success is a 200 with fewer entries than failed tests, matching the system being replaced's own per-test error handling. 404 means run_id has no ingested results at all, which is distinct from a run with no failures (a 200 with an empty list). Requires three grants: qa.jira_bug/create for the registry write, qa.test_result/list to read the run's own results, and qa.jira_config/get to read the tenant's JIRA settings. Unlike the per-test failures above, a denial on any of the three refuses the whole request with a 403 rather than being swallowed - authorization is checked once, before any test is filed.
-         */
-        post: operations["qa_insights.file_jira_bugs"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/qa/v1/jira/open-bugs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List open JIRA bugs
-         * @description Every bug this tenant's registry still considers open (status = 'Open'), or - when repo_id and plan_path are both supplied - only those filed against that plan. The two must be supplied together; one without the other is a 400. This is the same (repo_id, plan_path) identity the runner's skip list is built from: a bug that suppresses a test at launch is the same bug this endpoint lists, which is why the match is exact rather than the analytics drill-downs' single plan_path matched across every repository a caller's scope admits. A bug the poller has since resolved leaves this list even though POST /qa/v1/jira/bugs' local re-file dedupe may still recognise it - see that endpoint's own description. Requires the qa.jira_bug/list grant.
-         */
-        get: operations["qa_insights.list_open_bugs"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/qa/v1/plans": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List discovered plans
-         * @description Discover plans from the synced working copy of the given repository and branch (plans are never persisted; they are materialized on read)
-         */
-        get: operations["qa_catalog.list_plans"];
         put?: never;
         post?: never;
         delete?: never;
@@ -813,6 +584,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/qa/v1/insights/rebuild": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Replay a time window from qa-runs
+         * @description Re-read every run that finished in [from, to) from qa-runs and rewrite this gear's projection of it, run by run. For a window whose results are known to be wrong or missing. Requires the qa.test_result/rebuild grant. The window is half-open, so adjoining windows neither skip a run nor replay one, and `to` must be strictly after `from`. It does not move the reconciler's watermark, in either direction: this is a repair for a known window, not a reset. It deletes nothing it does not immediately rewrite, so rows for runs qa-runs no longer has are left standing. The window is capped by the configured reconcile page size; a window holding more runs than that replays the oldest page and logs a warning, so narrow it and repeat.
+         */
+        post: operations["qa_insights.rebuild"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/qa/v1/jira/bugs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * File or find JIRA bugs for a run's failed tests
+         * @description File a JIRA issue for every FAILED test of run_id, or - when test_name is given - for just that one test if it failed. A test already registered locally, or one JIRA's own search already tracks, is not re-filed: the entry for it carries created: false and the existing key. A test this call cannot file for (JIRA is not configured or disabled, the test has no plan identity in this run's projection, or the JIRA call itself failed) is silently dropped from the response rather than failing the whole request - a partial success is a 200 with fewer entries than failed tests, matching the system being replaced's own per-test error handling. 404 means run_id has no ingested results at all, which is distinct from a run with no failures (a 200 with an empty list). Requires three grants: qa.jira_bug/create for the registry write, qa.test_result/list to read the run's own results, and qa.jira_config/get to read the tenant's JIRA settings. Unlike the per-test failures above, a denial on any of the three refuses the whole request with a 403 rather than being swallowed - authorization is checked once, before any test is filed.
+         */
+        post: operations["qa_insights.file_jira_bugs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/qa/v1/jira/open-bugs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List open JIRA bugs
+         * @description Every bug this tenant's registry still considers open (status = 'Open'), or - when repo_id and plan_path are both supplied - only those filed against that plan. The two must be supplied together; one without the other is a 400. This is the same (repo_id, plan_path) identity the runner's skip list is built from: a bug that suppresses a test at launch is the same bug this endpoint lists, which is why the match is exact rather than the analytics drill-downs' single plan_path matched across every repository a caller's scope admits. A bug the poller has since resolved leaves this list even though POST /qa/v1/jira/bugs' local re-file dedupe may still recognise it - see that endpoint's own description. Requires the qa.jira_bug/list grant.
+         */
+        get: operations["qa_insights.list_open_bugs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/qa/v1/plans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List discovered plans
+         * @description Discover plans from the synced working copy of the given repository and branch (plans are never persisted; they are materialized on read)
+         */
+        get: operations["qa_catalog.list_plans"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/qa/v1/product-folders": {
         parameters: {
             query?: never;
@@ -825,6 +676,26 @@ export interface paths {
          * @description Distinct non-null folder names across the caller's visible products
          */
         get: operations["qa_catalog.list_product_folders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/qa/v1/product-plugins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List registered product plugins
+         * @description Every product plugin this deployment registers, with the two field-descriptor schemas each declares: `credential_schema` renders the environment credential form, and `observed_schema` describes what observing an environment of that product yields and which values claim a platform role. `instance_id` is the value to write back to a product's `plugin_instance_id`, verbatim. An empty list is a 200, not a 404
+         */
+        get: operations["qa_catalog.list_product_plugins"];
         put?: never;
         post?: never;
         delete?: never;
@@ -890,7 +761,7 @@ export interface paths {
         };
         /**
          * Read the run queue
-         * @description One page of run-queue rows, newest first, all states. `queue_position` is 1-based among a platform's queued rows and is computed over the rows this request returned - so a narrow page understates it, and filtering by platform_id is the way to get a position you can rely on. `limit` defaults to 200 and is clamped to 1-500; new callers should use $top instead, which wins when both are given.
+         * @description One page of run-queue rows, newest first, all states. `queue_position` is 1-based among an environment's queued rows and is computed over the rows this request returned - so a narrow page understates it, and filtering by environment_id is the way to get a position you can rely on. `limit` defaults to 200 and is clamped to 1-500; new callers should use $top instead, which wins when both are given.
          */
         get: operations["qa_runs.list_queue"];
         put?: never;
@@ -913,7 +784,7 @@ export interface paths {
         post?: never;
         /**
          * Cancel a queued row
-         * @description Drop a row that has not started, retiring its run in the same transaction. Answers 409 when the row has already left `queued`: it then holds a claim on its platform, and dropping it here would release a platform a live execution still owns.
+         * @description Drop a row that has not started, retiring its run in the same transaction. Answers 409 when the row has already left `queued`: it then holds a claim on its environment, and dropping it here would release an environment a live execution still owns.
          */
         delete: operations["qa_runs.cancel_queued_row"];
         options?: never;
@@ -932,7 +803,7 @@ export interface paths {
         put?: never;
         /**
          * Force-start a queued row
-         * @description Start a queued row now, bypassing the platform occupancy check. The cluster-wide max_concurrent_runs cap is still enforced, so this can still answer 429 - the asymmetry is deliberate: an operator may override exclusivity on one platform, but not the limit that protects the whole cluster. The override is logged with the run and the platform named.
+         * @description Start a queued row now, bypassing the environment occupancy check. The cluster-wide max_concurrent_runs cap is still enforced, so this can still answer 429 - the asymmetry is deliberate: an operator may override exclusivity on one environment, but not the limit that protects the whole cluster. The override is logged with the run and the environment named.
          */
         post: operations["qa_runs.force_start_queued_row"];
         delete?: never;
@@ -956,7 +827,7 @@ export interface paths {
         put?: never;
         /**
          * Launch a run
-         * @description Validate, resolve exclusivity, and either start the run immediately (200) or admit it to its platform's queue (202). A queued run starts on its own - no further call is needed. 429 means the launch was refused by a capacity setting, and the response names which one: queue_max_depth for a full per-platform queue, max_concurrent_runs for the cluster-wide cap.
+         * @description Validate, resolve exclusivity, and either start the run immediately (200) or admit it to its environment's queue (202). A queued run starts on its own - no further call is needed. 429 means the launch was refused by a capacity setting, and the response names which one: queue_max_depth for a full per-environment queue, max_concurrent_runs for the cluster-wide cap.
          */
         post: operations["qa_runs.launch_run"];
         delete?: never;
@@ -1107,7 +978,7 @@ export interface paths {
         get?: never;
         /**
          * Replace a schedule's Slack notification settings
-         * @description The three per-schedule Slack settings, and nothing else on the schedule: a              schedule pinned exclusive comes back pinned exclusive, because the other              columns are not in the UPDATE at all. The source system registers this as a              POST (`manager/src/routes/mod.rs:95-98`); a full, idempotent replacement of a              settings sub-resource is a PUT, and the REST surface - unlike the test-facing              contract - is not frozen. All three fields are required, for the reason the              schedule replace requires `enabled`. 400 is an event name outside the six              legacy serializes (`pending`, `in_progress`, `succeeded`, `failed`, `error`,              `skipped`) or a channel wider than the column. qa-runs stores these and sends              nothing; the sending is qa-insights'.
+         * @description The three per-schedule Slack settings, and nothing else on the schedule: a              schedule pinned exclusive comes back pinned exclusive, because the other              columns are not in the UPDATE at all. A full, idempotent replacement of a              settings sub-resource is a PUT, and the REST surface - unlike the test-facing              contract - is not frozen. All three fields are required, for the reason the              schedule replace requires `enabled`. 400 is an event name outside the six              (`pending`, `in_progress`, `succeeded`, `failed`, `error`,              `skipped`) or a channel wider than the column. qa-runs stores these and sends              nothing; the sending is qa-insights'.
          */
         put: operations["qa_runs.update_schedule_notifications"];
         post?: never;
@@ -1240,7 +1111,7 @@ export interface paths {
         put?: never;
         /**
          * Send a test notification
-         * @description Sends a real notification right now, over whichever channel(s) are enabled. With no request body, sends the settings page's generic test message using the tenant's stored settings. With a body, tests one scheduled-run Slack template against the given config override and event token (one of pending, in_progress, succeeded, failed, error, skipped) rather than the stored settings - the config override must have Slack enabled with a non-empty webhook reference, or this is refused with a 400 before anything is sent. Neither shape claims a dedupe slot or writes the audit log; both are pinned by qa_insights_sdk::SLACK_NOTIFICATION_EVENTS. Unlike the automatic completion path, a send failure here is returned rather than swallowed - an operator testing a channel deserves to know it does not work, including a 501 when the channel this deployment ships has no adapter at all (D10). This endpoint's OpenAPI schema shows the body as required; posting no body at all is also accepted, matching legacy. Requires the qa.notification_config/test grant.
+         * @description Sends a real notification right now, over whichever channel(s) are enabled. With no request body, sends the settings page's generic test message using the tenant's stored settings. With a body, tests one scheduled-run Slack template against the given config override and event token (one of pending, in_progress, succeeded, failed, error, skipped) rather than the stored settings - the config override must have Slack enabled with a non-empty webhook reference, or this is refused with a 400 before anything is sent. Neither shape claims a dedupe slot or writes the audit log; both are pinned by qa_insights_sdk::SLACK_NOTIFICATION_EVENTS. Unlike the automatic completion path, a send failure here is returned rather than swallowed - an operator testing a channel deserves to know it does not work, including a 501 when the channel this deployment ships has no adapter at all (D10). This endpoint's OpenAPI schema shows the body as required; posting no body at all is also accepted. Requires the qa.notification_config/test grant.
          */
         post: operations["qa_insights.test_notification"];
         delete?: never;
@@ -1489,170 +1360,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/resource-group/v1/groups": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List resource groups
-         * @description Retrieve a paginated list of resource groups with OData filtering
-         */
-        get: operations["resource_group.list_groups"];
-        put?: never;
-        /**
-         * Create a new resource group
-         * @description Create a new resource group with the provided type, name, and optional parent
-         */
-        post: operations["resource_group.create_group"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/resource-group/v1/groups/{group_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get resource group by ID
-         * @description Retrieve a specific resource group by its UUID
-         */
-        get: operations["resource_group.get_group"];
-        /**
-         * Update resource group
-         * @description Update a resource group (full replacement via PUT, including parent move)
-         */
-        put: operations["resource_group.update_group"];
-        post?: never;
-        /**
-         * Delete resource group
-         * @description Delete a resource group. Use ?force=true to cascade delete subtree and memberships.
-         */
-        delete: operations["resource_group.delete_group"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/resource-group/v1/groups/{group_id}/ancestors": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get group ancestors
-         * @description Get ancestors of a reference group (depth <= 0) with OData filtering
-         */
-        get: operations["resource_group.get_group_ancestors"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/resource-group/v1/groups/{group_id}/descendants": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get group descendants
-         * @description Get descendants of a reference group (depth >= 0) with OData filtering
-         */
-        get: operations["resource_group.get_group_descendants"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/resource-group/v1/memberships": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List memberships
-         * @description Retrieve a paginated list of memberships with OData filtering on group_id, resource_type, resource_id
-         */
-        get: operations["resource_group.list_memberships"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/resource-group/v1/memberships/{group_id}/{resource_type}/{resource_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Add membership
-         * @description Add a membership link between a resource group and a resource
-         */
-        post: operations["resource_group.add_membership"];
-        /**
-         * Remove membership
-         * @description Remove a membership link between a resource group and a resource
-         */
-        delete: operations["resource_group.remove_membership"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/simple-user-settings/v1/settings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get user settings
-         * @description Retrieve settings for the authenticated user
-         */
-        get: operations["simple_user_settings.get_settings"];
-        put?: never;
-        /**
-         * Update user settings
-         * @description Full update of user settings (POST semantics)
-         */
-        post: operations["simple_user_settings.update_settings"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        /**
-         * Partially update user settings
-         * @description Partial update of user settings (PATCH semantics)
-         */
-        patch: operations["simple_user_settings.patch_settings"];
-        trace?: never;
-    };
     "/types-registry/v1/entities": {
         parameters: {
             query?: never;
@@ -1697,31 +1404,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/types-registry/v1/types": {
+    "/types-registry/v2/entities": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * List GTS types
-         * @description Retrieve a list of GTS resource group type definitions with OData filtering
-         */
-        get: operations["resource_group.list_types"];
+        get?: never;
         put?: never;
         /**
-         * Create a new GTS type
-         * @description Create a new GTS resource group type definition
+         * Submit GTS entities for registration
+         * @description Submit one or more GTS entities for admission. Returns 202 with the operation's Location; poll GET /types-registry/v2/operations/{operation_id} for the per-candidate outcome. A replay of a terminal operation returns 200. An Idempotency-Key header is required: a replay with the same body returns the same operation, and a different body under the same key is a conflict.
          */
-        post: operations["resource_group.create_type"];
+        post: operations["types_registry.submit_entities"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/types-registry/v1/types/{code}": {
+    "/types-registry/v2/entities/{entity_key}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1729,21 +1432,33 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get GTS type by code
-         * @description Retrieve a specific GTS type definition by its GTS type path
+         * Get a GTS entity by identifier or Registry Reference
+         * @description Return one entity with its authored document and the effective artifacts materialized at admission. The key is either a canonical GTS identifier or the Registry Reference UUID derived from it. A deleted entity is still readable and reports its lifecycle status.
          */
-        get: operations["resource_group.get_type"];
-        /**
-         * Update GTS type
-         * @description Update a GTS resource group type definition (full replacement)
-         */
-        put: operations["resource_group.update_type"];
+        get: operations["types_registry.get_entity"];
+        put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/types-registry/v2/operations/{operation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
         /**
-         * Delete GTS type
-         * @description Delete a GTS resource group type definition
+         * Get an admission operation
+         * @description Return one operation and the durable per-candidate outcomes. `status` is progress only: `completed` means every item is terminal, and the outcomes are on the items.
          */
-        delete: operations["resource_group.delete_type"];
+        get: operations["types_registry.get_operation"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1753,28 +1468,32 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description The action being performed. */
+        Action: {
+            /** @description Action name (e.g., "list", "get", "create", "update", "delete"). */
+            name: string;
+        };
         /**
          * @description One test as the three overview lists draw it.
          *
-         *     Legacy's `AnalyticsListItem` (`analytics.rs:112-133`), and **three of its
-         *     fields are spelled differently here because this architecture stores an id
-         *     where legacy stored a label**:
+         *     **Three of its fields carry an id where a reader might expect a label**, and
+         *     each is named for what it carries:
          *
-         *     * `plan_id: String` becomes [`Self::repo_id`] + [`Self::plan_path`]. A plan
-         *       has no UUID in this subsystem — `qa_insights_sdk`'s header records that it
-         *       is materialized on read from qa-catalog and that legacy's own `plan_id` is
-         *       a lossy path-derived slug — so the pair *is* the identity.
-         *     * `last_platform: Option<String>` becomes [`Self::last_platform_id`] +
-         *       [`Self::last_platform`], the id and the name qa-environments resolved for
-         *       it. Both, rather than only the name: the name is `null` for a platform the
-         *       caller cannot see, and a client that has to draw *something* needs the id
-         *       to disambiguate two unresolved bars.
-         *     * `last_run_name: Option<String>` becomes [`Self::last_run_id`]. **There is
-         *       no run-name read in this gear**: `RunsReader` has no bulk name lookup and a
-         *       per-item `get_run` would be an N+1 across a gear boundary on a list whose
-         *       length is the universe size. Named for what it carries rather than
-         *       `last_run_name`-with-a-UUID-inside, which is the discipline Task 23 applied
-         *       to the platform id.
+         *     * The plan is [`Self::repo_id`] + [`Self::plan_path`]. A plan has no UUID in
+         *       this subsystem — `qa_insights_sdk`'s header records that it is materialized
+         *       on read from qa-catalog — so the pair *is* the identity.
+         *     * The environment is [`Self::last_environment_id`] **and**
+         *       [`Self::last_environment`] (renamed from `last_environment_id`/`last_platform`
+         *       at ruling G-3): the id, and the name qa-environments resolved for it. Both,
+         *       rather than only the name, because the name is `null` for an environment
+         *       the caller cannot see, and a client that has to draw *something* needs the
+         *       id to disambiguate two unresolved bars.
+         *     * The run is [`Self::last_run_id`]. **There is no run-name read in this
+         *       gear**: `RunsReader` has no bulk name lookup, and a per-item `get_run`
+         *       would be an N+1 across a gear boundary on a list whose length is the
+         *       universe size. Named for what it carries rather than a `last_run_name`
+         *       with a UUID inside it, which is the discipline Task 23 applied to the
+         *       environment id.
          */
         AnalyticsListItemDto: {
             /**
@@ -1798,23 +1517,23 @@ export interface components {
              */
             last_build?: string | null;
             /**
-             * @description `null` when no row named a platform **or** when qa-environments resolved
-             *     none for the id — the two are deliberately indistinguishable, which
-             *     `domain::ports::PlatformReader::names` records as a visibility rule
+             * @description `null` when no row named an environment **or** when qa-environments
+             *     resolved none for the id — the two are deliberately indistinguishable,
+             *     which `domain::ports::EnvironmentReader::names` records as a visibility rule
              *     rather than an omission.
              */
-            last_platform?: string | null;
+            last_environment?: string | null;
             /**
              * Format: uuid
-             * @description See this type's header for why both this and [`Self::last_platform`] are
-             *     present.
+             * @description See this type's header for why both this and
+             *     [`Self::last_environment`] are present.
              */
-            last_platform_id?: string | null;
+            last_environment_id?: string | null;
             /** Format: date-time */
             last_run_finished_at?: string | null;
             /**
              * Format: uuid
-             * @description See this type's header: an id, where legacy had a run name.
+             * @description See this type's header: an id, not a run name.
              */
             last_run_id?: string | null;
             /**
@@ -1853,8 +1572,7 @@ export interface components {
         /**
          * @description The universe as three lists, each sorted by display name.
          *
-         *     Legacy's `AnalyticsLists` (`analytics.rs:136-140`). Every universe entry is
-         *     in exactly one of the three, so their lengths sum to
+         *     Every universe entry is in exactly one of the three, so their lengths sum to
          *     [`OverviewSummaryDto::total`].
          */
         AnalyticsListsDto: {
@@ -1869,15 +1587,14 @@ export interface components {
         /**
          * @description Everything `GET /qa/v1/analytics/overview` answers with.
          *
-         *     Legacy's `AnalyticsOverviewResponse` (`analytics.rs:231-248`): **eight
-         *     computed sections** plus the query echoed back.
+         *     **Eight computed sections** plus the query echoed back.
          *
-         *     # One field of legacy's sixteen is absent
+         *     # There is no `product_key` field
          *
-         *     `product_key`. Legacy fills it from the product registry it resolved
-         *     `product_id` through (`:787`), VHP-319 deleted that model, and nothing in
-         *     this subsystem carries a product key. Absent rather than echoed back as the
-         *     `product_id`, which would be a different value under the same name.
+         *     Nothing in this subsystem carries a product key on a run: qa-catalog owns
+         *     products, and a run reaches one through its target. Absent rather than echoed
+         *     back as the `product_id`, which would be a different value under the same
+         *     name.
          */
         AnalyticsOverviewDto: {
             /** @description Normalized: `null` means every branch. */
@@ -1886,7 +1603,7 @@ export interface components {
             build_distribution: components["schemas"]["BuildLastRunDistributionDto"][];
             /** @description Flakiest first. An empty array is the ordinary answer on a healthy suite. */
             flaky: components["schemas"]["FlakyTestDto"][];
-            /** @description `none` | `component` | `tag` | `platform`. */
+            /** @description `none` | `component` | `tag` | `environment`. */
             group_by: string;
             /** @description Normalized: trimmed, and `null` when blank. */
             group_value?: string | null;
@@ -1922,11 +1639,13 @@ export interface components {
             sharing?: components["schemas"]["SharingMode"];
             type: string;
         };
-        BatteryInfoDto: {
-            on_battery: boolean;
-            /** Format: int32 */
-            percentage: number;
-        };
+        /**
+         * @description Controls how barriers (self-managed tenants) are handled during `AuthZ` evaluation.
+         *
+         *     Consistent with `tenant_resolver_sdk::BarrierMode`.
+         * @enum {string}
+         */
+        AuthzBarrierMode: "respect" | "ignore";
         /**
          * @description Cached branch names of a repository (refreshed by sync and the
          *     branch-cache lifecycle task).
@@ -1950,9 +1669,8 @@ export interface components {
         /**
          * @description One build's slice of the "latest run per test" snapshot.
          *
-         *     Legacy's `BuildLastRunDistribution` (`analytics.rs:169-175`), with
-         *     `latest_run_name: Option<String>` spelled as [`Self::latest_run_id`] for
-         *     [`AnalyticsListItemDto`]'s reason.
+         *     The newest run in each bucket is [`Self::latest_run_id`], an id rather than a
+         *     name, for [`AnalyticsListItemDto`]'s reason.
          */
         BuildLastRunDistributionDto: {
             /**
@@ -1976,8 +1694,8 @@ export interface components {
         /**
          * @description One test of one build, as the drill-down lists it.
          *
-         *     Legacy's `BuildTestDetailItem` (`analytics.rs:178-186`), with `run_name`
-         *     spelled as [`Self::run_id`] for [`AnalyticsListItemDto`]'s reason.
+         *     The run is [`Self::run_id`], an id rather than a name, for
+         *     [`AnalyticsListItemDto`]'s reason.
          */
         BuildTestDetailDto: {
             component?: string | null;
@@ -2007,30 +1725,30 @@ export interface components {
             capacity: number;
         };
         /**
-         * @description REST DTO for one platform's cluster-health reading. See
-         *     [`EnvironmentDto::cluster`]'s own doc for what its presence and its `status`
-         *     mean.
-         */
-        ClusterHealthDto: {
-            /** Format: date-time */
-            checked_at: string;
-            counts: components["schemas"]["NodeCountsDto"];
-            /** Format: int32 */
-            namespace_count?: number | null;
-            nodes: components["schemas"]["NodeSummaryDto"][];
-            status: string;
-            status_message?: string | null;
-        };
-        /**
-         * @description The body the runner posts with one file's exact case count — legacy's
-         *     `CollectCountPayload` (`manager/src/routes/analytics.rs:2606-2610`).
+         * @description PEP-level capability declarations.
          *
-         *     `case_count` is `i64`, matching legacy's own signed field and **not**
+         *     Tells the PDP which advanced features the PEP can handle so the PDP
+         *     can tailor its response accordingly.
+         *
+         *     **Note:** `GroupMembership` and `GroupHierarchy` require access to the
+         *     Resource Group tables (`resource_group`, `resource_group_membership`, `resource_group_closure`).
+         *     Services that can join against these tables may declare the capabilities;
+         *     the PDP will then return `InGroup`/`InGroupSubtree` predicates directly.
+         *     Services without access should omit these capabilities — the PDP will
+         *     degrade group predicates to explicit `In` with pre-resolved resource IDs.
+         * @enum {string}
+         */
+        Capability: "tenant_hierarchy" | "group_membership" | "group_hierarchy";
+        /**
+         * @description The body the runner posts with one file's exact case count —
+         *     `CollectCountPayload`.
+         *
+         *     `case_count` is `i64` on the wire and **not**
          *     [`qa_insights_sdk::CollectCount::case_count`]'s `u32` — see
          *     `domain::service::collect`'s header, "The `case_count` clamp needs an
-         *     `i64` wire field": a `u32` field here would turn legacy's clamp-to-zero
+         *     `i64` wire field": a `u32` field here would turn a clamp-to-zero
          *     into a deserialization 400, which is a different behaviour a client would
-         *     observe as this gear rejecting a request legacy accepted.
+         *     observe as a rejected report rather than a recorded zero.
          */
         CollectCountReq: {
             /** Format: int64 */
@@ -2038,10 +1756,9 @@ export interface components {
             test_file: string;
         };
         /**
-         * @description What `POST /qa/v1/analytics/collect` answers with — legacy's bare
-         *     `Json(json!({ "launched": .., "branch": .. }))`
-         *     (`manager/src/routes/analytics.rs:2664`), typed here rather than an
-         *     untyped `serde_json::Value` so the `OpenAPI` schema states the two fields.
+         * @description What `POST /qa/v1/analytics/collect` answers with: the launched count and
+         *     the branch, typed rather than an untyped `serde_json::Value` so the `OpenAPI`
+         *     schema states the two fields.
          */
         CollectTriggerOutcomeDto: {
             /**
@@ -2057,6 +1774,19 @@ export interface components {
              */
             launched: number;
         };
+        /**
+         * @description A constraint on a specific resource property.
+         *
+         *     Multiple constraints within a response are `ORed`:
+         *     a resource matches if it satisfies ANY constraint.
+         */
+        Constraint: {
+            /**
+             * @description The predicates within this constraint. All predicates are `ANDed`:
+             *     a resource matches this constraint only if ALL predicates are satisfied.
+             */
+            predicates: components["schemas"]["Predicate"][];
+        };
         CorsConfig: {
             allow_credentials?: boolean;
             allowed_methods?: components["schemas"]["CorsHttpMethod"][];
@@ -2070,141 +1800,59 @@ export interface components {
         /**
          * @description One build's coverage, as `GET /qa/v1/dashboard/coverage` returns it.
          *
-         *     Every field of `qa_insights_sdk::CoverageBuild`, which is every field of
-         *     legacy's `CoverageBuild` (`manager/src/routes/dashboard.rs:564-569`).
+         *     Every field of `qa_insights_sdk::CoverageBuild`.
          *
          *     # The array is empty today, and no *field* is omitted to say so
          *
-         *     The wire consequence first: the difference from [`DashboardStatsDto`]'s
-         *     omission convention is deliberate and is legacy's own. There, a *field*
-         *     nothing computes is absent from the payload; here, an *entry* nothing measures
-         *     is absent from the array. A point that did exist would carry all four fields,
-         *     so all four are declared, and a client can bind them now.
+         *     The wire consequence first, because it differs deliberately from
+         *     [`DashboardStatsDto`]'s omission convention. There, a *field* nothing computes
+         *     is absent from the payload; here, an *entry* nothing measures is absent from
+         *     the array. A point that did exist would carry all four fields, so all four are
+         *     declared and a client can bind them now.
          *
-         *     # Why it is empty has one copy, and this is it
+         *     # Why it is empty
          *
-         *     **Two blocks below were moved here out of `domain::service::dashboard`'s
-         *     module header by Task 21b**, at the request of Phase A's whole-phase review,
-         *     which assigned the move to plan Task 21 and named this type as the preferred
-         *     home: that header was 319 lines and 93 of them were this argument — an
-         *     argument about why *this* type's array is empty, in the header of the service
-         *     that computes eight other things. What replaced them there is a pointer here,
-         *     so the copy count is unchanged.
+         *     Recorded at length because an empty answer invites the wrong explanations. It
+         *     is neither a transient state nor an empty tenant: **nothing in this system
+         *     produces a coverage point, and two upstreams are missing before one could.**
          *
-         *     **The prose is reproduced word for word.** Three mechanical notes, so that
-         *     nothing below has to be read as reworded:
-         *
-         *     * Only intra-doc links were re-pointed, because a link written from that
-         *       module does not resolve from here.
-         *     * The first block's bare `:` citations are into `docs/PRD.md`, whose
-         *       requirement bullet is `:575-581` — the antecedent stayed behind with the
-         *       requirement-discharge section.
-         *     * That block opens with `And` and closes with "nothing above as discharging
-         *       the clause", both of which pointed at that same section. It is the paragraph
-         *       about which *task* ships the coverage shape, and it stayed behind because it
-         *       is about task ownership rather than about this type.
-         *
-         *     # The requirement and legacy do not describe the same quantity
-         *
-         *     **And the requirement does not describe the same quantity legacy computes,
-         *     which no decision reconciles.** The PRD's bullet is "a coverage view (which
-         *     tests and plans ran against which product versions and platforms)" (`:580`) —
-         *     *execution* coverage, for which `qa_test_results` does have columns. Legacy's
-         *     `api_coverage` answers *code* coverage: `line_pct`, `branch_pct` and
-         *     `function_pct` parsed out of runner logs (`manager/src/models.rs:1482-1486`).
-         *     The shipped shape answers code coverage: `qa_insights_sdk::CoverageBuild`
-         *     types `line_pct`, `branch_pct` and `function_pct`, and
-         *     `gears/qa-platform/docs/DESIGN.md` §3.5 records the divergence as open.
-         *     **Which of the two readings the clause
-         *     should have is an open question raised out of Task 19 and is not settled here
-         *     or anywhere else in this crate** — nothing below should be read as settling
-         *     it, and nothing above as discharging the clause.
-         *
-         *     # The coverage view, and why it answers an empty array
-         *
-         *     Task 19 and [`DashboardService::coverage`](crate::domain::service::dashboard::DashboardService::coverage). Recorded at length because the
-         *     answer is empty and an empty answer invites the wrong explanations.
-         *
-         *     ## What legacy does, field by field
-         *
-         *     `api_coverage` (`manager/src/routes/dashboard.rs:573`) takes **no
-         *     parameters** — its only argument is `State(state)`, and the route is a bare
-         *     `get(dashboard::api_coverage)` (`manager/src/routes/mod.rs:301-304`). It
-         *     answers with a JSON array of `CoverageBuild` (`dashboard.rs:564-569`):
-         *     `product_key`, `version`, `build`, and a `CoverageSummary` of `line_pct`,
-         *     `branch_pct` and `function_pct` (`manager/src/models.rs:1482-1486`). `build`
-         *     is the label `format!("{}/{}", product_key, version)` (`:618`), not a build
-         *     identifier — nothing to do with `qa_test_results.app_build`.
-         *
-         *     It gets there by listing **every** Argo workflow (`:574`), sorting them by
-         *     `finished_at` falling back to `started_at`, descending and as *strings*
-         *     (`:575-587`), then per run: skipping any phase other than `Succeeded` or
-         *     `Failed` (`:593-595`), skipping a blank `app_version` (`:596-599`) or a blank
-         *     `product_key` (`:600-604`), **fetching that workflow's logs** (`:606-609`),
-         *     and parsing `=== COVERAGE_SUMMARY: {line} {branch} {function} ===` out of them
-         *     (`:611`; the marker and its regex are at
-         *     `manager/src/services/argo.rs:2718-2728`).
-         *
-         *     ## The grouping key is `product_key`, and the dedupe sits *inside* the parse
-         *
-         *     One point per product: `seen_products` is a `HashSet` of product keys and the
-         *     first survivor of the newest-first order wins (`:612-621`). The order of those
-         *     two facts is the part worth transcribing — the dedupe check is inside
-         *     `if let Some(summary)`, so a run with no marker does not consume its product's
-         *     slot and an older run of the same product can still supply the point.
-         *
-         *     ## A build with no coverage is **absent**, never present with zeros
-         *
-         *     Checked rather than guessed, as the plan requires. There is no `else` on
-         *     `:611`: a run whose logs carry no marker contributes nothing, and a product
-         *     whose every run lacks one is missing from the array rather than reported as
-         *     `0.0`. The one client renders the empty array as a first-class state — "No
-         *     coverage data available yet. Enable coverage collection in your test runs."
-         *     (`manager-ui/src/components/analytics/CoverageChart.tsx:36-50`) — while
-         *     reading `d.coverage.line_pct` unconditionally on every entry it does get
-         *     (`:52-57`), so an entry without a summary would be worse than no entry.
-         *
-         *     ## Two upstreams are missing, and the first of them is p2 work
-         *
-         *     * **The percentages come from log text, and this gear has none.** Legacy's
-         *       only source is the workflow log; there is no coverage column anywhere in its
-         *       schema (zero occurrences of `coverage` in `manager/migrations/001_initial.sql`,
-         *       which is its only migration file). Here the sole source of run data is
-         *       qa-runs, and no method of its client returns log text
-         *       (`qa-runs-sdk/src/client.rs:24-200`, seventeen methods) — by design rather
-         *       than by omission: `qa_runs_sdk::Run::log_storage_ref` is an archived-log
-         *       *pointer* documented as "populated on completion (p2 with 2.7)"
-         *       (`qa-runs-sdk/src/models.rs:376-380`), and neither `RunFinished` nor
-         *       `TestResult` carries a log slice
-         *       ([`crate::infra::events::payloads`]). It is the same parity gap
+         *     * **The percentages would have to come from log text, and this gear has
+         *       none.** The sole source of run data here is qa-runs, and no method of its
+         *       client returns log text — by design rather than omission: a run's durable
+         *       log lives in `qa_run_logs` and is served only as an SSE stream, and
+         *       `qa_runs_sdk` carries no log slice on any model. It is the same gap
          *       `qa_insights_sdk::TestResultRecord` records for its missing `logs` column,
          *       one granularity up.
          *     * **The grouping key does not exist either.** `qa_runs_sdk::Run` carries no
-         *       product key at all — VHP-319 deleted legacy's product-version model and
-         *       qa-catalog owns products now — which this crate already records twice for
-         *       other reasons (`domain::service::dashboard::dashboard_run` and `api::rest::dto::DashboardQuery`, whose
-         *       `product_key` parameter is dropped for it). Closing it is the plan's largest
-         *       open question, deferred to Task 20.
+         *       product key: qa-catalog owns products, and a run is attributed to one
+         *       through its target. This crate records the same gap twice more, on
+         *       `domain::service::dashboard::dashboard_run` and on [`DashboardQuery`], whose
+         *       `product_key` parameter is dropped for it.
          *
-         *     So the empty array is the honest answer, and it is **parity rather than a
-         *     placeholder**: legacy answers the same way under exactly the conditions this
-         *     architecture is permanently in. A run whose logs it cannot fetch is skipped
-         *     (`Err(_) => continue`, `:606-609`), a run with no `product_key` is skipped
-         *     (`None => continue`, `:600-604`), and a run whose logs carry no marker is
-         *     skipped (no `else` on `:611`). Here every run meets all three conditions, so
-         *     legacy's own code would return `[]` too — this is not a stub standing in for
-         *     legacy's answer, it *is* legacy's answer. What is deliberately **not**
-         *     done is the available temptation: folding something out of `qa_test_results`
-         *     and putting it under `line_pct`. Test-status counts are not code coverage, and
-         *     a plausible number under legacy's key is the "plausible lie"
-         *     `api::rest::dto::DashboardStatsDto`'s omission convention refuses one level up
-         *     — that convention omits a *field* nothing computes, this omits an *entry*
-         *     nothing measures, and the second is where legacy itself applies the rule.
+         *     So the empty array is the honest answer. What is deliberately **not** done is
+         *     the available temptation: folding something out of `qa_test_results` and
+         *     putting it under `line_pct`. Test-status counts are not code coverage, and a
+         *     plausible number under a coverage key is exactly the "plausible lie"
+         *     [`DashboardStatsDto`]'s omission convention refuses one level up — that
+         *     convention omits a *field* nothing computes, this omits an *entry* nothing
+         *     measures.
          *
-         *     ## It still compiles a PEP decision, and the objection to that is real
+         *     # The requirement and this endpoint do not describe the same quantity
          *
-         *     [`DashboardService::coverage`](crate::domain::service::dashboard::DashboardService::coverage) compiles the same decision
-         *     [`DashboardService::stats`](crate::domain::service::dashboard::DashboardService::stats) does, and then reads nothing. The objection is that a decision protecting no
+         *     `cpt-cf-qa-fr-insights-dashboard` (PRD §5.5) phrases coverage as "a coverage
+         *     view (which tests and plans ran against which product versions and
+         *     environments)" — *execution* coverage, for which `qa_test_results` does have
+         *     columns. This endpoint's shape answers *code* coverage: `line_pct`,
+         *     `branch_pct` and `function_pct`. **Which of the two readings the clause should
+         *     have is open**, and `gears/qa-platform/docs/DESIGN.md` §3.5 records it as
+         *     such; nothing here settles it and nothing here discharges the clause.
+         *
+         *     # It still compiles a PEP decision, and the objection to that is real
+         *
+         *     [`DashboardService::coverage`](crate::domain::service::dashboard::DashboardService::coverage)
+         *     compiles the same decision
+         *     [`DashboardService::stats`](crate::domain::service::dashboard::DashboardService::stats)
+         *     does, and then reads nothing. The objection is that a decision protecting no
          *     data is ceremony. It is made anyway because the endpoint's authorization
          *     contract must not change under a caller when the upstream lands: a client that
          *     works today and starts receiving 403 the moment the first real point is
@@ -2216,30 +1864,27 @@ export interface components {
         CoverageBuildDto: {
             /**
              * @description The chart's x-axis label — the product key and the version joined by a
-             *     slash (`:618`). A **label**, not a build identifier, and unrelated to
+             *     slash. A **label**, not a build identifier, and unrelated to
              *     `qa_test_results.app_build`.
              */
             build: string;
             coverage: components["schemas"]["CoverageSummaryDto"];
             /**
-             * @description The product this point is for. Never empty: legacy skips a run with a
-             *     blank one (`manager/src/routes/dashboard.rs:600-604`).
+             * @description The product this point is for. Never empty: a run with a blank product
+             *     key contributes no point.
              */
             product_key: string;
             /**
              * @description The application version the run reported (`app_version`), never blank for
-             *     the same reason (`:596-599`).
+             *     the same reason.
              */
             version: string;
         };
         /**
          * @description Code coverage percentages for one build.
          *
-         *     Legacy's `CoverageSummary` (`manager/src/models.rs:1482-1486`) — three
-         *     fields, three fields. The names are the JSON keys legacy already emits and the
-         *     ones its chart reads
-         *     (`manager-ui/src/components/analytics/CoverageChart.tsx:52-57`), so they are
-         *     wire contract rather than taste.
+         *     The three field names are the JSON keys the coverage endpoint emits and the
+         *     ones its chart reads, so they are wire contract rather than taste.
          */
         CoverageSummaryDto: {
             /** Format: double */
@@ -2249,36 +1894,8 @@ export interface components {
             /** Format: double */
             line_pct: number;
         };
-        CpuInfoDto: {
-            /** Format: int32 */
-            cores: number;
-            /** Format: double */
-            frequency_mhz: number;
-            model: string;
-            /** Format: int32 */
-            num_cpus: number;
-        };
-        /** @description REST DTO for creating a new resource group. */
-        CreateGroupDto: {
-            /**
-             * Format: uuid
-             * @description Optional caller-supplied ID. If omitted, the server generates a UUID.
-             */
-            id?: string | null;
-            /** @description Type-specific metadata. */
-            metadata?: unknown;
-            /** @description Display name (1..255 characters). */
-            name: string;
-            /**
-             * Format: uuid
-             * @description Parent group ID (null for root groups).
-             */
-            parent_id?: string | null;
-            /** @description GTS chained type path. Must have prefix `gts.cf.core.rg.type.v1~`. */
-            type: string;
-        };
         /**
-         * @description REST DTO for creating a new target platform.
+         * @description REST DTO for creating a new target environment.
          *
          *     # Two ways to supply the kubeconfig
          *
@@ -2300,17 +1917,29 @@ export interface components {
          */
         CreateEnvironmentReq: {
             /**
-             * @description Optional per-platform default branch override. Absent, `null`, or an
+             * @description Credentials keyed by the product plugin's own field key, each either
+             *     the document (`{"material": …}`) or a credstore reference
+             *     (`{"reference": …}`). This is the plugin-shaped channel; the
+             *     `kubeconfig`/`kubeconfig_credstore_ref` pair above is the pre-plugin
+             *     spelling of one entry of it and is still accepted so the shipped UI
+             *     keeps working. Supplying both spellings of the same field is a
+             *     validation error.
+             */
+            credentials?: {
+                [key: string]: components["schemas"]["CredentialSubmissionDto"];
+            } | null;
+            /**
+             * @description Optional per-environment default branch override. Absent, `null`, or an
              *     empty/whitespace-only string all mean "no override"; the service
-             *     normalises. See `sdk::TargetPlatform::default_branch`.
+             *     normalises. See `sdk::Environment::default_branch`.
              */
             default_branch?: string | null;
             description?: string | null;
             /**
-             * @description Make this platform its product's default -- what the Run and Schedule
+             * @description Make this environment its product's default -- what the Run and Schedule
              *     dialogs' "Default cluster" option resolves to. Absent or `null` means
              *     `false`. Setting it clears the flag on the product's previous default.
-             *     See `sdk::TargetPlatform::is_default`.
+             *     See `sdk::Environment::is_default`.
              */
             is_default?: boolean | null;
             /**
@@ -2334,6 +1963,25 @@ export interface components {
             folder?: string | null;
             key: string;
             name: string;
+            /**
+             * @description Full GTS instance id of the owning product plugin. **Required since
+             *     Task 20a**: absent or `null` is a 400 from
+             *     `TryFrom<CreateProductReq>` naming `GET /qa/v1/product-plugins`, and a
+             *     bare instance segment, a type id, or an id no plugin registers is
+             *     rejected with a 400 rather than stored as an id that resolves to
+             *     nothing.
+             *
+             *     It stays `Option` on the wire so the refusal can say *where to find a
+             *     valid id*, which serde's "missing field" cannot. The doc used to say
+             *     absence "leaves the product unbound, which is accepted only while the
+             *     column is nullable" — untrue as of the commit that added the refusal
+             *     twelve lines below it (review finding IMPORTANT-4).
+             *
+             *     A missing key deserializes to `None` unaided — see
+             *     [`CustomPlanFileDto::plan_path`] for the measurement behind not
+             *     putting a `#[serde(default)]` here.
+             */
+            plugin_instance_id?: string | null;
         };
         CreateRouteRequest: {
             cors?: null | components["schemas"]["CorsConfig"];
@@ -2416,24 +2064,6 @@ export interface components {
              */
             url: string;
         };
-        /** @description REST DTO for creating a new GTS type. */
-        CreateTypeDto: {
-            /** @description GTS type paths of allowed membership resource types. */
-            allowed_membership_types?: string[];
-            /** @description GTS type paths of allowed parent types. */
-            allowed_parent_types?: string[];
-            /** @description Whether groups of this type can be root nodes. */
-            can_be_root: boolean;
-            /**
-             * @description GTS type path. Must have prefix `gts.cf.core.rg.type.v1~`.
-             *
-             *     Whether the type creates a new tenant scope is derived from the code:
-             *     any path starting with the tenant RG type prefix is a tenant type.
-             */
-            code: string;
-            /** @description Optional JSON Schema for instance metadata. */
-            metadata_schema?: unknown;
-        };
         CreateUpstreamRequest: {
             alias?: string | null;
             auth?: null | components["schemas"]["AuthConfig"];
@@ -2445,6 +2075,37 @@ export interface components {
             rate_limit?: null | components["schemas"]["RateLimitConfig"];
             server: components["schemas"]["Server"];
             tags?: string[];
+        };
+        /**
+         * @description One submitted credential on the wire: either the document or a reference.
+         *
+         *     Externally tagged, so a body reads
+         *     `{"credentials": {"kubeconfig": {"material": "apiVersion: v1\n…"}}}` or
+         *     `{"credentials": {"kubeconfig": {"reference": "credstore://kc/staging"}}}`.
+         *     The tag is what makes "exactly one of a document and a reference"
+         *     unrepresentable rather than validated — see
+         *     `sdk::CredentialSubmission`, whose shape this mirrors.
+         *
+         *     `Debug` is hand-written and redacts [`Self::Material`], for
+         *     `CreateEnvironmentReq`'s reason: a derived `Debug` here is the 2026-08-28
+         *     leak with a new field name. A reference is not redacted, matching
+         *     `kubeconfig_credstore_ref`'s long-standing treatment in these same
+         *     hand-written impls — it is withheld from *responses* (`EnvironmentDto`
+         *     drops it) because under `SharingMode::Tenant` it is a read path to the
+         *     material, but the caller of a request already holds it.
+         */
+        CredentialSubmissionDto: {
+            /**
+             * @description The document itself. Written to credstore under a reference this gear
+             *     generates and then owns.
+             */
+            material: string;
+        } | {
+            /**
+             * @description A credstore reference the caller already holds. Never written, never
+             *     deleted by this gear.
+             */
+            reference: string;
         };
         /** @description REST DTO for a user-composed persisted plan. */
         CustomPlanDto: {
@@ -2504,19 +2165,16 @@ export interface components {
         /**
          * @description One day of the pass/fail trend.
          *
-         *     **Two counters, not four.** Legacy's daily query counts `PASSED` and
-         *     `IN ('FAILED','ERROR')` and nothing else
-         *     (`manager/src/routes/dashboard.rs:218-219`), so a skipped test moves neither —
+         *     **Two counters, not four.** The daily fold counts `PASSED` and
+         *     `IN ('FAILED','ERROR')` and nothing else, so a skipped test moves neither —
          *     a different reading of the same rows from [`RunTestTrendPointDto`]'s, and
-         *     deliberately preserved.
+         *     deliberately so.
          */
         DailyStatusPointDto: {
             /**
-             * @description `YYYY-MM-DD`, UTC. A string rather than a date type, exactly as legacy
-             *     renders it (`row.day.format("%Y-%m-%d")`,
-             *     `manager/src/routes/dashboard.rs:237`), and formatted here rather than left
-             *     to a serde attribute so the wire shape does not depend on which date
-             *     features the workspace's `time` and `utoipa` happen to have.
+             * @description `YYYY-MM-DD`, UTC. A string rather than a date type, and formatted here
+             *     rather than left to a serde attribute so the wire shape does not depend on
+             *     which date features the workspace's `time` and `utoipa` happen to have.
              */
             day: string;
             /**
@@ -2537,37 +2195,42 @@ export interface components {
         DashboardRunDto: {
             app_version?: string | null;
             /**
-             * @description Legacy's rendered duration text — `"2m 5s"` or `"45s"`
-             *     (`manager/src/services/argo.rs:2406-2417`). `null` unless the run has both
+             * @description The rendered duration text — `"2m 5s"` or `"45s"`.
+             *     `null` unless the run has both
              *     a start and a finish, so a running run has none and a client showing
              *     elapsed time computes it from [`Self::started_at`].
              */
             duration?: string | null;
+            /**
+             * Format: uuid
+             * @description The environment the run occupied, as an id. Resolving it to a display
+             *     name is a qa-environments lookup this gear does not make yet.
+             *
+             *     Sourced from `qa_runs_sdk::Run::environment_id` (this crate's own
+             *     `test_result::Model` is not involved here — this row never touches
+             *     `qa_test_results`), so it is qa-runs' own physical column, one gear
+             *     over, that this field projects. Renamed from `environment_id` (Task 25)
+             *     — see [`TestResultDto::environment_id`]'s doc for why: the same
+             *     rename applies on both sides of the boundary, even though the source
+             *     column this field is sourced from is qa-runs', not this crate's own.
+             */
+            environment_id?: string | null;
             /** @description The run's human-facing name, `{slug}-{n}`. */
             name: string;
             /**
              * @description The run's lifecycle state, in **qa-runs' own lowercase spelling**:
              *     `created` | `queued` | `dispatching` | `running` | `succeeded` | `failed`
-             *     | `canceled` | `timed_out` | `expired` | `error`
-             *     (`qa-runs-sdk/src/models.rs:266-280`). Named `phase` because that is
-             *     legacy's field name for the same column of the same card, and legacy's
-             *     values are the capitalised Argo phases — a client ported from it must
-             *     re-map, not merely re-case. Open set: a new run state is a qa-runs change,
-             *     not corruption.
+             *     | `canceled` | `timed_out` | `expired` | `error`. Named `phase` because
+             *     that is what the card calls the column; the values are qa-runs' persisted
+             *     spellings and never an execution backend's. Open set: a new run state is a
+             *     qa-runs change, not corruption.
              */
             phase: string;
             plan_path?: string | null;
             /**
-             * Format: uuid
-             * @description The platform the run occupied, as an id. Legacy draws a platform *name*
-             *     here; resolving the name is a qa-environments lookup this gear does not
-             *     make yet.
-             */
-            platform_id?: string | null;
-            /**
              * @description **Always `null` today.** `qa_runs_sdk::Run` carries no product key — see
              *     [`DashboardQuery`] for the same gap and who owns closing it. Present on the
-             *     wire rather than omitted because legacy's active-runs card draws it, so a
+             *     wire rather than omitted because the active-runs card draws it, so a
              *     client can bind the field now and see it populate later.
              */
             product_key?: string | null;
@@ -2591,52 +2254,31 @@ export interface components {
          *
          *     # Fourteen fields, where the contract type has seventeen
          *
-         *     `qa_insights_sdk::DashboardStats` is legacy's whole sixteen-field payload plus
-         *     `queued_runs`. Task 18 computed seven, Task 21b five more, Task 23b one and
-         *     Task 25a one; each of the remaining three needs a read or an upstream this
-         *     gear does not have yet, enumerated on that type and in
+         *     Each of the three missing ones needs a read or an upstream this gear does not
+         *     have yet; they are enumerated on `qa_insights_sdk::DashboardStats` and in
          *     `domain::service::dashboard`'s header — which also records that
          *     `cpt-cf-qa-fr-insights-dashboard` is **not** discharged by this endpoint, and
          *     that its coverage half is not discharged in this feature at all.
-         *
-         *     **It stayed twelve through Task 23**, which is worth stating because that task
-         *     was named for two of the five then outstanding. It shipped the *analytics*
-         *     flaky, quality-vector and grouped folds — a different grain and a different
-         *     classification from the two dashboard quantities — so it added no key here.
-         *     **Task 23b added [`Self::flaky_tests`]**, the dashboard-grain flaky query, and
-         *     **Task 25a added [`Self::quality_vectors_pass_rate`]** together with the
-         *     production `CatalogReader` adapter it could not be computed without — the
-         *     adapter that had been parked on Task 40, fifteen tasks past the task that
-         *     needed it.
          *
          *     **They are omitted from this DTO rather than emitted as zeros**, which is the
          *     decision worth recording. `"total_plans": 0` is indistinguishable from a
          *     measured zero, and a client that renders it is reporting a number nothing
          *     computed; an absent key cannot be misread that way, and adding a key later is
          *     a compatible change while correcting a wrong one is not. The cost is that a
-         *     client ported from legacy's `/api/dashboard` sees fewer keys than it expects
-         *     and must tolerate their absence — accepted, because there is no such client
-         *     yet (UI parity is `cpt-cf-qa-fr-ui-surfaces`, p2) and because the alternative
-         *     ships a plausible lie.
+         *     client must tolerate the absence — accepted, because the alternative ships a
+         *     plausible lie.
          *
-         *     The example this paragraph used through Task 21a was `"failed_24h_count": 0`,
-         *     which is now a computed field — kept as a note rather than silently swapped,
-         *     because the fields that *were* omitted are what a reader of that sentence
-         *     would have gone looking for. There were five of them when that note was
-         *     written and there are **three** now: Task 23b computed
-         *     [`Self::flaky_tests`] and Task 25a `quality_vectors_pass_rate`, the second and
-         *     third times this convention has shed a field rather than gained one. The three
-         *     left — `total_plans`, `total_schedules`, `platforms_summary` — are the ones no
-         *     task in the plan owns, so the shedding has stopped rather than slowed.
+         *     The three left — `total_plans`, `total_schedules`, `environments_summary` — are
+         *     the ones no task owns. Two fields have left this list rather than joined it:
+         *     [`Self::flaky_tests`] and `quality_vectors_pass_rate` are computed now.
          *
          *     # A `null` pass rate is a measurement, and that is a different thing
          *
          *     [`Self::pass_rate_24h`] is present and may be `null`, which is **not** the
-         *     omission convention above: the field is computed, and `null` is legacy's own
-         *     spelling of "the window held nothing to divide by" (`Option<f64>` left at
-         *     `None` behind an `if total > 0` guard, `manager/src/routes/dashboard.rs:356`,
-         *     `:359`). A `0.0` there would say "everything failed", so the distinction is
-         *     load-bearing on the wire and not only in the domain.
+         *     omission convention above: the field is computed, and `null` spells "the
+         *     window held nothing to divide by" — an `Option<f64>` left at `None` behind an
+         *     `if total > 0` guard. A `0.0` there would say "everything failed", so the
+         *     distinction is load-bearing on the wire and not only in the domain.
          */
         DashboardStatsDto: {
             /**
@@ -2716,9 +2358,9 @@ export interface components {
              *
              *     One entry per vector declared by any test file with a row in the window,
              *     with the executions of every such file summed into it. **A fourth
-             *     window**, equal to [`Self::flaky_tests`]' and independent of it — legacy
-             *     spells the seven days as a separate literal in a separate statement
-             *     (`dashboard.rs:490` against `:391`).
+             *     window**, equal to [`Self::flaky_tests`]' and independent of it — the
+             *     seven days are a separate literal in a separate statement, so the two can
+             *     diverge without either moving silently.
              *
              *     "Any row", not "a counted row": an entry whose three counters are all zero
              *     is legal and means every contributing file was skipped — see
@@ -2744,7 +2386,7 @@ export interface components {
             recent_runs: components["schemas"]["DashboardRunDto"][];
             /**
              * Format: int64
-             * @description Runs this gear holds results for. **Not** legacy's count of every run ever
+             * @description Runs this gear holds results for. **Not** a count of every run ever
              *     launched — `domain::repos::ResultsRepository::count_ingested_runs` records
              *     why that number is not obtainable across the gear boundary.
              */
@@ -2759,6 +2401,13 @@ export interface components {
              */
             unattributable_runs: number;
         };
+        /** @description Reason for an explicit deny from the PDP. */
+        DenyReason: {
+            /** @description Human-readable details (optional). */
+            details?: string | null;
+            /** @description Machine-readable error code. */
+            error_code: string;
+        };
         /**
          * @description Deployment mode of a gear
          * @enum {string}
@@ -2771,22 +2420,284 @@ export interface components {
             scheme?: components["schemas"]["Scheme"];
         };
         /**
+         * @description One entity with its authored content and the artifacts materialized at
+         *     admission (D3). No consumer recomputes an effective form.
+         */
+        EntityDto: {
+            content?: unknown;
+            /** Format: date-time */
+            created_at: string;
+            effective_traits?: unknown;
+            effective_traits_schema?: unknown;
+            gts_id: string;
+            /**
+             * Format: uuid
+             * @description The Registry Reference: a deterministic `UUIDv5` of the identifier.
+             */
+            gts_uuid: string;
+            kind: components["schemas"]["EntityKindDto"];
+            /** @description A tombstone stays exact-readable and only leaves discovery. */
+            lifecycle_status: components["schemas"]["LifecycleStatusDto"];
+            /** @description Caller-declared attribution. It MUST NOT be used to authorize. */
+            owning_gear?: string | null;
+            resolved_schema?: unknown;
+            /** Format: int64 */
+            resource_version: number;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /**
+         * @description `type_schema` or `instance`.
+         * @enum {string}
+         */
+        EntityKindDto: "type_schema" | "instance";
+        /**
+         * @description REST DTO for a registered target environment.
+         *
+         *     Never carries the kubeconfig document, and — since 2026-08-27, by a human
+         *     decision — not its **credstore reference** either. The material is stored
+         *     under [`SharingMode::Tenant`](credstore_sdk::SharingMode::Tenant), so any
+         *     tenant member holding the reference can read it back through credstore's own
+         *     `GET /credstore/v1/secrets/{ref}`. This DTO is returned on **every**
+         *     environment read and write path, i.e. to every `qa.platform` GET/LIST-authorized
+         *     caller, so publishing the reference handed every tenant member a working read
+         *     path to a kubeconfig's `client-key-data` — a client private key — the moment
+         *     the create form began accepting pasted documents (`EnvironmentsService`).
+         *
+         *     This is exactly `SshKeyDto`'s convention
+         *     (`qa-catalog/qa-catalog/src/api/rest/dto.rs`), which withholds its own
+         *     `credstore_ref` for the same reason and says so. The reference stays on the
+         *     SDK model (`qa_environments_sdk::Environment::kubeconfig_credstore_ref`)
+         *     for in-process consumers — `qa-runs` resolves the kubeconfig from it when it
+         *     builds a dispatch spec — and on the column. Only the REST projection drops
+         *     it. The `name` is what identifies an environment to a human.
+         */
+        EnvironmentDto: {
+            available: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description Per-environment default branch override; `null` means the repository's own
+             *     default applies. See `sdk::Environment::default_branch`.
+             */
+            default_branch?: string | null;
+            description?: string | null;
+            /**
+             * Format: date-time
+             * @description When the most recent health read ran, or `null` if nothing ever looked.
+             */
+            health_checked_at?: string | null;
+            /**
+             * @description Why the most recent health read reached that state, when there is
+             *     something to say. Classified text only: a fixed string chosen by
+             *     failure variant, or a remote service's own message — never a formatted
+             *     error and never anything derived from a credential (**D12**).
+             */
+            health_detail?: string | null;
+            /**
+             * @description The most recent health verdict: `ok`, `degraded`, `down` or `unknown`.
+             *     `unknown` covers both "nothing has looked" and "a look failed" —
+             *     [`Self::health_checked_at`] is what tells those apart, being `null`
+             *     only in the first case.
+             */
+            health_state: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description Whether this environment is its product's default -- what the Run and
+             *     Schedule dialogs' "Default cluster" option resolves to. At most one
+             *     environment per product has this set. See `sdk::Environment::is_default`.
+             */
+            is_default: boolean;
+            name: string;
+            /**
+             * @description The most recent observation's plugin-defined attributes, keyed by the
+             *     plugin's own `FieldDesc::key`. `{}` for an environment the plugin path
+             *     has never observed.
+             *
+             *     This is what makes an environment table renderable without the UI
+             *     knowing any product: the caller pairs these values with the product's
+             *     `observed_schema()` from `GET /qa/v1/product-plugins`.
+             *
+             *     **Safe to publish structurally, not by review.** Two rules stand
+             *     between a plugin and this field: `observed_schema()` may declare no
+             *     `Secret`/`MultilineSecret` field (a boot failure if it does), and
+             *     `qa_product_sdk::observation::retain_declared` drops every *undeclared*
+             *     key before the column is written — so a plugin that echoed its
+             *     kubeconfig into an attribute finds the attribute gone before it is
+             *     stored, let alone serialised here.
+             */
+            observed_attrs: {
+                [key: string]: string;
+            };
+            /**
+             * @description The environment's base domain (`https://…`), as the plugin's
+             *     `FieldRole::BaseUrl` attribute. `null` means never conclusively
+             *     detected.
+             *
+             *     Non-secret, which is why it is published here at all: it is a URL an
+             *     operator already knows, not a credential. It replaced `vhp_base_url`,
+             *     which Task 19 dropped.
+             */
+            observed_base_url?: string | null;
+            observed_build?: string | null;
+            observed_version?: string | null;
+            /** Format: uuid */
+            product_id?: string | null;
+            /** Format: date-time */
+            updated_at: string;
+            /**
+             * @description The most recent **failed** observation's message, or `null` if the
+             *     most recent attempt succeeded (or none has run). See
+             *     `sdk::Environment::version_detect_error` — this is the field a
+             *     `POST /qa/v1/environments/{id}/refresh` populates on a 200 response when
+             *     only detection itself failed.
+             */
+            version_detect_error?: string | null;
+            /**
+             * Format: date-time
+             * @description When the most recent observation attempt ran, success or failure.
+             */
+            version_detected_at?: string | null;
+        };
+        /**
+         * @description One bar of the environment breakdown.
+         *
+         *     # Why this is not a [`GroupSummaryDto`]
+         *
+         *     The other two breakdowns bucket by a string the row itself carries, so their
+         *     bars are `GroupSummary { value: String, .. }`. An execution row carries the
+         *     environment as a `Uuid`, and the name comes from qa-environments — which can
+         *     decline to resolve it, for an environment deleted since the run executed or
+         *     one in another tenant, two cases `domain::ports::EnvironmentReader::names`
+         *     deliberately makes indistinguishable.
+         *
+         *     So the bar carries **both**: [`Self::environment_id`], which always
+         *     identifies the bucket, and [`Self::environment`], which is the label when
+         *     there is one. Collapsing them into a `value: String` would force a choice
+         *     between dropping an unresolvable bar — silent data loss on a chart whose
+         *     job is comparison — and rendering a UUID into a field a client will draw
+         *     as a name, which is the exact outcome Task 23 typed `PlatformGroupSummary`
+         *     around a `Uuid` to prevent.
+         *
+         *     Renamed from `PlatformGroupSummaryDto`, with its `environment_id`/`platform`
+         *     fields, to `EnvironmentGroupSummaryDto` with `environment_id`/`environment`
+         *     (Task 25) — see [`TestResultDto::environment_id`]'s doc for why.
+         */
+        EnvironmentGroupSummaryDto: {
+            /**
+             * @description `null` when qa-environments resolved no name for
+             *     [`Self::environment_id`].
+             */
+            environment?: string | null;
+            /** Format: uuid */
+            environment_id: string;
+            failed: number;
+            not_run: number;
+            passed: number;
+            /**
+             * @description The size of the **whole** universe, not of the environment's own tests:
+             *     each bar re-buckets every test by its latest row *on that environment*,
+             *     so a test that never ran there counts as `not_run` in that bar. The bars therefore
+             *     do not partition anything and do not sum to
+             *     [`OverviewSummaryDto::total`].
+             */
+            total: number;
+        };
+        /** @description Equality predicate: `property = value`. */
+        EqPredicate: {
+            /** @description Resource property name (e.g., `pep_properties::OWNER_TENANT_ID`, `pep_properties::RESOURCE_ID`). */
+            property: string;
+            /** @description The value to match (UUID string, plain string, number, bool, etc.). */
+            value: unknown;
+        };
+        /**
+         * @description Authorization evaluation request.
+         *
+         *     Follows the `AuthZEN` 1.0 model: Subject + Action + Resource + Context.
+         */
+        EvaluationRequest: {
+            /** @description The action being performed. */
+            action: components["schemas"]["Action"];
+            /** @description Additional context for the evaluation. */
+            context: components["schemas"]["EvaluationRequestContext"];
+            /** @description The resource being accessed. */
+            resource: components["schemas"]["Resource"];
+            /** @description The subject (who is making the request). */
+            subject: components["schemas"]["Subject"];
+        };
+        /** @description Additional evaluation request context. */
+        EvaluationRequestContext: {
+            /** @description PEP capabilities (tells PDP what the PEP can handle). */
+            capabilities?: components["schemas"]["Capability"][];
+            /**
+             * @description Whether the PDP should return row-level constraints.
+             *     - `true` for LIST/GET/UPDATE/DELETE (need scope filtering)
+             *     - `false` for CREATE (just need decision)
+             */
+            require_constraints?: boolean;
+            /** @description Supported constraint properties (tells PDP which properties the PEP understands). */
+            supported_properties?: string[];
+            tenant_context?: null | components["schemas"]["TenantContext"];
+            /** @description Token scopes from the `AuthN` result. */
+            token_scopes?: string[];
+        };
+        /**
+         * @description Authorization evaluation response.
+         *
+         *     The PDP returns a decision (allow/deny) and optionally a context
+         *     containing constraints or deny reason.
+         */
+        EvaluationResponse: {
+            /** @description Response context with constraints or deny reason. */
+            context?: components["schemas"]["EvaluationResponseContext"];
+            /** @description Whether access is granted. */
+            decision: boolean;
+        };
+        /**
+         * @description Authorization evaluation response context.
+         *
+         *     Contains constraints (when `decision` is `true`) or deny reason
+         *     (when `decision` is `false`).
+         */
+        EvaluationResponseContext: {
+            /**
+             * @description Row-level constraints to apply when `decision` is `true`.
+             *     Empty when `require_constraints` was `false` or when access is unrestricted.
+             *     Multiple constraints are `ORed` (any one matching is sufficient).
+             */
+            constraints?: components["schemas"]["Constraint"][];
+            deny_reason?: null | components["schemas"]["DenyReason"];
+        };
+        /**
+         * @description Which tier supplied a run's exclusivity decision. `plan.yaml` is the
+         *     plan-file tier, spelled as the file is named.
+         * @enum {string}
+         */
+        ExclusiveTierDto: "launch" | "plan.yaml" | "test_meta" | "default";
+        /**
          * @description One recent failure, as the dashboard's failure card.
          *
-         *     `qa_insights_sdk::FailedTestCard`, which is legacy's eight-field
-         *     `FailedTestCard` (`manager/src/models.rs:388-398`) with `workflow_name`
-         *     replaced by a run id and `plan_id` expanded into the plan pair. Every field is
+         *     `qa_insights_sdk::FailedTestCard`, keyed by a run id and by the plan pair.
+         *     Every field is
          *     on the wire: unlike [`DashboardStatsDto`], nothing here is omitted, because
          *     every column is computed — the list itself is empty when nothing failed, which
          *     is a measurement rather than a gap.
          */
         FailedTestCardDto: {
             /**
+             * Format: uuid
+             * @description The environment the run occupied, as an id rather than a name — the same
+             *     substitution [`DashboardRunDto::environment_id`] documents.
+             *     Renamed from `environment_id` (Task 25) — see
+             *     [`TestResultDto::environment_id`]'s doc for why.
+             */
+            environment_id?: string | null;
+            /**
              * Format: date-time
              * @description When the failure's run finished, falling back to when the row was
-             *     ingested. Legacy selects that fallback expression itself
-             *     (`manager/src/routes/dashboard.rs:270`), which is why a run still in
-             *     progress can appear on this list at all.
+             *     ingested. The fallback is why a run still in progress can appear on this
+             *     list at all.
              */
             finished_at?: string | null;
             /**
@@ -2799,12 +2710,6 @@ export interface components {
             plan_path?: string | null;
             /**
              * Format: uuid
-             * @description The platform the run occupied, as an id rather than legacy's name — the
-             *     same substitution [`DashboardRunDto::platform_id`] documents.
-             */
-            platform_id?: string | null;
-            /**
-             * Format: uuid
              * @description The plan the run targeted, as the `(repo_id, plan_path)` pair this port
              *     uses in place of a plan id — the same substitution
              *     [`DashboardRunDto`] makes. Both are `null` for a custom-plan or collect
@@ -2813,8 +2718,8 @@ export interface components {
             repo_id?: string | null;
             /**
              * Format: uuid
-             * @description The run the failure came from. Legacy's card carries a `workflow_name`
-             *     string here; a client ported from it must resolve the name separately.
+             * @description The run the failure came from, as an id — a client that wants the run's
+             *     name resolves it through qa-runs.
              */
             run_id: string;
             /**
@@ -2825,12 +2730,57 @@ export interface components {
             test_file?: string | null;
             test_name: string;
         };
+        /** @description One declared field of a product plugin's credential or observation schema. */
+        FieldDescDto: {
+            help?: string | null;
+            /** @description Whether the field is shown on the environment detail page. */
+            in_detail: boolean;
+            /** @description Whether the field earns a column on the environments table. */
+            in_table: boolean;
+            /**
+             * @description Stable identifier, unique within its schema, and the key the value
+             *     appears under in `credentials` or `observed_attrs`.
+             */
+            key: string;
+            kind: components["schemas"]["FieldKindDto"];
+            label: string;
+            required: boolean;
+            role?: null | components["schemas"]["FieldRoleDto"];
+        };
         /**
-         * @description `POST /qa/v1/jira/bugs`'s body — legacy's `JiraCreateRequest`
-         *     (`manager/src/models.rs:704-706`), unchanged: `test_name` is optional there
-         *     too, and `run_id` replaces legacy's run *name* path segment
-         *     (`manager/src/routes/settings.rs:583`, `Path(name): Path<String>`) because
-         *     this gear addresses a run by id, not by an Argo workflow name.
+         * @description A field's data type, mirroring `qa_product_sdk::FieldKind`.
+         *
+         *     # Why this is a mirror and not the SDK type
+         *
+         *     `#[api_dto]` adds `utoipa::ToSchema`, and every type nested in a DTO needs
+         *     it too. The SDK's descriptor types carry `serde` (they are persisted in
+         *     `observed_attrs` JSONB) but deliberately **no** utoipa: this module's own
+         *     header states the rule — SDK models carry no serde/utoipa and the DTO
+         *     layer is the only bridge — and adding an `OpenAPI` dependency to
+         *     `qa-product-sdk` would put a REST concern in the crate every third-party
+         *     product plugin links.
+         *
+         *     The variant names and their wire spellings must match the SDK's
+         *     `#[serde(rename_all = "snake_case")]` exactly; `product_plugin_dto_tests`
+         *     pins that.
+         * @enum {string}
+         */
+        FieldKindDto: "text" | "url" | "int" | "bool" | "enum" | "secret" | "multiline_secret";
+        /**
+         * @description The platform meaning a field claims, mirroring `qa_product_sdk::FieldRole`.
+         *
+         *     There is no `Health` variant, and there is no `Health` role in the SDK
+         *     either: health has its own channel and its own columns, because a role is
+         *     a projection of a string attribute into a column while health is a closed
+         *     enum. See the SDK's `FieldRole` docs.
+         * @enum {string}
+         */
+        FieldRoleDto: "version" | "build" | "base_url" | "namespace";
+        /**
+         * @description `POST /qa/v1/jira/bugs`'s body. `test_name` is optional, and the run is
+         *     addressed by `run_id` rather than by a name, because this gear keys a run by
+         *     id and never by an execution backend's
+         *     workflow name.
          */
         FileJiraBugsReq: {
             /** Format: uuid */
@@ -2841,19 +2791,11 @@ export interface components {
              */
             test_name?: string | null;
         };
-        /** @description REST DTO for file parser info response */
-        FileParserInfoDto: {
-            supported_extensions: {
-                [key: string]: string[];
-            };
-        };
         /**
          * @description A test that both passed and failed inside the dashboard's seven-day window.
          *
-         *     `qa_insights_sdk::FlakyTestCard` — seven fields, seven fields. The names are
-         *     legacy's own JSON keys (`manager/src/models.rs:401-409`) except for the plan
-         *     pair, which replaces legacy's single `plan_id` string; that crate's note 1
-         *     argues the substitution and its `FlakyTestCard` records it.
+         *     `qa_insights_sdk::FlakyTestCard`, with the plan carried as the
+         *     `(repo_id, plan_path)` pair — that crate's note 1 argues why.
          *
          *     Every field is emitted, `test_file`, `repo_id` and `plan_path` as `null` when
          *     absent — none of them is subject to [`DashboardStatsDto`]' omission
@@ -2876,32 +2818,29 @@ export interface components {
             plan_path?: string | null;
             /**
              * Format: uuid
-             * @description The plan's repository. Half of legacy's `plan_id`; see this type's note.
+             * @description The plan's repository; half of the plan identity. See this type's note.
              */
             repo_id?: string | null;
             /**
-             * @description The file the runner reported this test from, `MAX`ed over the group —
-             *     legacy's own representative pick (`manager/src/routes/dashboard.rs:384`),
-             *     because the file is not one of the grouping keys. `null` when no row of the
-             *     group named one.
+             * @description The file the runner reported this test from, `MAX`ed over the group as a
+             *     representative pick, because the file is not one of the grouping keys.
+             *     `null` when no row of the group named one.
              */
             test_file?: string | null;
             test_name: string;
             /**
              * Format: int64
-             * @description Passed plus failed. **Not every row of the group**: a skipped or in-progress
-             *     row is in no counter here, which is legacy's sixth status classification
-             *     (`dashboard.rs:388`) and is why this is emitted rather than left to the
-             *     client to add up.
+             * @description Passed plus failed. **Not every row of the group**: a skipped or
+             *     in-progress row is in no counter here — a sixth status classification —
+             *     which is why this is emitted rather than left to the client to add up.
              */
             total: number;
         };
         /**
          * @description One test the flaky detector picked out.
          *
-         *     Legacy's `FlakyTest` (`analytics.rs:189-199`). The window is the **trend's**
-         *     day count, not a third one, and the qualification is at least five executions
-         *     with a pass rate in `[40, 80]`.
+         *     The window is the **trend's** day count, not a third one, and the
+         *     qualification is at least five executions with a pass rate in `[40, 80]`.
          */
         FlakyTestDto: {
             component?: string | null;
@@ -2966,40 +2905,7 @@ export interface components {
             /** @description Secret value as a UTF-8 string. */
             value: string;
         };
-        GpuInfoDto: {
-            /** Format: int32 */
-            cores?: number | null;
-            model: string;
-            /** Format: double */
-            total_memory_mb?: number | null;
-            /** Format: double */
-            used_memory_mb?: number | null;
-        };
-        /**
-         * @description REST DTO for resource group representation.
-         *
-         *     Group responses do NOT include `created_at`/`updated_at` (per DESIGN).
-         */
-        GroupDto: {
-            /** @description Hierarchy context. */
-            hierarchy: components["schemas"]["HierarchyDto"];
-            /**
-             * Format: uuid
-             * @description Group identifier.
-             */
-            id: string;
-            /** @description Type-specific metadata. */
-            metadata?: unknown;
-            /** @description Display name. */
-            name: string;
-            /** @description GTS chained type path. */
-            type: string;
-        };
-        /**
-         * @description One bar of a component or tag breakdown.
-         *
-         *     Legacy's `GroupSummary` (`analytics.rs:202-208`).
-         */
+        /** @description One bar of a component or tag breakdown. */
         GroupSummaryDto: {
             failed: number;
             not_run: number;
@@ -3012,27 +2918,11 @@ export interface components {
              */
             value: string;
         };
-        /** @description REST DTO for resource group with depth (hierarchy queries). */
-        GroupWithDepthDto: {
-            /** @description Hierarchy context with depth. */
-            hierarchy: components["schemas"]["HierarchyWithDepthDto"];
-            /**
-             * Format: uuid
-             * @description Group identifier.
-             */
-            id: string;
-            /** @description Type-specific metadata. */
-            metadata?: unknown;
-            /** @description Display name. */
-            name: string;
-            /** @description GTS chained type path. */
-            type: string;
-        };
         /**
          * @description The three group breakdowns.
          *
-         *     Legacy's `GroupedSummaries` (`analytics.rs:211-215`). **Computed over the
-         *     unfiltered universe and all rows**, so selecting one group narrows the rest of
+         *     **Computed over the unfiltered universe and all rows**, so selecting one
+         *     group narrows the rest of
          *     the payload and leaves this chart whole — which is what makes it a chart
          *     rather than a single bar.
          */
@@ -3046,26 +2936,22 @@ export interface components {
              * @description **Ordered by resolved name**, with the bars qa-environments could not
              *     name last, ordered by id.
              *
-             *     Legacy orders this list by name too — its rows carry names, so a
-             *     `BTreeMap<String, _>` gave it that for free (`:1115`). Task 23's fold
-             *     orders by id because that is all it has, so the sort happens here, where
-             *     the names exist. **A rendered order changes when a platform is renamed**,
-             *     which is the correct direction and a change to expect rather than a
+             *     Task 23's fold orders by id because that is all it has, so the sort
+             *     happens here, where the names exist. **A rendered order changes when an
+             *     environment is
+             *     renamed**, which is the correct direction and a change to expect rather than a
              *     regression to hunt.
+             *
+             *     Renamed from `platform` (Task 25), alongside its element type
+             *     (`PlatformGroupSummaryDto` → [`EnvironmentGroupSummaryDto`]).
              */
-            platform: components["schemas"]["PlatformGroupSummaryDto"][];
+            environment: components["schemas"]["EnvironmentGroupSummaryDto"][];
             /**
              * @description Alphabetical. A file with several tags is in several buckets, so these do
              *     **not** sum to anything meaningful.
              */
             tag: components["schemas"]["GroupSummaryDto"][];
         };
-        /**
-         * @description Which tier supplied a run's exclusivity decision. `plan.yaml` is the
-         *     plan-file tier, spelled as the file is named.
-         * @enum {string}
-         */
-        ExclusiveTierDto: "launch" | "plan.yaml" | "test_meta" | "default";
         GrpcMatch: {
             method: string;
             service: string;
@@ -3116,10 +3002,8 @@ export interface components {
         /**
          * @description The heatmap: a day axis and one row per test.
          *
-         *     Legacy's `HeatmapData` (`analytics.rs:150-153`, its row at `:143-147`). Rows
-         *     are in the universe's
-         *     order — **not** sorted, unlike the lists — and a file listed by two plans is
-         *     two identical rows.
+         *     Rows are in the universe's order — **not** sorted, unlike the lists — and a
+         *     file listed by two plans is two identical rows.
          */
         HeatmapDataDto: {
             /** @description `YYYY-MM-DD`, oldest first, ending today. Between 1 and 30 entries. */
@@ -3136,44 +3020,6 @@ export interface components {
              */
             values: string[];
         };
-        /** @description REST DTO for hierarchy context in group responses. */
-        HierarchyDto: {
-            /**
-             * Format: uuid
-             * @description Parent group ID (null for root groups).
-             */
-            parent_id: string | null;
-            /**
-             * Format: uuid
-             * @description Tenant scope.
-             */
-            tenant_id: string;
-        };
-        /** @description REST DTO for hierarchy context with depth in group responses. */
-        HierarchyWithDepthDto: {
-            /**
-             * Format: int32
-             * @description Relative distance from reference group.
-             */
-            depth: number;
-            /**
-             * Format: uuid
-             * @description Parent group ID (null for root groups).
-             */
-            parent_id: string | null;
-            /**
-             * Format: uuid
-             * @description Tenant scope.
-             */
-            tenant_id: string;
-        };
-        HostInfoDto: {
-            hostname: string;
-            /** @description All detected IP addresses. The first one is the primary IP (used for default route). */
-            ip_addresses: string[];
-            /** Format: int64 */
-            uptime_seconds: number;
-        };
         HttpMatch: {
             methods: components["schemas"]["HttpMethod"][];
             path: string;
@@ -3182,49 +3028,110 @@ export interface components {
         };
         /** @enum {string} */
         HttpMethod: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
-        /** @description REST DTO for inline content */
-        InlineDto: {
-            style: components["schemas"]["InlineStyleDto"];
-            text: string;
-            /** @enum {string} */
-            type: "text";
-        } | {
-            style: components["schemas"]["InlineStyleDto"];
-            target: string;
-            text: string;
-            /** @enum {string} */
-            type: "link";
-        } | {
-            style: components["schemas"]["InlineStyleDto"];
-            text: string;
-            /** @enum {string} */
-            type: "code";
-        };
-        /** @description REST DTO for inline text styling */
-        InlineStyleDto: {
-            bold?: boolean;
-            code?: boolean;
-            italic?: boolean;
-            strike?: boolean;
-            underline?: boolean;
+        /**
+         * @description Group membership predicate: resource is visible if it belongs to any of the listed groups.
+         *
+         *     Compiles to: `property IN (SELECT resource_id FROM resource_group_membership WHERE group_id IN (group_ids))`
+         */
+        InGroupPredicate: {
+            /** @description Group UUIDs - the resource must be a member of at least one. */
+            group_ids: unknown[];
+            /** @description Resource property to filter (e.g., `pep_properties::RESOURCE_ID`). */
+            property: string;
         };
         /**
-         * @description One row of `GET /qa/v1/jira/open-bugs` — legacy's `JiraBug`
-         *     (`manager/src/models.rs:689-698`), with the two divergences
-         *     `qa_insights_sdk::JiraBug`'s own header states: `plan_id: String` split into
-         *     [`Self::repo_id`]/[`Self::plan_path`], and `platform: Option<String>` become
-         *     [`Self::platform_id`].
+         * @description Group subtree predicate: resource is visible if it belongs to any group
+         *     that is a descendant of the listed ancestor groups.
+         *
+         *     Compiles to: `property IN (SELECT resource_id FROM resource_group_membership
+         *       WHERE group_id IN (SELECT descendant_id FROM resource_group_closure WHERE ancestor_id IN (ancestor_ids)))`
+         */
+        InGroupSubtreePredicate: {
+            /** @description Ancestor group UUIDs - the resource must be a member of any descendant. */
+            ancestor_ids: unknown[];
+            /** @description Resource property to filter (e.g., `pep_properties::RESOURCE_ID`). */
+            property: string;
+        };
+        /** @description Set membership predicate: `property IN (values)`. */
+        InPredicate: {
+            /** @description Resource property name (e.g., `pep_properties::OWNER_TENANT_ID`, `pep_properties::RESOURCE_ID`). */
+            property: string;
+            /** @description The set of values to match against. */
+            values: unknown[];
+        };
+        /**
+         * @description Tenant subtree predicate: resource is visible if its tenant property is a
+         *     descendant of a single root tenant per the AM-owned `tenant_closure` table.
+         *
+         *     Compiles to (with `barrier_mode = Respect`, the default):
+         *     `property IN (SELECT descendant_id FROM tenant_closure
+         *       WHERE ancestor_id = root_tenant_id AND barrier = 0)`
+         *
+         *     With `barrier_mode = Ignore`:
+         *     `property IN (SELECT descendant_id FROM tenant_closure
+         *       WHERE ancestor_id = root_tenant_id)`
+         *
+         *     The `barrier = 0` clamp matches the AM closure-table contract:
+         *     `barrier` is set when any tenant on the strict path
+         *     `(ancestor, descendant]` is `self_managed`. Respecting the barrier
+         *     therefore yields the canonical "subtree minus self-managed branches"
+         *     semantics; ignoring it is reserved for cross-barrier operations such
+         *     as billing or tenant metadata reads.
+         *
+         *     Multiple-root semantics are expressed at the constraint envelope: emit
+         *     one `Constraint` per root and rely on the OR-of-constraints semantics.
+         *
+         *     **`descendant_status`:** When non-empty, the predicate compiles to
+         *     `AND descendant_status IN (...)` on the closure subquery, restricting
+         *     the subtree to tenants in the listed statuses. The name mirrors the
+         *     `tenant_closure.descendant_status` column so the binding is unambiguous
+         *     — the filter applies to the descendants reached via the closure, not
+         *     to the ancestor root.
+         */
+        InTenantSubtreePredicate: {
+            /**
+             * @description Barrier enforcement mode. Defaults to [`BarrierMode::Respect`]
+             *     which clamps the closure subquery with `AND barrier = 0`.
+             */
+            barrier_mode?: components["schemas"]["AuthzBarrierMode"];
+            /**
+             * @description Status filter applied to the descendants reached via the closure.
+             *
+             *     Empty list means "no status filter"; a non-empty list compiles to
+             *     `AND descendant_status IN (...)` on the closure subquery. The PEP
+             *     maps each [`TenantStatus`] to the SMALLINT encoding canonically
+             *     defined by [`TenantStatus::as_smallint`] (`Active = 1`,
+             *     `Suspended = 2`, `Deleted = 3`).
+             */
+            descendant_status?: components["schemas"]["TenantStatus"][];
+            /**
+             * @description Resource property to filter (e.g., `pep_properties::OWNER_TENANT_ID`,
+             *     or `pep_properties::RESOURCE_ID` on the `tenants` entity itself).
+             */
+            property: string;
+            /** @description Root tenant UUID — the resource's tenant must be a descendant of this tenant. */
+            root_tenant_id: unknown;
+        };
+        /**
+         * @description One row of `GET /qa/v1/jira/open-bugs`. The plan is
+         *     [`Self::repo_id`]/[`Self::plan_path`] and the environment is
+         *     [`Self::environment_id`], as `qa_insights_sdk::JiraBug`'s own header
+         *     states.
          */
         JiraBugDto: {
             app_version?: string | null;
             /** Format: date-time */
             created_at: string;
+            /**
+             * Format: uuid
+             * @description Renamed from `environment_id` (Task 25) — see
+             *     [`TestResultDto::environment_id`]'s doc for why.
+             */
+            environment_id?: string | null;
             /** Format: uuid */
             id: string;
             jira_key: string;
             plan_path: string;
-            /** Format: uuid */
-            platform_id?: string | null;
             /** Format: uuid */
             repo_id: string;
             /** Format: date-time */
@@ -3239,9 +3146,8 @@ export interface components {
             test_name: string;
         };
         /**
-         * @description One entry of `POST /qa/v1/jira/bugs`'s response — legacy's
-         *     `JiraCreateResponse` (`manager/src/models.rs:709-713`) verbatim: `created`
-         *     is `false` for **both** of the port's dedupe paths (a local hit, a
+         * @description One entry of `POST /qa/v1/jira/bugs`'s response. `created`
+         *     is `false` for **both** dedupe paths (a local hit, a
          *     JIRA-side search hit) and `true` only for an issue this call actually
          *     posted. [`crate::domain::ports::jira_client::IssueRef`]'s own doc carries
          *     the full argument.
@@ -3254,8 +3160,7 @@ export interface components {
          * @description The tenant's poller cadence and auto-rerun switch on the wire —
          *     `GET/PUT /qa/v1/settings/jira-poller`.
          *
-         *     Legacy's `JiraPollerConfig` (`manager/src/models.rs:1417-1420`) verbatim —
-         *     two fields, no rename: unlike [`JiraSettingsDto`], neither field here is a
+         *     Two fields, neither renamed: unlike [`JiraSettingsDto`], neither is a
          *     secret, so there is no masking asymmetry between the two directions and one
          *     `impl From` pair covers both.
          */
@@ -3277,14 +3182,12 @@ export interface components {
         /**
          * @description The tenant's JIRA settings on the wire — `GET/PUT /qa/v1/settings/jira`.
          *
-         *     Legacy's `JiraConfig` (`manager/src/models.rs:678-685`) with **one field
-         *     renamed, and the rename is the security boundary**: legacy's `api_token`
-         *     carries the token itself and its `GET` substitutes `"********"` for it
-         *     (`manager/src/routes/settings.rs:254-259`).
-         *     [`Self::api_token_credstore_ref`] carries a credential-store *reference*, so
-         *     there is nothing to mask and nothing to leak —
-         *     `the_jira_settings_response_has_no_api_token_field` is what keeps a future
-         *     edit from reintroducing the field under its legacy name.
+         *     **One field is named for a reference rather than a value, and that naming is
+         *     the security boundary**: an `api_token` field would carry the token and its
+         *     `GET` substitutes `"********"` for it. [`Self::api_token_credstore_ref`]
+         *     carries a credential-store *reference*, so there is nothing to mask and
+         *     nothing to leak — `the_jira_settings_response_has_no_api_token_field` is
+         *     what keeps a future edit from reintroducing a raw-token field.
          *
          *     One DTO for both directions, unlike the saved-view pair: the six fields are
          *     the same six either way, and the one asymmetry — an empty
@@ -3319,9 +3222,16 @@ export interface components {
         LaunchRunReq: {
             /**
              * @description Test-content branch. When absent, resolution falls back to the
-             *     platform's `default_branch` and then the repository's.
+             *     environment's `default_branch` and then the repository's.
              */
             branch?: string | null;
+            /**
+             * Format: uuid
+             * @description `null` launches a run with no target environment. Such a run is never
+             *     queued and never blocks anything. Renamed from `environment_id`
+             *     (Task 25) — see [`RunDto::environment_id`]'s doc for why.
+             */
+            environment_id?: string | null;
             exclude_tags?: string[];
             /**
              * @description The launch exclusivity tier, and the one genuinely tri-state field here:
@@ -3332,12 +3242,6 @@ export interface components {
             exclusive?: boolean | null;
             include_tags?: string[];
             parameters?: components["schemas"]["RunParameterDto"][];
-            /**
-             * Format: uuid
-             * @description `null` launches a run with no target platform. Such a run is never
-             *     queued and never blocks anything.
-             */
-            platform_id?: string | null;
             target: components["schemas"]["RunTargetDto"];
             /**
              * Format: int64
@@ -3347,9 +3251,9 @@ export interface components {
             timeout_seconds?: number | null;
         };
         /**
-         * @description Read-only lease view for a platform's detail page (PRD: engineers must
+         * @description Read-only lease view for an environment's detail page (PRD: engineers must
          *     see why a run is queued/waiting). Acquire/release are SDK-only
-         *     operations — see `crate::api::rest::routes::platforms` — so this is the
+         *     operations — see `crate::api::rest::routes::environments` — so this is the
          *     only lease-related REST DTO.
          */
         LeaseDto: {
@@ -3365,6 +3269,11 @@ export interface components {
             /** @enum {string} */
             state: "held_exclusive";
         };
+        /**
+         * @description `active` or `deleted`.
+         * @enum {string}
+         */
+        LifecycleStatusDto: "active" | "deleted";
         /** @description Response DTO for listing GTS entities. */
         ListEntitiesResponse: {
             /** @description Total count of entities returned. */
@@ -3377,38 +3286,11 @@ export interface components {
             http?: null | components["schemas"]["HttpMatch"];
         };
         /**
-         * @description REST DTO for membership representation.
-         *
-         *     Membership responses do NOT include `tenant_id` (derived from group).
-         */
-        MembershipDto: {
-            /**
-             * Format: uuid
-             * @description Group identifier.
-             */
-            group_id: string;
-            /** @description Resource identifier. */
-            resource_id: string;
-            /** @description GTS type path of the resource type. */
-            resource_type: string;
-        };
-        MemoryInfoDto: {
-            /** Format: int64 */
-            available_bytes: number;
-            /** Format: int64 */
-            total_bytes: number;
-            /** Format: int64 */
-            used_bytes: number;
-            /** Format: int32 */
-            used_percent: number;
-        };
-        /**
-         * @description The body of a create or a replace — legacy's `SavedViewUpsertRequest`
-         *     (`manager/src/routes/analytics.rs:69-74`), with the same `plan_id` split.
+         * @description The body of a create or a replace, with the same plan-identity pair.
          *
          *     `query_json` is a JSON object on the wire in both directions, matching
-         *     legacy's own `serde_json::Value` field — not the doubly-encoded
-         *     string-holding-a-string shape a bare `String` field would advertise here.
+         *     a `serde_json::Value` — not the doubly-encoded string-holding-a-string
+         *     shape a bare `String` field would advertise here.
          *     [`qa_insights_sdk::NewSavedView::query_json`]'s doc records why the *domain*
          *     type is a `String` instead: it is `serde`-free contract-layer purity, not a
          *     claim about the wire shape.
@@ -3428,9 +3310,7 @@ export interface components {
          *
          *     The PUT is a **full replace** matching `sdk::NewSchedule`, so the two bodies
          *     are the same body and a second near-identical type would be a place for them
-         *     to drift. The source system's edit endpoint takes its *create* form too
-         *     (`manager/src/routes/schedules.rs`, `api_update`), so this is also what a
-         *     ported caller already sends.
+         *     to drift.
          *
          *     It is not a PATCH: `serde_with` is absent (see this module's header), so a
          *     tri-state patch on [`Self::exclusive_choice`] - itself a tri-state - would
@@ -3451,7 +3331,7 @@ export interface components {
          *     and implies a protection this type does not provide. On a **full replace**,
          *     omitting a defaulted field changes the schedule silently:
          *
-         *     * omitting `platform_id` **detaches a platform-targeted schedule**, and by
+         *     * omitting `environment_id` **detaches an environment-targeted schedule**, and by
          *       that field's own doc the runs it then fires are never queued and never
          *       block anything - the same class of silent behaviour change as the disable
          *       below, and arguably a wider one;
@@ -3469,8 +3349,7 @@ export interface components {
          *     the one omission whose blast radius is the whole schedule rather than one of
          *     its fields, and the next section is why that one earns the exception.
          *
-         *     ## `enabled` is required, and that is the legacy quirk this port exists not
-         *     to repeat
+         *     ## `enabled` is required
          *
          *     `ScheduleService::update` preserves `enabled` by construction - it is a field
          *     of `NewSchedule`, so a replace states it. That is only safe while the wire
@@ -3479,13 +3358,8 @@ export interface components {
          *     `#[serde(default = "…true")]` into a silent *re-enable* of a schedule an
          *     operator had paused.
          *
-         *     The source system has exactly the second failure, from the other direction:
-         *     its edit form carries no suspended flag at all
-         *     (`manager/src/models.rs`, `CreateScheduleForm`), so it edits by deleting the
-         *     `CronWorkflow`, recreating it, and re-suspending it by hand - with an error
-         *     message that has to tell the operator the schedule is now running when the
-         *     restore fails. Requiring the field is what makes that unrepresentable here
-         *     rather than merely unlikely.
+         *     Requiring the field is what makes a silent enable or disable
+         *     unrepresentable rather than merely unlikely.
          */
         NewScheduleReq: {
             /** @description `null` resolves the branch at launch time, as a manual launch does. */
@@ -3500,6 +3374,12 @@ export interface components {
              *     no default.
              */
             enabled: boolean;
+            /**
+             * Format: uuid
+             * @description `null` schedules a run with no target environment. Renamed from
+             *     `environment_id` (Task 25) — see [`RunDto::environment_id`]'s doc for why.
+             */
+            environment_id?: string | null;
             exclude_tags?: string[];
             /**
              * @description `"true"`, `"false"` or `"auto"`. **Required**, and a string rather than a
@@ -3510,78 +3390,11 @@ export interface components {
             /** @description Unique within the tenant; a name already taken answers 409. */
             name: string;
             parameters?: components["schemas"]["RunParameterDto"][];
-            /**
-             * Format: uuid
-             * @description `null` schedules a run with no target platform.
-             */
-            platform_id?: string | null;
             target: components["schemas"]["RunTargetDto"];
         };
         /**
-         * @description REST DTO for node counts derived server-side (once) from a
-         *     [`ClusterHealthDto`]'s `nodes`. The UI renders these; it must never
-         *     re-derive them.
-         */
-        NodeCountsDto: {
-            /** Format: int32 */
-            control_plane: number;
-            /** Format: int32 */
-            ready: number;
-            /** Format: int32 */
-            ready_control_plane: number;
-            /** Format: int32 */
-            ready_worker: number;
-            /** Format: int32 */
-            total: number;
-            /** Format: int32 */
-            worker: number;
-        };
-        /** @description Node response DTO */
-        NodeDto: {
-            /** Format: date-time */
-            created_at: string;
-            hostname: string;
-            /** Format: uuid */
-            id: string;
-            ip_address?: string | null;
-            syscap?: null | components["schemas"]["NodeSysCapDto"];
-            sysinfo?: null | components["schemas"]["NodeSysInfoDto"];
-            /** Format: date-time */
-            updated_at: string;
-        };
-        /** @description REST DTO for one node, as the platform's own cluster reported it. */
-        NodeSummaryDto: {
-            control_plane: boolean;
-            kubelet_version?: string | null;
-            name: string;
-            os_image?: string | null;
-            ready: boolean;
-        };
-        /** @description System capabilities response DTO */
-        NodeSysCapDto: {
-            capabilities: components["schemas"]["SysCapDto"][];
-            /** Format: date-time */
-            collected_at: string;
-            /** Format: uuid */
-            node_id: string;
-        };
-        /** @description System information response DTO */
-        NodeSysInfoDto: {
-            battery?: null | components["schemas"]["BatteryInfoDto"];
-            /** Format: date-time */
-            collected_at: string;
-            cpu: components["schemas"]["CpuInfoDto"];
-            gpus: components["schemas"]["GpuInfoDto"][];
-            host: components["schemas"]["HostInfoDto"];
-            memory: components["schemas"]["MemoryInfoDto"];
-            /** Format: uuid */
-            node_id: string;
-            os: components["schemas"]["OsInfoDto"];
-        };
-        /**
          * @description The tenant's notification settings, on the wire —
-         *     `GET/PUT /qa/v1/settings/notifications`. Legacy's `NotificationsConfig`
-         *     (`manager/src/models.rs:1339-1384`) field-for-field; unlike
+         *     `GET/PUT /qa/v1/settings/notifications`. Unlike
          *     [`JiraSettingsDto`], no field here needed a **rename** —
          *     [`Self::slack_webhook_credstore_ref`] is already named for what it holds.
          *
@@ -3617,8 +3430,7 @@ export interface components {
             slack_webhook_credstore_ref: string;
         };
         /**
-         * @description One entry of `GET /qa/v1/settings/notifications/log` — legacy's
-         *     `NotificationLogEntry` (`manager/src/models.rs:1468-1475`).
+         * @description One entry of `GET /qa/v1/settings/notifications/log`.
          *
          *     `run_id` is `null` for an entry that belongs to no run — a settings
          *     `/test` send — rather than a zero UUID; see
@@ -3636,14 +3448,16 @@ export interface components {
             /** Format: uuid */
             run_id?: string | null;
         };
-        /**
-         * @description `POST /qa/v1/settings/notifications/preview`'s response — legacy's
-         *     `ScheduledRunNotificationPreviewResponse`.
-         */
+        /** @description `POST /qa/v1/settings/notifications/preview`'s response. */
         NotificationPreviewDto: {
             /**
-             * @description Slack Block Kit blocks, opaque JSON — the same shape
-             *     `domain::notify::render::RenderedScheduledRunMessage::blocks` carries.
+             * @description Slack Block Kit blocks: literally the `blocks` array the tenant's
+             *     Slack would receive, so this endpoint's contract is Slack's wire
+             *     format rather than this gear's own. Encoded from
+             *     `domain::ports::SlackBlock` by `infra::notify::block_kit`, the one
+             *     encoder the outbound adapter uses too — which is what makes "the
+             *     preview shows what gets sent" true by construction (review finding
+             *     #17).
              */
             blocks: unknown[];
             event: string;
@@ -3652,28 +3466,24 @@ export interface components {
             rendered_message: string;
         };
         /**
-         * @description `POST /qa/v1/settings/notifications/preview`'s body — legacy's
-         *     `ScheduledRunNotificationPreviewRequest`, always required (unlike the test
-         *     endpoint's optional one).
+         * @description `POST /qa/v1/settings/notifications/preview`'s body, always required (unlike
+         *     the test endpoint's optional one).
          */
         NotificationPreviewReq: {
             config: components["schemas"]["NotificationConfigDto"];
             event: string;
         };
         /**
-         * @description `POST /qa/v1/settings/notifications/test`'s response — legacy answers
-         *     `{"status": "sent"}` (`manager/src/routes/settings.rs:495`); this crate's
-         *     convention is a typed response everywhere else, so the one field gets a
+         * @description `POST /qa/v1/settings/notifications/test`'s response — `{"status": "sent"}`.
+         *     This crate's convention is a typed response everywhere else, so the one field gets a
          *     DTO rather than a bare `serde_json::Value`.
          */
         NotificationTestOutcomeDto: {
             status: string;
         };
         /**
-         * @description `POST /qa/v1/settings/notifications/test`'s optional body — legacy's
-         *     `Option<Json<ScheduledRunNotificationPreviewRequest>>`
-         *     (`manager/src/routes/settings.rs:467`). Absent (or an absent body
-         *     entirely) means the generic settings-page test; present means the
+         * @description `POST /qa/v1/settings/notifications/test`'s optional body. Absent (or an
+         *     absent body entirely) means the generic settings-page test; present means the
          *     scheduled-run test, over the *given* config override and event.
          */
         NotificationTestReq: {
@@ -3681,35 +3491,80 @@ export interface components {
             /** @description One of `qa_runs_sdk::SLACK_NOTIFICATION_EVENTS`, e.g. `"failed"`. */
             event: string;
         };
-        OsInfoDto: {
-            arch: string;
-            name: string;
-            version: string;
+        /**
+         * @description The receipt returned by a submission: `202` for accepted work, `200` only when
+         *     a replayed operation is already terminal.
+         */
+        OperationAcceptedDto: {
+            /** Format: uuid */
+            operation_id: string;
+            /**
+             * @description `true` when this submission resolved to an operation that already existed
+             *     under its `Idempotency-Key` with a matching request.
+             */
+            replayed: boolean;
+            status: components["schemas"]["OperationStatusDto"];
+        };
+        /** @description An operation as a caller polls it. */
+        OperationDto: {
+            /** Format: date-time */
+            completed_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            dry_run: boolean;
+            items: components["schemas"]["OperationItemDto"][];
+            kind: components["schemas"]["OperationKindDto"];
+            /** Format: uuid */
+            operation_id: string;
+            /** Format: date-time */
+            started_at?: string | null;
+            /**
+             * @description Progress only — the outcomes are on the items and are deliberately not
+             *     aggregated here.
+             */
+            status: components["schemas"]["OperationStatusDto"];
+        };
+        /** @description One candidate's durable outcome. */
+        OperationItemDto: {
+            /** @description The structured refusal reason, when this candidate failed. */
+            error?: unknown;
+            gts_id: string;
+            /** Format: int64 */
+            resource_version?: number | null;
+            status: components["schemas"]["OperationItemStatusDto"];
         };
         /**
-         * @description The universe partitioned three ways, plus the per-case counters.
-         *
-         *     Legacy's `OverviewSummary` (`analytics.rs:89-109`), fourteen fields, fourteen
-         *     fields.
+         * @description `pending`, `running`, `succeeded`, `unchanged` or `failed`.
+         * @enum {string}
          */
+        OperationItemStatusDto: "pending" | "running" | "succeeded" | "unchanged" | "failed";
+        /**
+         * @description `registration` or `deletion`.
+         * @enum {string}
+         */
+        OperationKindDto: "registration" | "deletion";
+        /**
+         * @description `pending`, `running` or `completed`.
+         * @enum {string}
+         */
+        OperationStatusDto: "pending" | "running" | "completed";
+        /** @description The universe partitioned three ways, plus the per-case counters. */
         OverviewSummaryDto: {
             /**
              * @description The number of test cases the universe is expected to contain, available
-             *     without any run — legacy's `build_summary` leaves it at `0` and the
-             *     handler fills it in afterward (`:769-779`); this port does the same,
-             *     in `AnalyticsService::overview` rather than `summarize`.
+             *     without any run. `summarize` leaves it at `0` and
+             *     `AnalyticsService::overview` fills it in afterwards.
              *
              *     **Per file, the collect job's exact count wins where one exists, and
-             *     the static count parsed out of the test source is the fallback**
-             *     (`:777`, `.unwrap_or(t.case_count)`) — never the other way, and never
-             *     a whole-payload choice of one source or the other:
-             *     `domain::analytics::universe::expected_cases` (Task 29) mixes the two
-             *     per file, exactly as legacy does. The static source is
+             *     the static count parsed out of the test source is the fallback** —
+             *     never the other way, and never a whole-payload choice of one source or
+             *     the other: `domain::analytics::universe::expected_cases` (Task 29) mixes
+             *     the two per file. The static source is
              *     `qa_catalog_sdk::UniverseTest::static_case_count`, present on every
              *     universe entry the overview reads; its own doc records the same
              *     precedence from the catalog side. Because that fallback needs no
              *     collect report at all, **this field is non-zero on a deployment that
-             *     has never run a collect job**, exactly as legacy's is.
+             *     has never run a collect job**.
              */
             case_expected: number;
             case_failed: number;
@@ -3759,18 +3614,6 @@ export interface components {
             items: components["schemas"]["EnvironmentDto"][];
             page_info: components["schemas"]["PageInfo"];
         };
-        Page_GroupDto: {
-            items: components["schemas"]["GroupDto"][];
-            page_info: components["schemas"]["PageInfo"];
-        };
-        Page_GroupWithDepthDto: {
-            items: components["schemas"]["GroupWithDepthDto"][];
-            page_info: components["schemas"]["PageInfo"];
-        };
-        Page_MembershipDto: {
-            items: components["schemas"]["MembershipDto"][];
-            page_info: components["schemas"]["PageInfo"];
-        };
         Page_QueueEntryDto: {
             items: components["schemas"]["QueueEntryDto"][];
             page_info: components["schemas"]["PageInfo"];
@@ -3791,113 +3634,18 @@ export interface components {
             items: components["schemas"]["VariableDto"][];
             page_info: components["schemas"]["PageInfo"];
         };
-        Page_TypeDto: {
-            items: components["schemas"]["TypeDto"][];
-            page_info: components["schemas"]["PageInfo"];
-        };
-        /** @description REST DTO for parse local file request */
-        ParseLocalFileRequest: {
-            file_path: string;
-        };
-        /** @description REST DTO for parsed block */
-        ParsedBlockDto: {
-            inlines: components["schemas"]["InlineDto"][];
-            /** Format: int32 */
-            level: number;
-            /** @enum {string} */
-            type: "heading";
-        } | {
-            inlines: components["schemas"]["InlineDto"][];
-            /** @enum {string} */
-            type: "paragraph";
-        } | {
-            blocks: components["schemas"]["ParsedBlockDto"][];
-            /** Format: int32 */
-            level: number;
-            ordered: boolean;
-            /** @enum {string} */
-            type: "list_item";
-        } | {
-            code: string;
-            language?: string | null;
-            /** @enum {string} */
-            type: "code_block";
-        } | {
-            table: components["schemas"]["TableBlockDto"];
-            /** @enum {string} */
-            type: "table";
-        } | {
-            blocks: components["schemas"]["ParsedBlockDto"][];
-            /** @enum {string} */
-            type: "quote";
-        } | {
-            /** @enum {string} */
-            type: "horizontal_rule";
-        } | {
-            alt?: string | null;
-            src?: string | null;
-            title?: string | null;
-            /** @enum {string} */
-            type: "image";
-        } | {
-            /** @enum {string} */
-            type: "page_break";
-        };
-        /** @description REST DTO for parsed document metadata */
-        ParsedDocMetadataDto: {
-            content_type?: string | null;
-            /** Format: date-time */
-            created_at?: string | null;
-            is_stub?: boolean;
-            /** Format: date-time */
-            modified_at?: string | null;
-            original_filename?: string | null;
-            source: components["schemas"]["ParsedDocSourceDto"];
-        };
-        /** @description REST DTO for file parse response (with optional markdown) */
-        ParsedDocResponseDto: {
-            /** @description The parsed document in intermediate representation */
-            document: components["schemas"]["ParsedDocumentDto"];
-            /** @description Rendered markdown (only present when `render_markdown=true`) */
-            markdown?: string | null;
-        };
-        /** @description REST DTO for document source */
-        ParsedDocSourceDto: {
-            path: string;
-            /** @enum {string} */
-            type: "local_path";
-        } | {
-            original_name: string;
-            /** @enum {string} */
-            type: "uploaded";
-        };
-        /** @description REST DTO for parsed document (IR) */
-        ParsedDocumentDto: {
-            blocks: components["schemas"]["ParsedBlockDto"][];
-            /** Format: uuid */
-            id?: string | null;
-            language?: string | null;
-            meta: components["schemas"]["ParsedDocMetadataDto"];
-            title?: string | null;
-        };
         /** @enum {string} */
         PassthroughMode: "none" | "allowlist" | "all";
-        PatchSimpleUserSettingsRequest: {
-            language?: string | null;
-            theme?: string | null;
-        };
         /** @enum {string} */
         PathSuffixMode: "disabled" | "append";
         /**
          * @description One build's distribution, as
          *     `GET /qa/v1/analytics/plan/builds?plan_id=` renders it.
-         *
-         *     Legacy's `BuildDistribution` (`manager/src/models.rs:651-657`).
          */
         PlanBuildDistributionDto: {
             /**
              * @description `unknown` when no execution named a version, sorted after every named
-             *     one — legacy's `COALESCE(r.app_version, 'unknown')`.
+             *     one: an absent version coalesces to the literal `unknown`.
              */
             build: string;
             /**
@@ -3947,11 +3695,11 @@ export interface components {
          * @description One test's aggregated analytics, as
          *     `GET /qa/v1/analytics/plan/tests?plan_id=` renders it.
          *
-         *     Legacy's `TestAnalytics` (`manager/src/models.rs:637-647`). `last_platform_id` and
-         *     `last_platform` both ride along for [`AnalyticsListItemDto`]'s reason: the
-         *     name is `null` for a platform the caller cannot see or that no row named,
-         *     and the two are indistinguishable on the wire, exactly as
-         *     `PlatformReader::names`' header records.
+         *     `last_environment_id` and `last_environment` (renamed from
+         *     `last_environment_id`/`last_platform` at ruling G-3) both ride along for
+         *     [`AnalyticsListItemDto`]'s reason: the name is `null` for an environment
+         *     the caller cannot see or that no row named, and the two are indistinguishable
+         *     on the wire, exactly as `EnvironmentReader::names`' header records.
          */
         PlanTestAnalyticsDto: {
             /**
@@ -3963,18 +3711,19 @@ export interface components {
             /** @description The most recent execution's JIRA reference. */
             jira_key?: string | null;
             /**
-             * @description `null` when no row named a platform **or** when qa-environments resolved
-             *     none for the id — see this type's header.
+             * @description `null` when no row named an environment **or** when qa-environments
+             *     resolved none for the id — see this type's header.
              */
-            last_platform?: string | null;
+            last_environment?: string | null;
             /**
              * Format: uuid
-             * @description See this type's header for why this rides beside [`Self::last_platform`].
+             * @description See this type's header for why this rides beside
+             *     [`Self::last_environment`].
              */
-            last_platform_id?: string | null;
+            last_environment_id?: string | null;
             /**
              * Format: uuid
-             * @description The most recent execution's run, as an id — legacy's `last_run_name`.
+             * @description The most recent execution's run, as an id rather than a name.
              */
             last_run_id: string;
             /** @description The most recent execution's raw status. */
@@ -4002,9 +3751,8 @@ export interface components {
          * @description One test's history, as `GET /qa/v1/analytics/plan/test-history?plan_id=`
          *     renders it.
          *
-         *     Legacy's `TestHistory` (`manager/src/models.rs:669-672`). See
-         *     [`PlanTestHistory`]'s header for why the outer array's order is this port's
-         *     own rather than legacy's unspecified `HashMap` order.
+         *     See [`PlanTestHistory`]'s header for why the outer array's order is
+         *     specified here rather than left to a map's iteration order.
          */
         PlanTestHistoryDto: {
             /** @description Newest first. See this type's header. */
@@ -4014,8 +3762,8 @@ export interface components {
         /**
          * @description One run's outcome for one test, inside [`PlanTestHistoryDto::results`].
          *
-         *     Legacy's `TestHistoryEntry` (`manager/src/models.rs:661-665`), with `run_name`
-         *     spelled as [`Self::run_id`] for [`AnalyticsListItemDto`]'s reason.
+         *     The run is [`Self::run_id`], an id rather than a name, for
+         *     [`AnalyticsListItemDto`]'s reason.
          */
         PlanTestHistoryEntryDto: {
             /**
@@ -4025,126 +3773,11 @@ export interface components {
             build?: string | null;
             /**
              * Format: uuid
-             * @description The execution's run, as an id — legacy's `run_name`. See this type's
+             * @description The execution's run, as an id rather than a name. See this type's
              *     header.
              */
             run_id: string;
             status: string;
-        };
-        /**
-         * @description REST DTO for a registered target platform.
-         *
-         *     Never carries the kubeconfig document, and — since 2026-08-27, by a human
-         *     decision — not its **credstore reference** either. The material is stored
-         *     under [`SharingMode::Tenant`](credstore_sdk::SharingMode::Tenant), so any
-         *     tenant member holding the reference can read it back through credstore's own
-         *     `GET /credstore/v1/secrets/{ref}`. This DTO is returned on **every**
-         *     platform read and write path, i.e. to every `qa.platform` GET/LIST-authorized
-         *     caller, so publishing the reference handed every tenant member a working read
-         *     path to a kubeconfig's `client-key-data` — a client private key — the moment
-         *     the create form began accepting pasted documents (`PlatformsService`).
-         *
-         *     This is exactly `SshKeyDto`'s convention
-         *     (`qa-catalog/qa-catalog/src/api/rest/dto.rs`), which withholds its own
-         *     `credstore_ref` for the same reason and says so. The reference stays on the
-         *     SDK model (`qa_environments_sdk::TargetPlatform::kubeconfig_credstore_ref`)
-         *     for in-process consumers — `qa-runs` resolves the kubeconfig from it when it
-         *     builds a dispatch spec — and on the column. Only the REST projection drops
-         *     it. The `name` is what identifies a platform to a human.
-         */
-        EnvironmentDto: {
-            available: boolean;
-            cluster?: null | components["schemas"]["ClusterHealthDto"];
-            /** Format: date-time */
-            created_at: string;
-            /**
-             * @description Per-platform default branch override; `null` means the repository's own
-             *     default applies. See `sdk::TargetPlatform::default_branch`.
-             */
-            default_branch?: string | null;
-            description?: string | null;
-            /** Format: uuid */
-            id: string;
-            /**
-             * @description Whether this platform is its product's default -- what the Run and
-             *     Schedule dialogs' "Default cluster" option resolves to. At most one
-             *     platform per product has this set. See `sdk::TargetPlatform::is_default`.
-             */
-            is_default: boolean;
-            name: string;
-            observed_build?: string | null;
-            /**
-             * @description The namespace the platform's core components were detected in. See
-             *     `sdk::TargetPlatform::observed_namespace`.
-             */
-            observed_namespace?: string | null;
-            observed_version?: string | null;
-            /** Format: uuid */
-            product_id?: string | null;
-            /** Format: date-time */
-            updated_at: string;
-            /**
-             * @description The most recent **failed** observation's message, or `null` if the
-             *     most recent attempt succeeded (or none has run). See
-             *     `sdk::TargetPlatform::version_detect_error` — this is the field a
-             *     `POST /qa/v1/environments/{id}/refresh` populates on a 200 response when
-             *     only detection itself failed.
-             */
-            version_detect_error?: string | null;
-            /**
-             * Format: date-time
-             * @description When the most recent observation attempt ran, success or failure.
-             */
-            version_detected_at?: string | null;
-            /**
-             * @description The platform's base domain (`https://…`), recovered from its gateway.
-             *     `null` means never conclusively detected. See
-             *     `sdk::TargetPlatform::vhp_base_url`. Non-secret: unlike
-             *     `kubeconfig_credstore_ref`, publishing this never exposes credential
-             *     material.
-             */
-            vhp_base_url?: string | null;
-        };
-        /**
-         * @description One bar of the platform breakdown.
-         *
-         *     # Why this is not a [`GroupSummaryDto`], where legacy's is
-         *
-         *     Legacy's execution row carries a platform **name** written by the runner, so
-         *     its platform bars are `GroupSummary { value: String, .. }` like the other two
-         *     (`analytics.rs:1144`, over the `by_platform` map at `:1115`). Here the row
-         *     carries a `Uuid`, and the name comes
-         *     from qa-environments — which can decline to resolve it, for a platform deleted
-         *     since the run executed or one in another tenant, two cases
-         *     `domain::ports::PlatformReader::names` deliberately makes
-         *     indistinguishable.
-         *
-         *     So the bar carries **both**: [`Self::platform_id`], which always identifies
-         *     the bucket, and [`Self::platform`], which is the label when there is one.
-         *     Collapsing them into a `value: String` would force a choice between dropping
-         *     an unresolvable bar — silent data loss on a chart whose job is comparison —
-         *     and rendering a UUID into a field a client will draw as a name, which is the
-         *     exact outcome Task 23 typed `PlatformGroupSummary` around a `Uuid` to prevent.
-         */
-        PlatformGroupSummaryDto: {
-            failed: number;
-            not_run: number;
-            passed: number;
-            /**
-             * @description `null` when qa-environments resolved no name for
-             *     [`Self::platform_id`].
-             */
-            platform?: string | null;
-            /** Format: uuid */
-            platform_id: string;
-            /**
-             * @description The size of the **whole** universe, not of the platform's own tests: each
-             *     bar re-buckets every test by its latest row *on that platform*, so a test
-             *     that never ran there counts as `not_run` in that bar. The bars therefore
-             *     do not partition anything and do not sum to
-             *     [`OverviewSummaryDto::total`].
-             */
-            total: number;
         };
         PluginBinding: {
             config?: {
@@ -4163,6 +3796,23 @@ export interface components {
             items?: components["schemas"]["PluginBinding"][];
             sharing?: components["schemas"]["SharingMode"];
         };
+        /** @description A predicate comparing a resource property to a value or subquery. */
+        Predicate: (components["schemas"]["EqPredicate"] & {
+            /** @enum {string} */
+            op: "eq";
+        }) | (components["schemas"]["InPredicate"] & {
+            /** @enum {string} */
+            op: "in";
+        }) | (components["schemas"]["InGroupPredicate"] & {
+            /** @enum {string} */
+            op: "in_group";
+        }) | (components["schemas"]["InGroupSubtreePredicate"] & {
+            /** @enum {string} */
+            op: "in_group_subtree";
+        }) | (components["schemas"]["InTenantSubtreePredicate"] & {
+            /** @enum {string} */
+            op: "in_tenant_subtree";
+        });
         /** @description RFC 9457 problem+json. `context` varies by error category. */
         Problem: {
             context: Record<string, never>;
@@ -4182,9 +3832,25 @@ export interface components {
             folder?: string | null;
             /** Format: uuid */
             id: string;
-            /** @description Durable short code (legacy `Product::key`). */
+            /** @description Durable short code. */
             key: string;
             name: string;
+            /**
+             * @description Full GTS instance id of the product plugin that owns this product's
+             *     behaviour — the whole composed id, not the plugin's instance segment.
+             *
+             *     **Always present since Task 20a.** The column is `NOT NULL`
+             *     (`m20260903_000004`) and `From<sdk::Product>` wraps a `String`, so this
+             *     field is never `null` on the wire. The `Option` survives only so the
+             *     response shape does not change under clients that already parse it;
+             *     Task 22 is where the UI stops needing that.
+             *
+             *     It used to read "`null` while the column is still nullable … such a
+             *     product has no resolvable plugin", which described a value this API can
+             *     no longer return — on a public response field, in rustdoc (review
+             *     finding IMPORTANT-4).
+             */
+            plugin_instance_id?: string | null;
             /** Format: date-time */
             updated_at: string;
         };
@@ -4195,6 +3861,36 @@ export interface components {
          */
         ProductFolderListDto: {
             folders: string[];
+        };
+        /**
+         * @description One product plugin this deployment has registered.
+         *
+         *     `credential_schema` renders the environment credential form;
+         *     `observed_schema` describes what observing an environment of this product
+         *     can yield, and which of those values claim a platform role. Tasks 21-22
+         *     render both.
+         *
+         *     Note what is **not** here: no failure class, no health vocabulary, and no
+         *     endpoint or credential value of any kind. A plugin's schemas are
+         *     declarations, and `observed_schema` cannot legally declare a secret field
+         *     at all — the SDK rejects that at registration, so nothing secret can reach
+         *     this response by construction.
+         */
+        ProductPluginDto: {
+            credential_schema: components["schemas"]["FieldDescDto"][];
+            /**
+             * @description The full GTS instance id, byte-identical to what
+             *     `qa_products.plugin_instance_id` stores. Write it back onto a product
+             *     verbatim — it is not a display name and must not be transformed.
+             */
+            instance_id: string;
+            observed_schema: components["schemas"]["FieldDescDto"][];
+            /**
+             * @description From the plugin's GTS instance `vendor` property; `null` if the
+             *     instance declares none. A deployment running several product plugins
+             *     selects between them on this string.
+             */
+            vendor?: string | null;
         };
         /** @description How many test files declare one Quality Vector. */
         QualityVectorCountDto: {
@@ -4207,33 +3903,32 @@ export interface components {
              * @description The **first** spelling seen for this vector, case-folded for grouping but
              *     rendered verbatim. So `Security` and `security` are one entry here — and
              *     **two rows** on the dashboard's own quality-vector list, which keys on the
-             *     display string. That asymmetry is legacy's, reproduced on both sides and
-             *     pinned on both sides; see `domain::analytics::aggregates`.
+             *     display string. The asymmetry is deliberate, and pinned on both sides;
+             *     see `domain::analytics::aggregates`.
              */
             vector: string;
         };
         /**
          * @description One Quality Vector's pass rate over the dashboard's seven-day window.
          *
-         *     `qa_insights_sdk::QualityVectorPassRate` — five fields, five fields, and the
-         *     names are legacy's own JSON keys (`manager/src/models.rs:378-385`).
+         *     `qa_insights_sdk::QualityVectorPassRate`.
          *
          *     # The sums across the array exceed the row count, by design
          *
-         *     A test file declaring two vectors contributes its counters to **both**
-         *     (`manager/src/routes/dashboard.rs:519-525`), so adding [`Self::total`] over
-         *     the array double-counts and is not a row count. The vectors partition
-         *     *concerns*, not executions, and a client that summed them would be computing
-         *     nothing. `domain::service::dashboard`'s `quality_vector_pass_rates` carries the
-         *     five properties of the fold, three of which look like defects and are legacy's.
+         *     A test file declaring two vectors contributes its counters to **both**, so
+         *     adding [`Self::total`] over the array double-counts and is not a row count.
+         *     The vectors partition *concerns*, not executions, and a client that summed
+         *     them would be computing nothing.
+         *     `domain::service::dashboard`'s `quality_vector_pass_rates` carries the five
+         *     properties of the fold, three of which look like defects and are not.
          *
          *     # Two spellings of one vector can both appear
          *
-         *     `Security` and `security` declared by two different files are two entries, not
-         *     one — legacy's dashboard fold keys on the display string where its analytics
-         *     fold case-folds. That asymmetry is legacy's own; the fold's doc records it and
-         *     a test pins it, so a client must not assume the vector names are a
-         *     case-normalized set.
+         *     `Security` and `security` declared by two different files are two entries,
+         *     not one: this fold keys on the display string where the *analytics* fold
+         *     case-folds. The asymmetry is deliberate, the fold's doc records it and a test
+         *     pins it, so a client must not assume the vector names are a case-normalized
+         *     set.
          */
         QualityVectorPassRateDto: {
             /**
@@ -4252,9 +3947,8 @@ export interface components {
              *     window, as opposed to [`Self::total`] executions. A file listed by two
              *     plans counts once.
              *
-             *     **Any row, not a counted one** — this said "a counted row", which is
-             *     wrong in a way that shows on the wire: legacy increments this
-             *     unconditionally (`dashboard.rs:524`), with no test on the three counters,
+             *     **Any row, not a counted one.** This counter increments unconditionally,
+             *     with no test on the other three,
              *     so a file whose window holds nothing but `SKIPPED` rows contributes here
              *     and to none of them. `("Security", 0, 0, 0, 5)` is therefore a legal and
              *     meaningful row — five files carry the vector and none of them was counted
@@ -4264,9 +3958,9 @@ export interface components {
             /**
              * Format: int64
              * @description Passed plus failed. **Not every row**: a skipped or in-progress row is in
-             *     no counter here, which is legacy's sixth status classification
-             *     (`dashboard.rs:487`) — the same one [`FlakyTestCardDto::total`] carries.
-             *     Emitted rather than left to the client to add up, for that reason.
+             *     no counter here — the same sixth status classification
+             *     [`FlakyTestCardDto::total`] carries. Emitted rather than left to the
+             *     client to add up, for that reason.
              */
             total: number;
             /**
@@ -4278,10 +3972,9 @@ export interface components {
         /**
          * @description The Quality Vector breakdown of the whole universe.
          *
-         *     Legacy's `QualityVectorSummary` (`analytics.rs:224-228`). **Never narrowed by
-         *     `group_by`/`group_value`** — the vectors are a property of the suite rather
-         *     than of a selection, which is legacy's own behaviour and easy to get wrong
-         *     when assembling the pipeline.
+         *     **Never narrowed by `group_by`/`group_value`** — the vectors are a property
+         *     of the suite rather than of a selection, which is easy to get wrong when
+         *     assembling the pipeline.
          */
         QualityVectorSummaryDto: {
             /** @description Most files first, then alphabetically. */
@@ -4299,22 +3992,26 @@ export interface components {
             dispatched_at?: string | null;
             /** Format: date-time */
             enqueued_at: string;
+            /**
+             * Format: uuid
+             * @description Renamed from `environment_id` (Task 25) — see [`RunDto::environment_id`]'s
+             *     doc for why.
+             */
+            environment_id: string;
             error?: string | null;
             exclusive: boolean;
             /** Format: date-time */
             finished_at?: string | null;
             /** Format: uuid */
             id: string;
-            /** Format: uuid */
-            platform_id: string;
             /**
              * Format: int32
-             * @description 1-based position among this platform's `queued` rows, oldest first;
+             * @description 1-based position among this environment's `queued` rows, oldest first;
              *     `null` for any other state.
              *
              *     Computed per request over the rows that request returned, so a
-             *     truncating `limit` understates it - the platform-filtered call is the
-             *     remedy, not a larger window.
+             *     truncating `limit` understates it - the environment-filtered call is
+             *     the remedy, not a larger window.
              */
             queue_position?: number | null;
             /** Format: uuid */
@@ -4483,6 +4180,20 @@ export interface components {
                 [key: string]: string;
             };
         };
+        /** @description The resource being accessed. */
+        Resource: {
+            /**
+             * Format: uuid
+             * @description Specific resource ID (for GET/UPDATE/DELETE on a single resource).
+             */
+            id?: string | null;
+            /** @description Additional resource properties for policy evaluation. */
+            properties?: {
+                [key: string]: unknown;
+            };
+            /** @description Resource type identifier (e.g., "`gts.cf.core.users.user.v1~`"). */
+            type: string;
+        };
         ResponseHeaderRules: {
             add?: {
                 [key: string]: string;
@@ -4529,11 +4240,28 @@ export interface components {
         /** @description A run as reported by the read endpoints. */
         RunDto: {
             app_build?: string | null;
-            /** @description Platform application version snapshotted at launch, not re-derived. */
+            /** @description Environment application version snapshotted at launch, not re-derived. */
             app_version?: string | null;
             bundle_ids: string[];
             /** Format: date-time */
             created_at: string;
+            /**
+             * Format: uuid
+             * @description Renamed from `environment_id` (Task 25): the wire now agrees with the
+             *     Rust field. The column moved with it: `environment_id` is now the
+             *     column, the Rust field and the wire key alike. Every other `environment_id` on this
+             *     crate's wire (requests and responses alike) was renamed the same way
+             *     — this is the one place it is spelled out in full.
+             *
+             *     **This was a breaking API change** (Task 25): a client reading
+             *     `environment_id` out of a response now finds it absent, replaced by
+             *     `environment_id`. (This type is a response - a client never *sends*
+             *     one, so there is no 400 to raise here. The 400 for a stale *request*
+             *     is on the request-side types: [`LaunchRunReq::environment_id`] and
+             *     [`NewScheduleReq::environment_id`] both refuse a `environment_id` sent in
+             *     their place explicitly - see the first one's doc, and ruling G-4.)
+             */
+            environment_id?: string | null;
             /**
              * @description Terminal failure reason, operator-facing.
              *
@@ -4560,12 +4288,10 @@ export interface components {
             log_storage_ref?: string | null;
             /**
              * @description `{slug}-{n}`. Load-bearing beyond display: a queue row's `blocked_by`
-             *     text names the run holding a platform.
+             *     text names the run holding an environment.
              */
             name: string;
             parameters: components["schemas"]["RunParameterDto"][];
-            /** Format: uuid */
-            platform_id?: string | null;
             /**
              * @description The exclusivity decision that was actually made - **not** the launch's
              *     request, which is a tri-state.
@@ -4629,10 +4355,10 @@ export interface components {
         /**
          * @description A run's five outcome counters.
          *
-         *     `failed` is the failed-**or-errored** count. The source system keeps
-         *     `FAILED` and `ERROR` as distinct per-test statuses and folds them together
-         *     in every aggregate that produces these numbers; `sdk::RunResult` explains
-         *     why a sixth counter would be a silent regression.
+         *     `failed` is the failed-**or-errored** count: `FAILED` and `ERROR` are
+         *     distinct per-test statuses and are folded together in every aggregate that
+         *     produces these numbers. `sdk::RunResult` explains why a sixth counter would
+         *     be a silent regression.
          */
         RunResultDto: {
             failed: number;
@@ -4650,9 +4376,9 @@ export interface components {
          * @description A run's lifecycle state. Note `canceled`, one `l` - a queue row's
          *     equivalent state is spelled `cancelled`, and the difference is deliberate.
          *
-         *     A client ported from the source system must **re-map, not merely re-case**:
-         *     `created`, `queued`, `dispatching`, `canceled`, `timed_out` and `expired`
-         *     have no equivalent there.
+         *     The set is `created`, `queued`, `dispatching`, `running`, `succeeded`,
+         *     `failed`, `canceled`, `timed_out`, `expired` and `error`; a client must match
+         *     on the whole set rather than assume a smaller one.
          * @enum {string}
          */
         RunStateDto: "created" | "queued" | "dispatching" | "running" | "succeeded" | "failed" | "canceled" | "timed_out" | "expired" | "error";
@@ -4676,9 +4402,8 @@ export interface components {
             /**
              * @description Where a `collect` run's runner posts its per-file case counts, becoming
              *     `VHP_COLLECT_URL`. Required for `collect` - though an empty string is
-             *     accepted and means "collect but report nowhere", which is the source
-             *     system's own behaviour for a blank URL
-             *     (`manager/src/services/argo.rs:52-58`). Ignored for the other kinds.
+             *     accepted and means "collect but report nowhere". Ignored for the other
+             *     kinds.
              */
             collect_url?: string | null;
             /**
@@ -4737,16 +4462,15 @@ export interface components {
         /**
          * @description Test volume for one run on the trend chart.
          *
-         *     **`passed + failed + skipped` need not equal [`Self::tests_total`]**, and that
-         *     is legacy's arithmetic rather than a rounding artefact: the total is a plain
+         *     **`passed + failed + skipped` need not equal [`Self::tests_total`]**, and
+         *     that is the arithmetic rather than a rounding artefact: the total is a plain
          *     `COUNT` while the three counters are filters, so an `XFAIL`, `XPASS`,
-         *     `PENDING` or `RUNNING` row is in the total and in none of them
-         *     (`manager/src/routes/dashboard.rs:170-173`).
+         *     `PENDING` or `RUNNING` row is in the total and in none of them.
          */
         RunTestTrendPointDto: {
             /**
              * Format: int64
-             * @description `FAILED` **and** `ERROR`, which legacy folds together in every aggregate.
+             * @description `FAILED` **and** `ERROR`, which are folded together in every aggregate.
              */
             failed: number;
             /** Format: int64 */
@@ -4766,10 +4490,9 @@ export interface components {
             tests_total: number;
         };
         /**
-         * @description A stored saved view — legacy's `AnalyticsSavedView`
-         *     (`manager/src/routes/analytics.rs:77-86`), with the same `plan_id` split
-         *     and `owner_id` still a caller-visible field: it is the caller's own id in
-         *     every case this gear can construct (the repository narrows every read and
+         * @description A stored saved view, with the same plan-identity pair and `owner_id` still a
+         *     caller-visible field: it is the caller's own id
+         *     in every case this gear can construct (the repository narrows every read and
          *     write to the caller's [`toolkit_security::AccessScope::ensure_owner`]-ed
          *     scope), so echoing it back is inert rather than a cross-owner leak.
          */
@@ -4798,8 +4521,9 @@ export interface components {
         /** @description A schedule as reported by the read endpoints. */
         ScheduleDto: {
             /**
-             * @description Branch each fire resolves against. `null` falls back to the platform's
-             *     `default_branch` and then the repository's, at launch time.
+             * @description Branch each fire resolves against. `null` falls back to the
+             *     environment's `default_branch` and then the repository's, at launch
+             *     time.
              */
             branch?: string | null;
             /** Format: date-time */
@@ -4811,6 +4535,13 @@ export interface components {
             cron: string;
             /** @description Whether the firing tick considers this schedule at all. */
             enabled: boolean;
+            /**
+             * Format: uuid
+             * @description `null` schedules a run with no target environment. Such a run is
+             *     never queued and never blocks anything. Renamed from `environment_id`
+             *     (Task 25) — see [`RunDto::environment_id`]'s doc for why.
+             */
+            environment_id?: string | null;
             exclude_tags: string[];
             /**
              * @description `"true"`, `"false"` or `"auto"` - see [`exclusive_choice_to_wire`] for
@@ -4832,17 +4563,11 @@ export interface components {
             /** @description Unique within the tenant. */
             name: string;
             parameters: components["schemas"]["RunParameterDto"][];
-            /**
-             * Format: uuid
-             * @description `null` schedules a run with no target platform. Such a run is never
-             *     queued and never blocks anything.
-             */
-            platform_id?: string | null;
             /** @description Channel override; `null` means the deployment-wide default channel. */
             slack_channel?: string | null;
             /**
-             * @description The events that notify, as the six lowercase tokens legacy serializes -
-             *     `pending`, `in_progress`, `succeeded`, `failed`, `error`, `skipped`.
+             * @description The events that notify, as the six lowercase tokens - `pending`,
+             *     `in_progress`, `succeeded`, `failed`, `error`, `skipped`.
              */
             slack_notification_events: string[];
             /**
@@ -4859,8 +4584,7 @@ export interface components {
             updated_at: string;
         };
         /**
-         * @description One status's Slack Block Kit sections, on the wire — legacy's
-         *     `ScheduledRunSlackTemplate` (`manager/src/models.rs`), unchanged: `enabled`
+         * @description One status's Slack Block Kit sections, on the wire. `enabled`
          *     is a routing concern already spent by
          *     `domain::notify::routing::route` and reaches the wire anyway because a
          *     tenant edits it on the same settings screen as the five sections.
@@ -4874,10 +4598,7 @@ export interface components {
             status_icon?: string | null;
             summary?: string | null;
         };
-        /**
-         * @description The six status templates, on the wire — legacy's
-         *     `ScheduledRunSlackTemplates` field-for-field.
-         */
+        /** @description The six status templates, on the wire. */
         ScheduledRunSlackTemplatesDto: {
             error: components["schemas"]["ScheduledRunSlackTemplateDto"];
             failed: components["schemas"]["ScheduledRunSlackTemplateDto"];
@@ -4922,12 +4643,6 @@ export interface components {
          * @enum {string}
          */
         SharingModeDto: "private" | "tenant" | "shared";
-        SimpleUserSettingsDto: {
-            language?: string | null;
-            tenant_id: string;
-            theme?: string | null;
-            user_id: string;
-        };
         /**
          * @description REST DTO for SSH key metadata.
          *
@@ -4954,63 +4669,130 @@ export interface components {
             name: string;
         };
         /**
-         * @description The 200 body of a force start: the run that now holds the platform.
+         * @description The 200 body of a force start: the run that now holds the environment.
          *
          *     A body rather than a 204, unlike cancel. Force start *creates* a
-         *     consequence the caller needs a handle to - something is now running on a
-         *     platform an operator overrode the occupancy check for - whereas cancel
+         *     consequence the caller needs a handle to - something is now running on an
+         *     environment an operator overrode the occupancy check for - whereas cancel
          *     merely stops one they already named.
          */
         StartedRunDto: {
             /** Format: uuid */
             run_id: string;
         };
+        /** @description The authenticated subject making the request. */
+        Subject: {
+            /**
+             * Format: uuid
+             * @description Subject identifier (user ID, service ID).
+             */
+            id: string;
+            /**
+             * @description Additional subject properties for policy evaluation.
+             *     The subject's home tenant ID goes here as `"tenant_id"`.
+             */
+            properties?: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description Subject type (e.g., "user", "service").
+             *     Serialized as `"type"` to match the `AuthZEN` spec.
+             */
+            type?: string | null;
+        };
+        /**
+         * @description A submission of one or more entities.
+         *
+         *     `items` and not `entities`: the operation result, the discovery page and
+         *     `Page<T>` all call their array `items`, so this is the house word for "the
+         *     array in this envelope". It is also the name v1 does *not* use, which keeps
+         *     the T24a promotion a loud break rather than one that turns on the element
+         *     shape.
+         */
+        SubmitEntitiesRequest: {
+            /**
+             * @description Reserved for T20 rollback-only evaluation. `true` is synchronously refused
+             *     until dry runs are implemented. The field is already part of the request
+             *     fingerprint, so a future dry run and commit cannot share one idempotency
+             *     identity.
+             */
+            dry_run?: boolean | null;
+            items: components["schemas"]["SubmitEntityDto"][];
+        };
+        /**
+         * @description One entity in a submission.
+         *
+         *     `SubmitEntityDto` and not `SubmitCandidateDto`: "candidate" is the domain's
+         *     word for a submitted-but-not-yet-admitted entity, and this type is the wire
+         *     form, whose name reaches callers as an `OpenAPI` component.
+         */
+        SubmitEntityDto: {
+            /** @description The authored document. */
+            content: unknown;
+            /**
+             * Format: int64
+             * @description Optimistic precondition. **Omit** to require that the identifier does not
+             *     exist; a literal `0` is refused. A positive version names a content
+             *     revision: the entity must exist at exactly that `resource_version`, and a
+             *     mismatch fails the candidate terminally rather than rebasing it.
+             */
+            expected_resource_version?: number | null;
+            /**
+             * @description ADR-0004 `force`: waive one cross-minor compatibility check. Refused where
+             *     the deployment disallows it, where the candidate has no such check, and
+             *     until T17 can evaluate the check and persist the waiver provenance.
+             */
+            force?: boolean | null;
+            /**
+             * @description The canonical GTS identifier. A non-canonical spelling is refused rather
+             *     than normalized.
+             */
+            gts_id: string;
+        };
         SustainedRate: {
             /** Format: int32 */
             rate: number;
             window?: components["schemas"]["Window"];
         };
-        SysCapDto: {
-            /** Format: double */
-            amount?: number | null;
-            amount_dimension?: string | null;
+        /** @description Tenant context for the evaluation. */
+        TenantContext: {
+            /** @description Barrier enforcement mode (default: `Respect`). */
+            barrier_mode?: components["schemas"]["AuthzBarrierMode"];
+            /** @description Tenant hierarchy mode (default: `Subtree`). */
+            mode?: components["schemas"]["TenantMode"];
             /**
-             * Format: int64
-             * @description Cache TTL in seconds
+             * Format: uuid
+             * @description The context tenant ID (tenant being operated on).
              */
-            cache_ttl_secs: number;
-            category: string;
-            details?: string | null;
-            display_name: string;
-            /**
-             * Format: int64
-             * @description When this capability was last fetched (Unix timestamp in seconds)
-             */
-            fetched_at_secs: number;
-            key: string;
-            name: string;
-            present: boolean;
-            version?: string | null;
+            root_id?: string | null;
+            /** @description Required tenant status filter (e.g., `["active"]`). */
+            tenant_status?: string[] | null;
         };
-        /** @description REST DTO for table block */
-        TableBlockDto: {
-            rows: components["schemas"]["TableRowDto"][];
-        };
-        /** @description REST DTO for table cell */
-        TableCellDto: {
-            blocks: components["schemas"]["ParsedBlockDto"][];
-        };
-        /** @description REST DTO for table row */
-        TableRowDto: {
-            cells: components["schemas"]["TableCellDto"][];
-            is_header: boolean;
-        };
+        /**
+         * @description Tenant hierarchy mode.
+         * @enum {string}
+         */
+        TenantMode: "root_only" | "subtree";
+        /**
+         * @description Tenant lifecycle status.
+         *
+         *     Mirrors the SMALLINT encoding stored in `tenants.status` and
+         *     `tenant_closure.descendant_status` (the canonical mapping is
+         *     `Active = 1`, `Suspended = 2`, `Deleted = 3`). Use [`as_smallint`] /
+         *     [`from_smallint`] to cross the DB boundary so the mapping stays in
+         *     one place — duplicating it elsewhere risks future drift.
+         *
+         *     [`as_smallint`]: TenantStatus::as_smallint
+         *     [`from_smallint`]: TenantStatus::from_smallint
+         * @enum {string}
+         */
+        TenantStatus: "active" | "suspended" | "deleted";
         /**
          * @description One test *function* outcome, as `GET /qa/v1/test-case-results` returns it.
          *
          *     A visibly different shape from [`TestResultDto`] and not a subset of it: the
-         *     function-name column is `name`, not `test_name` (legacy's spelling,
-         *     `manager/migrations/001_initial.sql:258`), the bug reference is `ticket` rather
+         *     function-name column is `name`, not `test_name`, the bug reference is
+         *     `ticket` rather
          *     than `jira_key`, and there are no denormalized run columns at all — case rows
          *     reach every aggregate through the file-level table first, so a second copy of
          *     the run's identity would be a second thing to keep true.
@@ -5123,9 +4905,9 @@ export interface components {
          *     `run_created_at`.** This doc said "there is nothing further to withhold here
          *     and this is a straight projection" until Task 21b added that column, so the
          *     claim is corrected rather than left standing. It is the fallback half of the
-         *     dashboard's window expression — `COALESCE(run_finished_at, run_created_at)`,
-         *     legacy's `COALESCE(rr.finished_at, rr.created_at)` — denormalized so this
-         *     gear's aggregates need no cross-gear join. On the *wire* it is redundant:
+         *     dashboard's window expression — `COALESCE(run_finished_at, run_created_at)`
+         *     — denormalized so this gear's aggregates need no cross-gear join. On the
+         *     *wire* it is redundant:
          *     qa-runs owns the run and a consumer of this collection can ask it for the
          *     run's creation instant, where it cannot for a per-row aggregate on a hot path.
          *     [`Self::run_finished_at`] is here because the pager and the analytics windows
@@ -5135,7 +4917,7 @@ export interface components {
          *     **Most of it is nullable**, and nothing here is `Option` because the wire
          *     likes it that way: each nullable field is a column that is genuinely absent for
          *     a real run. Named rather than counted — `duration`, `launch_id`, `jira_key`,
-         *     `product_version`, `app_build`, `platform_id`, `repo_id`, `plan_path`,
+         *     `product_version`, `app_build`, `environment_id`, `repo_id`, `plan_path`,
          *     `branch` and `run_finished_at`; only `id`, `run_id`, `test_file`, `test_name`,
          *     `status` and `created_at` are always present. `run_finished_at` is `null` while
          *     the run is still going, `repo_id`/`plan_path` are `null` for a custom-plan or
@@ -5143,9 +4925,8 @@ export interface components {
          *     rendering this must handle them; `qa_insights_sdk::TestResultRecord`'s field
          *     docs say what each absence means.
          *
-         *     **`logs` is not here and cannot be**, which is a parity gap rather than a
-         *     design choice: legacy's `test_results` has a `logs TEXT` column that its run
-         *     detail view renders, and this gear's only source of outcomes is qa-runs, whose
+         *     **`logs` is not here and cannot be**, which is a gap rather than a design
+         *     choice: this gear's only source of outcomes is qa-runs, whose
          *     `RunTestResult` carries no per-test log slice. The whole argument is on
          *     [`TestResultRecord`], which is where it belongs — a DTO cannot expose a field
          *     the contract does not have.
@@ -5166,9 +4947,25 @@ export interface components {
             created_at: string;
             /**
              * @description The runner's own duration text, verbatim — e.g. `85.06s (0:01:25)`. Not a
-             *     number and not normalised: legacy's fixture is that exact string.
+             *     number and not normalised — the runner's text is the contract.
              */
             duration?: string | null;
+            /**
+             * Format: uuid
+             * @description Renamed from `environment_id` (Task 25): the wire now agrees with the
+             *     Rust field. The column moved with it: `environment_id` is now the
+             *     column, the Rust field and the wire key alike. Every other
+             *     `environment_id` on this crate's wire, whatever its own source entity,
+             *     was renamed the same way — this is the one place it is spelled out
+             *     in full.
+             *
+             *     **This was a breaking API change** (Task 25): a client reading
+             *     `environment_id` out of a response now finds it absent, replaced by
+             *     `environment_id`. Every renamed field on this crate's wire is a
+             *     response field - unlike `qa-runs`, nothing here is also a request
+             *     field, so there is no 400 to raise on this crate's side of ruling G-4.
+             */
+            environment_id?: string | null;
             /** Format: uuid */
             id: string;
             /**
@@ -5178,8 +4975,6 @@ export interface components {
             jira_key?: string | null;
             launch_id?: string | null;
             plan_path?: string | null;
-            /** Format: uuid */
-            platform_id?: string | null;
             product_version?: string | null;
             /** Format: uuid */
             repo_id?: string | null;
@@ -5217,8 +5012,8 @@ export interface components {
         /**
          * @description The trend: one point per day, each totalling the universe.
          *
-         *     Legacy's `TrendData` (`analytics.rs:164-166`). **`passed + failed + not_run`
-         *     is the universe size on every point**, including days before any row exists —
+         *     **`passed + failed + not_run` is the universe size on every point**,
+         *     including days before any row exists —
          *     the denominator is the universe and not the data, which is what makes the
          *     chart comparable across days.
          */
@@ -5234,64 +5029,25 @@ export interface components {
             not_run: number;
             passed: number;
         };
-        /** @description REST DTO for GTS type representation. */
-        TypeDto: {
-            /** @description GTS type paths of allowed membership resource types */
-            allowed_membership_types: string[];
-            /** @description GTS type paths of allowed parent types */
-            allowed_parent_types: string[];
-            /** @description Whether groups of this type can be root nodes */
-            can_be_root: boolean;
-            /** @description GTS type path */
-            code: string;
-            /** @description Optional JSON Schema for instance metadata */
-            metadata_schema?: unknown;
-        };
         /**
-         * @description REST DTO for updating a resource group (full replacement via PUT).
-         *
-         *     **The group's GTS type is immutable after creation.** The payload
-         *     deliberately does not carry a `type` field — to change a group's type,
-         *     delete the existing group and create a new one. See the SDK
-         *     `UpdateGroupRequest` doc for the full rationale.
-         *
-         *     Every replaceable field is **required** so an omitted field cannot be
-         *     confused with "preserve previous value". Nullable fields (`parent_id`,
-         *     `metadata`) must be sent explicitly as `null` to clear them — for
-         *     example, moving a group to root requires `"parent_id": null`, not an
-         *     omitted key.
-         */
-        UpdateGroupDto: {
-            /** @description Type-specific metadata (`null` to clear). */
-            metadata: unknown;
-            /** @description Display name (1..255 characters). */
-            name: string;
-            /**
-             * Format: uuid
-             * @description Parent group ID (`null` for root groups).
-             */
-            parent_id: string | null;
-        };
-        /**
-         * @description REST DTO for partially updating a target platform.
+         * @description REST DTO for partially updating a target environment.
          *
          *     `serde_with` is not a workspace dependency, so — unlike
-         *     `sdk::PlatformPatch`'s nested `Option<Option<_>>` fields — `product_id`
+         *     `sdk::EnvironmentPatch`'s nested `Option<Option<_>>` fields — `product_id`
          *     and `description` here cannot distinguish an explicit JSON `null` (meaning
          *     "clear this field") from the key being absent: both deserialize to `None`
-         *     and are mapped to "leave unchanged" (`sdk::PlatformPatch`'s outer `None`).
+         *     and are mapped to "leave unchanged" (`sdk::EnvironmentPatch`'s outer `None`).
          *     There is currently no REST-exposed way to clear a previously-set
          *     `product_id` or `description` back to empty; only SDK/local-client
-         *     callers using `sdk::PlatformPatch` directly can do that.
+         *     callers using `sdk::EnvironmentPatch` directly can do that.
          *
          *     # `default_branch` is the exception, and deliberately so
          *
-         *     It reaches all three of `sdk::PlatformPatch`'s states over REST without
-         *     `serde_with`, because the source system's "clear" signal is **not** JSON
-         *     `null` — it is the **empty string**. `update_platform` maps an empty or
+         *     It reaches all three of `sdk::EnvironmentPatch`'s states over REST without
+         *     `serde_with`, because this field's "clear" signal is **not** JSON `null` —
+         *     it is the **empty string**. `update_environment` maps an empty or
          *     whitespace-only `default_branch` to its `"__NULL__"` sentinel and thence to
-         *     `NULL`, while an absent field keeps the stored value
-         *     (`manager/src/services/platforms.rs:447-496`). So:
+         *     `NULL`, while an absent field keeps the stored value. So:
          *
          *     | request body | meaning |
          *     |---|---|
@@ -5300,10 +5056,10 @@ export interface components {
          *     | `"release-9.0"` | pin to that branch |
          *
          *     The middle row works because `Some(String)` survives the `.map(Some)` below
-         *     as `Some(Some(""))`, which `PlatformsService::normalize_default_branch` then
+         *     as `Some(Some(""))`, which `EnvironmentsService::normalize_default_branch` then
          *     folds to `Some(None)` — the outer `Some` carrying "the caller mentioned the
-         *     field" the whole way. This is not a workaround for the missing `serde_with`;
-         *     it is the source system's own encoding, which happens not to need it.
+         *     field" the whole way. This is not a workaround for the missing `serde_with`:
+         *     the empty-string encoding simply does not need it.
          *
          *     # `kubeconfig` mirrors the create DTO
          *
@@ -5315,7 +5071,19 @@ export interface components {
         UpdateEnvironmentReq: {
             available?: boolean | null;
             /**
-             * @description Per-platform default branch override. See the struct doc's table: absent
+             * @description Credentials keyed by the product plugin's own field key, each either
+             *     the document (`{"material": …}`) or a credstore reference
+             *     (`{"reference": …}`). This is the plugin-shaped channel; the
+             *     `kubeconfig`/`kubeconfig_credstore_ref` pair above is the pre-plugin
+             *     spelling of one entry of it and is still accepted so the shipped UI
+             *     keeps working. Supplying both spellings of the same field is a
+             *     validation error.
+             */
+            credentials?: {
+                [key: string]: components["schemas"]["CredentialSubmissionDto"];
+            } | null;
+            /**
+             * @description Per-environment default branch override. See the struct doc's table: absent
              *     or `null` leaves it unchanged, `""` clears it, any other value pins it.
              */
             default_branch?: string | null;
@@ -5323,7 +5091,7 @@ export interface components {
             /**
              * @description Absent or `null` leaves the default flag unchanged; `true` makes this the
              *     product's default (clearing the previous holder); `false` clears it on this
-             *     platform. See `sdk::TargetPlatform::is_default`.
+             *     environment. See `sdk::Environment::is_default`.
              */
             is_default?: boolean | null;
             /**
@@ -5343,13 +5111,25 @@ export interface components {
         };
         /**
          * @description REST DTO for `PUT /qa/v1/products/{id}` — full replace of the product's
-         *     mutable fields (an absent `folder` moves the product back to the root).
+         *     mutable fields, with one exception: an absent `folder` moves the product
+         *     back to the root, while an absent `plugin_instance_id` leaves the stored
+         *     plugin binding alone.
          */
         UpdateProductReq: {
             description: string;
             folder?: string | null;
             key: string;
             name: string;
+            /**
+             * @description Full GTS instance id of the owning product plugin — see
+             *     [`CreateProductReq::plugin_instance_id`]. **Not** full-replace: an
+             *     absent value leaves the current binding in place rather than unbinding
+             *     the product. `sdk::ProductUpdate::plugin_instance_id` carries the
+             *     measurement behind that asymmetry — in short, the shipped UI cannot
+             *     send this field, so full replace turned a description edit into a
+             *     silent unbind.
+             */
+            plugin_instance_id?: string | null;
         };
         UpdateRouteRequest: {
             cors?: null | components["schemas"]["CorsConfig"];
@@ -5364,34 +5144,27 @@ export interface components {
         /**
          * @description The body of `PUT /qa/v1/schedules/{id}/notifications`.
          *
-         *     # `PUT`, where the source system uses `POST`
+         *     # Why `PUT`
          *
-         *     Legacy registers this as `axum::routing::post`
-         *     (`manager/src/routes/mod.rs:95-98`). The divergence is deliberate and is
-         *     already recorded in the PRD and DESIGN, so it is cited here rather than
-         *     re-argued: the frozen contract for this subsystem is the **test-facing** one
-         *     (environment variables, `plan.yaml`, `TEST_META` -
-         *     `cpt-cf-qa-fr-runner-contract`), and the REST surface explicitly is
-         *     not. This route already changes its prefix (`/api` -> `/qa/v1`) and its key
-         *     (`{name}` -> `{id}`); a full, idempotent replacement of a settings
-         *     sub-resource is a `PUT`, which is also what the sibling gears do.
+         *     A full, idempotent replacement of a settings sub-resource is a `PUT`, which
+         *     is also what the sibling gears do. The frozen contract for this subsystem is
+         *     the **test-facing** one — environment variables, `plan.yaml`, `TEST_META`
+         *     (`cpt-cf-qa-fr-runner-contract`) — and the REST surface explicitly is not,
+         *     so the method is chosen on its own merits.
          *
          *     # A replacement, so every field is required
          *
          *     All three are stated on every call - there is no partial edit here for the
-         *     same reason `NewScheduleReq` is not a `PATCH`. Legacy defaults `channel` and
-         *     `events` (`UpdateScheduleNotificationsForm`,
-         *     `manager/src/models.rs:291-299`), and its UI compensates by re-sending the
-         *     current values whenever it toggles the switch
-         *     (`manager-ui/src/pages/SchedulesPage.tsx:118-127`). Requiring them makes the
-         *     same outcome a property of the contract instead of the client's diligence.
+         *     same reason `NewScheduleReq` is not a `PATCH`. Defaulting `channel` or
+         *     `events` would leave correctness to a client that remembers to re-send the
+         *     current values whenever it toggles the switch; requiring them makes the
+         *     outcome a property of the contract instead of the client's diligence.
          *
          *     # What it cannot touch
          *
-         *     Everything else on the schedule. That is the half of legacy's handler that is
-         *     behaviour rather than annotation plumbing - *"this endpoint edits Slack
-         *     settings only, so a schedule pinned to exclusive (or to parallel) must come
-         *     back pinned the same way"* (`manager/src/routes/schedules.rs:854-856`).
+         *     Everything else on the schedule: this endpoint edits Slack settings only, so
+         *     a schedule pinned to exclusive (or to parallel) must come back pinned the
+         *     same way.
          *
          *     # Where its two checks live
          *
@@ -5404,7 +5177,7 @@ export interface components {
          *     The `slack_` prefix is kept against `clippy::struct_field_names`, for the
          *     reason [`sdk::ScheduleNotificationSettings`] gives: `ScheduleDto::enabled`
          *     already exists on the same aggregate and means whether the schedule fires,
-         *     and these are legacy's own field names.
+         *     so the prefix is what keeps the two readable side by side.
          */
         UpdateScheduleNotificationsReq: {
             /** @description `null` uses the deployment-wide default channel. */
@@ -5416,8 +5189,8 @@ export interface components {
              */
             slack_enabled: boolean;
             /**
-             * @description The events that notify, as the six lowercase tokens legacy serializes:
-             *     `pending`, `in_progress`, `succeeded`, `failed`, `error`, `skipped`.
+             * @description The events that notify, as the six lowercase tokens: `pending`,
+             *     `in_progress`, `succeeded`, `failed`, `error`, `skipped`.
              *     An empty list notifies on nothing; an unrecognised name is a 400.
              */
             slack_events: string[];
@@ -5442,10 +5215,6 @@ export interface components {
             type?: string | null;
             /** @description Secret value as a UTF-8 string. */
             value: string;
-        };
-        UpdateSimpleUserSettingsRequest: {
-            language: string;
-            theme: string;
         };
         /**
          * @description REST DTO for `PUT /qa/v1/test-repos/{id}` — full replace of the
@@ -5482,23 +5251,6 @@ export interface components {
              *     userinfo credentials are rejected — use `credential_ref`.
              */
             url: string;
-        };
-        /**
-         * @description REST DTO for updating a GTS type (full replacement via PUT).
-         *
-         *     Every replaceable field is **required** so an omitted field cannot be
-         *     confused with "preserve previous value". Nullable fields
-         *     (`metadata_schema`) must be sent explicitly as `null` to clear them.
-         */
-        UpdateTypeDto: {
-            /** @description GTS type paths of allowed membership resource types. */
-            allowed_membership_types: string[];
-            /** @description GTS type paths of allowed parent types. */
-            allowed_parent_types: string[];
-            /** @description Whether groups of this type can be root nodes. */
-            can_be_root: boolean;
-            /** @description JSON Schema for instance metadata (`null` to clear). */
-            metadata_schema: unknown;
         };
         UpdateUpstreamRequest: {
             alias?: string | null;
@@ -5542,9 +5294,9 @@ export interface components {
          *     `environment_id = Some(_)` targets that environment's variable table.
          */
         UpsertVariableReq: {
-            name: string;
             /** Format: uuid */
             environment_id?: string | null;
+            name: string;
             value: string;
         };
         UpstreamResponse: {
@@ -5565,10 +5317,10 @@ export interface components {
         /** @description REST DTO for a pipeline (global) or per-environment variable. */
         VariableDto: {
             /** Format: uuid */
+            environment_id?: string | null;
+            /** Format: uuid */
             id: string;
             name: string;
-            /** Format: uuid */
-            environment_id?: string | null;
             value: string;
         };
         /** @enum {string} */
@@ -5582,6 +5334,92 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    auth_z_resolver_api_rest_evaluate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvaluationRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvaluationResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     "credstore.create_secret": {
         parameters: {
             query?: never;
@@ -5906,479 +5744,6 @@ export interface operations {
             };
         };
     };
-    "file_parser.get_parser_info": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Information about available parsers */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FileParserInfoDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "file_parser.parse_local": {
-        parameters: {
-            query?: {
-                /** @description Render Markdown output if true (optional, default false) */
-                render_markdown?: boolean;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description Local file path */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ParseLocalFileRequest"];
-            };
-        };
-        responses: {
-            /** @description Parsed document with optional markdown */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ParsedDocResponseDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unsupported Media Type */
-            415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "file_parser.parse_local_markdown": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description Local file path */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ParseLocalFileRequest"];
-            };
-        };
-        responses: {
-            /** @description Markdown stream */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/markdown": string;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "file_parser.upload": {
-        parameters: {
-            query?: {
-                /** @description Render Markdown output if true (optional, default false) */
-                render_markdown?: boolean;
-                /** @description Optional original filename (used to determine file type if Content-Type is ambiguous) */
-                filename?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description Raw file bytes to parse */
-        requestBody: {
-            content: {
-                "application/octet-stream": string;
-            };
-        };
-        responses: {
-            /** @description Parsed document with optional markdown */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ParsedDocResponseDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unsupported Media Type */
-            415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "file_parser.upload_markdown": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description File to parse and stream as Markdown (expects field 'file' with file data) */
-        requestBody: {
-            content: {
-                "multipart/form-data": {
-                    /** Format: binary */
-                    file: string;
-                };
-            };
-        };
-        responses: {
-            /** @description Markdown stream */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/markdown": string;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unsupported Media Type */
-            415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
     "gear_orchestrator.list_gears": {
         parameters: {
             query?: never;
@@ -6444,171 +5809,6 @@ export interface operations {
             };
             /** @description Too Many Requests */
             429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "nodes_registry.list_nodes": {
-        parameters: {
-            query?: {
-                /** @description Include detailed system information and capabilities */
-                details?: string;
-                /** @description Force refresh syscap, ignoring cache (only applies when details=true) */
-                force_refresh?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description List of nodes */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NodeDto"][];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "nodes_registry.get_node": {
-        parameters: {
-            query?: {
-                /** @description Include detailed system information and capabilities */
-                details?: string;
-                /** @description Force refresh syscap, ignoring cache (only applies when details=true) */
-                force_refresh?: string;
-            };
-            header?: never;
-            path: {
-                /** @description Node UUID */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Node details */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NodeDto"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "nodes_registry.get_node_syscap": {
-        parameters: {
-            query?: {
-                /** @description Force refresh all syscap, ignoring cache and TTL */
-                force_refresh?: string;
-            };
-            header?: never;
-            path: {
-                /** @description Node UUID */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description System capabilities (merged) */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NodeSysCapDto"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "nodes_registry.get_node_sysinfo": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Node UUID */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description System information */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NodeSysInfoDto"];
-                };
-            };
-            /** @description Not Found */
-            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7520,7 +6720,7 @@ export interface operations {
                 plan_id?: string;
                 /** @description The branch whose plans define the universe. Absent means each repository's own default branch, and leaves every branch's executions in scope. */
                 branch?: string;
-                /** @description none, component, tag or platform. Defaults to none when absent; a present but empty value is rejected. */
+                /** @description none, component, tag or environment. Defaults to none when absent; a present but empty value is rejected. */
                 group_by?: string;
                 /** @description The component or tag to narrow to, matched case-insensitively. Blank narrows nothing. */
                 group_value?: string;
@@ -7656,7 +6856,7 @@ export interface operations {
                 days_heatmap?: number;
                 /** @description Points on the trend, and the flaky window. Defaults to 90, silently clamped to 7-365. */
                 days_trend?: number;
-                /** @description none, component, tag or platform. Defaults to none when absent; a present but empty value is rejected. */
+                /** @description none, component, tag or environment. Defaults to none when absent; a present but empty value is rejected. */
                 group_by?: string;
                 /** @description The component or tag to narrow to, matched case-insensitively. Blank narrows nothing. */
                 group_value?: string;
@@ -7735,7 +6935,7 @@ export interface operations {
                 days_heatmap?: number;
                 /** @description Points on the trend, and the flaky window. Defaults to 90, silently clamped to 7-365. */
                 days_trend?: number;
-                /** @description none, component, tag or platform. Defaults to none when absent; a present but empty value is rejected. */
+                /** @description none, component, tag or environment. Defaults to none when absent; a present but empty value is rejected. */
                 group_by?: string;
                 /** @description The component or tag to narrow to, matched case-insensitively. Blank narrows nothing. */
                 group_value?: string;
@@ -8631,6 +7831,8 @@ export interface operations {
             query?: {
                 /** @description Days of history for the daily trend. Defaults to 14, clamped to 3-90. */
                 days?: number;
+                /** @description Narrow every run-derived number to one product, through the run's target. Absent narrows nothing; a value that is not a UUID is a 400. */
+                product_id?: string;
             };
             header?: never;
             path?: never;
@@ -8714,268 +7916,6 @@ export interface operations {
             };
             /** @description Forbidden */
             403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "qa_insights.rebuild": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description The window to replay */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RebuildReq"];
-            };
-        };
-        responses: {
-            /** @description What the rebuild did */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RebuildOutcomeDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "qa_insights.file_jira_bugs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description The run to file against, and an optional test_name to narrow to */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FileJiraBugsReq"];
-            };
-        };
-        responses: {
-            /** @description One entry per test this call successfully filed or found a bug for */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JiraBugFilingDto"][];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "qa_insights.list_open_bugs": {
-        parameters: {
-            query?: {
-                /** @description The plan's repository. Required together with plan_path. */
-                repo_id?: string;
-                /** @description The plan's path within its repository. Required together with repo_id. */
-                plan_path?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The open bugs, narrowed to one plan when both query parameters are given */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JiraBugDto"][];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "qa_catalog.list_plans": {
-        parameters: {
-            query: {
-                /** @description Repository UUID */
-                repo_id: string;
-                /** @description Branch name */
-                branch: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Discovered plans */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PlanDto"][];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9474,6 +8414,268 @@ export interface operations {
             };
         };
     };
+    "qa_insights.rebuild": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The window to replay */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RebuildReq"];
+            };
+        };
+        responses: {
+            /** @description What the rebuild did */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RebuildOutcomeDto"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    "qa_insights.file_jira_bugs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The run to file against, and an optional test_name to narrow to */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileJiraBugsReq"];
+            };
+        };
+        responses: {
+            /** @description One entry per test this call successfully filed or found a bug for */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JiraBugFilingDto"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    "qa_insights.list_open_bugs": {
+        parameters: {
+            query?: {
+                /** @description The plan's repository. Required together with plan_path. */
+                repo_id?: string;
+                /** @description The plan's path within its repository. Required together with repo_id. */
+                plan_path?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The open bugs, narrowed to one plan when both query parameters are given */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JiraBugDto"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    "qa_catalog.list_plans": {
+        parameters: {
+            query: {
+                /** @description Repository UUID */
+                repo_id: string;
+                /** @description Branch name */
+                branch: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Discovered plans */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanDto"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     "qa_catalog.list_product_folders": {
         parameters: {
             query?: never;
@@ -9490,6 +8692,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProductFolderListDto"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    "qa_catalog.list_product_plugins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Registered product plugins and their field descriptors */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductPluginDto"][];
                 };
             };
             /** @description Unauthorized */
@@ -9780,15 +9029,15 @@ export interface operations {
     "qa_runs.list_queue": {
         parameters: {
             query?: {
-                /** @description Narrow to one platform's queue */
-                platform_id?: string;
-                /** @description Legacy page size; defaults to 200, clamped to 1-500. $top takes precedence. */
+                /** @description Narrow to one environment's queue */
+                environment_id?: string;
+                /** @description Bare page size; defaults to 200, clamped to 1-500. $top takes precedence. */
                 limit?: number;
                 /**
                  * @description OData v4 filter expression
                  *     - id: eq|ne|in
                  *     - run_id: eq|ne|in
-                 *     - platform_id: eq|ne|in
+                 *     - environment_id: eq|ne|in
                  *     - state: eq|ne|contains|startswith|endswith|in
                  *     - run_kind: eq|ne|contains|startswith|endswith|in
                  *     - source: eq|ne|contains|startswith|endswith|in
@@ -9804,8 +9053,8 @@ export interface operations {
                  *     - id desc
                  *     - run_id asc
                  *     - run_id desc
-                 *     - platform_id asc
-                 *     - platform_id desc
+                 *     - environment_id asc
+                 *     - environment_id desc
                  *     - state asc
                  *     - state desc
                  *     - run_kind asc
@@ -10028,7 +9277,7 @@ export interface operations {
                  *     - name: eq|ne|contains|startswith|endswith|in
                  *     - state: eq|ne|contains|startswith|endswith|in
                  *     - run_kind: eq|ne|contains|startswith|endswith|in
-                 *     - platform_id: eq|ne|in
+                 *     - environment_id: eq|ne|in
                  *     - source: eq|ne|contains|startswith|endswith|in
                  *     - schedule_id: eq|ne|in
                  *     - resolved_exclusive: eq|ne
@@ -10048,8 +9297,8 @@ export interface operations {
                  *     - state desc
                  *     - run_kind asc
                  *     - run_kind desc
-                 *     - platform_id asc
-                 *     - platform_id desc
+                 *     - environment_id asc
+                 *     - environment_id desc
                  *     - source asc
                  *     - source desc
                  *     - schedule_id asc
@@ -12420,760 +11669,6 @@ export interface operations {
             };
         };
     };
-    "resource_group.list_groups": {
-        parameters: {
-            query?: {
-                /** @description Maximum number of groups to return */
-                limit?: number;
-                /** @description Cursor for pagination */
-                cursor?: string;
-                /**
-                 * @description OData v4 filter expression
-                 *     - type: eq|ne|contains|startswith|endswith|in
-                 *     - hierarchy/parent_id: eq|ne|in
-                 *     - tenant_id: eq|ne|in
-                 *     - id: eq|ne|in
-                 *     - name: eq|ne|contains|startswith|endswith|in
-                 */
-                $filter?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Paginated list of resource groups */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Page_GroupDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "resource_group.create_group": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description Group creation data */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateGroupDto"];
-            };
-        };
-        responses: {
-            /** @description Created resource group */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GroupDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "resource_group.get_group": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Group UUID */
-                group_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Resource group found */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GroupDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "resource_group.update_group": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Group UUID */
-                group_id: string;
-            };
-            cookie?: never;
-        };
-        /** @description Group update data */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateGroupDto"];
-            };
-        };
-        responses: {
-            /** @description Updated resource group */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GroupDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "resource_group.delete_group": {
-        parameters: {
-            query?: {
-                /** @description Force cascade delete of subtree and memberships */
-                force?: boolean;
-            };
-            header?: never;
-            path: {
-                /** @description Group UUID */
-                group_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Group deleted successfully */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "resource_group.get_group_ancestors": {
-        parameters: {
-            query?: {
-                /** @description Maximum entries to return */
-                limit?: number;
-                /** @description Cursor for pagination */
-                cursor?: string;
-                /**
-                 * @description OData v4 filter expression
-                 *     - hierarchy/depth: eq|ne|gt|ge|lt|le|in
-                 *     - type: eq|ne|contains|startswith|endswith|in
-                 */
-                $filter?: string;
-            };
-            header?: never;
-            path: {
-                /** @description Reference group UUID */
-                group_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Paginated ancestors with relative depth */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Page_GroupWithDepthDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "resource_group.get_group_descendants": {
-        parameters: {
-            query?: {
-                /** @description Maximum entries to return */
-                limit?: number;
-                /** @description Cursor for pagination */
-                cursor?: string;
-                /**
-                 * @description OData v4 filter expression
-                 *     - hierarchy/depth: eq|ne|gt|ge|lt|le|in
-                 *     - type: eq|ne|contains|startswith|endswith|in
-                 */
-                $filter?: string;
-            };
-            header?: never;
-            path: {
-                /** @description Reference group UUID */
-                group_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Paginated descendants with relative depth */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Page_GroupWithDepthDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "resource_group.list_memberships": {
-        parameters: {
-            query?: {
-                /** @description Maximum number of memberships to return */
-                limit?: number;
-                /** @description Cursor for pagination */
-                cursor?: string;
-                /**
-                 * @description OData v4 filter expression
-                 *     - group_id: eq|ne|in
-                 *     - resource_type: eq|ne|contains|startswith|endswith|in
-                 *     - resource_id: eq|ne|contains|startswith|endswith|in
-                 */
-                $filter?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Paginated list of memberships */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Page_MembershipDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "resource_group.add_membership": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Group UUID */
-                group_id: string;
-                /** @description GTS type path of the resource type */
-                resource_type: string;
-                /** @description Resource identifier */
-                resource_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Membership created */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MembershipDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "resource_group.remove_membership": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Group UUID */
-                group_id: string;
-                /** @description GTS type path of the resource type */
-                resource_type: string;
-                /** @description Resource identifier */
-                resource_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Membership removed successfully */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": Record<string, never>;
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "simple_user_settings.get_settings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Settings retrieved */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SimpleUserSettingsDto"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "simple_user_settings.update_settings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description Settings update data */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateSimpleUserSettingsRequest"];
-            };
-        };
-        responses: {
-            /** @description Settings updated */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SimpleUserSettingsDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unprocessable Entity */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "simple_user_settings.patch_settings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description Settings patch data */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PatchSimpleUserSettingsRequest"];
-            };
-        };
-        responses: {
-            /** @description Settings patched */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SimpleUserSettingsDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unprocessable Entity */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
     "types_registry.list": {
         parameters: {
             query?: {
@@ -13338,6 +11833,33 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description Payload Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Too Many Requests */
             429: {
                 headers: {
@@ -13444,75 +11966,49 @@ export interface operations {
             };
         };
     };
-    "resource_group.list_types": {
+    "types_registry.submit_entities": {
         parameters: {
-            query?: {
-                /** @description Maximum number of types to return */
-                limit?: number;
-                /** @description Cursor for pagination */
-                cursor?: string;
-                /**
-                 * @description OData v4 filter expression
-                 *     - code: eq|ne|contains|startswith|endswith|in
-                 */
-                $filter?: string;
+            query?: never;
+            header: {
+                /** @description Caller-supplied key scoping the retry of this submission. A replay with the same body returns the same operation; a different body under the same key is a conflict. */
+                "Idempotency-Key": string;
             };
-            header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
-        responses: {
-            /** @description List of GTS types */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Page_TypeDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "resource_group.create_type": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description Type creation data */
+        /** @description Entities to admit */
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateTypeDto"];
+                "application/json": components["schemas"]["SubmitEntitiesRequest"];
             };
         };
         responses: {
-            /** @description Created type */
-            201: {
+            /** @description Replay of an operation that is already terminal */
+            200: {
                 headers: {
+                    /** @description Whether this submission replayed an existing operation */
+                    "Idempotency-Replayed"?: boolean;
+                    /** @description URI of the admission operation */
+                    Location?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TypeDto"];
+                    "application/json": components["schemas"]["OperationAcceptedDto"];
+                };
+            };
+            /** @description Accepted; poll the operation at the returned Location */
+            202: {
+                headers: {
+                    /** @description Whether this submission replayed an existing operation */
+                    "Idempotency-Replayed"?: boolean;
+                    /** @description URI of the admission operation */
+                    Location?: string;
+                    /** @description Suggested delay in seconds before polling the operation */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperationAcceptedDto"];
                 };
             };
             /** @description Bad Request */
@@ -13524,8 +12020,8 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Conflict */
-            409: {
+            /** @description Unauthorized */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13533,36 +12029,13 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Internal Server Error */
-            500: {
+            /** @description Forbidden */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "resource_group.get_type": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description GTS type path */
-                code: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Type found */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TypeDto"];
                 };
             };
             /** @description Not Found */
@@ -13574,6 +12047,51 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Payload Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Internal Server Error */
             500: {
                 headers: {
@@ -13583,32 +12101,38 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    /** @description Suggested delay in seconds before repeating the submission under the same Idempotency-Key; present where the family-lock budget expired */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
         };
     };
-    "resource_group.update_type": {
+    "types_registry.get_entity": {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /** @description GTS type path */
-                code: string;
+                /** @description A GTS identifier (e.g. gts.acme.core.events.user_created.v1~) or a Registry Reference UUID */
+                entity_key: string;
             };
             cookie?: never;
         };
-        /** @description Type update data */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateTypeDto"];
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description Updated type */
+            /** @description The requested entity */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TypeDto"];
+                    "application/json": components["schemas"]["EntityDto"];
                 };
             };
             /** @description Bad Request */
@@ -13620,6 +12144,24 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not Found */
             404: {
                 headers: {
@@ -13638,8 +12180,26 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13649,25 +12209,52 @@ export interface operations {
             };
         };
     };
-    "resource_group.delete_type": {
+    "types_registry.get_operation": {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /** @description GTS type path */
-                code: string;
+                /** @description The operation UUID returned by a submission */
+                operation_id: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Type deleted successfully */
-            204: {
+            /** @description The operation */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Record<string, never>;
+                    "application/json": components["schemas"]["OperationDto"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Not Found */
@@ -13688,8 +12275,26 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

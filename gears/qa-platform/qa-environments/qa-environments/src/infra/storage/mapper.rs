@@ -245,7 +245,7 @@ pub fn lease_to_state(m: &environment_lease::Model) -> Result<LeaseState, Domain
     let holders: Vec<Uuid> = serde_json::from_value(m.holders.clone()).map_err(|e| {
         DomainError::Internal(format!(
             "corrupt lease row: holders is not a JSON array of UUIDs for \
-             platform_id (the environment's id)={}: {e}",
+             environment_id (the environment's id)={}: {e}",
             m.environment_id
         ))
     })?;
@@ -255,7 +255,7 @@ pub fn lease_to_state(m: &environment_lease::Model) -> Result<LeaseState, Domain
         ("exclusive", [holder]) => Ok(LeaseState::HeldExclusive { holder: *holder }),
         (mode, hs) => Err(DomainError::Internal(format!(
             "corrupt lease row: unknown mode {mode:?} with {} holder(s) for \
-             platform_id (the environment's id)={}",
+             environment_id (the environment's id)={}",
             hs.len(),
             m.environment_id
         ))),

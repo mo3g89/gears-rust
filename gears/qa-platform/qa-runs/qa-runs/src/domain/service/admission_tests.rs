@@ -157,7 +157,7 @@ pub(in crate::domain::service) mod fakes {
     /// A run, in whatever state a test needs.
     pub(in crate::domain::service) fn run_fixture(
         id: Uuid,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
         exclusive: bool,
         state: RunState,
     ) -> Run {
@@ -168,7 +168,7 @@ pub(in crate::domain::service) mod fakes {
                 repo_id: REPO,
                 path: "tests/plan.yaml".to_owned(),
             },
-            platform_id,
+            environment_id,
             test_version: Some("main".to_owned()),
             app_version: Some("7.1".to_owned()),
             app_build: None,
@@ -198,11 +198,11 @@ pub(in crate::domain::service) mod fakes {
         id: Uuid,
         tenant_id: Uuid,
         run_id: Uuid,
-        platform_id: Uuid,
+        environment_id: Uuid,
         exclusive: bool,
         state: QueueState,
     ) -> QueueRowRecord {
-        row_aged(id, tenant_id, run_id, platform_id, exclusive, state, 0)
+        row_aged(id, tenant_id, run_id, environment_id, exclusive, state, 0)
     }
 
     /// The same, `age_seconds` in the past.
@@ -214,7 +214,7 @@ pub(in crate::domain::service) mod fakes {
         id: Uuid,
         tenant_id: Uuid,
         run_id: Uuid,
-        platform_id: Uuid,
+        environment_id: Uuid,
         exclusive: bool,
         state: QueueState,
         age_seconds: i64,
@@ -224,7 +224,7 @@ pub(in crate::domain::service) mod fakes {
             id,
             tenant_id,
             run_id,
-            platform_id,
+            environment_id,
             run_kind: RunKind::Plan,
             source: RunSource::Manual,
             exclusive,
@@ -944,7 +944,7 @@ pub(in crate::domain::service) mod fakes {
                 id: Uuid::new_v4(),
                 name: new.name,
                 target: new.target,
-                platform_id: new.platform_id,
+                environment_id: new.environment_id,
                 test_version: new.test_version,
                 app_version: new.app_version,
                 app_build: new.app_build,
@@ -1543,7 +1543,7 @@ pub(in crate::domain::service) mod fakes {
                 id: Uuid::new_v4(),
                 tenant_id,
                 run_id: row.run.get(),
-                platform_id: row.platform_id,
+                environment_id: row.environment_id,
                 run_kind: row.run_kind,
                 source: row.source,
                 exclusive: row.exclusive,
@@ -1588,13 +1588,13 @@ pub(in crate::domain::service) mod fakes {
             &self,
             _runner: &C,
             scope: &AccessScope,
-            platform_id: Uuid,
+            environment_id: Uuid,
         ) -> Result<usize, DomainError> {
             assert_scope_is_for(scope, "qa.queue_entry", "queued_depth");
             let depth = self
                 .visible(scope)
                 .iter()
-                .filter(|row| row.platform_id == platform_id && row.state == QueueState::Queued)
+                .filter(|row| row.environment_id == environment_id && row.state == QueueState::Queued)
                 .count();
             tokio::task::yield_now().await;
             Ok(depth)
@@ -1604,13 +1604,13 @@ pub(in crate::domain::service) mod fakes {
             &self,
             _runner: &C,
             scope: &AccessScope,
-            platform_id: Uuid,
+            environment_id: Uuid,
         ) -> Result<Vec<QueuedRow>, DomainError> {
             assert_scope_is_for(scope, "qa.queue_entry", "queued_rows");
             let mut rows: Vec<QueueRowRecord> = self
                 .visible(scope)
                 .into_iter()
-                .filter(|row| row.platform_id == platform_id && row.state == QueueState::Queued)
+                .filter(|row| row.environment_id == environment_id && row.state == QueueState::Queued)
                 .collect();
             // `ORDER BY enqueued_at ASC, id ASC` (`run_queue.rs:243-257`).
             rows.sort_by(|a, b| a.enqueued_at.cmp(&b.enqueued_at).then(a.id.cmp(&b.id)));
@@ -1628,7 +1628,7 @@ pub(in crate::domain::service) mod fakes {
             &self,
             _runner: &C,
             scope: &AccessScope,
-            platform_id: Uuid,
+            environment_id: Uuid,
         ) -> Result<Vec<ClaimRow>, DomainError> {
             assert_scope_is_for(scope, "qa.queue_entry", "claims_for_platform");
             if *self.hide_claims.lock().unwrap() {
@@ -1638,7 +1638,7 @@ pub(in crate::domain::service) mod fakes {
                 .visible(scope)
                 .into_iter()
                 .filter(|row| {
-                    row.platform_id == platform_id
+                    row.environment_id == environment_id
                         && matches!(row.state, QueueState::Dispatching | QueueState::Running)
                 })
                 .map(|row| ClaimRow {
@@ -1661,19 +1661,19 @@ pub(in crate::domain::service) mod fakes {
                     continue;
                 }
                 let entry = QueuedPlatform {
-                    platform_id: row.platform_id,
+                    environment_id: row.environment_id,
                     tenant_id: row.tenant_id,
                 };
                 if !out.iter().any(|seen| {
-                    seen.platform_id == entry.platform_id && seen.tenant_id == entry.tenant_id
+                    seen.environment_id == entry.environment_id && seen.tenant_id == entry.tenant_id
                 }) {
                     out.push(entry);
                 }
             }
             // **Deliberately unsorted, and this comment is the point.** The real
-            // query is a `GROUP BY platform_id, tenant_id` with no `ORDER BY`
+            // query is a `GROUP BY environment_id, tenant_id` with no `ORDER BY`
             // (`queue_sea_repo`), so drain order is planner-defined. An earlier
-            // version of this double sorted by `platform_id`, which handed every
+            // version of this double sorted by `environment_id`, which handed every
             // drain test a determinism production does not have — so neither the
             // order-dependence of the threaded budget nor cross-tenant competition
             // for it was observable. Insertion order here is the row order the
@@ -1771,20 +1771,20 @@ pub(in crate::domain::service) mod fakes {
             ))
         }
 
-        /// Scope plus the `platform_id` narrowing, newest first. The `OData`
+        /// Scope plus the `environment_id` narrowing, newest first. The `OData`
         /// query is ignored - see `FakeRuns::list_page`.
         async fn list_page<C: DBRunner>(
             &self,
             _runner: &C,
             scope: &AccessScope,
-            platform_id: Option<Uuid>,
+            environment_id: Option<Uuid>,
             _query: &ODataQuery,
         ) -> Result<Page<QueueRowRecord>, DomainError> {
             assert_scope_is_for(scope, "qa.queue_entry", "list_page");
             let mut rows: Vec<QueueRowRecord> = self
                 .visible(scope)
                 .into_iter()
-                .filter(|row| platform_id.is_none_or(|id| row.platform_id == id))
+                .filter(|row| environment_id.is_none_or(|id| row.environment_id == id))
                 .collect();
             rows.sort_by(|a, b| b.enqueued_at.cmp(&a.enqueued_at).then(b.id.cmp(&a.id)));
             Ok(unfiltered_page(rows))
@@ -1812,7 +1812,7 @@ pub(in crate::domain::service) mod fakes {
                     id: row.id,
                     tenant_id: row.tenant_id,
                     run_id: row.run_id,
-                    platform_id: row.platform_id,
+                    environment_id: row.environment_id,
                     // `dispatched_at` falling back to `enqueued_at`
                     // (`run_queue.rs:341-346`).
                     age_basis: row.dispatched_at.unwrap_or(row.enqueued_at),
@@ -1850,7 +1850,7 @@ pub(in crate::domain::service) mod fakes {
                     id: row.id,
                     tenant_id: row.tenant_id,
                     run_id: row.run_id,
-                    platform_id: row.platform_id,
+                    environment_id: row.environment_id,
                     exclusive: row.exclusive,
                     enqueued_at: row.enqueued_at,
                 });
@@ -1891,14 +1891,14 @@ pub(in crate::domain::service) mod fakes {
             &self,
             _runner: &C,
             scope: &AccessScope,
-            platform_id: Option<Uuid>,
+            environment_id: Option<Uuid>,
             limit: u64,
         ) -> Result<Vec<QueueRowRecord>, DomainError> {
             assert_scope_is_for(scope, "qa.queue_entry", "list_for_read");
             let mut rows: Vec<QueueRowRecord> = self
                 .visible(scope)
                 .into_iter()
-                .filter(|row| platform_id.is_none_or(|id| row.platform_id == id))
+                .filter(|row| environment_id.is_none_or(|id| row.environment_id == id))
                 .collect();
             rows.sort_by(|a, b| b.enqueued_at.cmp(&a.enqueued_at).then(b.id.cmp(&a.id)));
             let window = usize::try_from(limit.min(crate::domain::repos::MAX_QUEUE_READ_LIMIT))
@@ -1919,7 +1919,7 @@ pub(in crate::domain::service) mod fakes {
                 .into_iter()
                 .find(|row| row.id == id)
                 .map(|row| RowStatus {
-                    platform_id: row.platform_id,
+                    environment_id: row.environment_id,
                     state: row.state,
                 }))
         }
@@ -1983,9 +1983,9 @@ pub(in crate::domain::service) mod fakes {
             }
         }
 
-        pub(in crate::domain::service) fn holding(platform_id: Uuid, state: LeaseState) -> Self {
+        pub(in crate::domain::service) fn holding(environment_id: Uuid, state: LeaseState) -> Self {
             Self {
-                leases: Mutex::new(vec![(platform_id, state)]),
+                leases: Mutex::new(vec![(environment_id, state)]),
                 platform_tenants: vec![OWNER_TENANT, OTHER_TENANT],
                 ..Self::default()
             }
@@ -2157,7 +2157,7 @@ pub(in crate::domain::service) mod fakes {
         async fn list_variables(
             &self,
             ctx: &SecurityContext,
-            _platform_id: Option<Uuid>,
+            _environment_id: Option<Uuid>,
         ) -> Result<Vec<Variable>, QaEnvironmentsError> {
             self.tenants_seen
                 .lock()
@@ -2185,7 +2185,7 @@ pub(in crate::domain::service) mod fakes {
         async fn acquire_lease(
             &self,
             ctx: &SecurityContext,
-            platform_id: Uuid,
+            environment_id: Uuid,
             run_id: Uuid,
             mode: LeaseMode,
         ) -> Result<AcquireOutcome, QaEnvironmentsError> {
@@ -2199,7 +2199,7 @@ pub(in crate::domain::service) mod fakes {
             self.acquires
                 .lock()
                 .unwrap()
-                .push((platform_id, run_id, mode));
+                .push((environment_id, run_id, mode));
             if *self.busy_on_acquire.lock().unwrap() {
                 return Ok(AcquireOutcome::Busy {
                     current: LeaseState::HeldExclusive {
@@ -2210,7 +2210,7 @@ pub(in crate::domain::service) mod fakes {
             let mut leases = self.leases.lock().unwrap();
             let current = leases
                 .iter()
-                .find(|(id, _)| *id == platform_id)
+                .find(|(id, _)| *id == environment_id)
                 .map_or(LeaseState::Free, |(_, state)| state.clone());
             // The compare-and-swap, modelled rather than assumed. A double that
             // granted every request would make the CAS invisible, and the CAS is
@@ -2260,22 +2260,22 @@ pub(in crate::domain::service) mod fakes {
                     },
                 },
             };
-            leases.retain(|(id, _)| *id != platform_id);
-            leases.push((platform_id, state));
+            leases.retain(|(id, _)| *id != environment_id);
+            leases.push((environment_id, state));
             Ok(AcquireOutcome::Acquired)
         }
 
         async fn release_lease(
             &self,
             ctx: &SecurityContext,
-            platform_id: Uuid,
+            environment_id: Uuid,
             run_id: Uuid,
         ) -> Result<LeaseState, QaEnvironmentsError> {
             self.tenants_seen
                 .lock()
                 .unwrap()
                 .push(ctx.subject_tenant_id());
-            self.releases.lock().unwrap().push((platform_id, run_id));
+            self.releases.lock().unwrap().push((environment_id, run_id));
             // **Mirrors `decide_release`** (`qa-environments/src/domain/lease.rs:57-70`):
             // idempotent for a run that does not hold the lease, and removing only
             // *this* holder from a parallel hold. The first version dropped the whole
@@ -2285,7 +2285,7 @@ pub(in crate::domain::service) mod fakes {
             let mut leases = self.leases.lock().unwrap();
             let current = leases
                 .iter()
-                .find(|(id, _)| *id == platform_id)
+                .find(|(id, _)| *id == environment_id)
                 .map_or(LeaseState::Free, |(_, state)| state.clone());
             let next = match &current {
                 LeaseState::Free => LeaseState::Free,
@@ -2303,9 +2303,9 @@ pub(in crate::domain::service) mod fakes {
                     }
                 }
             };
-            leases.retain(|(id, _)| *id != platform_id);
+            leases.retain(|(id, _)| *id != environment_id);
             if next != LeaseState::Free {
-                leases.push((platform_id, next.clone()));
+                leases.push((environment_id, next.clone()));
             }
             Ok(next)
         }
@@ -2313,7 +2313,7 @@ pub(in crate::domain::service) mod fakes {
         async fn get_lease(
             &self,
             ctx: &SecurityContext,
-            platform_id: Uuid,
+            environment_id: Uuid,
         ) -> Result<LeaseState, QaEnvironmentsError> {
             self.tenants_seen
                 .lock()
@@ -2327,7 +2327,7 @@ pub(in crate::domain::service) mod fakes {
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|(id, _)| *id == platform_id)
+                .find(|(id, _)| *id == environment_id)
                 .map_or(LeaseState::Free, |(_, state)| state.clone()))
         }
     }

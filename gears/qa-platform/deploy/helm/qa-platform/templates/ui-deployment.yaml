@@ -1,12 +1,8 @@
-{{/* Carries files/ui-tls/tls.conf verbatim (copied into this chart's
-     files/ui-tls/ so .Files.Get can reach it -- Helm's .Files is scoped to
-     the chart directory and cannot read files outside it via ../, the same
-     constraint certs-scripts-configmap.yaml and postgres-initdb-configmap.yaml
-     already work around). Kept byte-identical to the compose original by
-     deploy/helm/tests/test_chart_file_sync.py's fourth table row. Grouped
-     into this file, not its own, because the Deployment below is its only
-     consumer -- same shape as certs-job.yaml grouping its ServiceAccount,
-     Role, RoleBinding and Job together. */}}
+{{/* Carries files/ui-tls/tls.conf, read at render time with .Files.Get. The
+     file under files/ IS the config -- there is no second copy to keep in
+     sync; edit it there. Grouped into this file, not its own, because the
+     Deployment below is its only consumer -- same shape as certs-job.yaml
+     grouping its ServiceAccount, Role, RoleBinding and Job together. */}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -40,8 +36,8 @@ data:
        - tls-conf   -> /etc/nginx/tls-conf   (listen 443 ssl + cert paths)
        - extra-conf -> /etc/nginx/extra-conf (the Keycloak location block)
      Neither directory exists in the image; an nginx `include` of a wildcard
-     that matches nothing is legal and silent, which is exactly how the
-     plain-compose stack (neither ConfigMap mounted) keeps working unchanged.
+     that matches nothing is legal and silent, so the image still runs
+     correctly with neither ConfigMap mounted.
 
      The Secret mount is deliberately NARROWED with `items`. qa-platform-tls
      also holds ca.key (the dev CA's private key) and the keycloak.crt/key
@@ -49,9 +45,9 @@ data:
      internet-facing pod, and `readOnly: true` on the volume only stops
      writes to the mount -- it does nothing to stop something inside the
      container reading a key that was placed there. `items` is what keeps
-     ca.key out of this pod entirely, the same property
-     gears-deployment.yaml's tls-ca mount and the compose stack's
-     volume.subpath both rely on for their own single-key mounts. */}}
+     ca.key out of this pod entirely -- the same property
+     gears-deployment.yaml's tls-ca mount relies on for its own single-key
+     mount. */}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

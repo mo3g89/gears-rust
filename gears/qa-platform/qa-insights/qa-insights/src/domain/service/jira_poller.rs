@@ -90,7 +90,7 @@
 //! # The branch, resolved once, is the whole point of this module's careful
 //! # ordering
 //!
-//! [`JiraPollerService::rerun`] resolves `bug.platform_id`'s default-branch
+//! [`JiraPollerService::rerun`] resolves `bug.environment_id`'s default-branch
 //! override **exactly once**, into a local `branch`, and passes that same
 //! value to both [`JiraPollerService::find_plan_test_file`] (the lookup) and
 //! [`RunsLauncher::launch_test`] (the launch). Resolving it twice — once for
@@ -458,7 +458,7 @@ where
 
     /// Launch the auto-rerun through the normal admission path.
     ///
-    /// Resolves `bug.platform_id`'s default branch **once** and reuses that
+    /// Resolves `bug.environment_id`'s default branch **once** and reuses that
     /// same value for both [`Self::find_plan_test_file`] and the launch — see
     /// this module's header for why resolving it twice, or resolving the
     /// lookup against a different default, silently drops the rerun.
@@ -486,7 +486,7 @@ where
         self.launch(ctx, bug, &test_file, branch.as_deref()).await
     }
 
-    /// `bug.platform_id`'s default-branch override, or `None` when there is
+    /// `bug.environment_id`'s default-branch override, or `None` when there is
     /// no platform to ask — [`RunsLauncher::launch_test`]'s own doc calls
     /// this port's `None` "no override", which is legacy's no-branch-selected
     /// shape and not a failure.
@@ -495,15 +495,15 @@ where
     /// the read itself failed, already logged, and the caller should give up
     /// on this rerun rather than treat a failed lookup as "no override".
     async fn resolve_branch(&self, ctx: &SecurityContext, bug: &JiraBug) -> Option<Option<String>> {
-        let Some(platform_id) = bug.platform_id else {
+        let Some(environment_id) = bug.environment_id else {
             return Some(None);
         };
-        match self.platforms.default_branch(ctx, platform_id).await {
+        match self.platforms.default_branch(ctx, environment_id).await {
             Ok(branch) => Some(branch),
             Err(error) => {
                 tracing::warn!(
                     jira_key = %bug.jira_key,
-                    %platform_id,
+                    %environment_id,
                     %error,
                     "failed to resolve the platform's default branch; the bug is already \
                      resolved, so this rerun will not be retried",
@@ -542,7 +542,7 @@ where
                 bug.repo_id,
                 &bug.plan_path,
                 test_file,
-                bug.platform_id,
+                bug.environment_id,
                 branch,
             )
             .await

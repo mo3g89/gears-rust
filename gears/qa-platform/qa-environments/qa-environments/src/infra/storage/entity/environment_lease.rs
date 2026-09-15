@@ -18,12 +18,12 @@ pub struct Model {
     /// primary key rather than a surrogate `id` (see
     /// `m20260812_000001_initial`'s comment on the table).
     ///
-    /// **The physical column is still `platform_id`, and this attribute is what
+    /// **The physical column is still `environment_id`, and this attribute is what
     /// keeps it that way — do not delete it as redundant.** The aggregate was
     /// renamed `TargetPlatform` → `Environment` (spec D5) and this field
     /// follows, but `m20260903_000010_rename_platform_tables` renames only the
     /// three *tables*: renaming a column is a behaviour change, three further
-    /// gears own `platform_id` columns with no migration scheduled for them,
+    /// gears own `environment_id` columns with no migration scheduled for them,
     /// and the plan defers column rewrites to the later expand/contract
     /// migrations that already touch these columns. Without `column_name` here
     /// `SeaORM` would derive the column from the field and emit
@@ -35,7 +35,6 @@ pub struct Model {
     /// (`Column::EnvironmentId`), not the physical column, so it renames with
     /// the field.
     #[sea_orm(primary_key, auto_increment = false)]
-    #[sea_orm(column_name = "platform_id")]
     pub environment_id: Uuid,
     pub tenant_id: Uuid,
     /// "free" | "parallel" | "exclusive" — denormalized from holders for indexing/display.

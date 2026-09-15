@@ -10,7 +10,7 @@
 #
 # WHO RUNS THIS, AND WHEN. An operator, on the k3s node itself (both steps need
 # to be local: the Docker daemon and containerd are both on that host), once
-# per change to anything under deploy/runner/. `deploy/remote/sync.sh --argo`
+# per change to anything under deploy/runner/. `deploy/remote/deploy-k8s.sh`
 # runs it on the remote as part of a deploy. It is not idempotent in the sense
 # of being free -- it rebuilds -- but re-running it is safe and layer-cached.
 #

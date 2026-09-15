@@ -1,48 +1,36 @@
-# Shared front end for gears/qa-platform/deploy/remote/*.sh drivers --
-# sync.sh (the docker-compose stack) and deploy-k8s.sh (the k3s/Helm stack).
-# SOURCED, not executed (`source lib.sh` / `. lib.sh`); it defines functions
-# and a handful of arrays/defaults and runs nothing on its own.
+# Shared front end for gears/qa-platform/deploy/remote/*.sh -- deploy-k8s.sh
+# and verify-k8s.sh. SOURCED, not executed (`source lib.sh` / `. lib.sh`); it
+# defines functions and a handful of arrays/defaults and runs nothing on its
+# own.
 #
-# WHAT LIVES HERE, and why it is safe to share between two drivers whose
-# back ends (compose vs. Helm) have nothing in common: everything below is
-# about REACHING the remote host and proving a REMOTE_PATH mirror is safe to
-# rsync into -- neither of which depends on what gets deployed once the
-# mirror exists. It was extracted out of sync.sh (Task 3-10's only proven
-# deploy path) verbatim where possible, specifically so sync.sh's own
-# behaviour does not change by one byte; see that script's own comments for
-# the reasoning behind each piece, which is not repeated here.
+# WHAT LIVES HERE: everything about REACHING the remote host and proving a
+# REMOTE_PATH mirror is safe to rsync into -- neither of which depends on what
+# gets deployed once the mirror exists. That separation is why this is a
+# library and not part of deploy-k8s.sh.
 #
-# THE CALLING CONTRACT for remote_sh / remote_sh_expect / ssh_ro_script:
-# unlike the single-script version this was extracted from (which closed
-# over sync.sh's own eight compose-specific globals -- PUBLIC_HOST, MARKER,
-# POSTGRES_HOST_IP, PUBLIC_ISSUER_ORIGIN, PUBLIC_UI_ORIGIN, COMPOSE_FILE_LIST,
-# SMOKE_TERMINAL_TIMEOUT, REMOTE_PATH -- baked into every call), these three
-# functions now forward EXPLICIT positional arguments: whatever the caller
-# passes after the label (and, for remote_sh_expect, the sentinel) becomes
-# the remote script's "$1", "$2", ... A caller with no values to forward
-# (the docker-install body below, for instance) simply passes none. This is
-# what lets deploy-k8s.sh use the same three functions with its own,
-# unrelated set of values (REMOTE_PATH, PUBLIC_ORIGIN, IMAGE_TAG, ...)
-# without adopting sync.sh's compose vocabulary.
+# THE CALLING CONTRACT for remote_sh / remote_sh_expect / ssh_ro_script: these
+# three forward EXPLICIT positional arguments -- whatever the caller passes
+# after the label (and, for remote_sh_expect, the sentinel) becomes the remote
+# script's "$1", "$2", ... A caller with no values to forward (the
+# docker-install body below, for instance) simply passes none. They close over
+# no caller globals, deliberately: an earlier single-script version baked eight
+# of them into every call, and that is what made the code impossible to reuse.
 #
 # THE CALLER MUST HAVE SET, before calling anything below: REMOTE_TARGET
 # (ssh destination), REMOTE_PATH (mirror directory, used only in die()
 # messages here), and DRY_RUN (true/false). preflight_disk_space and
-# preflight_rsync_path_guard also read MIN_DOCKER_GIB / MIN_PATH_GIB, with
-# the same defaults sync.sh has always used, applied here so a caller that
-# does not care can leave them unset.
+# preflight_rsync_path_guard also read MIN_DOCKER_GIB / MIN_PATH_GIB, applied
+# here so a caller that does not care can leave them unset.
 
-# A floor, not a measurement -- see sync.sh's own comment on this number for
-# the derivation. Overridable because it is a guess, and shared so both
-# drivers guard against the same cold-build cost.
+# A floor, not a measurement: it is what a cold `docker build` of the gears
+# image plus its layers has been observed to need, rounded up. Overridable
+# because it is a guess.
 MIN_DOCKER_GIB="${MIN_DOCKER_GIB:-40}"
 MIN_PATH_GIB="${MIN_PATH_GIB:-2}"
 
-# Written into REMOTE_PATH so a later run -- by either driver -- can
-# recognise its own work before running rsync --delete. Shared between
-# sync.sh and deploy-k8s.sh on purpose: both mirror the SAME repository into
-# the SAME kind of directory, and a mirror one of them created is exactly as
-# safe for the other to rsync --delete into.
+# Written into REMOTE_PATH so a later run can recognise its own work before
+# running rsync --delete. A directory without this marker is never deleted
+# into -- see preflight_rsync_path_guard.
 MARKER="${MARKER:-.gears-rust-remote-sync}"
 
 # Batch mode is not optional: without it a host that has lost its key prompts
@@ -53,18 +41,16 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT:-10}")
 
 # The repo's own .dockerignore set (target, **/target, *.rlib, .venv,
 # **/__pycache__, *.pyc, node_modules, dist, .build, .git, .gitignore,
-# .github), proven sufficient because the local `docker compose build` /
-# `docker build` succeed with exactly these paths absent from the build
-# context -- including .git, so neither build can depend on git metadata.
+# .github), proven sufficient because `docker build` succeeds with exactly
+# these paths absent from the build context -- including .git, so no build can
+# depend on git metadata.
 #
 # Bare names (no slash) match at any depth in rsync, so `target` alone
 # already covers `**/target`; both are listed to keep this set diffable
 # against .dockerignore.
 #
-# COMPOSE-SPECIFIC EXCLUDES ARE NOT HERE. sync.sh additionally excludes its
-# own generated compose `.env` and `.generated` directory; that is a
-# compose-only concern (deploy-k8s.sh never writes either) and stays in
-# sync.sh, appended to this array rather than folded into it.
+# A DRIVER WITH ITS OWN remote-only generated state appends to this array
+# rather than folding the path in here.
 COMMON_RSYNC_EXCLUDES=(
     target "**/target" "*.rlib"
     .venv "**/.venv" "**/__pycache__" "*.pyc"
@@ -73,8 +59,8 @@ COMMON_RSYNC_EXCLUDES=(
 )
 
 # ---------------------------------------------------------------- helpers --
-# PROG_NAME is the caller's own error-message prefix (sync.sh uses "sync",
-# deploy-k8s.sh uses "deploy-k8s"), set by the caller before sourcing this
+# PROG_NAME is the caller's own error-message prefix (deploy-k8s.sh uses
+# "deploy-k8s"), set by the caller before sourcing this
 # file or before the first die()/step() call. A plain BASH_SOURCE[1] lookup
 # would not work here: die() is called both directly by the caller AND from
 # inside this file's own preflight_* functions, and in the latter case
@@ -136,11 +122,11 @@ remote_sh() {
 # WHY THIS EXISTS, and it is a bug that already happened rather than a
 # precaution. `remote_sh` pipes its body into `bash -s` on the remote, so the
 # script IS the remote shell's stdin -- and a command that forwards its own
-# stdin (`docker compose exec -T` without `</dev/null` is the one measured
-# here) reads the rest of the script and throws it away. Measured
-# 2026-08-27 against this exact stack: a body whose second line was
-# `docker compose exec -T gears cat .../ca.crt` printed line A, copied the
-# certificate, and then EXITED 0 without running lines B and C. The whole
+# stdin (a container `exec` without `</dev/null` is the one measured here)
+# reads the rest of the script and throws it away. Measured 2026-08-27 against
+# this exact stack: a body whose second line exec'd into a container to `cat` a
+# CA certificate printed line A, copied the certificate, and then EXITED 0
+# without running lines B and C. The whole
 # VERIFY block after that -- seven checks -- had been silently skipped, and
 # the deploy reported success.
 #
@@ -201,17 +187,13 @@ preflight_ssh_reachable() {
 
 # Preflight: the docker ENGINE on the remote, installed if absent.
 #
-# DOCKER ONLY -- deliberately NOT `docker compose`. There is no registry in
-# this deployment: deploy-k8s.sh builds each image with `docker build` and
-# hands it to the node's containerd with `docker save | ctr images import -`,
-# so the engine is a hard requirement. The compose CLI plugin is not, and this
-# function must never ask for it again. It once did, because sync.sh -- the
-# compose back end that shared this preflight -- really ran `docker compose`,
-# and installing both in one idempotent step left a host ready for either
-# driver. sync.sh is gone; deploy-k8s.sh is the only caller left and never
-# invokes compose (its header forbids it). All the shared check bought after
-# that was a node fully ready for the Helm stack failing preflight 2/8 over a
-# plugin nothing calls, then being sent to a package manager it may not have.
+# THE DOCKER ENGINE ONLY, and no CLI plugin. There is no registry in this
+# deployment: deploy-k8s.sh builds each image with `docker build` and hands it
+# to the node's containerd with `docker save | ctr images import -`, so the
+# engine is a hard requirement. Nothing else is. This check once also demanded
+# a CLI plugin that no caller invokes, which failed preflight on nodes that
+# were otherwise fully ready -- and then sent them to a package manager they
+# may not have. Do not add one back.
 preflight_docker() {
     local label="$1"
     step "$label"
@@ -229,7 +211,7 @@ fi
 # install the wrong thing and report success; naming the requirement is more
 # useful than that.
 if ! command -v dnf >/dev/null 2>&1; then
-    echo "install: no dnf on this host -- install Docker Engine yourself, then re-run. Nothing else is required (no compose plugin, no Rust toolchain)." >&2
+    echo "install: no dnf on this host -- install Docker Engine yourself, then re-run. Nothing else is required (no Rust toolchain, no CLI plugins)." >&2
     exit 1
 fi
 dnf -y install dnf-plugins-core

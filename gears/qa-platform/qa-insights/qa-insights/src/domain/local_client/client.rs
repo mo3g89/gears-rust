@@ -211,7 +211,7 @@ mod tests {
             repo_id,
             plan_path: plan_path.to_owned(),
             app_version: None,
-            platform_id: None,
+            environment_id: None,
             summary: format!("{test_name} is failing"),
         }
     }

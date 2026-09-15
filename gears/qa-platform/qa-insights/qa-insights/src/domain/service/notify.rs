@@ -30,7 +30,7 @@
 //! `product_key` stay `None` — not a stand-in, but this context's honest
 //! answer: `product_key` has no equivalent in this architecture at all
 //! (`domain::notify::routing`'s header records the removal, VHP-319), and
-//! resolving `platform_id` to a display name needs
+//! resolving `environment_id` to a display name needs
 //! [`crate::domain::ports::EnvironmentReader`], which nothing wires into this
 //! service — [`render::render_run_completed`]'s own `display_value` already
 //! renders an absent field as `"-"`, which is what legacy shows for a field
@@ -435,7 +435,7 @@ fn plan_id_for_target(target: &qa_runs_sdk::RunTarget) -> String {
 /// `platform` and `product_key` are `None` — this module's header,
 /// "R104: `notify_run_completed` resolves a real run", says why that is an
 /// honest absence and not a stand-in: `product_key` has no equivalent in
-/// this architecture, and `platform_id` is not resolved to a display name
+/// this architecture, and `environment_id` is not resolved to a display name
 /// here because doing so needs [`crate::domain::ports::EnvironmentReader`],
 /// which nothing wires into this service.
 fn run_completed_render_context(run: &Run, results: &[RunTestResult]) -> RunCompletedRenderContext {

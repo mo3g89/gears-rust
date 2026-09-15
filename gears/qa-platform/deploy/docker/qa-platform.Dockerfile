@@ -1,9 +1,9 @@
-# Multi-stage build for the qa-platform compose stack's gears server.
+# Multi-stage build for the qa-platform gears server.
 #
 # Modeled on testing/docker/cyberware.Dockerfile: same pinned builder image,
 # same protobuf toolchain, same workspace copies. It differs only in which
 # binary/features get built and in the runtime stage's config + entrypoint,
-# which this stack needs to point the server at Postgres inside compose
+# which this stack needs to point the server at a deployment's own Postgres
 # (see gears/qa-platform/deploy/docker/entrypoint.sh for why that can't be done via `${VAR}`
 # expansion in the config file itself).
 
@@ -43,22 +43,21 @@ FROM rust:1.95.0-bookworm@sha256:6bb82db0878825e157664188b319c875de4f1fff5d70f59
 # boot. With no tenant row in Resource Group there is nothing to resolve, so
 # the server exits instead of serving, and the only way to create that row is
 # the REST API of the server that just exited. That circle is broken by
-# deploy/compose/seed-tenant.sh, which the compose stack runs as a one-shot
-# `tenant-seed` service; see its header for the ordering.
+# deploy/helm/qa-platform/files/seed-tenant.sh, which the chart runs as a
+# `tenant-seed` hook Job; see its header for the ordering.
 ARG CARGO_FEATURES=qa-platform,oidc-authn,static-authz,tenant-resolver-rg,static-credstore,postgres-credstore,runner-secret
 #
 # `postgres-credstore` compiles in the database-backed credstore plugin, which
 # is what makes a stored secret survive this container being recreated. It is
 # in the default as of 2026-08-27: without it every secret lives in a HashMap
-# and dies on `docker compose up --build`, which cost the human their SSH key
+# and dies on every container recreate, which cost the human their SSH key
 # four times in one day.
 #
 # It is ONE OF THREE places the switch lives, and all three must agree:
-#   1. this ARG default            -- the local stack and any plain build
-#   2. deploy/compose/docker-compose.argo.yml's `CARGO_FEATURES:` default
-#      -- that file carries its OWN COPY of this list, so a feature added
-#      here and not there is silently absent from every `--argo` deploy,
-#      which is how the remote is deployed
+#   1. this ARG default            -- any plain build
+#   2. deploy/cargo-features.argo  -- that file carries its OWN COPY of this
+#      list, so a feature added here and not there is silently absent from
+#      every argo build, which is how the remote is deployed
 #   3. `credstore.config.vendor` in
 #      gears/qa-platform/config/qa-platform-stack.yaml, which must say
 #      "constructorfabric-postgres"
@@ -147,8 +146,8 @@ FROM debian:13.3-slim
 #   "repository sync failed: clone failed: Could not initialize the http
 #   client: builder error: unexpected error: No CA certificates were loaded
 #   from the system"
-# found by `deploy/compose/smoke.sh` (Task 5) actually driving a clone
-# through this image rather than asserting against its shape. The mechanism
+# found by actually driving a clone through this image rather than asserting
+# against its shape. The mechanism
 # is not "no cert store means no HTTPS": qa-catalog's gix is wired through
 # `blocking-http-transport-reqwest-rust-tls` (root Cargo.toml), and that
 # reqwest+rustls client fails to *build* -- before it inspects the request's
@@ -209,8 +208,8 @@ EXPOSE 8087
 # stays root-owned (0755) with no such directory in it -- appuser can't
 # create it either. Without `-m` the container dies at startup with
 # "Error: Failed to resolve server.home_dir ... Permission denied", found
-# and initially worked around with a compose-level `HOME: /tmp` override
-# now removed in favor of this proper fix.
+# and initially worked around with a `HOME: /tmp` override at the deployment
+# level, now removed in favor of this proper fix.
 RUN useradd -m -U -u 1000 appuser && \
     chown -R 1000:1000 /etc/cf-gears
 
@@ -221,8 +220,8 @@ RUN useradd -m -U -u 1000 appuser && \
 # override. Without an explicit, owned WORKDIR the runtime stage's default
 # CWD is `/`, root-owned, and qa-catalog's init fails with "failed to
 # create the repositories directory './data/qa-catalog/repos': Permission
-# denied" -- found and initially worked around with a compose-level
-# `working_dir: /tmp` override now removed in favor of this proper fix.
+# denied" -- found and initially worked around with a `working_dir: /tmp`
+# override at the deployment level, now removed in favor of this proper fix.
 # /var/lib/cf-gears, not /tmp: this directory ends up holding cloned git
 # repositories and content bundles synced from tenant test repos, which
 # belongs with other persistent application state (conventionally
@@ -230,12 +229,12 @@ RUN useradd -m -U -u 1000 appuser && \
 # that other processes on the same host share and that expects to be
 # cleared without warning.
 #
-# `data/` is created here, and not left to the process, for a reason that only
-# shows up under compose: docker-compose.yml now mounts a named volume at
-# /var/lib/cf-gears/data so the clones survive a container recreate. Docker
-# seeds a fresh named volume from the image's content *and ownership* at the
-# mount point -- and a mount point that does not exist in the image gets a
-# root-owned empty directory instead, which the uid-1000 process cannot write.
+# `data/` is created here, and not left to the process, because a deployment
+# mounts a volume at /var/lib/cf-gears/data so the clones survive a container
+# recreate (gears-pvc.yaml does this in-cluster). A fresh volume is seeded from
+# the image's content *and ownership* at the mount point -- and a mount point
+# that does not exist in the image gets a root-owned empty directory instead,
+# which the uid-1000 process cannot write.
 # That reproduces the exact failure this WORKDIR was introduced to fix
 # ("failed to create the repositories directory './data/qa-catalog/repos':
 # Permission denied"), just one directory deeper. The two leaf directories are

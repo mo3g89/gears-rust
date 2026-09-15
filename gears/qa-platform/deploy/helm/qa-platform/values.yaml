@@ -14,6 +14,12 @@
 # scheme://host[:port], no path, no trailing slash.
 publicOrigin: ""
 
+# The tenant every seeded Keycloak user carries as its `tenant_id` claim, and
+# the tenant `seed-tenant.sh` creates. One value, so the claim and the row
+# cannot disagree -- oidc-authn-plugin maps the first onto the second, and a
+# mismatch authenticates a user into a tenant that does not exist.
+seedTenantId: "00000000-df51-5b42-9538-d2b56b7ee953"
+
 # nginx `resolver` needs an ADDRESS, not a name, because `location /qa/v1/` reaches
 # the gears through a VARIABLE `proxy_pass` and so resolves the upstream at REQUEST
 # time.
@@ -34,11 +40,10 @@ clusterDns: ""
 argo:
   namespace: argo
   workflowServiceAccount: argo-workflow
-  # qa-runs' ArgoExecutorConfig fields Task 7's fragment ConfigMap renders
-  # (deploy/compose/render-argo.sh's own defaults, restated here so the chart
-  # has one source for them rather than a second copy baked into the
-  # template). kubeconfig_path is deliberately NOT one of these -- see
-  # gears-argo-configmaps.yaml.
+  # qa-runs' ArgoExecutorConfig fields the Argo fragment ConfigMap renders,
+  # restated here so the chart has one source for them rather than a second
+  # copy baked into the template. kubeconfig_path is deliberately NOT one of
+  # these -- see gears-argo-configmaps.yaml.
   workflowTtlSeconds: 3600
   statusPollSeconds: 3
   # `ArgoExecutorConfig::log_follow_idle_seconds`'s own default (`config.rs`) --
@@ -50,13 +55,24 @@ argo:
   # no operator override -- a deployment whose pods legitimately go quieter
   # than 600s needs to raise this, not just live with the shipped number.
   logFollowIdleSeconds: 600
-  # Must equal whatever provisions the workflow pod's bundle-download
-  # credential (deploy/argo/provision-workflow-secret.sh's own defaults, or
-  # its in-cluster equivalent) -- the adapter only ever emits a
-  # secretKeyRef naming these, it never reads the value.
+  # Must equal the Secret `workflow-oidc-secret.yaml` creates in `namespace`
+  # above, which is what carries the workflow pod's bundle-download credential
+  # -- the adapter only ever emits a secretKeyRef naming these, it never reads
+  # the value.
   workflowSecretName: qa-platform-workflow-oidc
   workflowSecretKey: client_secret
   workflowClientId: qa-platform-workflow
+  # The confidential client secret a workflow pod authenticates with. Written
+  # into the realm AND into the Secret in `namespace` above, from this one
+  # value, so the two cannot drift. A dev literal by default -- override it on
+  # any deployment a stranger can reach:
+  #
+  #   --set argo.workflowClientSecret="$(openssl rand -hex 24)"
+  workflowClientSecret: qa-platform-workflow-dev-secret
+  # Whether to create that Secret in Argo's namespace. Turn it off when that
+  # namespace does not exist yet or is managed elsewhere: the gears still
+  # start, and only run submission needs it.
+  createWorkflowSecret: true
 
 # qa-runs' own gear config -- `QaRunsConfig`, not `ArgoExecutorConfig`. Rendered
 # into the SAME fragment as the `argo:` block above (see
@@ -162,9 +178,15 @@ keycloak:
   adminUser: admin
   adminPassword: admin
 
-# Set by deploy-k8s.sh with --set-file, from render-realm.sh's output. Keycloak
-# 26.0.8 will not expand a placeholder in an import file -- measured, it aborts
-# start-up -- so the realm has to arrive already rendered for this origin.
+# AN OVERRIDE, NOT AN INPUT. Empty means "use the realm this chart carries"
+# (`files/keycloak/realm-qa-platform.json`), rendered by
+# `keycloak-realm-configmap.yaml` for this release's publicOrigin, seedTenantId
+# and argo.workflowClientSecret. Set it -- `--set-file keycloakRealmJson=...` --
+# only to import a realm this chart did not build.
+#
+# Keycloak 26.0.8 will not expand a placeholder in an import file (measured: it
+# aborts start-up), which is why the substitution happens at template time and a
+# realm supplied here must already be rendered for its origin.
 keycloakRealmJson: ""
 
 # THE ONLY ACCESS CONTROL ON THE COLLECT-REPORT ROUTE, and so a real secret.
@@ -192,7 +214,7 @@ uiServiceClusterIP: ""
 
 # WHETHER THE 22 METRIC FAMILIES LEAVE THE PROCESS AT ALL, and where they go.
 # The catalog -- series name, type, labels, and what each supports -- is
-# docs/DESIGN.md 3.9.
+# docs/DESIGN.md 3.11.
 #
 # METRICS ARE PUSHED OVER OTLP, NOT SCRAPED, so there is no port to open and no
 # scrape annotation to add: libs/toolkit's `init_metrics_provider` builds an

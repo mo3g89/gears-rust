@@ -157,7 +157,7 @@ pub struct ExecRow {
     ///
     /// Since this gear carries an id where legacy carried a *name*, all three
     /// fields are an unresolved **label** rather than an unresolved value — the same shape as
-    /// [`Self::platform_id`]'s obligation below, and recorded on the two types
+    /// [`Self::environment_id`]'s obligation below, and recorded on the two types
     /// that carry it:
     /// [`aggregates::LatestBuildTestSnapshot`](super::analytics::aggregates::LatestBuildTestSnapshot)
     /// and
@@ -238,7 +238,7 @@ pub struct ExecRow {
     /// and visibly.** This gear has no qa-environments port and inventing one was
     /// out of scope, so
     /// [`aggregates::PlatformGroupSummary`](super::analytics::aggregates::PlatformGroupSummary)
-    /// keys the platform breakdown on `platform_id` instead of on legacy's
+    /// keys the platform breakdown on `environment_id` instead of on legacy's
     /// `value: String`. A `Uuid` in a field named for a `Uuid` is a gap a reader
     /// can see; the same `Uuid` `Display`-formatted into a field named `value`
     /// would be a label nobody would question. The ordering changes with the
@@ -253,7 +253,7 @@ pub struct ExecRow {
     /// see resolves to nothing and the bar is kept rather than dropped. The
     /// re-sort onto the name happens there too, so the rendered order is legacy's
     /// again.
-    pub platform_id: Option<Uuid>,
+    pub environment_id: Option<Uuid>,
     /// `run_finished_at ?? run_created_at`, legacy's `:1028`. The fallback
     /// matters: a run still in progress has no finish instant, and legacy sorts
     /// and buckets those rows by **the run's** creation time rather than dropping

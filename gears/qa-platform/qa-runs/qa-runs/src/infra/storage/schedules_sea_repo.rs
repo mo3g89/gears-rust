@@ -106,7 +106,7 @@ fn schedule_columns(new: &NewSchedule) -> Result<ScheduleAM, DomainError> {
         // through means the guard above is the only thing deciding policy, and
         // deleting it changes behaviour rather than corrupting rows.
         target_collect_url: ActiveValue::Set(columns.collect_url),
-        environment_id: ActiveValue::Set(new.platform_id),
+        environment_id: ActiveValue::Set(new.environment_id),
         branch: ActiveValue::Set(new.branch.clone()),
         cron: ActiveValue::Set(new.cron.clone()),
         // Always written, including for the `None` case — that is the whole
@@ -623,7 +623,7 @@ mod tests {
             id: created.id,
             name: new.name.clone(),
             target: new.target.clone(),
-            platform_id: new.platform_id,
+            environment_id: new.environment_id,
             branch: new.branch.clone(),
             cron: new.cron.clone(),
             exclusive_choice: new.exclusive_choice,

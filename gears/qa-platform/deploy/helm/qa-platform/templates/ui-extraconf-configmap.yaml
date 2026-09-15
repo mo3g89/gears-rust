@@ -14,14 +14,12 @@
                       renders bare (unstyled HTML, no working form).
 
      `/admin/` USED TO BE A THIRD PREFIX AND IS DELIBERATELY GONE. It was
-     justified as "the admin REST API deploy/argo/provision-workflow-secret.sh
-     calls to read back the qa-platform-workflow client secret", and that
-     justification was simply false: that script reads the secret out of the
-     realm JSON with `jq`
-     (deploy/argo/provision-workflow-secret.sh:76-81 -- `jq -r --arg c
-     "$CLIENT_ID" '.clients[] | select(.clientId==$c) | .secret // empty'`)
-     and never issues an HTTP request to Keycloak at all. Nothing else in
-     this tree calls the admin API either.
+     justified as "the admin REST API is what reads back the
+     qa-platform-workflow client secret", and that justification was simply
+     false: the secret is pinned by `workflow-oidc-secret.yaml` from
+     `argo.workflowClientSecret`, the same value the realm template writes, and
+     no part of this tree issues an HTTP request to Keycloak's admin API at
+     all.
 
      What the prefix DID do is publish Keycloak's admin console and full
      admin REST API on the SAME public origin as the application, reachable

@@ -520,7 +520,7 @@ fn the_latest_entry_carries_every_field_the_lists_render() {
     let info = &latest["tests/a.py"];
 
     assert_eq!(info.status_bucket, "PASSED");
-    assert_eq!(info.platform_id, expected.platform_id);
+    assert_eq!(info.environment_id, expected.environment_id);
     assert_eq!(info.run_id, Some(expected.run_id));
     assert_eq!(info.build, expected.build);
     assert_eq!(info.finished_at, Some(expected.ts));

@@ -1,40 +1,25 @@
 #!/usr/bin/env bash
 # Mirror this repository onto a remote host and install the qa-platform Helm
-# chart into its k3s cluster -- the in-cluster counterpart to sync.sh, which
-# deploys the same stack as a docker-compose project. They share the same
-# ssh/docker/disk/rsync-safety preflight, extracted into lib.sh; everything
-# below it is specific to this back end (build+import via containerd, no
-# registry; render the realm before Helm sees it; hand off to Helm hooks
-# instead of `depends_on`).
+# chart into its k3s cluster. This is a DEVELOPMENT CONVENIENCE, not the
+# install path: the chart installs on its own (see below). What this adds is
+# the build+import-via-containerd dance a registry-less k3s node needs, the
+# rsync that puts this checkout on it, and the post-deploy verification -- so
+# one command takes a working tree to a running stand.
 #
 # WHAT IT DOES, in order, and it stops at the first failure rather than
 # half-deploying: preflight (the four shared ones, plus kubectl and helm on
 # the remote) -> rsync -> build gears/ui/runner images tagged with a
-# timestamp, import all three into containerd -> render the realm for
-# PUBLIC_ORIGIN -> helm upgrade --install (NO --wait, see below) ->
-# kubectl rollout status
-# for the three Deployments -> provision the Argo workflow client secret ->
-# deploy/remote/verify-k8s.sh, if Task 12 has landed it.
+# timestamp, import all three into containerd ->
+# helm upgrade --install (NO --wait, see below) -> kubectl rollout status
+# for the three Deployments -> deploy/remote/verify-k8s.sh.
 #
-# NO RUST TOOLCHAIN IS INSTALLED OR NEEDED ON THE REMOTE, same as sync.sh:
+# NO RUST TOOLCHAIN IS INSTALLED OR NEEDED ON THE REMOTE:
 # qa-platform.Dockerfile builds from a pinned `rust:` image with its own
 # builder-stage toolchain. Docker is the only host requirement for the
 # builds; k3s (already on the target node, per NOTES-hairpin.md) is the only
 # additional requirement for the install.
 #
-# `target/` IS NOT SYNCED, for the same reason and with the same exclude set
-# sync.sh uses (lib.sh's COMMON_RSYNC_EXCLUDES) -- see that script's header.
-#
-# ============================================================================
-# `docker compose down -v` DOES NOT APPEAR IN THIS SCRIPT, IS NOT RELEVANT TO
-# IT, AND MUST NEVER BE ADDED TO IT. This driver never runs compose at all;
-# it is named here only so a future edit does not "helpfully" add a compose
-# teardown step that would destroy pgdata (the seeded tenant row) or
-# qa-catalog's clones on a host that might still be running the compose
-# stack sync.sh deployed. If both stacks are ever run on the same node, they
-# use different Postgres volumes (a Kubernetes PVC here, a compose volume
-# there) and this script does not touch the other one.
-# ============================================================================
+# `target/` IS NOT SYNCED -- see lib.sh's COMMON_RSYNC_EXCLUDES.
 #
 # THE IMAGE TAG IS NOT COSMETIC. `imagePullPolicy: IfNotPresent` (both
 # images.gears and images.ui default it) plus a FIXED tag means
@@ -45,13 +30,19 @@
 # `--set images.gears.tag=... --set images.ui.tag=...` -- that is what makes
 # a re-deploy of unchanged config still roll the pods.
 #
-# THE REALM IS RENDERED BEFORE HELM, NOT BY IT. Keycloak 26.0.8 will not
-# expand a `${env.VAR}` placeholder in a realm import file -- measured, it
-# aborts start-up -- so deploy/compose/render-realm.sh runs HERE, on the
-# remote, against PUBLIC_ORIGIN, and its OUTPUT FILE is handed to Helm with
-# `--set-file keycloakRealmJson=...`. See render-realm.sh's own header and
-# keycloak-realm-configmap.yaml's comment for the full reasoning; both
-# already document this script as their caller.
+# THIS SCRIPT IS A CONVENIENCE, NOT A DEPENDENCY OF THE CHART. Everything
+# the platform needs to exist is in the chart: `helm upgrade --install
+# deploy/helm/qa-platform --set publicOrigin=...` installs a working stack on
+# any cluster that can pull the images. What this script adds is the part a
+# chart cannot do on a registry-less k3s node -- build the three images from
+# this checkout and import them into containerd -- plus the rsync and the
+# post-deploy verification that make a dev round-trip one command.
+#
+# In particular the realm and the Argo workflow Secret are NO LONGER RENDERED
+# HERE. Keycloak 26.0.8 still will not expand a `${env.VAR}` placeholder in an
+# import file (measured, it aborts start-up), but the substitution now happens
+# at TEMPLATE time inside the chart -- see keycloak-realm-configmap.yaml and
+# workflow-oidc-secret.yaml, which carry the full reasoning.
 #
 # THERE IS NO REGISTRY IN THIS DEPLOYMENT. `docker build` puts an image in
 # the DOCKER daemon's store; k3s runs containerd, a completely separate
@@ -104,7 +95,7 @@ set -euo pipefail
 # SCRIPT_DIR / lib.sh sourced first, before any default lib.sh owns (MARKER,
 # SSH_OPTS, MIN_DOCKER_GIB, MIN_PATH_GIB, and every preflight/remote_sh
 # helper below) is read. This file is at gears/qa-platform/deploy/remote/,
-# four levels below the repo root, same as sync.sh.
+# four levels below the repo root.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROG_NAME="deploy-k8s"
 # shellcheck source=./lib.sh
@@ -117,13 +108,10 @@ source "$SCRIPT_DIR/lib.sh"
 # certificate at it -- convenient for exactly one person and a footgun for everyone
 # else. `test_no_environment_hardcode.py` is what keeps them empty.
 REMOTE_TARGET="${QA_PLATFORM_TARGET:-}"
-# Reuses sync.sh's own default mirror directory on purpose: both drivers
-# rsync the SAME repository into the SAME kind of dedicated mirror, and
-# lib.sh's MARKER file (shared, see its own comment) is what lets either
-# script recognise a directory the other one created as safe for
-# `rsync --delete`. Running both against the same REMOTE_PATH is intended --
-# it is one checkout on the node serving two different stacks (compose,
-# k3s), not two copies to keep in sync by hand.
+# A DEDICATED MIRROR DIRECTORY, never an arbitrary path: the rsync below is
+# `-a --delete`, and lib.sh's MARKER file is what lets this script recognise a
+# directory as one it created and may therefore delete into. See
+# `preflight_rsync_path_guard`.
 REMOTE_PATH="/opt/gears-rust"
 PUBLIC_ORIGIN="${QA_PLATFORM_PUBLIC_ORIGIN:-}"
 DRY_RUN=false
@@ -143,10 +131,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Same shape check render-realm.sh itself enforces on this exact value (it is
-# the script's own first positional argument) -- checked here too so the
-# refusal happens before anything is transferred, rather than inside a
-# remote heredoc several layers from the cause.
+# Checked before anything is transferred, rather than inside a remote heredoc
+# several layers from the cause. The chart pins the same shape on the value it
+# renders into the realm; this is the earlier of the two refusals.
 if [[ -z "$REMOTE_TARGET" ]]; then
     echo "deploy-k8s: no target. Pass --target USER@HOST or set QA_PLATFORM_TARGET -- this script has no default node, deliberately." >&2
     exit 2
@@ -169,9 +156,7 @@ REQUIRED_FILES=("Cargo.toml" ".dockerignore"
                  "gears/qa-platform/deploy/cargo-features.argo"
                  "gears/qa-platform/deploy/docker/qa-platform.Dockerfile"
                  "gears/qa-platform/deploy/docker/qa-platform-ui.Dockerfile"
-                 "gears/qa-platform/deploy/realm/render-realm.sh"
-                 "gears/qa-platform/deploy/runner/build-and-import.sh"
-                 "gears/qa-platform/deploy/argo/provision-workflow-secret.sh")
+                 "gears/qa-platform/deploy/runner/build-and-import.sh")
 for required in "${REQUIRED_FILES[@]}"; do
     if [[ ! -e "$REPO_ROOT/$required" ]]; then
         echo "deploy-k8s: '$REPO_ROOT' does not look like the gears-rust repo root ('$required' is missing) -- refusing to sync" >&2
@@ -180,50 +165,14 @@ for required in "${REQUIRED_FILES[@]}"; do
 done
 
 # ---------------------------------------------------------------- excludes --
-# lib.sh's COMMON_RSYNC_EXCLUDES, PLUS THE SAME TWO COMPOSE PATHS sync.sh
-# excludes -- and that addition is not cosmetic tidiness, it is what stops
-# this script from destroying a running compose stack.
-#
-# THE DEFAULT REMOTE_PATH IS THE SAME /opt/gears-rust sync.sh USES, and the
-# rsync below is `-a --delete`. `--delete` removes anything on the REMOTE
-# that is not in the LOCAL source tree -- and both of these paths are
-# gitignored generated state that exists ONLY on the remote:
-#
-#   .../compose/.env         sync.sh writes it there: COMPOSE_FILE (which
-#                            overlays are active), PUBLIC_HOST, the Postgres
-#                            credentials, CARGO_FEATURES. Deleting it stops
-#                            `docker compose` in that directory from finding
-#                            the stack at all, and docker-compose.argo.yml's
-#                            `${CARGO_FEATURES:?}` then hard-fails. A local
-#                            copy, if a developer happens to have one, is
-#                            WORSE than deletion: it would overwrite the
-#                            remote's host and credentials with this laptop's.
-#   .../compose/.generated   render-realm.sh's and render-argo.sh's output
-#                            for the REMOTE's own origin -- .generated/ca.crt
-#                            (the CA a human has already trusted in a
-#                            browser), .generated/keycloak/, and the rendered
-#                            argo config fragments. Syncing a local copy over
-#                            these is backwards, and --delete removes them
-#                            outright when there is no local copy.
-#
-# The previous comment here claimed not excluding them was "harmless" because
-# this script never reads or writes them, and that not excluding them was
-# what kept the two drivers from clobbering each other. Both halves were
-# wrong: `--delete` does not care whether this script reads a path, only
-# whether the local tree has it, and NOT excluding a path is exactly what
-# hands it to `--delete`. Excluding is what makes the two drivers coexist.
-#
-# This script's OWN generated realm lives at deploy/.generated-k8s/, written on
-# the remote after the rsync and absent from the local tree -- so rsync --delete
-# would remove it on the next run if it were not excluded here.
-#
-# The two `deploy/compose/...` excludes that used to sit beside it are gone with
-# the compose stack itself. They existed to stop this driver's `rsync --delete`
-# destroying a RUNNING compose deployment's .env and rendered fragments on a node
-# serving both stacks. There is no second stack any more.
-EXCLUDES=("${COMMON_RSYNC_EXCLUDES[@]}"
-    "/gears/qa-platform/deploy/.generated-k8s"
-)
+# lib.sh's COMMON_RSYNC_EXCLUDES, and nothing else. The rsync below is
+# `-a --delete`, so anything on the REMOTE that the LOCAL tree does not have is
+# removed -- which is exactly what is wanted for a mirror of a checkout, and
+# why the shared exclude list (target/, node_modules/, .git/) is the whole of
+# it. There is no generated remote-only state under the mirror any more: the
+# realm and the Argo config fragments used to be rendered into it by helper
+# scripts, and are rendered by the chart at template time now.
+EXCLUDES=("${COMMON_RSYNC_EXCLUDES[@]}")
 RSYNC_EXCLUDE_ARGS=()
 for e in "${EXCLUDES[@]}"; do RSYNC_EXCLUDE_ARGS+=(--exclude "$e"); done
 
@@ -234,8 +183,8 @@ $DRY_RUN && echo "deploy-k8s: --dry-run: nothing on the remote will be changed"
 # Two of these are READ-ONLY checks -- kubectl and helm. Unlike
 # preflight_docker, this script does not install either for you.
 # Installing a cluster CLI is a decision about the node, not about a deploy,
-# and k3s already ships a kubectl (a shim, if the node followed sync.sh
-# --argo's argo-prep step, is not assumed here); helm has no equivalent
+# and k3s already ships a kubectl (a shim, if the node has one, is not
+# assumed here); helm has no equivalent
 # reason to assume it is already there, so its absence is refused with a
 # named remedy rather than silently fetched and run.
 preflight_ssh_reachable "Preflight 1/8: ssh reachability (batch mode, no password prompt)"
@@ -260,25 +209,24 @@ else
 fi
 
 step "Preflight 7/8: node ports 80 and 443 are free for the UI pod's hostPort"
-# THE COMPOSE STACK THIS DEPLOYMENT REPLACES BINDS THE SAME TWO PORTS ON THE
-# SAME NODE, and this script is designed to run while it is still up (it never
-# touches compose -- see this file's header). ui-deployment.yaml's pod
-# requests hostPort 80 and 443; hostPort is a NODE-WIDE reservation, so if
-# anything already holds either port the UI pod never schedules. It does not
-# fail loudly either: it sits Pending with a `node(s) didn't have free ports
-# for the requested pod ports` predicate failure, and the ONLY symptom
-# downstream is `kubectl rollout status` timing out several minutes later
-# against a Deployment whose message names a port, not a stack.
+# ui-deployment.yaml's pod requests hostPort 80 and 443, and hostPort is a
+# NODE-WIDE reservation -- so if ANYTHING already holds either port (an older
+# release of this chart, a stray nginx, another project's web server) the UI
+# pod never schedules. It does not fail loudly either: it sits Pending with a
+# `node(s) didn't have free ports for the requested pod ports` predicate
+# failure, and the ONLY symptom downstream is `kubectl rollout status` timing
+# out several minutes later against a Deployment whose message names a port,
+# not a cause.
 #
-# Worse, it is a plausibly-green failure: with compose still serving 80/443,
-# `curl $PUBLIC_ORIGIN/` answers 200 from the OLD stack. verify-k8s.sh's
-# check 6 now defends against that from the other side (it compares the
-# served leaf against the cluster Secret's ui.crt), but catching it BEFORE
+# Worse, it is a plausibly-green failure: whatever already serves 80/443
+# answers `curl $PUBLIC_ORIGIN/` with a 200, from the OLD deployment.
+# verify-k8s.sh's check 6 defends against that from the other side (it compares
+# the served leaf against the cluster Secret's ui.crt), but catching it BEFORE
 # anything is installed is strictly better than diagnosing it afterwards.
 #
-# READ-ONLY, and it does NOT stop anything for you: deciding to take the
-# compose stack down is a decision about the node, exactly like the
-# kubectl/helm checks above. `ss -ltn` (iproute2, present on any host running
+# READ-ONLY, and it does NOT stop anything for you: deciding to take another
+# service down is a decision about the node, exactly like the kubectl/helm
+# checks above. `ss -ltn` (iproute2, present on any host running
 # k3s) over `lsof`/`netstat`, and the listener list is compared for the two
 # exact ports rather than grepped loosely -- ':8080' must not read as ':80'.
 # `ss` MISSING MUST NOT READ AS "PORTS ARE FREE" -- an empty result from an
@@ -319,11 +267,10 @@ esac
 if [[ -n "$PORT_CONFLICTS" ]]; then
     # FATAL on a real run, LOUD BUT NON-FATAL under --dry-run. A dry run
     # installs nothing, and the operator running one is precisely the person
-    # mid-cutover with the compose stack still up on purpose (this script
-    # never stops it -- see the header) -- dying here would hide preflight 8
-    # and the whole rest of the plan from exactly the person who needs to see
-    # it. A REAL run still refuses, because by then the conflict is not
-    # hypothetical.
+    # surveying a node whose ports are still held on purpose -- dying here
+    # would hide preflight 8 and the whole rest of the plan from exactly the
+    # person who needs to see it. A REAL run still refuses, because by then the
+    # conflict is not hypothetical.
     PORT_MSG="port(s) ${PORT_CONFLICTS}already have a listener on $REMOTE_TARGET, and ui-deployment.yaml's pod requests hostPort 80 AND 443. The UI pod would stay Pending with 'node(s) didn't have free ports for the requested pod ports' and this deploy would fail minutes later at 'kubectl rollout status', naming a port rather than a cause.
   REMEDY: 'ss -ltnp' on the node names the process holding the port. If it is a previous release of this chart, 'kubectl -n $NAMESPACE delete pod -l app.kubernetes.io/component=ui' releases it. If it is anything else, stop that instead -- this script will not guess."
     if $DRY_RUN; then
@@ -439,9 +386,9 @@ fi
 echo "=== docker build $IMAGE (gears) ==="
 # CARGO_FEATURES from the CANONICAL argo list (deploy/cargo-features.argo),
 # not the Dockerfile's own ARG default -- test_features.py is what keeps
-# that file a superset of the Dockerfile default, and this is the
-# --argo-equivalent build path for the in-cluster deploy, so it takes the
-# argo list the same way sync.sh --argo's render-argo.sh does for compose.
+# that file a superset of the Dockerfile default. The in-cluster deploy always
+# builds the argo-featured image, so it reads the canonical list rather than
+# letting the Dockerfile's default decide.
 #
 # READ INTO A VARIABLE FIRST, AND CHECKED, rather than
 # `--build-arg CARGO_FEATURES="$(cat ...)"` inline: `set -euo pipefail` does
@@ -452,9 +399,7 @@ echo "=== docker build $IMAGE (gears) ==="
 # would override the Dockerfile's own non-empty `ARG CARGO_FEATURES` default,
 # and the result is a zero-feature image that builds, imports and deploys
 # without one line of output naming the cause -- the exact false-green shape
-# this project has already been bitten by (see this repo's other scripts'
-# comments on `remote_sh_expect` and the pipefail traps in sync.sh's VERIFY
-# block).
+# this project has already been bitten by (see lib.sh's `remote_sh_expect`).
 CARGO_FEATURES_ARGO_FILE="gears/qa-platform/deploy/cargo-features.argo"
 if ! CARGO_FEATURES="$(cat "$CARGO_FEATURES_ARGO_FILE")"; then
     echo "deploy-k8s: could not read '$CARGO_FEATURES_ARGO_FILE' (cwd $(pwd)) -- refusing to build with an empty CARGO_FEATURES" >&2
@@ -513,8 +458,8 @@ echo "=== docker build $IMAGE (ui) ==="
 # NO /auth SEGMENT: Keycloak runs at its default root path in this chart
 # (keycloak-deployment.yaml does not set KC_HTTP_RELATIVE_PATH; see
 # values.yaml's own comment on why not). VITE_OIDC_CLIENT_ID must equal the
-# realm's qa-platform-ui client id -- render-realm.sh does not rename it, so
-# this is the same literal the compose build args have always used.
+# realm's qa-platform-ui client id, which the chart's realm template does not
+# rename, so this is that same literal.
 docker build \
     -f ../deploy/docker/qa-platform-ui.Dockerfile \
     -t "$IMAGE" \
@@ -554,19 +499,6 @@ set -euo pipefail
 cd "$1/gears/qa-platform"
 bash deploy/runner/build-and-import.sh
 BUILDRUNNER
-
-# =============================================================== realm ==
-step "Rendering the realm for PUBLIC_ORIGIN=$PUBLIC_ORIGIN"
-# render-realm.sh's OWN OUTPUT DIRECTORY on the remote. The rendered file
-# (realm-qa-platform.json) is what --set-file hands to Helm below.
-REALM_OUT_DIR="$REMOTE_PATH/gears/qa-platform/deploy/.generated-k8s/keycloak"
-remote_sh "render-realm.sh (k8s output dir)" "$REMOTE_PATH" "$PUBLIC_ORIGIN" "$REALM_OUT_DIR" <<'RENDERREALM'
-set -euo pipefail
-cd "$1/gears/qa-platform/deploy/realm"
-command -v jq >/dev/null 2>&1 || { echo "deploy-k8s: jq not found on this host -- render-realm.sh requires it (install: dnf -y install jq / apt-get install -y jq)" >&2; exit 1; }
-bash ./render-realm.sh "$2" "$3"
-echo "PASS: rendered realm at $3/realm-qa-platform.json"
-RENDERREALM
 
 # ============================================================ hostAliases ==
 # Only consumed when gears.hostAliases.enabled is true in the chart's
@@ -612,7 +544,6 @@ HELM_ARGS=(upgrade --install "$RELEASE" "$CHART_REL"
            --set "publicOrigin=$PUBLIC_ORIGIN"
            --set "images.gears.tag=$IMAGE_TAG"
            --set "images.ui.tag=$IMAGE_TAG"
-           --set-file "keycloakRealmJson=gears/qa-platform/deploy/.generated-k8s/keycloak/realm-qa-platform.json"
            # ---------------------------------------------------------------
            # NO `--wait`. NEVER RE-ADD IT. `--timeout` stays -- it still
            # bounds the post-install HOOKS (db-migrate, tenant-seed), which
@@ -792,15 +723,6 @@ if [ "$fail" -ne 0 ]; then
 fi
 echo "ROLLOUT: all three Deployments are available"
 ROLLOUT
-
-# ======================================================== workflow secret ==
-step "Provisioning the Argo workflow client Secret (after Keycloak is up, before the first run)"
-remote_sh "provision-workflow-secret.sh" "$REMOTE_PATH" <<'PROVISION'
-set -euo pipefail
-cd "$1/gears/qa-platform"
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-bash deploy/argo/provision-workflow-secret.sh
-PROVISION
 
 # ============================================================== verify ==
 step "deploy/remote/verify-k8s.sh (Task 12)"

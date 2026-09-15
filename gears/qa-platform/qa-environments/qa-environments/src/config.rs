@@ -79,7 +79,7 @@ impl Default for QaEnvironmentsConfig {
 /// Connection details for the Argo cluster D4's `Secret` writer targets.
 /// Mirrors `qa-runs`' `ArgoExecutorConfig` shape (`qa-runs/src/config.rs`),
 /// deliberately: both gears reach the same Argo cluster from the same
-/// deployment shapes (docker-compose with a mounted kubeconfig, or in-cluster
+/// deployment shapes (off-cluster with a mounted kubeconfig, or in-cluster
 /// with ambient service-account credentials), so there is no reason for the
 /// two knobs to disagree on what "unset" means.
 #[derive(Debug, Clone, Deserialize)]

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Proves the envsubst template still renders the compose stack's nginx.conf
-# EXACTLY as it was, so templatising it changed no behaviour of the local stack.
+# Proves the envsubst template renders EXACTLY the committed baseline, so a
+# change to default.conf.template that was meant to be cosmetic cannot silently
+# alter nginx's behaviour. Regenerate the fixture deliberately when a change to
+# the template is intended.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UI="$HERE/../../../qa-platform-ui"
@@ -21,9 +23,9 @@ envsubst '${NGINX_RESOLVER} ${GEARS_UPSTREAM}' \
 [ "$rc" -eq 0 ] || { echo "FAIL: envsubst exited $rc"; exit 1; }
 
 if diff -u "$BASELINE" "$rendered"; then
-    echo "PASS: template renders the compose baseline byte-identically"
+    echo "PASS: template renders the committed baseline byte-identically"
 else
-    echo "FAIL: rendered template differs from the compose baseline (above)"
+    echo "FAIL: rendered template differs from the committed baseline (above)"
     exit 1
 fi
 

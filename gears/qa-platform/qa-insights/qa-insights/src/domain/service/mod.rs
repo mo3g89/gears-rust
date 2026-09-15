@@ -818,7 +818,7 @@ pub(crate) struct ServiceDeps {
     /// `quality_vectors_pass_rate`; [`analytics::AnalyticsService`] is the
     /// second, added by Task 25b.
     pub(crate) catalog: Arc<dyn CatalogReader>,
-    /// An environment's display name for the `platform_id` a row carries,
+    /// An environment's display name for the `environment_id` a row carries,
     /// resolved behind [`EnvironmentReader`].
     /// `infra::clients::QaEnvironmentsReader` in production;
     /// [`test_support::FakePlatforms`] in this layer's tests.

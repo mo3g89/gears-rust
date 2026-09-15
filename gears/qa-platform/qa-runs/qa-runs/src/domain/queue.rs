@@ -436,7 +436,7 @@ pub struct PositionInput {
     /// The queue row's identifier — the key the returned map is built on.
     pub id: Uuid,
     /// Which platform's queue the row is in. Positions never cross platforms.
-    pub platform_id: Uuid,
+    pub environment_id: Uuid,
     /// When the row joined the queue; the primary FIFO sort key.
     pub enqueued_at: OffsetDateTime,
     /// Whether the row is in the `queued` state. Only these get a position.
@@ -465,13 +465,13 @@ pub struct PositionInput {
 #[must_use]
 pub fn assign_positions(rows: &[PositionInput]) -> HashMap<Uuid, u32> {
     let mut queued: Vec<&PositionInput> = rows.iter().filter(|row| row.queued).collect();
-    // `platform_id` leads the sort as a *grouping* device, not an ordering
+    // `environment_id` leads the sort as a *grouping* device, not an ordering
     // claim: it clusters each platform's rows so the run-length reset below
     // sees them consecutively. No caller may read anything into which platform
     // sorts first — only `enqueued_at`, then `id`, carry FIFO meaning.
     queued.sort_by(|a, b| {
-        a.platform_id
-            .cmp(&b.platform_id)
+        a.environment_id
+            .cmp(&b.environment_id)
             .then(a.enqueued_at.cmp(&b.enqueued_at))
             .then(a.id.cmp(&b.id))
     });
@@ -480,8 +480,8 @@ pub fn assign_positions(rows: &[PositionInput]) -> HashMap<Uuid, u32> {
     let mut current: Option<Uuid> = None;
     let mut position = 0u32;
     for row in queued {
-        if current != Some(row.platform_id) {
-            current = Some(row.platform_id);
+        if current != Some(row.environment_id) {
+            current = Some(row.environment_id);
             position = 0;
         }
         position += 1;
@@ -954,25 +954,25 @@ mod tests {
         let rows = vec![
             PositionInput {
                 id: id(3),
-                platform_id: plat_a,
+                environment_id: plat_a,
                 enqueued_at: at(12),
                 queued: true,
             },
             PositionInput {
                 id: id(1),
-                platform_id: plat_a,
+                environment_id: plat_a,
                 enqueued_at: at(10),
                 queued: true,
             },
             PositionInput {
                 id: id(2),
-                platform_id: plat_b,
+                environment_id: plat_b,
                 enqueued_at: at(11),
                 queued: true,
             },
             PositionInput {
                 id: id(4),
-                platform_id: plat_a,
+                environment_id: plat_a,
                 enqueued_at: at(9),
                 queued: false,
             },
@@ -1000,13 +1000,13 @@ mod tests {
         let rows = vec![
             PositionInput {
                 id: id(2),
-                platform_id: plat,
+                environment_id: plat,
                 enqueued_at: at(10),
                 queued: true,
             },
             PositionInput {
                 id: id(1),
-                platform_id: plat,
+                environment_id: plat,
                 enqueued_at: at(10),
                 queued: true,
             },

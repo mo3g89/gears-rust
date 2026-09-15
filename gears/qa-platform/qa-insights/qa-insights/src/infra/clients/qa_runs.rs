@@ -240,7 +240,7 @@ impl RunsLauncher for QaRunsReader {
                 repo_id,
                 collect_url: collect_url.to_owned(),
             },
-            platform_id: None,
+            environment_id: None,
             branch: Some(branch.to_owned()),
             include_tags: Vec::new(),
             exclude_tags: Vec::new(),
@@ -271,7 +271,7 @@ impl RunsLauncher for QaRunsReader {
     /// — so the launch resolves its exclusivity from the plan and the tiers
     /// rather than this adapter overriding it.
     ///
-    /// `platform_id` and `branch` cross verbatim, unresolved further: this
+    /// `environment_id` and `branch` cross verbatim, unresolved further: this
     /// adapter does not default a branch, and neither does
     /// `RunsLauncher::launch_test`'s own doc claim it should — the caller has
     /// already resolved the one value it wants both the plan lookup and this
@@ -282,7 +282,7 @@ impl RunsLauncher for QaRunsReader {
         repo_id: Uuid,
         plan_path: &str,
         test_file: &str,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
         branch: Option<&str>,
     ) -> Result<(), DomainError> {
         let request = LaunchRequest {
@@ -291,7 +291,7 @@ impl RunsLauncher for QaRunsReader {
                 path: plan_path.to_owned(),
                 test_file: test_file.to_owned(),
             },
-            platform_id,
+            environment_id,
             branch: branch.map(str::to_owned),
             include_tags: Vec::new(),
             exclude_tags: Vec::new(),

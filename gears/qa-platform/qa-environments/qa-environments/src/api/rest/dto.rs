@@ -323,11 +323,10 @@ impl TryFrom<CreateEnvironmentReq> for sdk::NewEnvironment {
 /// # `default_branch` is the exception, and deliberately so
 ///
 /// It reaches all three of `sdk::EnvironmentPatch`'s states over REST without
-/// `serde_with`, because the source system's "clear" signal is **not** JSON
-/// `null` — it is the **empty string**. `update_environment` maps an empty or
+/// `serde_with`, because this field's "clear" signal is **not** JSON `null` —
+/// it is the **empty string**. `update_environment` maps an empty or
 /// whitespace-only `default_branch` to its `"__NULL__"` sentinel and thence to
-/// `NULL`, while an absent field keeps the stored value
-/// (`manager/src/services/platforms.rs:447-496`). So:
+/// `NULL`, while an absent field keeps the stored value. So:
 ///
 /// | request body | meaning |
 /// |---|---|
@@ -338,8 +337,8 @@ impl TryFrom<CreateEnvironmentReq> for sdk::NewEnvironment {
 /// The middle row works because `Some(String)` survives the `.map(Some)` below
 /// as `Some(Some(""))`, which `EnvironmentsService::normalize_default_branch` then
 /// folds to `Some(None)` — the outer `Some` carrying "the caller mentioned the
-/// field" the whole way. This is not a workaround for the missing `serde_with`;
-/// it is the source system's own encoding, which happens not to need it.
+/// field" the whole way. This is not a workaround for the missing `serde_with`:
+/// the empty-string encoding simply does not need it.
 ///
 /// # `kubeconfig` mirrors the create DTO
 ///
@@ -725,9 +724,8 @@ mod tests {
     }
 
     /// The one thing `product_id` and `description` cannot do over REST, and
-    /// `default_branch` can — because the source system's clear signal is the
-    /// empty string, not JSON `null`
-    /// (`manager/src/services/platforms.rs:447-454`).
+    /// `default_branch` can — because this field's clear signal is the empty
+    /// string, not JSON `null`.
     ///
     /// The outer `Some` is what carries "the caller mentioned the field"; the
     /// service's normaliser then folds the inner `Some("")` to `None`. Both

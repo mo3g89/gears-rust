@@ -35,7 +35,7 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use super::{
-    AnalyticsService, BuildTestsQuery, narrow_to_plan, platform_ids, universe_filter,
+    AnalyticsService, BuildTestsQuery, narrow_to_plan, environment_ids, universe_filter,
     universe_window_start,
 };
 use crate::domain::analytics::aggregates::{
@@ -187,7 +187,7 @@ fn the_platform_ids_are_the_distinct_ones_of_both_rendered_sections() {
     lists.passed.push(list_item_on(Some(LINUX)));
     lists.failed.push(list_item_on(None));
 
-    assert_eq!(platform_ids(&grouped, &lists), vec![LINUX, WINDOWS]);
+    assert_eq!(environment_ids(&grouped, &lists), vec![LINUX, WINDOWS]);
 }
 
 // ---------------------------------------------------------------------------
@@ -823,7 +823,7 @@ fn plan_row(
         jira_key: jira_key.map(str::to_owned),
         product_version: version.map(str::to_owned),
         app_build: None,
-        platform_id: platform,
+        environment_id: platform,
         repo_id: Some(REPO),
         plan_path: Some(PLAN.to_owned()),
         branch: None,
@@ -903,7 +903,7 @@ async fn the_plan_tests_drilldown_aggregates_across_runs_and_picks_the_latest_ro
     assert_eq!(login.fail_count, 1);
     assert_eq!(login.last_status, "FAILED", "the newer run wins");
     assert_eq!(login.last_version.as_deref(), Some("8.1.3"));
-    assert_eq!(login.last_platform_id, Some(WINDOWS));
+    assert_eq!(login.last_environment_id, Some(WINDOWS));
     assert_eq!(
         login.jira_key, None,
         "the latest row's jira_key, not the older row's VHP-1"
@@ -919,7 +919,7 @@ async fn the_plan_tests_drilldown_aggregates_across_runs_and_picks_the_latest_ro
 }
 
 /// Platform names are resolved for exactly the ids the response renders —
-/// `last_platform_id` — in one batch, the same discipline
+/// `last_environment_id` — in one batch, the same discipline
 /// [`the_platform_names_are_resolved_in_one_batch_of_distinct_ids`] pins for
 /// the overview. `LINUX` never appears as any test's *latest* platform here, so
 /// it must not be asked about.
@@ -1286,7 +1286,7 @@ impl Fixture {
             jira_key: None,
             product_version: Some(VERSION.to_owned()),
             app_build: Some(BUILD.to_owned()),
-            platform_id: Some(platform),
+            environment_id: Some(platform),
             repo_id: Some(REPO),
             plan_path: Some(PLAN.to_owned()),
             branch: None,
@@ -1375,9 +1375,9 @@ fn normalized(group_by: GroupBy, group_value: Option<&str>) -> NormalizedOvervie
     }
 }
 
-fn platform_bar(platform_id: Uuid) -> PlatformGroupSummary {
+fn platform_bar(environment_id: Uuid) -> PlatformGroupSummary {
     PlatformGroupSummary {
-        platform_id,
+        environment_id,
         total: 1,
         passed: 1,
         failed: 0,
@@ -1386,7 +1386,7 @@ fn platform_bar(platform_id: Uuid) -> PlatformGroupSummary {
 }
 
 fn list_item_on(
-    platform_id: Option<Uuid>,
+    environment_id: Option<Uuid>,
 ) -> crate::domain::analytics::aggregates::AnalyticsListItem {
     crate::domain::analytics::aggregates::AnalyticsListItem {
         test_file: "tests/a.py".to_owned(),
@@ -1400,7 +1400,7 @@ fn list_item_on(
         plan_name: "Smoke".to_owned(),
         versions: Vec::new(),
         last_status: "PASSED",
-        last_platform_id: platform_id,
+        last_environment_id: environment_id,
         last_run_id: None,
         last_build: None,
         last_run_finished_at: None,

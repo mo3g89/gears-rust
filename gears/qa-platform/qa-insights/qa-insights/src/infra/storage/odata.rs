@@ -565,13 +565,7 @@ mod tests {
             "jira_key",
             "product_version",
             "app_build",
-            // Names the physical column, which stays `platform_id` — see
-            // `TestResultDto::environment_id`'s doc (`api/rest/dto.rs`) for
-            // why the *wire* field renamed while the column did not.
-            // `test_result::Model` renames the Rust field to
-            // `environment_id` and pins it to this column name; this list
-            // asserts on the column, not the Rust field, so it stays as-is.
-            "platform_id",
+            "environment_id",
             "repo_id",
             "plan_path",
             "branch",

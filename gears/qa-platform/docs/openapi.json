@@ -1663,7 +1663,7 @@
           "QA Insights"
         ],
         "summary": "Dashboard aggregate",
-        "description": "Run activity and the test counters behind it, in one payload. Live run state (active, queued, the recent list) is read from qa-runs on every request and is never cached here, because qa-runs owns it; the counters are computed over this gear's ingested results. days sets the length of the daily pass/fail trend: it defaults to 14 and is silently clamped to 3-90, so days=365 answers with 90 points rather than an error. Every day in the window is present, including days nothing ran. total_runs counts the runs this gear holds results for, which is not the same as every run ever launched - a run whose results have not been ingested yet is absent, and asynchronous ingest makes that a normal transient state. The recent list holds ten runs and the active list holds at most ten, using the same predicate as the active count, so a caller reading 23 active gets ten entries. The 24-hour block - failed_recent, failed_24h_count, failed_prev_24h_count, pass_rate_24h and pass_rate_prev_24h - has a window of its own and does not move with days; it counts a wider row set than the trends do, because a run that has not finished yet contributes to it. A pass rate is a ratio between 0 and 1 over passed-plus-failed rows, so skipped tests do not lower it, and it is null rather than 0 when the window held nothing to divide by. flaky_tests has a third window - seven days, also fixed - and holds at most ten tests that both passed and failed in it, flakiest first, where flakiest means the larger count of the smaller of the two status groups; a test that only passed or only failed is absent rather than listed with a zero, so an empty array is the ordinary answer on a healthy suite. quality_vectors_pass_rate has a fourth window, also seven days and also fixed, and holds one entry per Quality Vector declared by any test file with a row in that window, highest total first; a file declaring two vectors contributes its executions to both, so the totals across that array are not a row count, and an entry whose counters are all zero means every file carrying that vector was skipped. Three fields of the legacy dashboard payload are deliberately absent rather than reported as zero, because nothing computes them yet: total_plans, total_schedules and platforms_summary. product_id narrows every measured number on this payload to one product - the counts, both lists, the per-run trend, the daily trend, the 24-hour block, flaky_tests and quality_vectors_pass_rate all narrow with it, and none of them stays deployment-wide. The attribution is through the run's own target: a run naming a repository (directly, whether it is running a plan, a single test, or enumerating a repository's cases) is attributed to that repository's product; a run naming a custom plan spans repositories and is attributed to none. unattributable_runs is the one field product_id does not narrow, and it is not a measurement of the selected product: it counts the runs in the same window that belong to no product at all, whichever product they would otherwise have been under, so it is not the selected product's own dropped runs - there is no way to identify those, which is what makes the runs unattributable in the first place. It is 0 without product_id only because nothing was dropped then, not because those runs stop existing. Omitting product_id preserves today's deployment-wide behaviour exactly, and an unattributable run is included in that deployment-wide answer as it always was. Requires the qa.test_result/list grant every request needs, and a product-scoped request additionally requires qa.test_repo/list: resolving which repositories the selected product owns is a qa-catalog read of its own, refused independently of the first grant.",
+        "description": "Run activity and the test counters behind it, in one payload. Live run state (active, queued, the recent list) is read from qa-runs on every request and is never cached here, because qa-runs owns it; the counters are computed over this gear's ingested results. days sets the length of the daily pass/fail trend: it defaults to 14 and is silently clamped to 3-90, so days=365 answers with 90 points rather than an error. Every day in the window is present, including days nothing ran. total_runs counts the runs this gear holds results for, which is not the same as every run ever launched - a run whose results have not been ingested yet is absent, and asynchronous ingest makes that a normal transient state. The recent list holds ten runs and the active list holds at most ten, using the same predicate as the active count, so a caller reading 23 active gets ten entries. The 24-hour block - failed_recent, failed_24h_count, failed_prev_24h_count, pass_rate_24h and pass_rate_prev_24h - has a window of its own and does not move with days; it counts a wider row set than the trends do, because a run that has not finished yet contributes to it. A pass rate is a ratio between 0 and 1 over passed-plus-failed rows, so skipped tests do not lower it, and it is null rather than 0 when the window held nothing to divide by. flaky_tests has a third window - seven days, also fixed - and holds at most ten tests that both passed and failed in it, flakiest first, where flakiest means the larger count of the smaller of the two status groups; a test that only passed or only failed is absent rather than listed with a zero, so an empty array is the ordinary answer on a healthy suite. quality_vectors_pass_rate has a fourth window, also seven days and also fixed, and holds one entry per Quality Vector declared by any test file with a row in that window, highest total first; a file declaring two vectors contributes its executions to both, so the totals across that array are not a row count, and an entry whose counters are all zero means every file carrying that vector was skipped. Three fields of the payload are deliberately absent rather than reported as zero, because nothing computes them yet: total_plans, total_schedules and environments_summary. product_id narrows every measured number on this payload to one product - the counts, both lists, the per-run trend, the daily trend, the 24-hour block, flaky_tests and quality_vectors_pass_rate all narrow with it, and none of them stays deployment-wide. The attribution is through the run's own target: a run naming a repository (directly, whether it is running a plan, a single test, or enumerating a repository's cases) is attributed to that repository's product; a run naming a custom plan spans repositories and is attributed to none. unattributable_runs is the one field product_id does not narrow, and it is not a measurement of the selected product: it counts the runs in the same window that belong to no product at all, whichever product they would otherwise have been under, so it is not the selected product's own dropped runs - there is no way to identify those, which is what makes the runs unattributable in the first place. It is 0 without product_id only because nothing was dropped then, not because those runs stop existing. Omitting product_id preserves today's deployment-wide behaviour exactly, and an unattributable run is included in that deployment-wide answer as it always was. Requires the qa.test_result/list grant every request needs, and a product-scoped request additionally requires qa.test_repo/list: resolving which repositories the selected product owns is a qa-catalog read of its own, refused independently of the first grant.",
         "operationId": "qa_insights.dashboard",
         "parameters": [
           {
@@ -1889,6 +1889,22 @@
             "bearerAuth": []
           }
         ],
+        "x-odata-orderby": {
+          "allowedFields": [
+            "id asc",
+            "id desc",
+            "name asc",
+            "name desc",
+            "product_id asc",
+            "product_id desc",
+            "is_default asc",
+            "is_default desc",
+            "observed_version asc",
+            "observed_version desc",
+            "created_at asc",
+            "created_at desc"
+          ]
+        },
         "x-odata-filter": {
           "allowedFields": {
             "created_at": [
@@ -1931,22 +1947,6 @@
               "in"
             ]
           }
-        },
-        "x-odata-orderby": {
-          "allowedFields": [
-            "id asc",
-            "id desc",
-            "name asc",
-            "name desc",
-            "product_id asc",
-            "product_id desc",
-            "is_default asc",
-            "is_default desc",
-            "observed_version asc",
-            "observed_version desc",
-            "created_at asc",
-            "created_at desc"
-          ]
         }
       },
       "post": {
@@ -3284,7 +3284,7 @@
           {
             "name": "limit",
             "in": "query",
-            "description": "Legacy page size; defaults to 200, clamped to 1-500. $top takes precedence.",
+            "description": "Bare page size; defaults to 200, clamped to 1-500. $top takes precedence.",
             "required": false,
             "schema": {
               "type": "integer"
@@ -3366,30 +3366,6 @@
             "bearerAuth": []
           }
         ],
-        "x-odata-orderby": {
-          "allowedFields": [
-            "id asc",
-            "id desc",
-            "run_id asc",
-            "run_id desc",
-            "environment_id asc",
-            "environment_id desc",
-            "state asc",
-            "state desc",
-            "run_kind asc",
-            "run_kind desc",
-            "source asc",
-            "source desc",
-            "exclusive asc",
-            "exclusive desc",
-            "enqueued_at asc",
-            "enqueued_at desc",
-            "dispatched_at asc",
-            "dispatched_at desc",
-            "finished_at asc",
-            "finished_at desc"
-          ]
-        },
         "x-odata-filter": {
           "allowedFields": {
             "dispatched_at": [
@@ -3463,6 +3439,30 @@
               "in"
             ]
           }
+        },
+        "x-odata-orderby": {
+          "allowedFields": [
+            "id asc",
+            "id desc",
+            "run_id asc",
+            "run_id desc",
+            "environment_id asc",
+            "environment_id desc",
+            "state asc",
+            "state desc",
+            "run_kind asc",
+            "run_kind desc",
+            "source asc",
+            "source desc",
+            "exclusive asc",
+            "exclusive desc",
+            "enqueued_at asc",
+            "enqueued_at desc",
+            "dispatched_at asc",
+            "dispatched_at desc",
+            "finished_at asc",
+            "finished_at desc"
+          ]
         }
       }
     },
@@ -3730,6 +3730,34 @@
             "bearerAuth": []
           }
         ],
+        "x-odata-orderby": {
+          "allowedFields": [
+            "id asc",
+            "id desc",
+            "name asc",
+            "name desc",
+            "state asc",
+            "state desc",
+            "run_kind asc",
+            "run_kind desc",
+            "environment_id asc",
+            "environment_id desc",
+            "source asc",
+            "source desc",
+            "schedule_id asc",
+            "schedule_id desc",
+            "resolved_exclusive asc",
+            "resolved_exclusive desc",
+            "is_validation asc",
+            "is_validation desc",
+            "created_at asc",
+            "created_at desc",
+            "started_at asc",
+            "started_at desc",
+            "finished_at asc",
+            "finished_at desc"
+          ]
+        },
         "x-odata-filter": {
           "allowedFields": {
             "created_at": [
@@ -3815,34 +3843,6 @@
               "in"
             ]
           }
-        },
-        "x-odata-orderby": {
-          "allowedFields": [
-            "id asc",
-            "id desc",
-            "name asc",
-            "name desc",
-            "state asc",
-            "state desc",
-            "run_kind asc",
-            "run_kind desc",
-            "environment_id asc",
-            "environment_id desc",
-            "source asc",
-            "source desc",
-            "schedule_id asc",
-            "schedule_id desc",
-            "resolved_exclusive asc",
-            "resolved_exclusive desc",
-            "is_validation asc",
-            "is_validation desc",
-            "created_at asc",
-            "created_at desc",
-            "started_at asc",
-            "started_at desc",
-            "finished_at asc",
-            "finished_at desc"
-          ]
         }
       },
       "post": {
@@ -4693,7 +4693,7 @@
           "QA Runs"
         ],
         "summary": "Replace a schedule's Slack notification settings",
-        "description": "The three per-schedule Slack settings, and nothing else on the schedule: a              schedule pinned exclusive comes back pinned exclusive, because the other              columns are not in the UPDATE at all. The source system registers this as a              POST (`manager/src/routes/mod.rs:95-98`); a full, idempotent replacement of a              settings sub-resource is a PUT, and the REST surface - unlike the test-facing              contract - is not frozen. All three fields are required, for the reason the              schedule replace requires `enabled`. 400 is an event name outside the six              legacy serializes (`pending`, `in_progress`, `succeeded`, `failed`, `error`,              `skipped`) or a channel wider than the column. qa-runs stores these and sends              nothing; the sending is qa-insights'.",
+        "description": "The three per-schedule Slack settings, and nothing else on the schedule: a              schedule pinned exclusive comes back pinned exclusive, because the other              columns are not in the UPDATE at all. A full, idempotent replacement of a              settings sub-resource is a PUT, and the REST surface - unlike the test-facing              contract - is not frozen. All three fields are required, for the reason the              schedule replace requires `enabled`. 400 is an event name outside the six              (`pending`, `in_progress`, `succeeded`, `failed`, `error`,              `skipped`) or a channel wider than the column. qa-runs stores these and sends              nothing; the sending is qa-insights'.",
         "operationId": "qa_runs.update_schedule_notifications",
         "parameters": [
           {
@@ -5340,7 +5340,7 @@
           "QA Insights"
         ],
         "summary": "Send a test notification",
-        "description": "Sends a real notification right now, over whichever channel(s) are enabled. With no request body, sends the settings page's generic test message using the tenant's stored settings. With a body, tests one scheduled-run Slack template against the given config override and event token (one of pending, in_progress, succeeded, failed, error, skipped) rather than the stored settings - the config override must have Slack enabled with a non-empty webhook reference, or this is refused with a 400 before anything is sent. Neither shape claims a dedupe slot or writes the audit log; both are pinned by qa_insights_sdk::SLACK_NOTIFICATION_EVENTS. Unlike the automatic completion path, a send failure here is returned rather than swallowed - an operator testing a channel deserves to know it does not work, including a 501 when the channel this deployment ships has no adapter at all (D10). This endpoint's OpenAPI schema shows the body as required; posting no body at all is also accepted, matching legacy. Requires the qa.notification_config/test grant.",
+        "description": "Sends a real notification right now, over whichever channel(s) are enabled. With no request body, sends the settings page's generic test message using the tenant's stored settings. With a body, tests one scheduled-run Slack template against the given config override and event token (one of pending, in_progress, succeeded, failed, error, skipped) rather than the stored settings - the config override must have Slack enabled with a non-empty webhook reference, or this is refused with a 400 before anything is sent. Neither shape claims a dedupe slot or writes the audit log; both are pinned by qa_insights_sdk::SLACK_NOTIFICATION_EVENTS. Unlike the automatic completion path, a send failure here is returned rather than swallowed - an operator testing a channel deserves to know it does not work, including a 501 when the channel this deployment ships has no adapter at all (D10). This endpoint's OpenAPI schema shows the body as required; posting no body at all is also accepted. Requires the qa.notification_config/test grant.",
         "operationId": "qa_insights.test_notification",
         "requestBody": {
           "description": "Optional: a config override and event token to test a scheduled-run template instead of the stored generic test",
@@ -5793,18 +5793,6 @@
             "bearerAuth": []
           }
         ],
-        "x-odata-orderby": {
-          "allowedFields": [
-            "id asc",
-            "id desc",
-            "run_id asc",
-            "run_id desc",
-            "test_file asc",
-            "test_file desc",
-            "status asc",
-            "status desc"
-          ]
-        },
         "x-odata-filter": {
           "allowedFields": {
             "id": [
@@ -5834,6 +5822,18 @@
               "in"
             ]
           }
+        },
+        "x-odata-orderby": {
+          "allowedFields": [
+            "id asc",
+            "id desc",
+            "run_id asc",
+            "run_id desc",
+            "test_file asc",
+            "test_file desc",
+            "status asc",
+            "status desc"
+          ]
         }
       }
     },
@@ -6883,7 +6883,7 @@
     "schemas": {
       "AnalyticsListItemDto": {
         "type": "object",
-        "description": "One test as the three overview lists draw it.\n\nLegacy's `AnalyticsListItem` (`analytics.rs:112-133`), and **three of its\nfields are spelled differently here because this architecture stores an id\nwhere legacy stored a label**:\n\n* `plan_id: String` becomes [`Self::repo_id`] + [`Self::plan_path`]. A plan\n  has no UUID in this subsystem — `qa_insights_sdk`'s header records that it\n  is materialized on read from qa-catalog and that legacy's own `plan_id` is\n  a lossy path-derived slug — so the pair *is* the identity.\n* Legacy's `last_platform: Option<String>` becomes this port's\n  [`Self::last_environment_id`] + [`Self::last_environment`] (renamed from\n  `last_platform_id`/`last_platform` at ruling G-3), the id and the name\n  qa-environments resolved for it. Both, rather than only the name: the\n  name is `null` for an environment the caller cannot see, and a client\n  that has to draw *something* needs the id to disambiguate two\n  unresolved bars.\n* `last_run_name: Option<String>` becomes [`Self::last_run_id`]. **There is\n  no run-name read in this gear**: `RunsReader` has no bulk name lookup and a\n  per-item `get_run` would be an N+1 across a gear boundary on a list whose\n  length is the universe size. Named for what it carries rather than\n  `last_run_name`-with-a-UUID-inside, which is the discipline Task 23 applied\n  to the environment id.",
+        "description": "One test as the three overview lists draw it.\n\n**Three of its fields carry an id where a reader might expect a label**, and\neach is named for what it carries:\n\n* The plan is [`Self::repo_id`] + [`Self::plan_path`]. A plan has no UUID in\n  this subsystem — `qa_insights_sdk`'s header records that it is materialized\n  on read from qa-catalog — so the pair *is* the identity.\n* The environment is [`Self::last_environment_id`] **and**\n  [`Self::last_environment`] (renamed from `last_environment_id`/`last_platform`\n  at ruling G-3): the id, and the name qa-environments resolved for it. Both,\n  rather than only the name, because the name is `null` for an environment\n  the caller cannot see, and a client that has to draw *something* needs the\n  id to disambiguate two unresolved bars.\n* The run is [`Self::last_run_id`]. **There is no run-name read in this\n  gear**: `RunsReader` has no bulk name lookup, and a per-item `get_run`\n  would be an N+1 across a gear boundary on a list whose length is the\n  universe size. Named for what it carries rather than a `last_run_name`\n  with a UUID inside it, which is the discipline Task 23 applied to the\n  environment id.",
         "required": [
           "test_file",
           "test_name",
@@ -6960,7 +6960,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "See this type's header: an id, where legacy had a run name."
+            "description": "See this type's header: an id, not a run name."
           },
           "last_status": {
             "type": "string",
@@ -7018,7 +7018,7 @@
       },
       "AnalyticsListsDto": {
         "type": "object",
-        "description": "The universe as three lists, each sorted by display name.\n\nLegacy's `AnalyticsLists` (`analytics.rs:136-140`). Every universe entry is\nin exactly one of the three, so their lengths sum to\n[`OverviewSummaryDto::total`].",
+        "description": "The universe as three lists, each sorted by display name.\n\nEvery universe entry is in exactly one of the three, so their lengths sum to\n[`OverviewSummaryDto::total`].",
         "required": [
           "passed",
           "failed",
@@ -7048,7 +7048,7 @@
       },
       "AnalyticsOverviewDto": {
         "type": "object",
-        "description": "Everything `GET /qa/v1/analytics/overview` answers with.\n\nLegacy's `AnalyticsOverviewResponse` (`analytics.rs:231-248`): **eight\ncomputed sections** plus the query echoed back.\n\n# One field of legacy's sixteen is absent\n\n`product_key`. Legacy fills it from the product registry it resolved\n`product_id` through (`:787`), VHP-319 deleted that model, and nothing in\nthis subsystem carries a product key. Absent rather than echoed back as the\n`product_id`, which would be a different value under the same name.",
+        "description": "Everything `GET /qa/v1/analytics/overview` answers with.\n\n**Eight computed sections** plus the query echoed back.\n\n# There is no `product_key` field\n\nNothing in this subsystem carries a product key on a run: qa-catalog owns\nproducts, and a run reaches one through its target. Absent rather than echoed\nback as the `product_id`, which would be a different value under the same\nname.",
         "required": [
           "product_id",
           "version",
@@ -7160,7 +7160,7 @@
       },
       "BuildLastRunDistributionDto": {
         "type": "object",
-        "description": "One build's slice of the \"latest run per test\" snapshot.\n\nLegacy's `BuildLastRunDistribution` (`analytics.rs:169-175`), with\n`latest_run_name: Option<String>` spelled as [`Self::latest_run_id`] for\n[`AnalyticsListItemDto`]'s reason.",
+        "description": "One build's slice of the \"latest run per test\" snapshot.\n\nThe newest run in each bucket is [`Self::latest_run_id`], an id rather than a\nname, for [`AnalyticsListItemDto`]'s reason.",
         "required": [
           "build",
           "passed",
@@ -7197,7 +7197,7 @@
       },
       "BuildTestDetailDto": {
         "type": "object",
-        "description": "One test of one build, as the drill-down lists it.\n\nLegacy's `BuildTestDetailItem` (`analytics.rs:178-186`), with `run_name`\nspelled as [`Self::run_id`] for [`AnalyticsListItemDto`]'s reason.",
+        "description": "One test of one build, as the drill-down lists it.\n\nThe run is [`Self::run_id`], an id rather than a name, for\n[`AnalyticsListItemDto`]'s reason.",
         "required": [
           "test_file",
           "test_name",
@@ -7243,7 +7243,7 @@
       },
       "CollectCountReq": {
         "type": "object",
-        "description": "The body the runner posts with one file's exact case count — legacy's\n`CollectCountPayload` (`manager/src/routes/analytics.rs:2606-2610`).\n\n`case_count` is `i64`, matching legacy's own signed field and **not**\n[`qa_insights_sdk::CollectCount::case_count`]'s `u32` — see\n`domain::service::collect`'s header, \"The `case_count` clamp needs an\n`i64` wire field\": a `u32` field here would turn legacy's clamp-to-zero\ninto a deserialization 400, which is a different behaviour a client would\nobserve as this gear rejecting a request legacy accepted.",
+        "description": "The body the runner posts with one file's exact case count —\n`CollectCountPayload`.\n\n`case_count` is `i64` on the wire and **not**\n[`qa_insights_sdk::CollectCount::case_count`]'s `u32` — see\n`domain::service::collect`'s header, \"The `case_count` clamp needs an\n`i64` wire field\": a `u32` field here would turn a clamp-to-zero\ninto a deserialization 400, which is a different behaviour a client would\nobserve as a rejected report rather than a recorded zero.",
         "required": [
           "test_file",
           "case_count"
@@ -7260,7 +7260,7 @@
       },
       "CollectTriggerOutcomeDto": {
         "type": "object",
-        "description": "What `POST /qa/v1/analytics/collect` answers with — legacy's bare\n`Json(json!({ \"launched\": .., \"branch\": .. }))`\n(`manager/src/routes/analytics.rs:2664`), typed here rather than an\nuntyped `serde_json::Value` so the `OpenAPI` schema states the two fields.",
+        "description": "What `POST /qa/v1/analytics/collect` answers with: the launched count and\nthe branch, typed rather than an untyped `serde_json::Value` so the `OpenAPI`\nschema states the two fields.",
         "required": [
           "launched",
           "branch"
@@ -7279,7 +7279,7 @@
       },
       "CoverageBuildDto": {
         "type": "object",
-        "description": "One build's coverage, as `GET /qa/v1/dashboard/coverage` returns it.\n\nEvery field of `qa_insights_sdk::CoverageBuild`, which is every field of\nlegacy's `CoverageBuild` (`manager/src/routes/dashboard.rs:564-569`).\n\n# The array is empty today, and no *field* is omitted to say so\n\nThe wire consequence first: the difference from [`DashboardStatsDto`]'s\nomission convention is deliberate and is legacy's own. There, a *field*\nnothing computes is absent from the payload; here, an *entry* nothing measures\nis absent from the array. A point that did exist would carry all four fields,\nso all four are declared, and a client can bind them now.\n\n# Why it is empty has one copy, and this is it\n\n**Two blocks below were moved here out of `domain::service::dashboard`'s\nmodule header by Task 21b**, at the request of Phase A's whole-phase review,\nwhich assigned the move to plan Task 21 and named this type as the preferred\nhome: that header was 319 lines and 93 of them were this argument — an\nargument about why *this* type's array is empty, in the header of the service\nthat computes eight other things. What replaced them there is a pointer here,\nso the copy count is unchanged.\n\n**The prose is reproduced word for word.** Three mechanical notes, so that\nnothing below has to be read as reworded:\n\n* Only intra-doc links were re-pointed, because a link written from that\n  module does not resolve from here.\n* The first block's bare `:` citations are into `docs/PRD.md`, whose\n  requirement bullet is `:575-581` — the antecedent stayed behind with the\n  requirement-discharge section.\n* That block opens with `And` and closes with \"nothing above as discharging\n  the clause\", both of which pointed at that same section. It is the paragraph\n  about which *task* ships the coverage shape, and it stayed behind because it\n  is about task ownership rather than about this type.\n\n# The requirement and legacy do not describe the same quantity\n\n**And the requirement does not describe the same quantity legacy computes,\nwhich no decision reconciles.** The PRD's bullet is \"a coverage view (which\ntests and plans ran against which product versions and platforms)\" (`:580`) —\n*execution* coverage, for which `qa_test_results` does have columns. Legacy's\n`api_coverage` answers *code* coverage: `line_pct`, `branch_pct` and\n`function_pct` parsed out of runner logs (`manager/src/models.rs:1482-1486`).\nThe shipped shape answers code coverage: `qa_insights_sdk::CoverageBuild`\ntypes `line_pct`, `branch_pct` and `function_pct`, and\n`gears/qa-platform/docs/DESIGN.md` §3.5 records the divergence as open.\n**Which of the two readings the clause\nshould have is an open question raised out of Task 19 and is not settled here\nor anywhere else in this crate** — nothing below should be read as settling\nit, and nothing above as discharging the clause.\n\n# The coverage view, and why it answers an empty array\n\nTask 19 and [`DashboardService::coverage`](crate::domain::service::dashboard::DashboardService::coverage). Recorded at length because the\nanswer is empty and an empty answer invites the wrong explanations.\n\n## What legacy does, field by field\n\n`api_coverage` (`manager/src/routes/dashboard.rs:573`) takes **no\nparameters** — its only argument is `State(state)`, and the route is a bare\n`get(dashboard::api_coverage)` (`manager/src/routes/mod.rs:301-304`). It\nanswers with a JSON array of `CoverageBuild` (`dashboard.rs:564-569`):\n`product_key`, `version`, `build`, and a `CoverageSummary` of `line_pct`,\n`branch_pct` and `function_pct` (`manager/src/models.rs:1482-1486`). `build`\nis the label `format!(\"{}/{}\", product_key, version)` (`:618`), not a build\nidentifier — nothing to do with `qa_test_results.app_build`.\n\nIt gets there by listing **every** Argo workflow (`:574`), sorting them by\n`finished_at` falling back to `started_at`, descending and as *strings*\n(`:575-587`), then per run: skipping any phase other than `Succeeded` or\n`Failed` (`:593-595`), skipping a blank `app_version` (`:596-599`) or a blank\n`product_key` (`:600-604`), **fetching that workflow's logs** (`:606-609`),\nand parsing `=== COVERAGE_SUMMARY: {line} {branch} {function} ===` out of them\n(`:611`; the marker and its regex are at\n`manager/src/services/argo.rs:2718-2728`).\n\n## The grouping key is `product_key`, and the dedupe sits *inside* the parse\n\nOne point per product: `seen_products` is a `HashSet` of product keys and the\nfirst survivor of the newest-first order wins (`:612-621`). The order of those\ntwo facts is the part worth transcribing — the dedupe check is inside\n`if let Some(summary)`, so a run with no marker does not consume its product's\nslot and an older run of the same product can still supply the point.\n\n## A build with no coverage is **absent**, never present with zeros\n\nChecked rather than guessed, as the plan requires. There is no `else` on\n`:611`: a run whose logs carry no marker contributes nothing, and a product\nwhose every run lacks one is missing from the array rather than reported as\n`0.0`. The one client renders the empty array as a first-class state — \"No\ncoverage data available yet. Enable coverage collection in your test runs.\"\n(`manager-ui/src/components/analytics/CoverageChart.tsx:36-50`) — while\nreading `d.coverage.line_pct` unconditionally on every entry it does get\n(`:52-57`), so an entry without a summary would be worse than no entry.\n\n## Two upstreams are missing, and the first of them is p2 work\n\n* **The percentages come from log text, and this gear has none.** Legacy's\n  only source is the workflow log; there is no coverage column anywhere in its\n  schema (zero occurrences of `coverage` in `manager/migrations/001_initial.sql`,\n  which is its only migration file). Here the sole source of run data is\n  qa-runs, and no method of its client returns log text\n  (`qa-runs-sdk/src/client.rs:24-200`, seventeen methods) — by design rather\n  than by omission: `qa_runs_sdk::Run::log_storage_ref` is an archived-log\n  *pointer* documented as \"populated on completion (p2 with 2.7)\"\n  (`qa-runs-sdk/src/models.rs:376-380`), and nothing else in `qa_runs_sdk`\n  carries a log slice either. It is the same parity gap\n  `qa_insights_sdk::TestResultRecord` records for its missing `logs` column,\n  one granularity up.\n* **The grouping key does not exist either.** `qa_runs_sdk::Run` carries no\n  product key at all — VHP-319 deleted legacy's product-version model and\n  qa-catalog owns products now — which this crate already records twice for\n  other reasons (`domain::service::dashboard::dashboard_run` and `api::rest::dto::DashboardQuery`, whose\n  `product_key` parameter is dropped for it). Closing it is the plan's largest\n  open question, deferred to Task 20.\n\nSo the empty array is the honest answer, and it is **parity rather than a\nplaceholder**: legacy answers the same way under exactly the conditions this\narchitecture is permanently in. A run whose logs it cannot fetch is skipped\n(`Err(_) => continue`, `:606-609`), a run with no `product_key` is skipped\n(`None => continue`, `:600-604`), and a run whose logs carry no marker is\nskipped (no `else` on `:611`). Here every run meets all three conditions, so\nlegacy's own code would return `[]` too — this is not a stub standing in for\nlegacy's answer, it *is* legacy's answer. What is deliberately **not**\ndone is the available temptation: folding something out of `qa_test_results`\nand putting it under `line_pct`. Test-status counts are not code coverage, and\na plausible number under legacy's key is the \"plausible lie\"\n`api::rest::dto::DashboardStatsDto`'s omission convention refuses one level up\n— that convention omits a *field* nothing computes, this omits an *entry*\nnothing measures, and the second is where legacy itself applies the rule.\n\n## It still compiles a PEP decision, and the objection to that is real\n\n[`DashboardService::coverage`](crate::domain::service::dashboard::DashboardService::coverage) compiles the same decision\n[`DashboardService::stats`](crate::domain::service::dashboard::DashboardService::stats) does, and then reads nothing. The objection is that a decision protecting no\ndata is ceremony. It is made anyway because the endpoint's authorization\ncontract must not change under a caller when the upstream lands: a client that\nworks today and starts receiving 403 the moment the first real point is\ncomputed is a breaking change nobody would have chosen, and the `403` this\nroute publishes has to be reachable to be true. Pinned by\n`a_denied_caller_is_refused_rather_than_answered_with_an_empty_coverage_list`\nand `the_coverage_view_authorizes_under_test_result_list_once`.",
+        "description": "One build's coverage, as `GET /qa/v1/dashboard/coverage` returns it.\n\nEvery field of `qa_insights_sdk::CoverageBuild`.\n\n# The array is empty today, and no *field* is omitted to say so\n\nThe wire consequence first, because it differs deliberately from\n[`DashboardStatsDto`]'s omission convention. There, a *field* nothing computes\nis absent from the payload; here, an *entry* nothing measures is absent from\nthe array. A point that did exist would carry all four fields, so all four are\ndeclared and a client can bind them now.\n\n# Why it is empty\n\nRecorded at length because an empty answer invites the wrong explanations. It\nis neither a transient state nor an empty tenant: **nothing in this system\nproduces a coverage point, and two upstreams are missing before one could.**\n\n* **The percentages would have to come from log text, and this gear has\n  none.** The sole source of run data here is qa-runs, and no method of its\n  client returns log text — by design rather than omission: a run's durable\n  log lives in `qa_run_logs` and is served only as an SSE stream, and\n  `qa_runs_sdk` carries no log slice on any model. It is the same gap\n  `qa_insights_sdk::TestResultRecord` records for its missing `logs` column,\n  one granularity up.\n* **The grouping key does not exist either.** `qa_runs_sdk::Run` carries no\n  product key: qa-catalog owns products, and a run is attributed to one\n  through its target. This crate records the same gap twice more, on\n  `domain::service::dashboard::dashboard_run` and on [`DashboardQuery`], whose\n  `product_key` parameter is dropped for it.\n\nSo the empty array is the honest answer. What is deliberately **not** done is\nthe available temptation: folding something out of `qa_test_results` and\nputting it under `line_pct`. Test-status counts are not code coverage, and a\nplausible number under a coverage key is exactly the \"plausible lie\"\n[`DashboardStatsDto`]'s omission convention refuses one level up — that\nconvention omits a *field* nothing computes, this omits an *entry* nothing\nmeasures.\n\n# The requirement and this endpoint do not describe the same quantity\n\n`cpt-cf-qa-fr-insights-dashboard` (PRD §5.5) phrases coverage as \"a coverage\nview (which tests and plans ran against which product versions and\nenvironments)\" — *execution* coverage, for which `qa_test_results` does have\ncolumns. This endpoint's shape answers *code* coverage: `line_pct`,\n`branch_pct` and `function_pct`. **Which of the two readings the clause should\nhave is open**, and `gears/qa-platform/docs/DESIGN.md` §3.5 records it as\nsuch; nothing here settles it and nothing here discharges the clause.\n\n# It still compiles a PEP decision, and the objection to that is real\n\n[`DashboardService::coverage`](crate::domain::service::dashboard::DashboardService::coverage)\ncompiles the same decision\n[`DashboardService::stats`](crate::domain::service::dashboard::DashboardService::stats)\ndoes, and then reads nothing. The objection is that a decision protecting no\ndata is ceremony. It is made anyway because the endpoint's authorization\ncontract must not change under a caller when the upstream lands: a client that\nworks today and starts receiving 403 the moment the first real point is\ncomputed is a breaking change nobody would have chosen, and the `403` this\nroute publishes has to be reachable to be true. Pinned by\n`a_denied_caller_is_refused_rather_than_answered_with_an_empty_coverage_list`\nand `the_coverage_view_authorizes_under_test_result_list_once`.",
         "required": [
           "product_key",
           "version",
@@ -7289,24 +7289,24 @@
         "properties": {
           "build": {
             "type": "string",
-            "description": "The chart's x-axis label — the product key and the version joined by a\nslash (`:618`). A **label**, not a build identifier, and unrelated to\n`qa_test_results.app_build`."
+            "description": "The chart's x-axis label — the product key and the version joined by a\nslash. A **label**, not a build identifier, and unrelated to\n`qa_test_results.app_build`."
           },
           "coverage": {
             "$ref": "#/components/schemas/CoverageSummaryDto"
           },
           "product_key": {
             "type": "string",
-            "description": "The product this point is for. Never empty: legacy skips a run with a\nblank one (`manager/src/routes/dashboard.rs:600-604`)."
+            "description": "The product this point is for. Never empty: a run with a blank product\nkey contributes no point."
           },
           "version": {
             "type": "string",
-            "description": "The application version the run reported (`app_version`), never blank for\nthe same reason (`:596-599`)."
+            "description": "The application version the run reported (`app_version`), never blank for\nthe same reason."
           }
         }
       },
       "CoverageSummaryDto": {
         "type": "object",
-        "description": "Code coverage percentages for one build.\n\nLegacy's `CoverageSummary` (`manager/src/models.rs:1482-1486`) — three\nfields, three fields. The names are the JSON keys legacy already emits and the\nones its chart reads\n(`manager-ui/src/components/analytics/CoverageChart.tsx:52-57`), so they are\nwire contract rather than taste.",
+        "description": "Code coverage percentages for one build.\n\nThe three field names are the JSON keys the coverage endpoint emits and the\nones its chart reads, so they are wire contract rather than taste.",
         "required": [
           "line_pct",
           "branch_pct",
@@ -7589,7 +7589,7 @@
       },
       "DailyStatusPointDto": {
         "type": "object",
-        "description": "One day of the pass/fail trend.\n\n**Two counters, not four.** Legacy's daily query counts `PASSED` and\n`IN ('FAILED','ERROR')` and nothing else\n(`manager/src/routes/dashboard.rs:218-219`), so a skipped test moves neither —\na different reading of the same rows from [`RunTestTrendPointDto`]'s, and\ndeliberately preserved.",
+        "description": "One day of the pass/fail trend.\n\n**Two counters, not four.** The daily fold counts `PASSED` and\n`IN ('FAILED','ERROR')` and nothing else, so a skipped test moves neither —\na different reading of the same rows from [`RunTestTrendPointDto`]'s, and\ndeliberately so.",
         "required": [
           "day",
           "passed",
@@ -7598,7 +7598,7 @@
         "properties": {
           "day": {
             "type": "string",
-            "description": "`YYYY-MM-DD`, UTC. A string rather than a date type, exactly as legacy\nrenders it (`row.day.format(\"%Y-%m-%d\")`,\n`manager/src/routes/dashboard.rs:237`), and formatted here rather than left\nto a serde attribute so the wire shape does not depend on which date\nfeatures the workspace's `time` and `utoipa` happen to have."
+            "description": "`YYYY-MM-DD`, UTC. A string rather than a date type, and formatted here\nrather than left to a serde attribute so the wire shape does not depend on\nwhich date features the workspace's `time` and `utoipa` happen to have."
           },
           "failed": {
             "type": "integer",
@@ -7633,7 +7633,7 @@
               "string",
               "null"
             ],
-            "description": "Legacy's rendered duration text — `\"2m 5s\"` or `\"45s\"`\n(`manager/src/services/argo.rs:2406-2417`). `null` unless the run has both\na start and a finish, so a running run has none and a client showing\nelapsed time computes it from [`Self::started_at`]."
+            "description": "The rendered duration text — `\"2m 5s\"` or `\"45s\"`.\n`null` unless the run has both\na start and a finish, so a running run has none and a client showing\nelapsed time computes it from [`Self::started_at`]."
           },
           "environment_id": {
             "type": [
@@ -7641,7 +7641,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "The environment the run occupied, as an id. Legacy draws a platform\n*name* here; resolving the name is a qa-environments lookup this gear\ndoes not make yet.\n\nSourced from `qa_runs_sdk::Run::platform_id` (this crate's own\n`test_result::Model` is not involved here — this row never touches\n`qa_test_results`), so it is qa-runs' own physical column, one gear\nover, that this field projects. Renamed from `platform_id` (Task 25)\n— see [`TestResultDto::environment_id`]'s doc for why: the same\nrename applies on both sides of the boundary, even though the source\ncolumn this field is sourced from is qa-runs', not this crate's own."
+            "description": "The environment the run occupied, as an id. Resolving it to a display\nname is a qa-environments lookup this gear does not make yet.\n\nSourced from `qa_runs_sdk::Run::environment_id` (this crate's own\n`test_result::Model` is not involved here — this row never touches\n`qa_test_results`), so it is qa-runs' own physical column, one gear\nover, that this field projects. Renamed from `environment_id` (Task 25)\n— see [`TestResultDto::environment_id`]'s doc for why: the same\nrename applies on both sides of the boundary, even though the source\ncolumn this field is sourced from is qa-runs', not this crate's own."
           },
           "name": {
             "type": "string",
@@ -7649,7 +7649,7 @@
           },
           "phase": {
             "type": "string",
-            "description": "The run's lifecycle state, in **qa-runs' own lowercase spelling**:\n`created` | `queued` | `dispatching` | `running` | `succeeded` | `failed`\n| `canceled` | `timed_out` | `expired` | `error`\n(`qa-runs-sdk/src/models.rs:266-280`). Named `phase` because that is\nlegacy's field name for the same column of the same card, and legacy's\nvalues are the capitalised Argo phases — a client ported from it must\nre-map, not merely re-case. Open set: a new run state is a qa-runs change,\nnot corruption."
+            "description": "The run's lifecycle state, in **qa-runs' own lowercase spelling**:\n`created` | `queued` | `dispatching` | `running` | `succeeded` | `failed`\n| `canceled` | `timed_out` | `expired` | `error`. Named `phase` because\nthat is what the card calls the column; the values are qa-runs' persisted\nspellings and never an execution backend's. Open set: a new run state is a\nqa-runs change, not corruption."
           },
           "plan_path": {
             "type": [
@@ -7662,7 +7662,7 @@
               "string",
               "null"
             ],
-            "description": "**Always `null` today.** `qa_runs_sdk::Run` carries no product key — see\n[`DashboardQuery`] for the same gap and who owns closing it. Present on the\nwire rather than omitted because legacy's active-runs card draws it, so a\nclient can bind the field now and see it populate later."
+            "description": "**Always `null` today.** `qa_runs_sdk::Run` carries no product key — see\n[`DashboardQuery`] for the same gap and who owns closing it. Present on the\nwire rather than omitted because the active-runs card draws it, so a\nclient can bind the field now and see it populate later."
           },
           "repo_id": {
             "type": [
@@ -7688,7 +7688,7 @@
       },
       "DashboardStatsDto": {
         "type": "object",
-        "description": "What `GET /qa/v1/dashboard` answers with.\n\n# Fourteen fields, where the contract type has seventeen\n\n`qa_insights_sdk::DashboardStats` is legacy's whole sixteen-field payload plus\n`queued_runs`. Task 18 computed seven, Task 21b five more, Task 23b one and\nTask 25a one; each of the remaining three needs a read or an upstream this\ngear does not have yet, enumerated on that type and in\n`domain::service::dashboard`'s header — which also records that\n`cpt-cf-qa-fr-insights-dashboard` is **not** discharged by this endpoint, and\nthat its coverage half is not discharged in this feature at all.\n\n**It stayed twelve through Task 23**, which is worth stating because that task\nwas named for two of the five then outstanding. It shipped the *analytics*\nflaky, quality-vector and grouped folds — a different grain and a different\nclassification from the two dashboard quantities — so it added no key here.\n**Task 23b added [`Self::flaky_tests`]**, the dashboard-grain flaky query, and\n**Task 25a added [`Self::quality_vectors_pass_rate`]** together with the\nproduction `CatalogReader` adapter it could not be computed without — the\nadapter that had been parked on Task 40, fifteen tasks past the task that\nneeded it.\n\n**They are omitted from this DTO rather than emitted as zeros**, which is the\ndecision worth recording. `\"total_plans\": 0` is indistinguishable from a\nmeasured zero, and a client that renders it is reporting a number nothing\ncomputed; an absent key cannot be misread that way, and adding a key later is\na compatible change while correcting a wrong one is not. The cost is that a\nclient ported from legacy's `/api/dashboard` sees fewer keys than it expects\nand must tolerate their absence — accepted, because there is no such client\nyet (UI parity is `cpt-cf-qa-fr-ui-surfaces`, p2) and because the alternative\nships a plausible lie.\n\nThe example this paragraph used through Task 21a was `\"failed_24h_count\": 0`,\nwhich is now a computed field — kept as a note rather than silently swapped,\nbecause the fields that *were* omitted are what a reader of that sentence\nwould have gone looking for. There were five of them when that note was\nwritten and there are **three** now: Task 23b computed\n[`Self::flaky_tests`] and Task 25a `quality_vectors_pass_rate`, the second and\nthird times this convention has shed a field rather than gained one. The three\nleft — `total_plans`, `total_schedules`, `platforms_summary` — are the ones no\ntask in the plan owns, so the shedding has stopped rather than slowed.\n\n# A `null` pass rate is a measurement, and that is a different thing\n\n[`Self::pass_rate_24h`] is present and may be `null`, which is **not** the\nomission convention above: the field is computed, and `null` is legacy's own\nspelling of \"the window held nothing to divide by\" (`Option<f64>` left at\n`None` behind an `if total > 0` guard, `manager/src/routes/dashboard.rs:356`,\n`:359`). A `0.0` there would say \"everything failed\", so the distinction is\nload-bearing on the wire and not only in the domain.",
+        "description": "What `GET /qa/v1/dashboard` answers with.\n\n# Fourteen fields, where the contract type has seventeen\n\nEach of the three missing ones needs a read or an upstream this gear does not\nhave yet; they are enumerated on `qa_insights_sdk::DashboardStats` and in\n`domain::service::dashboard`'s header — which also records that\n`cpt-cf-qa-fr-insights-dashboard` is **not** discharged by this endpoint, and\nthat its coverage half is not discharged in this feature at all.\n\n**They are omitted from this DTO rather than emitted as zeros**, which is the\ndecision worth recording. `\"total_plans\": 0` is indistinguishable from a\nmeasured zero, and a client that renders it is reporting a number nothing\ncomputed; an absent key cannot be misread that way, and adding a key later is\na compatible change while correcting a wrong one is not. The cost is that a\nclient must tolerate the absence — accepted, because the alternative ships a\nplausible lie.\n\nThe three left — `total_plans`, `total_schedules`, `environments_summary` — are\nthe ones no task owns. Two fields have left this list rather than joined it:\n[`Self::flaky_tests`] and `quality_vectors_pass_rate` are computed now.\n\n# A `null` pass rate is a measurement, and that is a different thing\n\n[`Self::pass_rate_24h`] is present and may be `null`, which is **not** the\nomission convention above: the field is computed, and `null` spells \"the\nwindow held nothing to divide by\" — an `Option<f64>` left at `None` behind an\n`if total > 0` guard. A `0.0` there would say \"everything failed\", so the\ndistinction is load-bearing on the wire and not only in the domain.",
         "required": [
           "total_runs",
           "active_runs",
@@ -7772,7 +7772,7 @@
             "items": {
               "$ref": "#/components/schemas/QualityVectorPassRateDto"
             },
-            "description": "Pass rate per Quality Vector over the **last seven days**, highest total\nfirst.\n\nOne entry per vector declared by any test file with a row in the window,\nwith the executions of every such file summed into it. **A fourth\nwindow**, equal to [`Self::flaky_tests`]' and independent of it — legacy\nspells the seven days as a separate literal in a separate statement\n(`dashboard.rs:490` against `:391`).\n\n\"Any row\", not \"a counted row\": an entry whose three counters are all zero\nis legal and means every contributing file was skipped — see\n[`QualityVectorPassRateDto::tests`].\n\nEmpty means one of three things and the payload does not distinguish them:\nno file had a row in the window at all, no such file is in the catalog's\nuniverse, or no file in it declares a vector. All three are ordinary\nstates; none is an error.\n\nThe array's [`QualityVectorPassRateDto::total`]s **do not sum to a row\ncount** — see that type."
+            "description": "Pass rate per Quality Vector over the **last seven days**, highest total\nfirst.\n\nOne entry per vector declared by any test file with a row in the window,\nwith the executions of every such file summed into it. **A fourth\nwindow**, equal to [`Self::flaky_tests`]' and independent of it — the\nseven days are a separate literal in a separate statement, so the two can\ndiverge without either moving silently.\n\n\"Any row\", not \"a counted row\": an entry whose three counters are all zero\nis legal and means every contributing file was skipped — see\n[`QualityVectorPassRateDto::tests`].\n\nEmpty means one of three things and the payload does not distinguish them:\nno file had a row in the window at all, no such file is in the catalog's\nuniverse, or no file in it declares a vector. All three are ordinary\nstates; none is an error.\n\nThe array's [`QualityVectorPassRateDto::total`]s **do not sum to a row\ncount** — see that type."
           },
           "queued_runs": {
             "type": "integer",
@@ -7797,7 +7797,7 @@
           "total_runs": {
             "type": "integer",
             "format": "int64",
-            "description": "Runs this gear holds results for. **Not** legacy's count of every run ever\nlaunched — `domain::repos::ResultsRepository::count_ingested_runs` records\nwhy that number is not obtainable across the gear boundary.",
+            "description": "Runs this gear holds results for. **Not** a count of every run ever\nlaunched — `domain::repos::ResultsRepository::count_ingested_runs` records\nwhy that number is not obtainable across the gear boundary.",
             "minimum": 0
           },
           "unattributable_runs": {
@@ -7931,7 +7931,7 @@
       },
       "EnvironmentGroupSummaryDto": {
         "type": "object",
-        "description": "One bar of the environment breakdown.\n\n# Why this is not a [`GroupSummaryDto`], where legacy's is\n\nLegacy's execution row carries a platform **name** written by the runner, so\nits platform bars are `GroupSummary { value: String, .. }` like the other two\n(`analytics.rs:1144`, over the `by_platform` map at `:1115`). Here the row\ncarries a `Uuid`, and the name comes\nfrom qa-environments — which can decline to resolve it, for an environment\ndeleted since the run executed or one in another tenant, two cases\n`domain::ports::EnvironmentReader::names` deliberately makes\nindistinguishable.\n\nSo the bar carries **both**: [`Self::environment_id`], which always\nidentifies the bucket, and [`Self::environment`], which is the label when\nthere is one. Collapsing them into a `value: String` would force a choice\nbetween dropping an unresolvable bar — silent data loss on a chart whose\njob is comparison — and rendering a UUID into a field a client will draw\nas a name, which is the exact outcome Task 23 typed `PlatformGroupSummary`\naround a `Uuid` to prevent.\n\nRenamed from `PlatformGroupSummaryDto`, with its `platform_id`/`platform`\nfields, to `EnvironmentGroupSummaryDto` with `environment_id`/`environment`\n(Task 25) — see [`TestResultDto::environment_id`]'s doc for why.",
+        "description": "One bar of the environment breakdown.\n\n# Why this is not a [`GroupSummaryDto`]\n\nThe other two breakdowns bucket by a string the row itself carries, so their\nbars are `GroupSummary { value: String, .. }`. An execution row carries the\nenvironment as a `Uuid`, and the name comes from qa-environments — which can\ndecline to resolve it, for an environment deleted since the run executed or\none in another tenant, two cases `domain::ports::EnvironmentReader::names`\ndeliberately makes indistinguishable.\n\nSo the bar carries **both**: [`Self::environment_id`], which always\nidentifies the bucket, and [`Self::environment`], which is the label when\nthere is one. Collapsing them into a `value: String` would force a choice\nbetween dropping an unresolvable bar — silent data loss on a chart whose\njob is comparison — and rendering a UUID into a field a client will draw\nas a name, which is the exact outcome Task 23 typed `PlatformGroupSummary`\naround a `Uuid` to prevent.\n\nRenamed from `PlatformGroupSummaryDto`, with its `environment_id`/`platform`\nfields, to `EnvironmentGroupSummaryDto` with `environment_id`/`environment`\n(Task 25) — see [`TestResultDto::environment_id`]'s doc for why.",
         "required": [
           "environment_id",
           "total",
@@ -7982,7 +7982,7 @@
       },
       "FailedTestCardDto": {
         "type": "object",
-        "description": "One recent failure, as the dashboard's failure card.\n\n`qa_insights_sdk::FailedTestCard`, which is legacy's eight-field\n`FailedTestCard` (`manager/src/models.rs:388-398`) with `workflow_name`\nreplaced by a run id and `plan_id` expanded into the plan pair. Every field is\non the wire: unlike [`DashboardStatsDto`], nothing here is omitted, because\nevery column is computed — the list itself is empty when nothing failed, which\nis a measurement rather than a gap.",
+        "description": "One recent failure, as the dashboard's failure card.\n\n`qa_insights_sdk::FailedTestCard`, keyed by a run id and by the plan pair.\nEvery field is\non the wire: unlike [`DashboardStatsDto`], nothing here is omitted, because\nevery column is computed — the list itself is empty when nothing failed, which\nis a measurement rather than a gap.",
         "required": [
           "test_name",
           "run_id"
@@ -7994,7 +7994,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "The environment the run occupied, as an id rather than legacy's name —\nthe same substitution [`DashboardRunDto::environment_id`] documents.\nRenamed from `platform_id` (Task 25) — see\n[`TestResultDto::environment_id`]'s doc for why."
+            "description": "The environment the run occupied, as an id rather than a name — the same\nsubstitution [`DashboardRunDto::environment_id`] documents.\nRenamed from `environment_id` (Task 25) — see\n[`TestResultDto::environment_id`]'s doc for why."
           },
           "finished_at": {
             "type": [
@@ -8002,7 +8002,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "When the failure's run finished, falling back to when the row was\ningested. Legacy selects that fallback expression itself\n(`manager/src/routes/dashboard.rs:270`), which is why a run still in\nprogress can appear on this list at all."
+            "description": "When the failure's run finished, falling back to when the row was\ningested. The fallback is why a run still in progress can appear on this\nlist at all."
           },
           "jira_key": {
             "type": [
@@ -8035,7 +8035,7 @@
           "run_id": {
             "type": "string",
             "format": "uuid",
-            "description": "The run the failure came from. Legacy's card carries a `workflow_name`\nstring here; a client ported from it must resolve the name separately."
+            "description": "The run the failure came from, as an id — a client that wants the run's\nname resolves it through qa-runs."
           },
           "test_file": {
             "type": [
@@ -8126,7 +8126,7 @@
       },
       "FileJiraBugsReq": {
         "type": "object",
-        "description": "`POST /qa/v1/jira/bugs`'s body — legacy's `JiraCreateRequest`\n(`manager/src/models.rs:704-706`), unchanged: `test_name` is optional there\ntoo, and `run_id` replaces legacy's run *name* path segment\n(`manager/src/routes/settings.rs:583`, `Path(name): Path<String>`) because\nthis gear addresses a run by id, not by an Argo workflow name.",
+        "description": "`POST /qa/v1/jira/bugs`'s body. `test_name` is optional, and the run is\naddressed by `run_id` rather than by a name, because this gear keys a run by\nid and never by an execution backend's\nworkflow name.",
         "required": [
           "run_id"
         ],
@@ -8146,7 +8146,7 @@
       },
       "FlakyTestCardDto": {
         "type": "object",
-        "description": "A test that both passed and failed inside the dashboard's seven-day window.\n\n`qa_insights_sdk::FlakyTestCard` — seven fields, seven fields. The names are\nlegacy's own JSON keys (`manager/src/models.rs:401-409`) except for the plan\npair, which replaces legacy's single `plan_id` string; that crate's note 1\nargues the substitution and its `FlakyTestCard` records it.\n\nEvery field is emitted, `test_file`, `repo_id` and `plan_path` as `null` when\nabsent — none of them is subject to [`DashboardStatsDto`]' omission\nconvention, which is about a *quantity nothing computed* rather than about a\nvalue a row genuinely does not carry.",
+        "description": "A test that both passed and failed inside the dashboard's seven-day window.\n\n`qa_insights_sdk::FlakyTestCard`, with the plan carried as the\n`(repo_id, plan_path)` pair — that crate's note 1 argues why.\n\nEvery field is emitted, `test_file`, `repo_id` and `plan_path` as `null` when\nabsent — none of them is subject to [`DashboardStatsDto`]' omission\nconvention, which is about a *quantity nothing computed* rather than about a\nvalue a row genuinely does not carry.",
         "required": [
           "test_name",
           "passed",
@@ -8179,14 +8179,14 @@
               "null"
             ],
             "format": "uuid",
-            "description": "The plan's repository. Half of legacy's `plan_id`; see this type's note."
+            "description": "The plan's repository; half of the plan identity. See this type's note."
           },
           "test_file": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The file the runner reported this test from, `MAX`ed over the group —\nlegacy's own representative pick (`manager/src/routes/dashboard.rs:384`),\nbecause the file is not one of the grouping keys. `null` when no row of the\ngroup named one."
+            "description": "The file the runner reported this test from, `MAX`ed over the group as a\nrepresentative pick, because the file is not one of the grouping keys.\n`null` when no row of the group named one."
           },
           "test_name": {
             "type": "string"
@@ -8194,14 +8194,14 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Passed plus failed. **Not every row of the group**: a skipped or in-progress\nrow is in no counter here, which is legacy's sixth status classification\n(`dashboard.rs:388`) and is why this is emitted rather than left to the\nclient to add up.",
+            "description": "Passed plus failed. **Not every row of the group**: a skipped or\nin-progress row is in no counter here — a sixth status classification —\nwhich is why this is emitted rather than left to the client to add up.",
             "minimum": 0
           }
         }
       },
       "FlakyTestDto": {
         "type": "object",
-        "description": "One test the flaky detector picked out.\n\nLegacy's `FlakyTest` (`analytics.rs:189-199`). The window is the **trend's**\nday count, not a third one, and the qualification is at least five executions\nwith a pass rate in `[40, 80]`.",
+        "description": "One test the flaky detector picked out.\n\nThe window is the **trend's** day count, not a third one, and the\nqualification is at least five executions with a pass rate in `[40, 80]`.",
         "required": [
           "test_file",
           "test_name",
@@ -8260,7 +8260,7 @@
       },
       "GroupSummaryDto": {
         "type": "object",
-        "description": "One bar of a component or tag breakdown.\n\nLegacy's `GroupSummary` (`analytics.rs:202-208`).",
+        "description": "One bar of a component or tag breakdown.",
         "required": [
           "value",
           "total",
@@ -8293,7 +8293,7 @@
       },
       "GroupedSummariesDto": {
         "type": "object",
-        "description": "The three group breakdowns.\n\nLegacy's `GroupedSummaries` (`analytics.rs:211-215`). **Computed over the\nunfiltered universe and all rows**, so selecting one group narrows the rest of\nthe payload and leaves this chart whole — which is what makes it a chart\nrather than a single bar.",
+        "description": "The three group breakdowns.\n\n**Computed over the unfiltered universe and all rows**, so selecting one\ngroup narrows the rest of\nthe payload and leaves this chart whole — which is what makes it a chart\nrather than a single bar.",
         "required": [
           "component",
           "tag",
@@ -8312,7 +8312,7 @@
             "items": {
               "$ref": "#/components/schemas/EnvironmentGroupSummaryDto"
             },
-            "description": "**Ordered by resolved name**, with the bars qa-environments could not\nname last, ordered by id.\n\nLegacy orders this list by name too — its rows carry names, so a\n`BTreeMap<String, _>` gave it that for free (`:1115`). Task 23's fold\norders by id because that is all it has, so the sort happens here, where\nthe names exist. **A rendered order changes when an environment is\nrenamed**, which is the correct direction and a change to expect rather than a\nregression to hunt.\n\nRenamed from `platform` (Task 25), alongside its element type\n(`PlatformGroupSummaryDto` → [`EnvironmentGroupSummaryDto`])."
+            "description": "**Ordered by resolved name**, with the bars qa-environments could not\nname last, ordered by id.\n\nTask 23's fold orders by id because that is all it has, so the sort\nhappens here, where the names exist. **A rendered order changes when an\nenvironment is\nrenamed**, which is the correct direction and a change to expect rather than a\nregression to hunt.\n\nRenamed from `platform` (Task 25), alongside its element type\n(`PlatformGroupSummaryDto` → [`EnvironmentGroupSummaryDto`])."
           },
           "tag": {
             "type": "array",
@@ -8325,7 +8325,7 @@
       },
       "HeatmapDataDto": {
         "type": "object",
-        "description": "The heatmap: a day axis and one row per test.\n\nLegacy's `HeatmapData` (`analytics.rs:150-153`, its row at `:143-147`). Rows\nare in the universe's\norder — **not** sorted, unlike the lists — and a file listed by two plans is\ntwo identical rows.",
+        "description": "The heatmap: a day axis and one row per test.\n\nRows are in the universe's order — **not** sorted, unlike the lists — and a\nfile listed by two plans is two identical rows.",
         "required": [
           "days",
           "rows"
@@ -8372,7 +8372,7 @@
       },
       "JiraBugDto": {
         "type": "object",
-        "description": "One row of `GET /qa/v1/jira/open-bugs` — legacy's `JiraBug`\n(`manager/src/models.rs:689-698`), with the two divergences\n`qa_insights_sdk::JiraBug`'s own header states: `plan_id: String` split into\n[`Self::repo_id`]/[`Self::plan_path`], and `platform: Option<String>` become\n[`Self::environment_id`].",
+        "description": "One row of `GET /qa/v1/jira/open-bugs`. The plan is\n[`Self::repo_id`]/[`Self::plan_path`] and the environment is\n[`Self::environment_id`], as `qa_insights_sdk::JiraBug`'s own header\nstates.",
         "required": [
           "id",
           "jira_key",
@@ -8400,7 +8400,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "Renamed from `platform_id` (Task 25) — see\n[`TestResultDto::environment_id`]'s doc for why."
+            "description": "Renamed from `environment_id` (Task 25) — see\n[`TestResultDto::environment_id`]'s doc for why."
           },
           "id": {
             "type": "string",
@@ -8437,7 +8437,7 @@
       },
       "JiraBugFilingDto": {
         "type": "object",
-        "description": "One entry of `POST /qa/v1/jira/bugs`'s response — legacy's\n`JiraCreateResponse` (`manager/src/models.rs:709-713`) verbatim: `created`\nis `false` for **both** of the port's dedupe paths (a local hit, a\nJIRA-side search hit) and `true` only for an issue this call actually\nposted. [`crate::domain::ports::jira_client::IssueRef`]'s own doc carries\nthe full argument.",
+        "description": "One entry of `POST /qa/v1/jira/bugs`'s response. `created`\nis `false` for **both** dedupe paths (a local hit, a\nJIRA-side search hit) and `true` only for an issue this call actually\nposted. [`crate::domain::ports::jira_client::IssueRef`]'s own doc carries\nthe full argument.",
         "required": [
           "jira_key",
           "created"
@@ -8453,7 +8453,7 @@
       },
       "JiraPollerConfigDto": {
         "type": "object",
-        "description": "The tenant's poller cadence and auto-rerun switch on the wire —\n`GET/PUT /qa/v1/settings/jira-poller`.\n\nLegacy's `JiraPollerConfig` (`manager/src/models.rs:1417-1420`) verbatim —\ntwo fields, no rename: unlike [`JiraSettingsDto`], neither field here is a\nsecret, so there is no masking asymmetry between the two directions and one\n`impl From` pair covers both.",
+        "description": "The tenant's poller cadence and auto-rerun switch on the wire —\n`GET/PUT /qa/v1/settings/jira-poller`.\n\nTwo fields, neither renamed: unlike [`JiraSettingsDto`], neither is a\nsecret, so there is no masking asymmetry between the two directions and one\n`impl From` pair covers both.",
         "required": [
           "poll_interval_seconds",
           "auto_rerun_on_resolve"
@@ -8473,7 +8473,7 @@
       },
       "JiraSettingsDto": {
         "type": "object",
-        "description": "The tenant's JIRA settings on the wire — `GET/PUT /qa/v1/settings/jira`.\n\nLegacy's `JiraConfig` (`manager/src/models.rs:678-685`) with **one field\nrenamed, and the rename is the security boundary**: legacy's `api_token`\ncarries the token itself and its `GET` substitutes `\"********\"` for it\n(`manager/src/routes/settings.rs:254-259`).\n[`Self::api_token_credstore_ref`] carries a credential-store *reference*, so\nthere is nothing to mask and nothing to leak —\n`the_jira_settings_response_has_no_api_token_field` is what keeps a future\nedit from reintroducing the field under its legacy name.\n\nOne DTO for both directions, unlike the saved-view pair: the six fields are\nthe same six either way, and the one asymmetry — an empty\n`api_token_credstore_ref` means \"keep the stored reference\" on a `PUT` and\nmeans \"none is stored\" on a `GET` — is a *rule*, not a shape, so a second\ntype would differ only in its doc. `domain::service::jira::JiraConfigInput`\nis where that asymmetry is named in the type system, one layer in.",
+        "description": "The tenant's JIRA settings on the wire — `GET/PUT /qa/v1/settings/jira`.\n\n**One field is named for a reference rather than a value, and that naming is\nthe security boundary**: an `api_token` field would carry the token and its\n`GET` substitutes `\"********\"` for it. [`Self::api_token_credstore_ref`]\ncarries a credential-store *reference*, so there is nothing to mask and\nnothing to leak — `the_jira_settings_response_has_no_api_token_field` is\nwhat keeps a future edit from reintroducing a raw-token field.\n\nOne DTO for both directions, unlike the saved-view pair: the six fields are\nthe same six either way, and the one asymmetry — an empty\n`api_token_credstore_ref` means \"keep the stored reference\" on a `PUT` and\nmeans \"none is stored\" on a `GET` — is a *rule*, not a shape, so a second\ntype would differ only in its doc. `domain::service::jira::JiraConfigInput`\nis where that asymmetry is named in the type system, one layer in.",
         "required": [
           "url",
           "project_key",
@@ -8529,7 +8529,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "`null` launches a run with no target environment. Such a run is never\nqueued and never blocks anything. Renamed from `platform_id`\n(Task 25) — see [`RunDto::environment_id`]'s doc for why."
+            "description": "`null` launches a run with no target environment. Such a run is never\nqueued and never blocks anything. Renamed from `environment_id`\n(Task 25) — see [`RunDto::environment_id`]'s doc for why."
           },
           "exclude_tags": {
             "type": "array",
@@ -8632,7 +8632,7 @@
       },
       "NewSavedViewReq": {
         "type": "object",
-        "description": "The body of a create or a replace — legacy's `SavedViewUpsertRequest`\n(`manager/src/routes/analytics.rs:69-74`), with the same `plan_id` split.\n\n`query_json` is a JSON object on the wire in both directions, matching\nlegacy's own `serde_json::Value` field — not the doubly-encoded\nstring-holding-a-string shape a bare `String` field would advertise here.\n[`qa_insights_sdk::NewSavedView::query_json`]'s doc records why the *domain*\ntype is a `String` instead: it is `serde`-free contract-layer purity, not a\nclaim about the wire shape.",
+        "description": "The body of a create or a replace, with the same plan-identity pair.\n\n`query_json` is a JSON object on the wire in both directions, matching\na `serde_json::Value` — not the doubly-encoded string-holding-a-string\nshape a bare `String` field would advertise here.\n[`qa_insights_sdk::NewSavedView::query_json`]'s doc records why the *domain*\ntype is a `String` instead: it is `serde`-free contract-layer purity, not a\nclaim about the wire shape.",
         "required": [
           "scope",
           "name",
@@ -8663,7 +8663,7 @@
       },
       "NewScheduleReq": {
         "type": "object",
-        "description": "The body of both `POST /qa/v1/schedules` and `PUT /qa/v1/schedules/{id}`.\n\n# One type for create and replace\n\nThe PUT is a **full replace** matching `sdk::NewSchedule`, so the two bodies\nare the same body and a second near-identical type would be a place for them\nto drift. The source system's edit endpoint takes its *create* form too\n(`manager/src/routes/schedules.rs`, `api_update`), so this is also what a\nported caller already sends.\n\nIt is not a PATCH: `serde_with` is absent (see this module's header), so a\ntri-state patch on [`Self::exclusive_choice`] - itself a tri-state - would\nneed `Option<Option<Option<bool>>>` to distinguish \"leave it\", \"set it to\ninherit\" and \"set it to parallel\". A full replace with stated semantics is\nthe honest shape.\n\n# Which fields are required, and what that does **not** buy\n\nTwo have no default: `enabled` and `exclusive_choice`. Both are choices with\nno neutral value - there is no \"no opinion\" for a switch, and `auto` is a\nthird choice rather than the absence of one - so serde refuses a body that\nomits either.\n\n**That is not a general safety rule and must not be read as one.** An earlier\nversion of this paragraph stated it as *\"a field whose absent reading differs\nfrom its empty reading is required\"*, which is true of every `Option` here\nand implies a protection this type does not provide. On a **full replace**,\nomitting a defaulted field changes the schedule silently:\n\n* omitting `environment_id` **detaches an environment-targeted schedule**, and by\n  that field's own doc the runs it then fires are never queued and never\n  block anything - the same class of silent behaviour change as the disable\n  below, and arguably a wider one;\n* omitting `parameters` wipes them, and omitting either tag list changes\n  which tests the schedule runs;\n* omitting `branch` returns the schedule to launch-time resolution.\n\nThis is what a replace *means*, and it is deliberate: a PUT that could not\nclear a field would need a separate \"unset\" spelling, which is the tri-state\nproblem this type avoids by not being a PATCH. **A caller must send the whole\nrecord.** `tests::omitting_a_defaulted_field_clears_it_on_a_replace` pins the\nbehaviour so it stays a documented property rather than a surprise.\n\nThe two required fields are therefore not a safety net over that. They close\nthe one omission whose blast radius is the whole schedule rather than one of\nits fields, and the next section is why that one earns the exception.\n\n## `enabled` is required, and that is the legacy quirk this port exists not\nto repeat\n\n`ScheduleService::update` preserves `enabled` by construction - it is a field\nof `NewSchedule`, so a replace states it. That is only safe while the wire\nmakes the caller state it too: an `#[serde(default)]` here would turn every\nedit that omits the field into a silent disable, and an\n`#[serde(default = \"…true\")]` into a silent *re-enable* of a schedule an\noperator had paused.\n\nThe source system has exactly the second failure, from the other direction:\nits edit form carries no suspended flag at all\n(`manager/src/models.rs`, `CreateScheduleForm`), so it edits by deleting the\n`CronWorkflow`, recreating it, and re-suspending it by hand - with an error\nmessage that has to tell the operator the schedule is now running when the\nrestore fails. Requiring the field is what makes that unrepresentable here\nrather than merely unlikely.",
+        "description": "The body of both `POST /qa/v1/schedules` and `PUT /qa/v1/schedules/{id}`.\n\n# One type for create and replace\n\nThe PUT is a **full replace** matching `sdk::NewSchedule`, so the two bodies\nare the same body and a second near-identical type would be a place for them\nto drift.\n\nIt is not a PATCH: `serde_with` is absent (see this module's header), so a\ntri-state patch on [`Self::exclusive_choice`] - itself a tri-state - would\nneed `Option<Option<Option<bool>>>` to distinguish \"leave it\", \"set it to\ninherit\" and \"set it to parallel\". A full replace with stated semantics is\nthe honest shape.\n\n# Which fields are required, and what that does **not** buy\n\nTwo have no default: `enabled` and `exclusive_choice`. Both are choices with\nno neutral value - there is no \"no opinion\" for a switch, and `auto` is a\nthird choice rather than the absence of one - so serde refuses a body that\nomits either.\n\n**That is not a general safety rule and must not be read as one.** An earlier\nversion of this paragraph stated it as *\"a field whose absent reading differs\nfrom its empty reading is required\"*, which is true of every `Option` here\nand implies a protection this type does not provide. On a **full replace**,\nomitting a defaulted field changes the schedule silently:\n\n* omitting `environment_id` **detaches an environment-targeted schedule**, and by\n  that field's own doc the runs it then fires are never queued and never\n  block anything - the same class of silent behaviour change as the disable\n  below, and arguably a wider one;\n* omitting `parameters` wipes them, and omitting either tag list changes\n  which tests the schedule runs;\n* omitting `branch` returns the schedule to launch-time resolution.\n\nThis is what a replace *means*, and it is deliberate: a PUT that could not\nclear a field would need a separate \"unset\" spelling, which is the tri-state\nproblem this type avoids by not being a PATCH. **A caller must send the whole\nrecord.** `tests::omitting_a_defaulted_field_clears_it_on_a_replace` pins the\nbehaviour so it stays a documented property rather than a surprise.\n\nThe two required fields are therefore not a safety net over that. They close\nthe one omission whose blast radius is the whole schedule rather than one of\nits fields, and the next section is why that one earns the exception.\n\n## `enabled` is required\n\n`ScheduleService::update` preserves `enabled` by construction - it is a field\nof `NewSchedule`, so a replace states it. That is only safe while the wire\nmakes the caller state it too: an `#[serde(default)]` here would turn every\nedit that omits the field into a silent disable, and an\n`#[serde(default = \"…true\")]` into a silent *re-enable* of a schedule an\noperator had paused.\n\nRequiring the field is what makes a silent enable or disable\nunrepresentable rather than merely unlikely.",
         "required": [
           "name",
           "target",
@@ -8693,7 +8693,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "`null` schedules a run with no target environment. Renamed from\n`platform_id` (Task 25) — see [`RunDto::environment_id`]'s doc for why."
+            "description": "`null` schedules a run with no target environment. Renamed from\n`environment_id` (Task 25) — see [`RunDto::environment_id`]'s doc for why."
           },
           "exclude_tags": {
             "type": "array",
@@ -8728,7 +8728,7 @@
       },
       "NotificationConfigDto": {
         "type": "object",
-        "description": "The tenant's notification settings, on the wire —\n`GET/PUT /qa/v1/settings/notifications`. Legacy's `NotificationsConfig`\n(`manager/src/models.rs:1339-1384`) field-for-field; unlike\n[`JiraSettingsDto`], no field here needed a **rename** —\n[`Self::slack_webhook_credstore_ref`] is already named for what it holds.\n\n**The name was the only thing that was already right** (Phase C's final\nreview, Important 1). That field is a credential-store reference and never a\nURL — possession of a Slack incoming-webhook URL *is* the authorization to\npost, so the column is as sensitive as a JIRA API token's reference — and\nuntil that review nothing enforced it, so an operator following the field's\nown name was the only thing keeping the secret out of a document\n`GET /qa/v1/settings/notifications` hands to any holder of\n`qa.notification_config/get`.\n`domain::service::notify::NotifyService::save_config` now applies the JIRA\nsurface's own syntax check to it. The one asymmetry that remains with\n[`JiraSettingsDto`] is that an empty value here *clears* the reference\ninstead of preserving the stored one — see that method's doc.",
+        "description": "The tenant's notification settings, on the wire —\n`GET/PUT /qa/v1/settings/notifications`. Unlike\n[`JiraSettingsDto`], no field here needed a **rename** —\n[`Self::slack_webhook_credstore_ref`] is already named for what it holds.\n\n**The name was the only thing that was already right** (Phase C's final\nreview, Important 1). That field is a credential-store reference and never a\nURL — possession of a Slack incoming-webhook URL *is* the authorization to\npost, so the column is as sensitive as a JIRA API token's reference — and\nuntil that review nothing enforced it, so an operator following the field's\nown name was the only thing keeping the secret out of a document\n`GET /qa/v1/settings/notifications` hands to any holder of\n`qa.notification_config/get`.\n`domain::service::notify::NotifyService::save_config` now applies the JIRA\nsurface's own syntax check to it. The one asymmetry that remains with\n[`JiraSettingsDto`] is that an empty value here *clears* the reference\ninstead of preserving the stored one — see that method's doc.",
         "required": [
           "slack_webhook_credstore_ref",
           "slack_channel",
@@ -8798,7 +8798,7 @@
       },
       "NotificationLogEntryDto": {
         "type": "object",
-        "description": "One entry of `GET /qa/v1/settings/notifications/log` — legacy's\n`NotificationLogEntry` (`manager/src/models.rs:1468-1475`).\n\n`run_id` is `null` for an entry that belongs to no run — a settings\n`/test` send — rather than a zero UUID; see\n`qa_insights_sdk::NotificationLogEntry`'s own divergence note.",
+        "description": "One entry of `GET /qa/v1/settings/notifications/log`.\n\n`run_id` is `null` for an entry that belongs to no run — a settings\n`/test` send — rather than a zero UUID; see\n`qa_insights_sdk::NotificationLogEntry`'s own divergence note.",
         "required": [
           "id",
           "created_at",
@@ -8839,7 +8839,7 @@
       },
       "NotificationPreviewDto": {
         "type": "object",
-        "description": "`POST /qa/v1/settings/notifications/preview`'s response — legacy's\n`ScheduledRunNotificationPreviewResponse`.",
+        "description": "`POST /qa/v1/settings/notifications/preview`'s response.",
         "required": [
           "event",
           "event_label",
@@ -8869,7 +8869,7 @@
       },
       "NotificationPreviewReq": {
         "type": "object",
-        "description": "`POST /qa/v1/settings/notifications/preview`'s body — legacy's\n`ScheduledRunNotificationPreviewRequest`, always required (unlike the test\nendpoint's optional one).",
+        "description": "`POST /qa/v1/settings/notifications/preview`'s body, always required (unlike\nthe test endpoint's optional one).",
         "required": [
           "config",
           "event"
@@ -8885,7 +8885,7 @@
       },
       "NotificationTestOutcomeDto": {
         "type": "object",
-        "description": "`POST /qa/v1/settings/notifications/test`'s response — legacy answers\n`{\"status\": \"sent\"}` (`manager/src/routes/settings.rs:495`); this crate's\nconvention is a typed response everywhere else, so the one field gets a\nDTO rather than a bare `serde_json::Value`.",
+        "description": "`POST /qa/v1/settings/notifications/test`'s response — `{\"status\": \"sent\"}`.\nThis crate's convention is a typed response everywhere else, so the one field gets a\nDTO rather than a bare `serde_json::Value`.",
         "required": [
           "status"
         ],
@@ -8897,7 +8897,7 @@
       },
       "NotificationTestReq": {
         "type": "object",
-        "description": "`POST /qa/v1/settings/notifications/test`'s optional body — legacy's\n`Option<Json<ScheduledRunNotificationPreviewRequest>>`\n(`manager/src/routes/settings.rs:467`). Absent (or an absent body\nentirely) means the generic settings-page test; present means the\nscheduled-run test, over the *given* config override and event.",
+        "description": "`POST /qa/v1/settings/notifications/test`'s optional body. Absent (or an\nabsent body entirely) means the generic settings-page test; present means the\nscheduled-run test, over the *given* config override and event.",
         "required": [
           "config",
           "event"
@@ -8914,7 +8914,7 @@
       },
       "OverviewSummaryDto": {
         "type": "object",
-        "description": "The universe partitioned three ways, plus the per-case counters.\n\nLegacy's `OverviewSummary` (`analytics.rs:89-109`), fourteen fields, fourteen\nfields.",
+        "description": "The universe partitioned three ways, plus the per-case counters.\n",
         "required": [
           "total",
           "passed",
@@ -8934,7 +8934,7 @@
         "properties": {
           "case_expected": {
             "type": "integer",
-            "description": "The number of test cases the universe is expected to contain, available\nwithout any run — legacy's `build_summary` leaves it at `0` and the\nhandler fills it in afterward (`:769-779`); this port does the same,\nin `AnalyticsService::overview` rather than `summarize`.\n\n**Per file, the collect job's exact count wins where one exists, and\nthe static count parsed out of the test source is the fallback**\n(`:777`, `.unwrap_or(t.case_count)`) — never the other way, and never\na whole-payload choice of one source or the other:\n`domain::analytics::universe::expected_cases` (Task 29) mixes the two\nper file, exactly as legacy does. The static source is\n`qa_catalog_sdk::UniverseTest::static_case_count`, present on every\nuniverse entry the overview reads; its own doc records the same\nprecedence from the catalog side. Because that fallback needs no\ncollect report at all, **this field is non-zero on a deployment that\nhas never run a collect job**, exactly as legacy's is.",
+            "description": "The number of test cases the universe is expected to contain, available\nwithout any run. `summarize` leaves it at `0` and\n`AnalyticsService::overview` fills it in afterwards.\n\n**Per file, the collect job's exact count wins where one exists, and\nthe static count parsed out of the test source is the fallback** —\nnever the other way, and never a whole-payload choice of one source or\nthe other: `domain::analytics::universe::expected_cases` (Task 29) mixes\nthe two per file. The static source is\n`qa_catalog_sdk::UniverseTest::static_case_count`, present on every\nuniverse entry the overview reads; its own doc records the same\nprecedence from the catalog side. Because that fallback needs no\ncollect report at all, **this field is non-zero on a deployment that\nhas never run a collect job**.",
             "minimum": 0
           },
           "case_failed": {
@@ -9131,7 +9131,7 @@
       },
       "PlanBuildDistributionDto": {
         "type": "object",
-        "description": "One build's distribution, as\n`GET /qa/v1/analytics/plan/builds?plan_id=` renders it.\n\nLegacy's `BuildDistribution` (`manager/src/models.rs:651-657`).",
+        "description": "One build's distribution, as\n`GET /qa/v1/analytics/plan/builds?plan_id=` renders it.\n",
         "required": [
           "build",
           "total",
@@ -9142,7 +9142,7 @@
         "properties": {
           "build": {
             "type": "string",
-            "description": "`unknown` when no execution named a version, sorted after every named\none — legacy's `COALESCE(r.app_version, 'unknown')`."
+            "description": "`unknown` when no execution named a version, sorted after every named\none: an absent version coalesces to the literal `unknown`."
           },
           "failed": {
             "type": "integer",
@@ -9227,7 +9227,7 @@
       },
       "PlanTestAnalyticsDto": {
         "type": "object",
-        "description": "One test's aggregated analytics, as\n`GET /qa/v1/analytics/plan/tests?plan_id=` renders it.\n\nLegacy's `TestAnalytics` (`manager/src/models.rs:637-647`).\n`last_environment_id` and `last_environment` (renamed from\n`last_platform_id`/`last_platform` at ruling G-3) both ride along for\n[`AnalyticsListItemDto`]'s reason: the name is `null` for an environment\nthe caller cannot see or that no row named, and the two are indistinguishable\non the wire, exactly as `EnvironmentReader::names`' header records.",
+        "description": "One test's aggregated analytics, as\n`GET /qa/v1/analytics/plan/tests?plan_id=` renders it.\n\n`last_environment_id` and `last_environment` (renamed from\n`last_environment_id`/`last_platform` at ruling G-3) both ride along for\n[`AnalyticsListItemDto`]'s reason: the name is `null` for an environment\nthe caller cannot see or that no row named, and the two are indistinguishable\non the wire, exactly as `EnvironmentReader::names`' header records.",
         "required": [
           "test_name",
           "last_status",
@@ -9268,7 +9268,7 @@
           "last_run_id": {
             "type": "string",
             "format": "uuid",
-            "description": "The most recent execution's run, as an id — legacy's `last_run_name`."
+            "description": "The most recent execution's run, as an id rather than a name."
           },
           "last_status": {
             "type": "string",
@@ -9300,7 +9300,7 @@
       },
       "PlanTestHistoryDto": {
         "type": "object",
-        "description": "One test's history, as `GET /qa/v1/analytics/plan/test-history?plan_id=`\nrenders it.\n\nLegacy's `TestHistory` (`manager/src/models.rs:669-672`). See\n[`PlanTestHistory`]'s header for why the outer array's order is this port's\nown rather than legacy's unspecified `HashMap` order.",
+        "description": "One test's history, as `GET /qa/v1/analytics/plan/test-history?plan_id=`\nrenders it.\n\nSee [`PlanTestHistory`]'s header for why the outer array's order is\nspecified here rather than left to a map's iteration order.",
         "required": [
           "test_name",
           "results"
@@ -9320,7 +9320,7 @@
       },
       "PlanTestHistoryEntryDto": {
         "type": "object",
-        "description": "One run's outcome for one test, inside [`PlanTestHistoryDto::results`].\n\nLegacy's `TestHistoryEntry` (`manager/src/models.rs:661-665`), with `run_name`\nspelled as [`Self::run_id`] for [`AnalyticsListItemDto`]'s reason.",
+        "description": "One run's outcome for one test, inside [`PlanTestHistoryDto::results`].\n\nThe run is [`Self::run_id`], an id rather than a name, for\n[`AnalyticsListItemDto`]'s reason.",
         "required": [
           "status",
           "run_id"
@@ -9336,7 +9336,7 @@
           "run_id": {
             "type": "string",
             "format": "uuid",
-            "description": "The execution's run, as an id — legacy's `run_name`. See this type's\nheader."
+            "description": "The execution's run, as an id rather than a name. See this type's\nheader."
           },
           "status": {
             "type": "string"
@@ -9409,7 +9409,7 @@
           },
           "key": {
             "type": "string",
-            "description": "Durable short code (legacy `Product::key`)."
+            "description": "Durable short code."
           },
           "name": {
             "type": "string"
@@ -9491,13 +9491,13 @@
           },
           "vector": {
             "type": "string",
-            "description": "The **first** spelling seen for this vector, case-folded for grouping but\nrendered verbatim. So `Security` and `security` are one entry here — and\n**two rows** on the dashboard's own quality-vector list, which keys on the\ndisplay string. That asymmetry is legacy's, reproduced on both sides and\npinned on both sides; see `domain::analytics::aggregates`."
+            "description": "The **first** spelling seen for this vector, case-folded for grouping but\nrendered verbatim. So `Security` and `security` are one entry here — and\n**two rows** on the dashboard's own quality-vector list, which keys on the\ndisplay string. The asymmetry is deliberate, and pinned on both sides;\nsee `domain::analytics::aggregates`."
           }
         }
       },
       "QualityVectorPassRateDto": {
         "type": "object",
-        "description": "One Quality Vector's pass rate over the dashboard's seven-day window.\n\n`qa_insights_sdk::QualityVectorPassRate` — five fields, five fields, and the\nnames are legacy's own JSON keys (`manager/src/models.rs:378-385`).\n\n# The sums across the array exceed the row count, by design\n\nA test file declaring two vectors contributes its counters to **both**\n(`manager/src/routes/dashboard.rs:519-525`), so adding [`Self::total`] over\nthe array double-counts and is not a row count. The vectors partition\n*concerns*, not executions, and a client that summed them would be computing\nnothing. `domain::service::dashboard`'s `quality_vector_pass_rates` carries the\nfive properties of the fold, three of which look like defects and are legacy's.\n\n# Two spellings of one vector can both appear\n\n`Security` and `security` declared by two different files are two entries, not\none — legacy's dashboard fold keys on the display string where its analytics\nfold case-folds. That asymmetry is legacy's own; the fold's doc records it and\na test pins it, so a client must not assume the vector names are a\ncase-normalized set.",
+        "description": "One Quality Vector's pass rate over the dashboard's seven-day window.\n\n`qa_insights_sdk::QualityVectorPassRate`.\n\n# The sums across the array exceed the row count, by design\n\nA test file declaring two vectors contributes its counters to **both**, so\nadding [`Self::total`] over the array double-counts and is not a row count.\nThe vectors partition *concerns*, not executions, and a client that summed\nthem would be computing nothing.\n`domain::service::dashboard`'s `quality_vector_pass_rates` carries the five\nproperties of the fold, three of which look like defects and are not.\n\n# Two spellings of one vector can both appear\n\n`Security` and `security` declared by two different files are two entries,\nnot one: this fold keys on the display string where the *analytics* fold\ncase-folds. The asymmetry is deliberate, the fold's doc records it and a test\npins it, so a client must not assume the vector names are a case-normalized\nset.",
         "required": [
           "vector",
           "passed",
@@ -9521,13 +9521,13 @@
           "tests": {
             "type": "integer",
             "format": "int64",
-            "description": "Distinct **test files** carrying this vector that had **any** row in the\nwindow, as opposed to [`Self::total`] executions. A file listed by two\nplans counts once.\n\n**Any row, not a counted one** — this said \"a counted row\", which is\nwrong in a way that shows on the wire: legacy increments this\nunconditionally (`dashboard.rs:524`), with no test on the three counters,\nso a file whose window holds nothing but `SKIPPED` rows contributes here\nand to none of them. `(\"Security\", 0, 0, 0, 5)` is therefore a legal and\nmeaningful row — five files carry the vector and none of them was counted\n— and a client must not read `tests > 0` as implying `total > 0`.",
+            "description": "Distinct **test files** carrying this vector that had **any** row in the\nwindow, as opposed to [`Self::total`] executions. A file listed by two\nplans counts once.\n\n**Any row, not a counted one.** This counter increments unconditionally,\nwith no test on the other three,\nso a file whose window holds nothing but `SKIPPED` rows contributes here\nand to none of them. `(\"Security\", 0, 0, 0, 5)` is therefore a legal and\nmeaningful row — five files carry the vector and none of them was counted\n— and a client must not read `tests > 0` as implying `total > 0`.",
             "minimum": 0
           },
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Passed plus failed. **Not every row**: a skipped or in-progress row is in\nno counter here, which is legacy's sixth status classification\n(`dashboard.rs:487`) — the same one [`FlakyTestCardDto::total`] carries.\nEmitted rather than left to the client to add up, for that reason.",
+            "description": "Passed plus failed. **Not every row**: a skipped or in-progress row is in\nno counter here — the same sixth status classification\n[`FlakyTestCardDto::total`] carries. Emitted rather than left to the\nclient to add up, for that reason.",
             "minimum": 0
           },
           "vector": {
@@ -9538,7 +9538,7 @@
       },
       "QualityVectorSummaryDto": {
         "type": "object",
-        "description": "The Quality Vector breakdown of the whole universe.\n\nLegacy's `QualityVectorSummary` (`analytics.rs:224-228`). **Never narrowed by\n`group_by`/`group_value`** — the vectors are a property of the suite rather\nthan of a selection, which is legacy's own behaviour and easy to get wrong\nwhen assembling the pipeline.",
+        "description": "The Quality Vector breakdown of the whole universe.\n\n**Never narrowed by `group_by`/`group_value`** — the vectors are a property\nof the suite rather than of a selection, which is easy to get wrong when\nassembling the pipeline.",
         "required": [
           "items",
           "unclassified_tests",
@@ -9599,7 +9599,7 @@
           "environment_id": {
             "type": "string",
             "format": "uuid",
-            "description": "Renamed from `platform_id` (Task 25) — see [`RunDto::environment_id`]'s\ndoc for why."
+            "description": "Renamed from `environment_id` (Task 25) — see [`RunDto::environment_id`]'s\ndoc for why."
           },
           "error": {
             "type": [
@@ -9805,7 +9805,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "Renamed from `platform_id` (Task 25): the wire now agrees with the\nRust field. The physical column is unmoved — it is still\n`platform_id`, and `infra::storage::entity::run::Model` still pins\n`#[sea_orm(column_name = \"platform_id\")]` on its own `environment_id`\nfield — but that attribute is now the *only* bridge between two names\ninstead of standing beside a second, wire-level one. The column\nitself waits for this plan's later expand/contract migrations (ruling\nB3); only the wire moved here. Every other `platform_id` on this\ncrate's wire (requests and responses alike) was renamed the same way\n— this is the one place it is spelled out in full.\n\n**This was a breaking API change** (Task 25): a client reading\n`platform_id` out of a response now finds it absent, replaced by\n`environment_id`. (This type is a response - a client never *sends*\none, so there is no 400 to raise here. The 400 for a stale *request*\nis on the request-side types: [`LaunchRunReq::environment_id`] and\n[`NewScheduleReq::environment_id`] both refuse a `platform_id` sent in\ntheir place explicitly - see the first one's doc, and ruling G-4.)"
+            "description": "Renamed from `environment_id` (Task 25): the wire now agrees with the\nRust field. The column moved with it: `environment_id` is now the\ncolumn, the Rust field and the wire key alike. Every other `environment_id` on this\ncrate's wire (requests and responses alike) was renamed the same way\n— this is the one place it is spelled out in full.\n\n**This was a breaking API change** (Task 25): a client reading\n`environment_id` out of a response now finds it absent, replaced by\n`environment_id`. (This type is a response - a client never *sends*\none, so there is no 400 to raise here. The 400 for a stale *request*\nis on the request-side types: [`LaunchRunReq::environment_id`] and\n[`NewScheduleReq::environment_id`] both refuse a `environment_id` sent in\ntheir place explicitly - see the first one's doc, and ruling G-4.)"
           },
           "error": {
             "type": [
@@ -9950,7 +9950,7 @@
       },
       "RunResultDto": {
         "type": "object",
-        "description": "A run's five outcome counters.\n\n`failed` is the failed-**or-errored** count. The source system keeps\n`FAILED` and `ERROR` as distinct per-test statuses and folds them together\nin every aggregate that produces these numbers; `sdk::RunResult` explains\nwhy a sixth counter would be a silent regression.",
+        "description": "A run's five outcome counters.\n\n`failed` is the failed-**or-errored** count: `FAILED` and `ERROR` are\ndistinct per-test statuses and are folded together in every aggregate that\nproduces these numbers. `sdk::RunResult` explains why a sixth counter would\nbe a silent regression.",
         "required": [
           "passed",
           "failed",
@@ -9991,7 +9991,7 @@
       },
       "RunStateDto": {
         "type": "string",
-        "description": "A run's lifecycle state. Note `canceled`, one `l` - a queue row's\nequivalent state is spelled `cancelled`, and the difference is deliberate.\n\nA client ported from the source system must **re-map, not merely re-case**:\n`created`, `queued`, `dispatching`, `canceled`, `timed_out` and `expired`\nhave no equivalent there.",
+        "description": "A run's lifecycle state. Note `canceled`, one `l` - a queue row's\nequivalent state is spelled `cancelled`, and the difference is deliberate.\n\nThe set is `created`, `queued`, `dispatching`, `running`, `succeeded`,\n`failed`, `canceled`, `timed_out`, `expired` and `error`; a client must match\non the whole set rather than assume a smaller one.",
         "enum": [
           "created",
           "queued",
@@ -10017,7 +10017,7 @@
               "string",
               "null"
             ],
-            "description": "Where a `collect` run's runner posts its per-file case counts, becoming\n`VHP_COLLECT_URL`. Required for `collect` - though an empty string is\naccepted and means \"collect but report nowhere\", which is the source\nsystem's own behaviour for a blank URL\n(`manager/src/services/argo.rs:52-58`). Ignored for the other kinds."
+            "description": "Where a `collect` run's runner posts its per-file case counts, becoming\n`VHP_COLLECT_URL`. Required for `collect` - though an empty string is\naccepted and means \"collect but report nowhere\". Ignored for the other\nkinds."
           },
           "custom_plan_id": {
             "type": [
@@ -10116,7 +10116,7 @@
       },
       "RunTestTrendPointDto": {
         "type": "object",
-        "description": "Test volume for one run on the trend chart.\n\n**`passed + failed + skipped` need not equal [`Self::tests_total`]**, and that\nis legacy's arithmetic rather than a rounding artefact: the total is a plain\n`COUNT` while the three counters are filters, so an `XFAIL`, `XPASS`,\n`PENDING` or `RUNNING` row is in the total and in none of them\n(`manager/src/routes/dashboard.rs:170-173`).",
+        "description": "Test volume for one run on the trend chart.\n\n**`passed + failed + skipped` need not equal [`Self::tests_total`]**, and\nthat is the arithmetic rather than a rounding artefact: the total is a plain\n`COUNT` while the three counters are filters, so an `XFAIL`, `XPASS`,\n`PENDING` or `RUNNING` row is in the total and in none of them.",
         "required": [
           "run_id",
           "run_name",
@@ -10129,7 +10129,7 @@
           "failed": {
             "type": "integer",
             "format": "int64",
-            "description": "`FAILED` **and** `ERROR`, which legacy folds together in every aggregate.",
+            "description": "`FAILED` **and** `ERROR`, which are folded together in every aggregate.",
             "minimum": 0
           },
           "passed": {
@@ -10166,7 +10166,7 @@
       },
       "SavedViewDto": {
         "type": "object",
-        "description": "A stored saved view — legacy's `AnalyticsSavedView`\n(`manager/src/routes/analytics.rs:77-86`), with the same `plan_id` split\nand `owner_id` still a caller-visible field: it is the caller's own id in\nevery case this gear can construct (the repository narrows every read and\nwrite to the caller's [`toolkit_security::AccessScope::ensure_owner`]-ed\nscope), so echoing it back is inert rather than a cross-owner leak.",
+        "description": "A stored saved view, with the same plan-identity pair and `owner_id` still a\ncaller-visible field: it is the caller's own id\nin every case this gear can construct (the repository narrows every read and\nwrite to the caller's [`toolkit_security::AccessScope::ensure_owner`]-ed\nscope), so echoing it back is inert rather than a cross-owner leak.",
         "required": [
           "id",
           "owner_id",
@@ -10268,7 +10268,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "`null` schedules a run with no target environment. Such a run is\nnever queued and never blocks anything. Renamed from `platform_id`\n(Task 25) — see [`RunDto::environment_id`]'s doc for why."
+            "description": "`null` schedules a run with no target environment. Such a run is\nnever queued and never blocks anything. Renamed from `environment_id`\n(Task 25) — see [`RunDto::environment_id`]'s doc for why."
           },
           "exclude_tags": {
             "type": "array",
@@ -10320,7 +10320,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The events that notify, as the six lowercase tokens legacy serializes -\n`pending`, `in_progress`, `succeeded`, `failed`, `error`, `skipped`."
+            "description": "The events that notify, as the six lowercase tokens - `pending`,\n`in_progress`, `succeeded`, `failed`, `error`, `skipped`."
           },
           "slack_notifications_enabled": {
             "type": "boolean",
@@ -10337,7 +10337,7 @@
       },
       "ScheduledRunSlackTemplateDto": {
         "type": "object",
-        "description": "One status's Slack Block Kit sections, on the wire — legacy's\n`ScheduledRunSlackTemplate` (`manager/src/models.rs`), unchanged: `enabled`\nis a routing concern already spent by\n`domain::notify::routing::route` and reaches the wire anyway because a\ntenant edits it on the same settings screen as the five sections.",
+        "description": "One status's Slack Block Kit sections, on the wire. `enabled`\nis a routing concern already spent by\n`domain::notify::routing::route` and reaches the wire anyway because a\ntenant edits it on the same settings screen as the five sections.",
         "required": [
           "enabled"
         ],
@@ -10385,7 +10385,7 @@
       },
       "ScheduledRunSlackTemplatesDto": {
         "type": "object",
-        "description": "The six status templates, on the wire — legacy's\n`ScheduledRunSlackTemplates` field-for-field.",
+        "description": "The six status templates, on the wire.",
         "required": [
           "pending",
           "in_progress",
@@ -10457,7 +10457,7 @@
       },
       "TestCaseResultDto": {
         "type": "object",
-        "description": "One test *function* outcome, as `GET /qa/v1/test-case-results` returns it.\n\nA visibly different shape from [`TestResultDto`] and not a subset of it: the\nfunction-name column is `name`, not `test_name` (legacy's spelling,\n`manager/migrations/001_initial.sql:258`), the bug reference is `ticket` rather\nthan `jira_key`, and there are no denormalized run columns at all — case rows\nreach every aggregate through the file-level table first, so a second copy of\nthe run's identity would be a second thing to keep true.\n\nThat also means there is **no timestamp to filter or sort a case row by other\nthan `created_at`**, which is the ingest instant. A caller who wants a time\nwindow filters `run_id` from the file-level collection.",
+        "description": "One test *function* outcome, as `GET /qa/v1/test-case-results` returns it.\n\nA visibly different shape from [`TestResultDto`] and not a subset of it: the\nfunction-name column is `name`, not `test_name`, the bug reference is\n`ticket` rather\nthan `jira_key`, and there are no denormalized run columns at all — case rows\nreach every aggregate through the file-level table first, so a second copy of\nthe run's identity would be a second thing to keep true.\n\nThat also means there is **no timestamp to filter or sort a case row by other\nthan `created_at`**, which is the ingest instant. A caller who wants a time\nwindow filters `run_id` from the file-level collection.",
         "required": [
           "id",
           "run_id",
@@ -10585,7 +10585,7 @@
       },
       "TestResultDto": {
         "type": "object",
-        "description": "One file-level test outcome, as `GET /qa/v1/test-results` returns it.\n\nEvery field of [`TestResultRecord`], in its order. The record itself already\ndrops the two columns a consumer has no business reading — `tenant_id`, which\nis the caller's own scope, and `updated_at`, which moves on a re-ingest of an\noutcome that happened once (`infra::storage::mapper::test_result_to_sdk`).\n\n**One contract field is withheld here, and it is the only one:\n`run_created_at`.** This doc said \"there is nothing further to withhold here\nand this is a straight projection\" until Task 21b added that column, so the\nclaim is corrected rather than left standing. It is the fallback half of the\ndashboard's window expression — `COALESCE(run_finished_at, run_created_at)`,\nlegacy's `COALESCE(rr.finished_at, rr.created_at)` — denormalized so this\ngear's aggregates need no cross-gear join. On the *wire* it is redundant:\nqa-runs owns the run and a consumer of this collection can ask it for the\nrun's creation instant, where it cannot for a per-row aggregate on a hot path.\n[`Self::run_finished_at`] is here because the pager and the analytics windows\npublish it, not because the pair travels together. Publishing it is one\nadditive field if a consumer ever needs it.\n\n**Most of it is nullable**, and nothing here is `Option` because the wire\nlikes it that way: each nullable field is a column that is genuinely absent for\na real run. Named rather than counted — `duration`, `launch_id`, `jira_key`,\n`product_version`, `app_build`, `environment_id`, `repo_id`, `plan_path`,\n`branch` and `run_finished_at`; only `id`, `run_id`, `test_file`, `test_name`,\n`status` and `created_at` are always present. `run_finished_at` is `null` while\nthe run is still going, `repo_id`/`plan_path` are `null` for a custom-plan or\ncollect run, `app_build` is `null` when the run named no build. A client\nrendering this must handle them; `qa_insights_sdk::TestResultRecord`'s field\ndocs say what each absence means.\n\n**`logs` is not here and cannot be**, which is a parity gap rather than a\ndesign choice: legacy's `test_results` has a `logs TEXT` column that its run\ndetail view renders, and this gear's only source of outcomes is qa-runs, whose\n`RunTestResult` carries no per-test log slice. The whole argument is on\n[`TestResultRecord`], which is where it belongs — a DTO cannot expose a field\nthe contract does not have.",
+        "description": "One file-level test outcome, as `GET /qa/v1/test-results` returns it.\n\nEvery field of [`TestResultRecord`], in its order. The record itself already\ndrops the two columns a consumer has no business reading — `tenant_id`, which\nis the caller's own scope, and `updated_at`, which moves on a re-ingest of an\noutcome that happened once (`infra::storage::mapper::test_result_to_sdk`).\n\n**One contract field is withheld here, and it is the only one:\n`run_created_at`.** This doc said \"there is nothing further to withhold here\nand this is a straight projection\" until Task 21b added that column, so the\nclaim is corrected rather than left standing. It is the fallback half of the\ndashboard's window expression — `COALESCE(run_finished_at, run_created_at)`\n— denormalized so this gear's aggregates need no cross-gear join. On the\n*wire* it is redundant:\nqa-runs owns the run and a consumer of this collection can ask it for the\nrun's creation instant, where it cannot for a per-row aggregate on a hot path.\n[`Self::run_finished_at`] is here because the pager and the analytics windows\npublish it, not because the pair travels together. Publishing it is one\nadditive field if a consumer ever needs it.\n\n**Most of it is nullable**, and nothing here is `Option` because the wire\nlikes it that way: each nullable field is a column that is genuinely absent for\na real run. Named rather than counted — `duration`, `launch_id`, `jira_key`,\n`product_version`, `app_build`, `environment_id`, `repo_id`, `plan_path`,\n`branch` and `run_finished_at`; only `id`, `run_id`, `test_file`, `test_name`,\n`status` and `created_at` are always present. `run_finished_at` is `null` while\nthe run is still going, `repo_id`/`plan_path` are `null` for a custom-plan or\ncollect run, `app_build` is `null` when the run named no build. A client\nrendering this must handle them; `qa_insights_sdk::TestResultRecord`'s field\ndocs say what each absence means.\n\n**`logs` is not here and cannot be**, which is a gap rather than a design\nchoice: this gear's only source of outcomes is qa-runs, whose\n`RunTestResult` carries no per-test log slice. The whole argument is on\n[`TestResultRecord`], which is where it belongs — a DTO cannot expose a field\nthe contract does not have.",
         "required": [
           "id",
           "run_id",
@@ -10618,7 +10618,7 @@
               "string",
               "null"
             ],
-            "description": "The runner's own duration text, verbatim — e.g. `85.06s (0:01:25)`. Not a\nnumber and not normalised: legacy's fixture is that exact string."
+            "description": "The runner's own duration text, verbatim — e.g. `85.06s (0:01:25)`. Not a\nnumber and not normalised — the runner's text is the contract."
           },
           "environment_id": {
             "type": [
@@ -10626,7 +10626,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "Renamed from `platform_id` (Task 25): the wire now agrees with the\nRust field. The physical column is unmoved — it is still\n`platform_id`, and `infra::storage::entity::test_result::Model` still\npins `#[sea_orm(column_name = \"platform_id\")]` on its own\n`environment_id` field — but that attribute is now the *only* bridge\nbetween two names instead of standing beside a second, wire-level\none. The column itself waits for this plan's later expand/contract\nmigrations (ruling B3); only the wire moved here. Every other\n`platform_id` on this crate's wire, whatever its own source entity,\nwas renamed the same way — this is the one place it is spelled out\nin full.\n\n**This was a breaking API change** (Task 25): a client reading\n`platform_id` out of a response now finds it absent, replaced by\n`environment_id`. Every renamed field on this crate's wire is a\nresponse field - unlike `qa-runs`, nothing here is also a request\nfield, so there is no 400 to raise on this crate's side of ruling G-4."
+            "description": "Renamed from `environment_id` (Task 25): the wire now agrees with the\nRust field. The column moved with it: `environment_id` is now the\ncolumn, the Rust field and the wire key alike. Every other\n`environment_id` on this crate's wire, whatever its own source entity,\nwas renamed the same way — this is the one place it is spelled out\nin full.\n\n**This was a breaking API change** (Task 25): a client reading\n`environment_id` out of a response now finds it absent, replaced by\n`environment_id`. Every renamed field on this crate's wire is a\nresponse field - unlike `qa-runs`, nothing here is also a request\nfield, so there is no 400 to raise on this crate's side of ruling G-4."
           },
           "id": {
             "type": "string",
@@ -10691,7 +10691,7 @@
       },
       "TrendDataDto": {
         "type": "object",
-        "description": "The trend: one point per day, each totalling the universe.\n\nLegacy's `TrendData` (`analytics.rs:164-166`). **`passed + failed + not_run`\nis the universe size on every point**, including days before any row exists —\nthe denominator is the universe and not the data, which is what makes the\nchart comparable across days.",
+        "description": "The trend: one point per day, each totalling the universe.\n\n**`passed + failed + not_run` is the universe size on every point**,\nincluding days before any row exists —\nthe denominator is the universe and not the data, which is what makes the\nchart comparable across days.",
         "required": [
           "points"
         ],
@@ -10735,7 +10735,7 @@
       },
       "UpdateEnvironmentReq": {
         "type": "object",
-        "description": "REST DTO for partially updating a target environment.\n\n`serde_with` is not a workspace dependency, so — unlike\n`sdk::EnvironmentPatch`'s nested `Option<Option<_>>` fields — `product_id`\nand `description` here cannot distinguish an explicit JSON `null` (meaning\n\"clear this field\") from the key being absent: both deserialize to `None`\nand are mapped to \"leave unchanged\" (`sdk::EnvironmentPatch`'s outer `None`).\nThere is currently no REST-exposed way to clear a previously-set\n`product_id` or `description` back to empty; only SDK/local-client\ncallers using `sdk::EnvironmentPatch` directly can do that.\n\n# `default_branch` is the exception, and deliberately so\n\nIt reaches all three of `sdk::EnvironmentPatch`'s states over REST without\n`serde_with`, because the source system's \"clear\" signal is **not** JSON\n`null` — it is the **empty string**. `update_environment` maps an empty or\nwhitespace-only `default_branch` to its `\"__NULL__\"` sentinel and thence to\n`NULL`, while an absent field keeps the stored value\n(`manager/src/services/platforms.rs:447-496`). So:\n\n| request body | meaning |\n|---|---|\n| key absent, or `null` | leave the override unchanged |\n| `\"\"` (or whitespace) | clear the override; the repository default applies |\n| `\"release-9.0\"` | pin to that branch |\n\nThe middle row works because `Some(String)` survives the `.map(Some)` below\nas `Some(Some(\"\"))`, which `EnvironmentsService::normalize_default_branch` then\nfolds to `Some(None)` — the outer `Some` carrying \"the caller mentioned the\nfield\" the whole way. This is not a workaround for the missing `serde_with`;\nit is the source system's own encoding, which happens not to need it.\n\n# `kubeconfig` mirrors the create DTO\n\nA patch may replace the kubeconfig by naming a new reference *or* by\npasting a new document, and supplying both is a validation error. Absent\non both leaves the stored reference alone. `Debug` is hand-written for the\nsame reason as `CreateEnvironmentReq`'s.",
+        "description": "REST DTO for partially updating a target environment.\n\n`serde_with` is not a workspace dependency, so — unlike\n`sdk::EnvironmentPatch`'s nested `Option<Option<_>>` fields — `product_id`\nand `description` here cannot distinguish an explicit JSON `null` (meaning\n\"clear this field\") from the key being absent: both deserialize to `None`\nand are mapped to \"leave unchanged\" (`sdk::EnvironmentPatch`'s outer `None`).\nThere is currently no REST-exposed way to clear a previously-set\n`product_id` or `description` back to empty; only SDK/local-client\ncallers using `sdk::EnvironmentPatch` directly can do that.\n\n# `default_branch` is the exception, and deliberately so\n\nIt reaches all three of `sdk::EnvironmentPatch`'s states over REST without\n`serde_with`, because this field's \"clear\" signal is **not** JSON `null` —\nit is the **empty string**. `update_environment` maps an empty or\nwhitespace-only `default_branch` to its `\"__NULL__\"` sentinel and thence to\n`NULL`, while an absent field keeps the stored value. So:\n\n| request body | meaning |\n|---|---|\n| key absent, or `null` | leave the override unchanged |\n| `\"\"` (or whitespace) | clear the override; the repository default applies |\n| `\"release-9.0\"` | pin to that branch |\n\nThe middle row works because `Some(String)` survives the `.map(Some)` below\nas `Some(Some(\"\"))`, which `EnvironmentsService::normalize_default_branch` then\nfolds to `Some(None)` — the outer `Some` carrying \"the caller mentioned the\nfield\" the whole way. This is not a workaround for the missing `serde_with`:\nthe empty-string encoding simply does not need it.\n\n# `kubeconfig` mirrors the create DTO\n\nA patch may replace the kubeconfig by naming a new reference *or* by\npasting a new document, and supplying both is a validation error. Absent\non both leaves the stored reference alone. `Debug` is hand-written for the\nsame reason as `CreateEnvironmentReq`'s.",
         "properties": {
           "available": {
             "type": [
@@ -10840,7 +10840,7 @@
       },
       "UpdateScheduleNotificationsReq": {
         "type": "object",
-        "description": "The body of `PUT /qa/v1/schedules/{id}/notifications`.\n\n# `PUT`, where the source system uses `POST`\n\nLegacy registers this as `axum::routing::post`\n(`manager/src/routes/mod.rs:95-98`). The divergence is deliberate and is\nalready recorded in the PRD and DESIGN, so it is cited here rather than\nre-argued: the frozen contract for this subsystem is the **test-facing** one\n(environment variables, `plan.yaml`, `TEST_META` -\n`cpt-cf-qa-fr-runner-contract`), and the REST surface explicitly is\nnot. This route already changes its prefix (`/api` -> `/qa/v1`) and its key\n(`{name}` -> `{id}`); a full, idempotent replacement of a settings\nsub-resource is a `PUT`, which is also what the sibling gears do.\n\n# A replacement, so every field is required\n\nAll three are stated on every call - there is no partial edit here for the\nsame reason `NewScheduleReq` is not a `PATCH`. Legacy defaults `channel` and\n`events` (`UpdateScheduleNotificationsForm`,\n`manager/src/models.rs:291-299`), and its UI compensates by re-sending the\ncurrent values whenever it toggles the switch\n(`manager-ui/src/pages/SchedulesPage.tsx:118-127`). Requiring them makes the\nsame outcome a property of the contract instead of the client's diligence.\n\n# What it cannot touch\n\nEverything else on the schedule. That is the half of legacy's handler that is\nbehaviour rather than annotation plumbing - *\"this endpoint edits Slack\nsettings only, so a schedule pinned to exclusive (or to parallel) must come\nback pinned the same way\"* (`manager/src/routes/schedules.rs:854-856`).\n\n# Where its two checks live\n\n**Not here.** The channel width and the event vocabulary are both enforced by\n`ScheduleService::validate_notifications`, unlike `name` and `branch`, whose\nwidths this module owns. That function's doc gives the reason: the in-process\ncaller is the point of this endpoint's contract, and it never constructs a\nDTO.\n\nThe `slack_` prefix is kept against `clippy::struct_field_names`, for the\nreason [`sdk::ScheduleNotificationSettings`] gives: `ScheduleDto::enabled`\nalready exists on the same aggregate and means whether the schedule fires,\nand these are legacy's own field names.",
+        "description": "The body of `PUT /qa/v1/schedules/{id}/notifications`.\n\n# Why `PUT`\n\nA full, idempotent replacement of a settings sub-resource is a `PUT`, which\nis also what the sibling gears do. The frozen contract for this subsystem is\nthe **test-facing** one — environment variables, `plan.yaml`, `TEST_META`\n(`cpt-cf-qa-fr-runner-contract`) — and the REST surface explicitly is not,\nso the method is chosen on its own merits.\n\n# A replacement, so every field is required\n\nAll three are stated on every call - there is no partial edit here for the\nsame reason `NewScheduleReq` is not a `PATCH`. Defaulting `channel` or\n`events` would leave correctness to a client that remembers to re-send the\ncurrent values whenever it toggles the switch; requiring them makes the\noutcome a property of the contract instead of the client's diligence.\n\n# What it cannot touch\n\nEverything else on the schedule: this endpoint edits Slack settings only, so\na schedule pinned to exclusive (or to parallel) must come back pinned the\nsame way.\n\n# Where its two checks live\n\n**Not here.** The channel width and the event vocabulary are both enforced by\n`ScheduleService::validate_notifications`, unlike `name` and `branch`, whose\nwidths this module owns. That function's doc gives the reason: the in-process\ncaller is the point of this endpoint's contract, and it never constructs a\nDTO.\n\nThe `slack_` prefix is kept against `clippy::struct_field_names`, for the\nreason [`sdk::ScheduleNotificationSettings`] gives: `ScheduleDto::enabled`\nalready exists on the same aggregate and means whether the schedule fires,\nso the prefix is what keeps the two readable side by side.",
         "required": [
           "slack_enabled",
           "slack_events"
@@ -10862,7 +10862,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The events that notify, as the six lowercase tokens legacy serializes:\n`pending`, `in_progress`, `succeeded`, `failed`, `error`, `skipped`.\nAn empty list notifies on nothing; an unrecognised name is a 400."
+            "description": "The events that notify, as the six lowercase tokens: `pending`,\n`in_progress`, `succeeded`, `failed`, `error`, `skipped`.\nAn empty list notifies on nothing; an unrecognised name is a 400."
           }
         }
       },

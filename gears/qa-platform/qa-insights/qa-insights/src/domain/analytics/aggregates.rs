@@ -243,9 +243,9 @@
 //!
 //! # What the platform id costs this surface
 //!
-//! [`AnalyticsListItem::last_platform_id`] is a `Uuid` where legacy's
+//! [`AnalyticsListItem::last_environment_id`] is a `Uuid` where legacy's
 //! `last_platform` was a display name, which is
-//! [`ExecRow::platform_id`](super::ExecRow::platform_id)'s carried obligation
+//! [`ExecRow::environment_id`](super::ExecRow::environment_id)'s carried obligation
 //! surfacing. This module resolves nothing and adds no lookup: the
 //! id travels to the DTO, and the task that owns the resolution owns it there
 //! too.
@@ -255,7 +255,7 @@
 //! [`PlatformGroupSummary`], which is where the obligation now lives and which
 //! makes it a type rather than a paragraph. The difference from the list item is
 //! that the id there sits beside a name nothing needs, where in a *group
-//! breakdown* the id **is** the label; so that type carries `platform_id` rather
+//! breakdown* the id **is** the label; so that type carries `environment_id` rather
 //! than a `value: String`, and no response DTO can be written over it without
 //! deciding what the label is.
 
@@ -508,7 +508,7 @@ pub struct AnalyticsListItem {
     /// The latest bucket, or [`NOT_RUN`] when no row touched this file.
     pub last_status: &'static str,
     /// **An id where legacy had a display name**; see this module's header.
-    pub last_platform_id: Option<Uuid>,
+    pub last_environment_id: Option<Uuid>,
     /// Legacy's `last_run_name`, which was its run identity.
     pub last_run_id: Option<Uuid>,
     /// The build the latest run executed against, already collapsed:
@@ -870,7 +870,7 @@ pub fn build_lists<S: BuildHasher>(
             plan_name: test.plan_name.clone(),
             versions: sorted_versions_desc(&test.versions),
             last_status: bucket,
-            last_platform_id: info.platform_id,
+            last_environment_id: info.environment_id,
             last_run_id: info.run_id,
             last_build: info.build,
             last_run_finished_at: info.finished_at,
@@ -1748,7 +1748,7 @@ pub struct GroupSummary {
 /// into a `BTreeSet<String>` (`analytics.rs:1116-1119`) and returns it as
 /// `GroupSummary::value` (`:1138`, then `:1144`), i.e. as the string the chart's
 /// axis draws. This
-/// gear stores [`ExecRow::platform_id`](super::ExecRow::platform_id), a `Uuid`,
+/// gear stores [`ExecRow::environment_id`](super::ExecRow::environment_id), a `Uuid`,
 /// for the reason that field's header gives, and **nothing between here and the
 /// response resolves it**: the lookup is a qa-environments read, once per
 /// distinct id and outside the per-row path.
@@ -1782,7 +1782,7 @@ pub struct GroupSummary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlatformGroupSummary {
     /// The platform, as an id. See this type's header for why it is not a name.
-    pub platform_id: Uuid,
+    pub environment_id: Uuid,
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
@@ -1839,7 +1839,7 @@ pub const UNTAGGED: &str = "untagged";
 ///   the files without one. A partition: the counters sum to `universe.len()`.
 /// * **Tag** — one group per tag, [`UNTAGGED`] for the files with none. **Not** a
 ///   partition; see that constant.
-/// * **Platform** — one group per distinct [`ExecRow::platform_id`](super::ExecRow::platform_id)
+/// * **Platform** — one group per distinct [`ExecRow::environment_id`](super::ExecRow::environment_id)
 ///   *seen in the rows*, and each group is counted over the **whole universe**
 ///   (`:1129-1138`), not over the tests that ran on that platform. So a test that
 ///   never ran on a platform is `not_run` in that platform's group, and every
@@ -1847,7 +1847,7 @@ pub const UNTAGGED: &str = "untagged";
 ///   answer "how much of the suite is green here", and it is why the platform
 ///   loop rebuilds a latest map per platform rather than partitioning one.
 ///
-/// A row whose `platform_id` is `None` contributes to no platform group and is
+/// A row whose `environment_id` is `None` contributes to no platform group and is
 /// not grouped under a placeholder — legacy's `filter_map(normalize_optional(..))`
 /// (`:1116-1119`) drops it, and there is no `"unknown"` platform the way there is
 /// an unknown component.
@@ -1903,14 +1903,14 @@ pub fn build_grouped_summaries(universe: &[UniverseTest], rows: &[ExecRow]) -> G
 /// Split out to keep the parent under `clippy::cognitive_complexity`; the nesting
 /// is legacy's own, three levels of it.
 fn platform_groups(universe: &[UniverseTest], rows: &[ExecRow]) -> Vec<PlatformGroupSummary> {
-    let platforms: BTreeSet<Uuid> = rows.iter().filter_map(|row| row.platform_id).collect();
+    let platforms: BTreeSet<Uuid> = rows.iter().filter_map(|row| row.environment_id).collect();
 
     platforms
         .into_iter()
-        .map(|platform_id| {
+        .map(|environment_id| {
             let platform_rows: Vec<ExecRow> = rows
                 .iter()
-                .filter(|row| row.platform_id == Some(platform_id))
+                .filter(|row| row.environment_id == Some(environment_id))
                 .cloned()
                 .collect();
             let latest = build_latest_map(universe, &platform_rows);
@@ -1925,7 +1925,7 @@ fn platform_groups(universe: &[UniverseTest], rows: &[ExecRow]) -> Vec<PlatformG
             }
 
             PlatformGroupSummary {
-                platform_id,
+                environment_id,
                 total: totals.total,
                 passed: totals.passed,
                 failed: totals.failed,

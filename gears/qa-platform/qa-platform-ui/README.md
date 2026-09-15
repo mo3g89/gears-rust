@@ -30,9 +30,9 @@ npm run dev
 ```
 
 The development server will start on `http://localhost:3000` and proxy `/qa/v1` requests to
-`http://localhost:8087`, where the gears answer on the host (see
-`gears/qa-platform/deploy/compose/docker-compose.yml`). Port 8080 is the compose stack's own
-`ui` container, which serves the *built* bundle -- not something the dev server should talk to.
+`http://localhost:8087`, where the gears answer on the host. Port 8080 is the UI container's
+own published port, which serves the *built* bundle -- not something the dev server should
+talk to.
 
 ### Build
 
@@ -88,8 +88,7 @@ The UI signs in against Keycloak with the OpenID Connect authorization-code flow
 (the `UserManager` and the React state), `RequireAuth.tsx` (the route guard -- an
 unauthenticated app mounts no data queries at all), `LoginPage.tsx`, and `tokenState.ts`
 (the access token, in memory, plus the "exactly one silent refresh per run of 401s, then
-back to the sign-in screen" rule). `deploy/compose/ui-gate.js` drives the real flow through
-a real browser and gates it.
+back to the sign-in screen" rule).
 
 ## Configuration
 

@@ -58,7 +58,7 @@ fn read_limit(requested: u64) -> u64 {
 /// database instead of materialising every queued row and folding them here.
 #[derive(sea_orm::FromQueryResult)]
 struct QueuedPlatformRow {
-    platform_id: Uuid,
+    environment_id: Uuid,
     tenant_id: Uuid,
 }
 
@@ -174,7 +174,7 @@ impl QueueRepository for OrmQueueRepository {
         let am = QueueAM {
             id: ActiveValue::Set(Uuid::new_v4()),
             tenant_id: ActiveValue::Set(tenant_id),
-            environment_id: ActiveValue::Set(row.platform_id),
+            environment_id: ActiveValue::Set(row.environment_id),
             run_id: ActiveValue::Set(run_id),
             run_kind: ActiveValue::Set(row.run_kind.as_str().to_owned()),
             source: ActiveValue::Set(row.source.as_str().to_owned()),
@@ -202,12 +202,12 @@ impl QueueRepository for OrmQueueRepository {
         &self,
         runner: &C,
         scope: &AccessScope,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<usize, DomainError> {
         let count = QueueEntity::find()
             .filter(
                 Condition::all()
-                    .add(QueueColumn::EnvironmentId.eq(platform_id))
+                    .add(QueueColumn::EnvironmentId.eq(environment_id))
                     .add(queued()),
             )
             .secure()
@@ -224,12 +224,12 @@ impl QueueRepository for OrmQueueRepository {
         &self,
         runner: &C,
         scope: &AccessScope,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<Vec<QueuedRow>, DomainError> {
         let rows = QueueEntity::find()
             .filter(
                 Condition::all()
-                    .add(QueueColumn::EnvironmentId.eq(platform_id))
+                    .add(QueueColumn::EnvironmentId.eq(environment_id))
                     .add(queued()),
             )
             .secure()
@@ -244,7 +244,7 @@ impl QueueRepository for OrmQueueRepository {
             // `queued_rows_are_fifo_by_enqueue_then_id` as stronger evidence
             // than it is. Break-testing found that **deleting both clauses
             // leaves that test green** on `SQLite`: this query's filter is
-            // `(tenant_id, platform_id, state)` and
+            // `(tenant_id, environment_id, state)` and
             // `idx_qa_run_queue_fifo` continues `(enqueued_at, id)`, so the
             // index scan already returns exactly this order and an absent
             // `ORDER BY` is indistinguishable from a correct one. What the
@@ -273,12 +273,12 @@ impl QueueRepository for OrmQueueRepository {
         &self,
         runner: &C,
         scope: &AccessScope,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<Vec<ClaimRow>, DomainError> {
         let rows = QueueEntity::find()
             .filter(
                 Condition::all()
-                    .add(QueueColumn::EnvironmentId.eq(platform_id))
+                    .add(QueueColumn::EnvironmentId.eq(environment_id))
                     .add(claim_states()),
             )
             .secure()
@@ -303,7 +303,7 @@ impl QueueRepository for OrmQueueRepository {
         scope: &AccessScope,
     ) -> Result<Vec<QueuedPlatform>, DomainError> {
         use sea_orm::ExprTrait;
-        // De-duplicated **in SQL**, by `GROUP BY (platform_id, tenant_id)`.
+        // De-duplicated **in SQL**, by `GROUP BY (environment_id, tenant_id)`.
         //
         // This used to fetch every queued row in scope and fold them in
         // memory, justified by two arguments that were both wrong. The first
@@ -363,7 +363,7 @@ impl QueueRepository for OrmQueueRepository {
         Ok(rows
             .into_iter()
             .map(|r| QueuedPlatform {
-                platform_id: r.platform_id,
+                environment_id: r.environment_id,
                 tenant_id: r.tenant_id,
             })
             .collect())
@@ -534,7 +534,7 @@ impl QueueRepository for OrmQueueRepository {
                     id: m.id,
                     tenant_id: m.tenant_id,
                     run_id: m.run_id,
-                    platform_id: m.environment_id,
+                    environment_id: m.environment_id,
                     age_basis: age_basis(&m),
                 })
                 .collect(),
@@ -608,7 +608,7 @@ impl QueueRepository for OrmQueueRepository {
                 id: m.id,
                 tenant_id: m.tenant_id,
                 run_id: m.run_id,
-                platform_id: m.environment_id,
+                environment_id: m.environment_id,
                 exclusive: m.exclusive,
                 enqueued_at: m.enqueued_at,
             });
@@ -660,11 +660,11 @@ impl QueueRepository for OrmQueueRepository {
         &self,
         runner: &C,
         scope: &AccessScope,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
         limit: u64,
     ) -> Result<Vec<QueueRowRecord>, DomainError> {
-        let filter = match platform_id {
-            Some(platform_id) => Condition::all().add(QueueColumn::EnvironmentId.eq(platform_id)),
+        let filter = match environment_id {
+            Some(environment_id) => Condition::all().add(QueueColumn::EnvironmentId.eq(environment_id)),
             None => Condition::all(),
         };
 
@@ -692,11 +692,11 @@ impl QueueRepository for OrmQueueRepository {
         &self,
         runner: &C,
         scope: &AccessScope,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
         query: &ODataQuery,
     ) -> Result<Page<QueueRowRecord>, DomainError> {
-        let filter = match platform_id {
-            Some(platform_id) => Condition::all().add(QueueColumn::EnvironmentId.eq(platform_id)),
+        let filter = match environment_id {
+            Some(environment_id) => Condition::all().add(QueueColumn::EnvironmentId.eq(environment_id)),
             None => Condition::all(),
         };
         // Filter-first, then scope: `paginate_odata_try` takes a
@@ -742,7 +742,7 @@ impl QueueRepository for OrmQueueRepository {
         found
             .map(|m| {
                 Ok(RowStatus {
-                    platform_id: m.environment_id,
+                    environment_id: m.environment_id,
                     state: queue_state_from_str(&m.state, m.id)?,
                 })
             })
@@ -850,9 +850,9 @@ mod tests {
         (run, owned)
     }
 
-    fn new_row(platform_id: Uuid, run: OwnedRunId, decision: AdmissionDecision) -> NewQueueRow {
+    fn new_row(environment_id: Uuid, run: OwnedRunId, decision: AdmissionDecision) -> NewQueueRow {
         NewQueueRow {
-            platform_id,
+            environment_id,
             run,
             run_kind: RunKind::Test,
             source: RunSource::Manual,
@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(waiting.dispatched_at, None);
         assert_eq!(waiting.run_kind, RunKind::Test);
         assert_eq!(waiting.source, RunSource::Manual);
-        assert_eq!(waiting.platform_id, platform);
+        assert_eq!(waiting.environment_id, platform);
 
         // `row_status`' platform is the lock key the force-start path takes,
         // so it is asserted rather than assumed: nothing else in this suite
@@ -930,7 +930,7 @@ mod tests {
             .await
             .unwrap()
             .expect("the row must have a status");
-        assert_eq!(status.platform_id, platform);
+        assert_eq!(status.environment_id, platform);
         assert_eq!(status.state, QueueState::Queued);
     }
 
@@ -1208,7 +1208,7 @@ mod tests {
         // And it is visible to the planner again.
         assert_eq!(
             queue
-                .queued_rows(&conn, &scope(tenant), row.platform_id)
+                .queued_rows(&conn, &scope(tenant), row.environment_id)
                 .await
                 .unwrap()
                 .len(),
@@ -1394,7 +1394,7 @@ mod tests {
             "the alert needs the run, not only the queue row"
         );
         assert_eq!(expired[0].tenant_id, tenant);
-        assert_eq!(expired[0].platform_id, platform);
+        assert_eq!(expired[0].environment_id, platform);
         assert_eq!(expired[0].enqueued_at, stale);
 
         assert_eq!(
@@ -1743,7 +1743,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            found.iter().map(|p| p.platform_id).collect::<Vec<_>>(),
+            found.iter().map(|p| p.environment_id).collect::<Vec<_>>(),
             vec![platform_old, platform_mid, platform_new],
             "the platform whose head-of-queue row has waited longest must drain first"
         );
@@ -1778,16 +1778,16 @@ mod tests {
             .platforms_with_queued_rows(&conn, &scope(a))
             .await
             .unwrap();
-        found.sort_by_key(|p| p.platform_id);
+        found.sort_by_key(|p| p.environment_id);
         assert_eq!(
             found,
             vec![
                 QueuedPlatform {
-                    platform_id: platform,
+                    environment_id: platform,
                     tenant_id: a,
                 },
                 QueuedPlatform {
-                    platform_id: other,
+                    environment_id: other,
                     tenant_id: a,
                 },
             ],
@@ -1800,7 +1800,7 @@ mod tests {
                 .await
                 .unwrap(),
             vec![QueuedPlatform {
-                platform_id: platform,
+                environment_id: platform,
                 tenant_id: b,
             }]
         );

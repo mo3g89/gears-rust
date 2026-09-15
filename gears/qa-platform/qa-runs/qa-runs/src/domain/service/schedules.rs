@@ -153,7 +153,7 @@ use crate::domain::system_actor::{self, TenantBound};
 ///
 /// **That is a rule of thumb and not a ceiling on useful work**, so it is not
 /// stated as one: a run that dispatches instead of queueing leaves no queue row
-/// for `queued_depth` to count, and a schedule with no `platform_id` is
+/// for `queued_depth` to count, and a schedule with no `environment_id` is
 /// admitted `Unqueued` before the depth check is reached at all
 /// (`service::admission`). Either kind can exceed twenty in a pass and succeed
 /// every time. The number is chosen for the case that hurts, not derived from
@@ -1112,7 +1112,7 @@ fn outstanding(
 fn launch_request_for(schedule: &Schedule) -> LaunchRequest {
     LaunchRequest {
         target: schedule.target.clone(),
-        platform_id: schedule.platform_id,
+        environment_id: schedule.environment_id,
         branch: schedule.branch.clone(),
         include_tags: schedule.include_tags.clone(),
         exclude_tags: schedule.exclude_tags.clone(),

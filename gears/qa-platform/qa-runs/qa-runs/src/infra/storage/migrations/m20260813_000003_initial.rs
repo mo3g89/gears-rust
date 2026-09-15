@@ -45,7 +45,7 @@
 //! (`manager/src/routes/runs.rs:594`), from the platform lookup at `:579` — and
 //! persists the result (`manager/migrations/001_initial.sql:56` for
 //! `app_version`, `:149` for `app_build`) rather than re-reading the platform.
-//! Re-deriving from `platform_id` would let a platform upgrade silently change
+//! Re-deriving from `environment_id` would let a platform upgrade silently change
 //! a queued run's or a re-run's `APP_VERSION`, breaking reproducibility and
 //! PRD §5.3, `cpt-cf-qa-fr-environments-variables`'s preserved-env-var contract.
 //!
@@ -151,8 +151,8 @@
 //!    question. See "The foreign keys are tenant-blind" above.
 //! 2. **Validate platform ownership at launch**, through a tenant-scoped
 //!    qa-environments client. `qa_environment_leases` (renamed from
-//!    `qa_platform_leases`) is keyed on a bare `platform_id`, so the lease is
-//!    not tenant-partitioned. See the comment on `qa_runs.platform_id`.
+//!    `qa_platform_leases`) is keyed on a bare `environment_id`, so the lease is
+//!    not tenant-partitioned. See the comment on `qa_runs.environment_id`.
 //! 3. **The per-test `status` vocabulary lives only in this file.** Eight known
 //!    uppercase values, an open set, and a fixed mapping onto the five
 //!    counters — including that `XFAIL`/`XPASS` count toward `total` and
@@ -203,14 +203,14 @@ CREATE TABLE IF NOT EXISTS qa_runs (
     -- tenant owns this platform, through a tenant-scoped qa-environments
     -- client, before persisting the row.** Nothing downstream re-checks.
     -- Why it matters more here than for a normal cross-gear id:
-    -- `qa_platform_leases`' primary key is a bare `platform_id`, so the lease
+    -- `qa_platform_leases`' primary key is a bare `environment_id`, so the lease
     -- is **not tenant-partitioned**, and `domain/queue.rs` makes that lease the
     -- authoritative admission decision. A run row carrying another tenant's
-    -- `platform_id` therefore drives its dispatcher to acquire the *global*
+    -- `environment_id` therefore drives its dispatcher to acquire the *global*
     -- lease on that platform and block the owning tenant's runs -- a
     -- cross-tenant denial of service reached entirely through legitimate,
     -- correctly-scoped writes to this gear's own tables.
-    platform_id UUID NULL,
+    environment_id UUID NULL,
     test_version VARCHAR(512) NULL,
     -- Snapshotted from the target platform at launch, never re-derived. See the
     -- module header. Width matches the column they are copied from,
@@ -302,7 +302,9 @@ CREATE TABLE IF NOT EXISTS qa_runs (
     in_progress INTEGER NOT NULL DEFAULT 0,
     total INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL,
+    -- Where a `collect` run's runner posts its per-file case counts.
+    target_collect_url VARCHAR(1024) NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_runs_tenant_name ON qa_runs(tenant_id, name);
 -- Timeout sweep and the active-run count. Not tenant-prefixed on purpose: the
@@ -315,16 +317,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_runs_tenant_name ON qa_runs(tenant_id, 
 -- dispatcher. So the enumeration wants the state leading, and being non-unique
 -- this is not a cross-tenant channel.
 CREATE INDEX IF NOT EXISTS idx_qa_runs_state_timeout ON qa_runs(state, timeout_at);
-CREATE INDEX IF NOT EXISTS idx_qa_runs_tenant_platform_state ON qa_runs(tenant_id, platform_id, state);
+CREATE INDEX IF NOT EXISTS idx_qa_runs_tenant_environment_state ON qa_runs(tenant_id, environment_id, state);
 CREATE INDEX IF NOT EXISTS idx_qa_runs_tenant_schedule ON qa_runs(tenant_id, schedule_id);
 
 CREATE TABLE IF NOT EXISTS qa_run_queue (
     id UUID PRIMARY KEY NOT NULL,
     tenant_id UUID NOT NULL,
-    -- Same obligation as `qa_runs.platform_id`: ownership is verified at
+    -- Same obligation as `qa_runs.environment_id`: ownership is verified at
     -- launch, not here, and the lease this id resolves to is not
     -- tenant-partitioned. See that column's comment.
-    platform_id UUID NOT NULL,
+    environment_id UUID NOT NULL,
     -- Tenant-blind FK: an insert with a caller-supplied `run_id` succeeds iff
     -- that run exists in *some* tenant, which is an existence oracle. The
     -- service must resolve the run under the caller's scope and return
@@ -383,7 +385,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_run_queue_tenant_run ON qa_run_queue(te
 -- legacy's equivalent stops at `enqueued_at`
 -- (`manager/migrations/001_initial.sql:303`).
 CREATE INDEX IF NOT EXISTS idx_qa_run_queue_fifo
-    ON qa_run_queue(tenant_id, platform_id, state, enqueued_at, id);
+    ON qa_run_queue(tenant_id, environment_id, state, enqueued_at, id);
 -- The TTL sweep and claim reconciliation, both cross-tenant enumerations, both
 -- filtering on state alone (`run_queue.rs:379`, `:335`). Legacy indexes the
 -- same way (`001_initial.sql:304`, `idx_run_queue_state`).
@@ -475,7 +477,13 @@ CREATE TABLE IF NOT EXISTS qa_run_test_results (
     -- delete-then-insert dedupe it always equals `created_at`, because a row is
     -- replaced rather than updated in place.
     created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL,
+    -- Case-level fidelity: the pytest node id, the xfail/skip reason and the
+    -- case-level ticket. `nodeid` defaults to the empty string so that an
+    -- absent value has exactly one spelling.
+    nodeid VARCHAR(1024) NOT NULL DEFAULT '',
+    reason TEXT NULL,
+    ticket VARCHAR(64) NULL
 );
 -- Deliberately NOT unique on (tenant_id, run_id, test_file, test_name), for two
 -- reasons that point the same way. (1) Parity: the source system deduplicates
@@ -487,93 +495,63 @@ CREATE TABLE IF NOT EXISTS qa_run_test_results (
 -- 6432 bytes under utf8mb4, well past InnoDB's 3072-byte limit, so the index
 -- could not be created on MySQL without prefix lengths anyway.
 CREATE INDEX IF NOT EXISTS idx_qa_run_test_results_run ON qa_run_test_results(tenant_id, run_id);
-";
 
-const MYSQL_UP: &str = r"
-CREATE TABLE IF NOT EXISTS qa_runs (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
+CREATE TABLE IF NOT EXISTS qa_schedules (
+    id UUID PRIMARY KEY NOT NULL,
+    tenant_id UUID NOT NULL,
     name VARCHAR(255) NOT NULL,
     run_kind VARCHAR(16) NOT NULL,
-    target_repo_id VARCHAR(36) NULL,
+    target_repo_id UUID NULL,
     target_path VARCHAR(1024) NULL,
     target_test_file VARCHAR(1024) NULL,
-    target_custom_plan_id VARCHAR(36) NULL,
-    platform_id VARCHAR(36) NULL,
-    test_version VARCHAR(512) NULL,
-    app_version VARCHAR(255) NULL,
-    app_build VARCHAR(255) NULL,
-    state VARCHAR(16) NOT NULL,
-    resolved_exclusive BOOLEAN NOT NULL,
-    exclusive_tier VARCHAR(16) NOT NULL,
-    is_validation BOOLEAN NOT NULL DEFAULT FALSE,
-    -- Expression defaults (MySQL 8.0.13+) for symmetry with the Postgres
-    -- (`JSONB NOT NULL DEFAULT '[]'`) and SQLite (`TEXT NOT NULL DEFAULT '[]'`)
-    -- definitions. The literal form is rejected for JSON/TEXT columns; the
-    -- parenthesised form is not, so there is no cross-dialect asymmetry to
-    -- document here. Application code always writes these columns explicitly.
-    parameters JSON NOT NULL DEFAULT ('[]'),
-    include_tags JSON NOT NULL DEFAULT ('[]'),
-    exclude_tags JSON NOT NULL DEFAULT ('[]'),
-    source VARCHAR(16) NOT NULL,
-    schedule_id VARCHAR(36) NULL,
-    bundle_ids JSON NOT NULL DEFAULT ('[]'),
-    execution_ref VARCHAR(512) NULL,
-    log_storage_ref VARCHAR(2048) NULL,
-    timeout_at TIMESTAMP NULL,
-    started_at TIMESTAMP NULL,
-    finished_at TIMESTAMP NULL,
-    error TEXT NULL,
-    passed INTEGER NOT NULL DEFAULT 0,
-    failed INTEGER NOT NULL DEFAULT 0,
-    skipped INTEGER NOT NULL DEFAULT 0,
-    in_progress INTEGER NOT NULL DEFAULT 0,
-    total INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_runs_tenant_name (tenant_id, name),
-    KEY idx_qa_runs_state_timeout (state, timeout_at),
-    KEY idx_qa_runs_tenant_platform_state (tenant_id, platform_id, state),
-    KEY idx_qa_runs_tenant_schedule (tenant_id, schedule_id)
+    target_custom_plan_id UUID NULL,
+    environment_id UUID NULL,
+    branch VARCHAR(512) NULL,
+    cron VARCHAR(255) NOT NULL,
+    exclusive_choice VARCHAR(8) NOT NULL DEFAULT 'auto',
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    include_tags JSONB NOT NULL DEFAULT '[]',
+    exclude_tags JSONB NOT NULL DEFAULT '[]',
+    parameters JSONB NOT NULL DEFAULT '[]',
+    last_fired_tick TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    target_collect_url VARCHAR(1024) NULL,
+    slack_notifications_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    slack_channel VARCHAR(255) NULL,
+    slack_notification_events JSONB NOT NULL DEFAULT '[]'
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_schedules_tenant_name ON qa_schedules(tenant_id, name);
+CREATE INDEX IF NOT EXISTS idx_qa_schedules_enabled ON qa_schedules(enabled, last_fired_tick);
 
-CREATE TABLE IF NOT EXISTS qa_run_queue (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    platform_id VARCHAR(36) NOT NULL,
-    run_id VARCHAR(36) NOT NULL,
-    run_kind VARCHAR(16) NOT NULL,
-    source VARCHAR(16) NOT NULL,
-    exclusive BOOLEAN NOT NULL,
-    state VARCHAR(16) NOT NULL,
+CREATE TABLE IF NOT EXISTS qa_schedule_ticks (
+    id UUID PRIMARY KEY NOT NULL,
+    tenant_id UUID NOT NULL,
+    schedule_id UUID NOT NULL REFERENCES qa_schedules(id) ON DELETE CASCADE,
+    due_at TIMESTAMPTZ NOT NULL,
+    claimed_by VARCHAR(255) NOT NULL,
+    claimed_at TIMESTAMPTZ NOT NULL,
+    run_id UUID NULL,
     error TEXT NULL,
-    enqueued_at TIMESTAMP NOT NULL,
-    dispatched_at TIMESTAMP NULL,
-    finished_at TIMESTAMP NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_run_queue_tenant_run (tenant_id, run_id),
-    KEY idx_qa_run_queue_fifo (tenant_id, platform_id, state, enqueued_at, id),
-    KEY idx_qa_run_queue_state_enqueued (state, enqueued_at),
-    CONSTRAINT fk_qa_run_queue_run FOREIGN KEY (run_id) REFERENCES qa_runs(id) ON DELETE CASCADE
+    created_at TIMESTAMPTZ NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_schedule_ticks_claim
+    ON qa_schedule_ticks(tenant_id, schedule_id, due_at);
 
-CREATE TABLE IF NOT EXISTS qa_run_test_results (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    run_id VARCHAR(36) NOT NULL,
-    test_file VARCHAR(1024) NOT NULL DEFAULT '',
-    test_name VARCHAR(512) NOT NULL,
-    status VARCHAR(16) NOT NULL,
-    duration VARCHAR(64) NULL,
-    launch_id VARCHAR(255) NULL,
-    jira_key VARCHAR(64) NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    KEY idx_qa_run_test_results_run (tenant_id, run_id),
-    CONSTRAINT fk_qa_run_test_results_run FOREIGN KEY (run_id) REFERENCES qa_runs(id) ON DELETE CASCADE
+-- The composite parent key `qa_run_logs` cascades from. Declared before that
+-- table because its foreign key names this pair.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_qa_runs_id_tenant ON qa_runs(id, tenant_id);
+
+CREATE TABLE IF NOT EXISTS qa_run_logs (
+    run_id UUID PRIMARY KEY NOT NULL,
+    tenant_id UUID NOT NULL,
+    text TEXT NOT NULL DEFAULT '',
+    lines BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL,
+    FOREIGN KEY (run_id, tenant_id) REFERENCES qa_runs(id, tenant_id) ON DELETE CASCADE
 );
 ";
+
 
 const SQLITE_UP: &str = r"
 CREATE TABLE IF NOT EXISTS qa_runs (
@@ -585,7 +563,7 @@ CREATE TABLE IF NOT EXISTS qa_runs (
     target_path TEXT NULL,
     target_test_file TEXT NULL,
     target_custom_plan_id TEXT NULL,
-    platform_id TEXT NULL,
+    environment_id TEXT NULL,
     test_version TEXT NULL,
     app_version TEXT NULL,
     app_build TEXT NULL,
@@ -611,17 +589,18 @@ CREATE TABLE IF NOT EXISTS qa_runs (
     in_progress INTEGER NOT NULL DEFAULT 0,
     total INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    target_collect_url VARCHAR(1024) NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_runs_tenant_name ON qa_runs(tenant_id, name);
 CREATE INDEX IF NOT EXISTS idx_qa_runs_state_timeout ON qa_runs(state, timeout_at);
-CREATE INDEX IF NOT EXISTS idx_qa_runs_tenant_platform_state ON qa_runs(tenant_id, platform_id, state);
+CREATE INDEX IF NOT EXISTS idx_qa_runs_tenant_environment_state ON qa_runs(tenant_id, environment_id, state);
 CREATE INDEX IF NOT EXISTS idx_qa_runs_tenant_schedule ON qa_runs(tenant_id, schedule_id);
 
 CREATE TABLE IF NOT EXISTS qa_run_queue (
     id TEXT PRIMARY KEY NOT NULL,
     tenant_id TEXT NOT NULL,
-    platform_id TEXT NOT NULL,
+    environment_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
     run_kind TEXT NOT NULL,
     source TEXT NOT NULL,
@@ -636,7 +615,7 @@ CREATE TABLE IF NOT EXISTS qa_run_queue (
     FOREIGN KEY (run_id) REFERENCES qa_runs(id) ON DELETE CASCADE
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_run_queue_tenant_run ON qa_run_queue(tenant_id, run_id);
-CREATE INDEX IF NOT EXISTS idx_qa_run_queue_fifo ON qa_run_queue(tenant_id, platform_id, state, enqueued_at, id);
+CREATE INDEX IF NOT EXISTS idx_qa_run_queue_fifo ON qa_run_queue(tenant_id, environment_id, state, enqueued_at, id);
 CREATE INDEX IF NOT EXISTS idx_qa_run_queue_state_enqueued ON qa_run_queue(state, enqueued_at);
 
 CREATE TABLE IF NOT EXISTS qa_run_test_results (
@@ -651,9 +630,65 @@ CREATE TABLE IF NOT EXISTS qa_run_test_results (
     jira_key TEXT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    nodeid VARCHAR(1024) NOT NULL DEFAULT '',
+    reason TEXT NULL,
+    ticket VARCHAR(64) NULL,
     FOREIGN KEY (run_id) REFERENCES qa_runs(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_qa_run_test_results_run ON qa_run_test_results(tenant_id, run_id);
+
+CREATE TABLE IF NOT EXISTS qa_schedules (
+    id TEXT PRIMARY KEY NOT NULL,
+    tenant_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    run_kind TEXT NOT NULL,
+    target_repo_id TEXT NULL,
+    target_path TEXT NULL,
+    target_test_file TEXT NULL,
+    target_custom_plan_id TEXT NULL,
+    environment_id TEXT NULL,
+    branch TEXT NULL,
+    cron TEXT NOT NULL,
+    exclusive_choice TEXT NOT NULL DEFAULT 'auto',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    include_tags TEXT NOT NULL DEFAULT '[]',
+    exclude_tags TEXT NOT NULL DEFAULT '[]',
+    parameters TEXT NOT NULL DEFAULT '[]',
+    last_fired_tick TEXT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    target_collect_url VARCHAR(1024) NULL,
+    slack_notifications_enabled INTEGER NOT NULL DEFAULT 0,
+    slack_channel VARCHAR(255) NULL,
+    slack_notification_events TEXT NOT NULL DEFAULT '[]'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_schedules_tenant_name ON qa_schedules(tenant_id, name);
+CREATE INDEX IF NOT EXISTS idx_qa_schedules_enabled ON qa_schedules(enabled, last_fired_tick);
+
+CREATE TABLE IF NOT EXISTS qa_schedule_ticks (
+    id TEXT PRIMARY KEY NOT NULL,
+    tenant_id TEXT NOT NULL,
+    schedule_id TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    claimed_by TEXT NOT NULL,
+    claimed_at TEXT NOT NULL,
+    run_id TEXT NULL,
+    error TEXT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (schedule_id) REFERENCES qa_schedules(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_schedule_ticks_claim ON qa_schedule_ticks(tenant_id, schedule_id, due_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_qa_runs_id_tenant ON qa_runs(id, tenant_id);
+
+CREATE TABLE IF NOT EXISTS qa_run_logs (
+    run_id TEXT PRIMARY KEY NOT NULL,
+    tenant_id TEXT NOT NULL,
+    text TEXT NOT NULL DEFAULT '',
+    lines BIGINT NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (run_id, tenant_id) REFERENCES qa_runs(id, tenant_id) ON DELETE CASCADE
+);
 ";
 
 #[async_trait::async_trait]
@@ -664,7 +699,6 @@ impl MigrationTrait for Migration {
 
         let sql = match backend {
             sea_orm::DatabaseBackend::Postgres => POSTGRES_UP,
-            sea_orm::DatabaseBackend::MySql => MYSQL_UP,
             sea_orm::DatabaseBackend::Sqlite => SQLITE_UP,
             other => {
                 return Err(DbErr::Migration(format!(
@@ -680,6 +714,9 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
         let sql = r"
+DROP TABLE IF EXISTS qa_run_logs;
+DROP TABLE IF EXISTS qa_schedule_ticks;
+DROP TABLE IF EXISTS qa_schedules;
 DROP TABLE IF EXISTS qa_run_test_results;
 DROP TABLE IF EXISTS qa_run_queue;
 DROP TABLE IF EXISTS qa_runs;
@@ -818,20 +855,25 @@ mod tests {
     #[test]
     fn every_dialect_declares_the_same_columns_in_the_same_order() {
         let pg = columns_by_table(super::POSTGRES_UP);
-        let my = columns_by_table(super::MYSQL_UP);
         let sq = columns_by_table(super::SQLITE_UP);
 
         assert_eq!(
             pg.iter().map(|(t, _)| t).collect::<Vec<_>>(),
-            vec!["qa_runs", "qa_run_queue", "qa_run_test_results"],
+            vec![
+                "qa_runs",
+                "qa_run_queue",
+                "qa_run_test_results",
+                "qa_schedules",
+                "qa_schedule_ticks",
+                "qa_run_logs"
+            ],
             "the parser lost a table; every assertion below would then compare \
              two empty lists and pass vacuously"
         );
         assert!(
-            pg.iter().all(|(_, c)| c.len() >= 10),
+            pg.iter().all(|(_, c)| c.len() >= 5),
             "the parser produced a suspiciously short column list: {pg:?}"
         );
-        assert_eq!(pg, my, "POSTGRES_UP and MYSQL_UP disagree");
         assert_eq!(pg, sq, "POSTGRES_UP and SQLITE_UP disagree");
     }
 
@@ -959,17 +1001,15 @@ mod tests {
     #[test]
     fn every_dialect_declares_the_same_indexes() {
         let pg = indexes(super::POSTGRES_UP);
-        let my = indexes(super::MYSQL_UP);
         let sq = indexes(super::SQLITE_UP);
 
         assert_eq!(
             pg.len(),
-            8,
-            "expected 8 indexes; the parser found {} and every comparison below \
+            12,
+            "expected 12 indexes; the parser found {} and every comparison below \
              would then be over the wrong set: {pg:?}",
             pg.len()
         );
-        assert_eq!(pg, my, "POSTGRES_UP and MYSQL_UP declare different indexes");
         assert_eq!(
             pg, sq,
             "POSTGRES_UP and SQLITE_UP declare different indexes"
@@ -1024,7 +1064,7 @@ mod tests {
     /// proves nothing.
     ///
     /// Column *order* matters and is asserted for the FIFO index specifically:
-    /// it exists to serve `WHERE tenant_id/platform_id/state ORDER BY
+    /// it exists to serve `WHERE tenant_id/environment_id/state ORDER BY
     /// enqueued_at, id` with one scan, and a permuted list still creates
     /// happily while serving the sort not at all.
     #[tokio::test]
@@ -1035,12 +1075,11 @@ mod tests {
             index_names(&conn, "qa_runs").await,
             vec![
                 "idx_qa_runs_state_timeout",
+                "idx_qa_runs_tenant_environment_state",
                 "idx_qa_runs_tenant_name",
-                "idx_qa_runs_tenant_platform_state",
                 "idx_qa_runs_tenant_schedule",
-                // Not declared by this migration. `migrated_db` runs the whole
-                // `Migrator`, and `m20260831_000008_run_logs` adds this one to
-                // `qa_runs` because its composite foreign key
+                // Declared last in this migration rather than with the other
+                // `qa_runs` indexes, because `qa_run_logs`' composite foreign key
                 // `(run_id, tenant_id) REFERENCES qa_runs(id, tenant_id)` needs
                 // a unique key on the parent side to reference. Listed here
                 // rather than filtered out, so this assertion stays an exact
@@ -1066,8 +1105,8 @@ mod tests {
             ("idx_qa_runs_tenant_name", vec!["tenant_id", "name"]),
             ("idx_qa_runs_state_timeout", vec!["state", "timeout_at"]),
             (
-                "idx_qa_runs_tenant_platform_state",
-                vec!["tenant_id", "platform_id", "state"],
+                "idx_qa_runs_tenant_environment_state",
+                vec!["tenant_id", "environment_id", "state"],
             ),
             (
                 "idx_qa_runs_tenant_schedule",
@@ -1076,7 +1115,7 @@ mod tests {
             ("idx_qa_run_queue_tenant_run", vec!["tenant_id", "run_id"]),
             (
                 "idx_qa_run_queue_fifo",
-                vec!["tenant_id", "platform_id", "state", "enqueued_at", "id"],
+                vec!["tenant_id", "environment_id", "state", "enqueued_at", "id"],
             ),
             (
                 "idx_qa_run_queue_state_enqueued",
@@ -1446,6 +1485,95 @@ mod tests {
             conn.execute_unprepared(&format!("SELECT 1 FROM {table}"))
                 .await
                 .expect_err("every table must be gone after down()");
+        }
+    }
+
+
+    /// The JSON column is `NOT NULL` **with a default** in every dialect, and
+    /// the default is an empty array.
+    ///
+    /// This is the module doc's "one strategy" made checkable. The rejected
+    /// alternative — a nullable column with `NULL` read as empty — would show up
+    /// here as a missing `NOT NULL` or a missing `DEFAULT`, and it is precisely
+    /// the shape that lets a mapper acquire a second, silent reading of "no
+    /// events".
+    ///
+    /// `MySQL`'s parenthesised form is the reason the assertion is on
+    /// `DEFAULT` + `[]` rather than on the exact literal.
+    #[test]
+    fn the_events_column_is_not_null_with_an_empty_array_default_everywhere() {
+        for (dialect, ddl) in [
+            ("POSTGRES_UP", super::POSTGRES_UP),
+            ("SQLITE_UP", super::SQLITE_UP),
+        ] {
+            let line = ddl
+                .lines()
+                .find(|l| l.contains("slack_notification_events"))
+                .unwrap_or_else(|| panic!("{dialect} has no events column"));
+            assert!(line.contains("NOT NULL"), "{dialect}: {line}");
+            assert!(line.contains("DEFAULT"), "{dialect}: {line}");
+            assert!(line.contains("[]"), "{dialect}: {line}");
+        }
+    }
+
+
+    /// The cascade is the entire retention policy (spec D-RLP-1) **and** the
+    /// only thing tying a log row's tenant to its run's tenant, so it is
+    /// asserted in the DDL text of every dialect and not only behaviourally —
+    /// and asserted in the *form* each dialect actually honors, not merely
+    /// that the words appear somewhere.
+    ///
+    /// **Fix-round 1.** The original version of this test only checked
+    /// `ddl.contains("REFERENCES qa_runs(id) ON DELETE CASCADE")`, which is
+    /// true of an inline `REFERENCES` clause written on the `run_id` column
+    /// definition — and `MySQL`/`InnoDB` parses and silently drops exactly
+    /// that form, registering no constraint at all. The substring-only
+    /// version passed against that broken `MYSQL_UP`, and this crate has no
+    /// `MySQL` execution tier to catch it any other way.
+    ///
+    /// **Final fix wave.** The key is now composite (see the module header),
+    /// which cannot be spelled inline in any dialect — so Postgres is no
+    /// longer exempt from the table-level requirement and all three bodies
+    /// are held to one spelling. Break-tested twice: dropping `tenant_id`
+    /// from either side of any one dialect's `FOREIGN KEY` turns the first
+    /// assertion red, and putting a dialect's key back inline on `run_id`
+    /// turns the second red.
+    #[test]
+    fn every_dialect_cascades_from_qa_runs_on_the_composite_key() {
+        for (name, ddl) in [
+            ("postgres", super::POSTGRES_UP),
+            ("sqlite", super::SQLITE_UP),
+        ] {
+            assert!(
+                ddl.contains(
+                    "FOREIGN KEY (run_id, tenant_id) REFERENCES qa_runs(id, tenant_id) \
+                     ON DELETE CASCADE"
+                ),
+                "{name} must cascade from qa_runs on (id, tenant_id): a run_id-only key \
+                 leaves a log row's tenant unconstrained, which lets a foreign tenant \
+                 create and permanently poison a run's log row, and dropping the cascade \
+                 orphans a deleted run's log forever",
+            );
+
+            // Scoped to `qa_run_logs`' own CREATE TABLE. The merged blob also
+            // declares `qa_run_queue`, whose `run_id` carries an inline
+            // single-column REFERENCES that is correct *there* — an unscoped
+            // search finds that one first and asserts against the wrong table.
+            let block = ddl
+                .split("CREATE TABLE IF NOT EXISTS qa_run_logs")
+                .nth(1)
+                .unwrap_or_else(|| panic!("{name} declares no qa_run_logs table"));
+            let run_id_line = block
+                .lines()
+                .find(|l| l.trim_start().starts_with("run_id "))
+                .unwrap_or_else(|| panic!("{name} declares no run_id column"));
+            assert!(
+                !run_id_line.contains("REFERENCES"),
+                "{name}'s cascade must not be declared inline on run_id — MySQL/InnoDB \
+                 silently drops an inline REFERENCES clause and registers no constraint \
+                 at all, and a composite key cannot be written inline in any dialect: \
+                 {run_id_line}",
+            );
         }
     }
 }

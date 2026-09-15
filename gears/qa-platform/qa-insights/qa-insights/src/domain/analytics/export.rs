@@ -156,7 +156,7 @@ pub struct ExportOverview<'a> {
     pub heatmap: &'a HeatmapData,
     pub trend: &'a TrendData,
     pub flaky: &'a [FlakyTest],
-    /// The label side of every `last_platform_id` a list item carries. See
+    /// The label side of every `last_environment_id` a list item carries. See
     /// [`crate::domain::service::analytics::AnalyticsOverview::platform_names`]
     /// for why the join is a map lookup rather than a value already on the
     /// item.
@@ -340,7 +340,7 @@ fn push_list_rows(lines: &mut Vec<String>, lists: &AnalyticsLists, names: &HashM
 /// `last_run_name` — this module's header says why.
 fn list_item_row(bucket: &str, item: &AnalyticsListItem, names: &HashMap<Uuid, String>) -> String {
     let last_environment = item
-        .last_platform_id
+        .last_environment_id
         .and_then(|id| names.get(&id))
         .map_or("", String::as_str);
     let last_run_id = item

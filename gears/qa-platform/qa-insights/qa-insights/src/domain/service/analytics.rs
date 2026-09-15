@@ -121,7 +121,7 @@ use crate::domain::service::{DbProvider, actions, resources};
 ///   a product key. Absent rather than echoed back as the `product_id`, which
 ///   would be a different value under the same name.
 /// * **[`Self::platform_names`] is added**, and it is not a section — it is the
-///   label side of [`crate::domain::analytics::ExecRow::platform_id`]. Legacy's
+///   label side of [`crate::domain::analytics::ExecRow::environment_id`]. Legacy's
 ///   row carried a platform *name*; this one carries an id, so a name has to be
 ///   read from qa-environments and the read is the service's while the rendering
 ///   is the DTO's. See that field.
@@ -170,7 +170,7 @@ pub struct AnalyticsOverview {
     /// # Why the map is here rather than the names being substituted in place
     ///
     /// Two sections carry a platform id — [`GroupedSummaries::platform`], whose
-    /// entries *are* platforms, and the three lists' `last_platform_id` — and the
+    /// entries *are* platforms, and the three lists' `last_environment_id` — and the
     /// resolution is **one** cross-gear call over the distinct ids of both
     /// ([`EnvironmentReader::names`]' signature is shaped to make a per-row lookup
     /// inexpressible). Substituting in place would mean two service-tier mirrors
@@ -262,7 +262,7 @@ pub struct PlanTestAnalytics {
     pub last_status: String,
     /// The most recent row's platform, unresolved. `None` for a run that named
     /// none.
-    pub last_platform_id: Option<Uuid>,
+    pub last_environment_id: Option<Uuid>,
     /// The most recent row's `product_version` — legacy's `last_version`
     /// (`r.app_version`). See [`PlanExecRow::version`].
     pub last_version: Option<String>,
@@ -558,7 +558,7 @@ where
         // refused it.
         let platform_names = self
             .platforms
-            .names(ctx, &platform_ids(&grouped, &lists))
+            .names(ctx, &environment_ids(&grouped, &lists))
             .await?;
 
         Ok(AnalyticsOverview {
@@ -681,7 +681,7 @@ where
         let items = build_plan_test_analytics(&rows);
         let platform_names = self
             .platforms
-            .names(ctx, &plan_test_platform_ids(&items))
+            .names(ctx, &plan_test_environment_ids(&items))
             .await?;
         Ok(PlanTests {
             items,
@@ -1251,7 +1251,7 @@ fn narrow_to_group(
 /// Every distinct platform id the payload will render, sorted.
 ///
 /// Two sections carry one: the platform breakdown, whose entries *are*
-/// platforms, and the three lists' `last_platform_id`. Collected from the
+/// platforms, and the three lists' `last_environment_id`. Collected from the
 /// **outputs** rather than from the rows, so the resolution asks about exactly
 /// what is rendered — a row whose file the group filter dropped names a platform
 /// nothing will draw.
@@ -1261,11 +1261,11 @@ fn narrow_to_group(
 /// every batch precisely because "resolved once, over the distinct ids" is a
 /// property with no other witness — and an assertion over a hasher's order is a
 /// flaky test.
-fn platform_ids(grouped: &GroupedSummaries, lists: &AnalyticsLists) -> Vec<Uuid> {
+fn environment_ids(grouped: &GroupedSummaries, lists: &AnalyticsLists) -> Vec<Uuid> {
     let mut ids: BTreeSet<Uuid> = grouped
         .platform
         .iter()
-        .map(|entry| entry.platform_id)
+        .map(|entry| entry.environment_id)
         .collect();
 
     for item in lists
@@ -1274,7 +1274,7 @@ fn platform_ids(grouped: &GroupedSummaries, lists: &AnalyticsLists) -> Vec<Uuid>
         .chain(lists.failed.iter())
         .chain(lists.not_run.iter())
     {
-        if let Some(id) = item.last_platform_id {
+        if let Some(id) = item.last_environment_id {
             ids.insert(id);
         }
     }
@@ -1336,7 +1336,7 @@ fn build_plan_test_analytics(rows: &[PlanExecRow]) -> Vec<PlanTestAnalytics> {
             PlanTestAnalytics {
                 test_name: test_name.to_owned(),
                 last_status: latest.status.clone(),
-                last_platform_id: latest.platform_id,
+                last_environment_id: latest.environment_id,
                 last_version: latest.version.clone(),
                 last_run_id: latest.run_id,
                 jira_key: latest.jira_key.clone(),
@@ -1419,11 +1419,11 @@ fn build_plan_test_history(rows: &[PlanExecRow]) -> Vec<PlanTestHistory> {
 }
 
 /// Every distinct platform id [`AnalyticsService::plan_tests`] will render,
-/// sorted — [`platform_ids`]'s argument, over one field instead of two.
-fn plan_test_platform_ids(items: &[PlanTestAnalytics]) -> Vec<Uuid> {
+/// sorted — [`environment_ids`]'s argument, over one field instead of two.
+fn plan_test_environment_ids(items: &[PlanTestAnalytics]) -> Vec<Uuid> {
     items
         .iter()
-        .filter_map(|item| item.last_platform_id)
+        .filter_map(|item| item.last_environment_id)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()

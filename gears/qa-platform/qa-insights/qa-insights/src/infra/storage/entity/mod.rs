@@ -173,7 +173,7 @@ mod tests {
         let tenant = uuid(1);
         let run_id = uuid(2);
         let repo_id = uuid(3);
-        let platform_id = uuid(4);
+        let environment_id = uuid(4);
         let owner_id = uuid(5);
 
         // ---- 1. qa_test_results -------------------------------------------
@@ -189,7 +189,7 @@ mod tests {
             jira_key: ActiveValue::Set(Some("VHP-2618".to_owned())),
             product_version: ActiveValue::Set(Some("5.0.1".to_owned())),
             app_build: ActiveValue::Set(Some("20260818.3".to_owned())),
-            environment_id: ActiveValue::Set(Some(platform_id)),
+            environment_id: ActiveValue::Set(Some(environment_id)),
             repo_id: ActiveValue::Set(Some(repo_id)),
             plan_path: ActiveValue::Set(Some("plans/smoke/plan.yaml".to_owned())),
             branch: ActiveValue::Set(Some("main".to_owned())),
@@ -349,7 +349,7 @@ mod tests {
             repo_id: ActiveValue::Set(repo_id),
             plan_path: ActiveValue::Set("plans/smoke/plan.yaml".to_owned()),
             app_version: ActiveValue::Set(Some("5.0.1".to_owned())),
-            environment_id: ActiveValue::Set(Some(platform_id)),
+            environment_id: ActiveValue::Set(Some(environment_id)),
             status: ActiveValue::Set("Open".to_owned()),
             summary: ActiveValue::Set("login flaps".to_owned()),
             resolved_at: ActiveValue::Set(None),

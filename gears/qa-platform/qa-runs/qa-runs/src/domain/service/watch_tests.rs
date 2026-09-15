@@ -361,11 +361,11 @@ fn passing_script() -> Vec<ExecutionEvent> {
 /// `timeout_at` is an hour out, which is the load-bearing part of the fixture:
 /// the control-plane timeout sweep runs in the same tick, and if it could be
 /// what retires these runs the assertions below would say nothing.
-async fn a_live_run(h: &Harness, name: &str, platform_id: Option<Uuid>) -> Uuid {
+async fn a_live_run(h: &Harness, name: &str, environment_id: Option<Uuid>) -> Uuid {
     let conn = h.db.conn().unwrap();
     let mut new = sample_new_run(name);
     new.state = RunState::Running;
-    new.platform_id = platform_id;
+    new.environment_id = environment_id;
     new.target = RunTarget::Plan {
         repo_id: Uuid::new_v4(),
         path: "tests/plan.yaml".to_owned(),

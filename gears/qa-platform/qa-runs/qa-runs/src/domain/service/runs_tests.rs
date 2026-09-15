@@ -1333,7 +1333,7 @@ fn replay_carries_the_stored_target_filter_and_parameters() {
     let request = replay(&run).unwrap();
     assert_eq!(request.target, run.target);
     assert_eq!(request.target.kind(), RunKind::Test);
-    assert_eq!(request.platform_id, Some(PLATFORM_A));
+    assert_eq!(request.environment_id, Some(PLATFORM_A));
     assert_eq!(request.include_tags, vec!["smoke".to_owned()]);
     assert_eq!(request.exclude_tags, vec!["destructive".to_owned()]);
     assert_eq!(request.parameters, run.parameters);
@@ -1371,7 +1371,7 @@ fn replay_carries_the_stored_target_filter_and_parameters() {
 #[test]
 fn replay_refuses_a_collect_run() {
     let mut run = stored(RunState::Succeeded, false);
-    run.platform_id = None;
+    run.environment_id = None;
     run.target = RunTarget::Collect {
         repo_id: REPO,
         collect_url: "https://insights.example/qa/v1/collect/r/main".to_owned(),
@@ -1531,7 +1531,7 @@ async fn a_refused_cancel_leaves_the_log_channel_alone() {
 }
 
 /// **Adopted from the spec review's probe.** A re-run re-reads the platform
-/// rather than replaying the stored `platform_id`, which is what stops a run
+/// rather than replaying the stored `environment_id`, which is what stops a run
 /// whose platform was deleted or reassigned since from taking the *global*,
 /// non-tenant-partitioned lease on it.
 ///
@@ -1630,7 +1630,7 @@ async fn queue_view_harness() -> Harness {
 /// number an operator cannot act on.
 ///
 /// **What this does not pin.** The double ignores the `ODataQuery` entirely -
-/// it applies scope and the `platform_id` narrowing and nothing else - so
+/// it applies scope and the `environment_id` narrowing and nothing else - so
 /// nothing here says anything about `$filter`, `$orderby` or cursors. **Nor
 /// does anything else**: `list_page` has no test at the storage tier either.
 /// See `test_support::MockRunsRepository::list_page`.

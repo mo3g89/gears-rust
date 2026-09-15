@@ -7,8 +7,9 @@
 # GlobalDatabaseConfig/DbConnConfig (libs/toolkit-db/src/config.rs) do not
 # opt in, so a `${POSTGRES_HOST}`-style placeholder in that file would reach
 # Postgres as a literal string, not an expanded one (see the comment at
-# gears/qa-platform/config/qa-platform-stack.yaml:18-36). Inside compose the database answers
-# to the `postgres` service, not `localhost`, so this script renders those
+# gears/qa-platform/config/qa-platform-stack.yaml:18-36). In any real
+# deployment the database answers to its own host, not `localhost`, so this
+# script renders those
 # three fields from POSTGRES_HOST/POSTGRES_USER/POSTGRES_PASSWORD into a
 # *separate* writable file before the server starts, rewrites the command
 # line to point at that rendered file, then execs it so it becomes PID 1 and
@@ -69,7 +70,7 @@
 # `oidc-authn-plugin` config structs do not opt into placeholder expansion
 # either), so the only place it can be parameterised without editing the
 # committed file is here. PUBLIC_ISSUER_ORIGIN is the knob (PUBLIC_HOST feeds
-# its default); docker-compose.yml gives `KC_HOSTNAME` and the UI's
+# its default); a deployment gives `KC_HOSTNAME` and the UI's
 # `VITE_OIDC_ISSUER` build arg the same value, which is what keeps the ends of
 # that chain in agreement.
 #
@@ -104,10 +105,9 @@ RENDERED_CONFIG_FILE="/var/lib/cf-gears/.rendered-$(basename "$CONFIG_FILE")"
 # instead because there is no correct default for them -- "localhost" is the
 # template's literal, and it is wrong inside every container.
 PUBLIC_HOST="${PUBLIC_HOST:-localhost}"
-# Same defaulting chain docker-compose.yml uses for KC_HOSTNAME and
-# VITE_OIDC_ISSUER, spelled the same way on purpose: unset means the localhost
-# http chain this stack has always run, and an https deploy sets this one
-# variable (docker-compose.https.yml does).
+# The same defaulting chain a deployment uses for KC_HOSTNAME and
+# VITE_OIDC_ISSUER, spelled the same way on purpose: unset means a localhost
+# http chain, and an https deploy sets this one variable.
 PUBLIC_ISSUER_ORIGIN="${PUBLIC_ISSUER_ORIGIN:-http://${PUBLIC_HOST}:8180}"
 
 # This value is interpolated into a REGEX (see `issuer_pattern` below), so an
@@ -131,8 +131,7 @@ PUBLIC_ISSUER_ORIGIN="${PUBLIC_ISSUER_ORIGIN:-http://${PUBLIC_HOST}:8180}"
 #
 # IPv6 is rejected rather than half-supported: a bracketed literal
 # (`http://[::1]:8180/...`) needs the brackets in the URL and needs them
-# escaped in the regex, and neither this script nor the compose file's
-# `${PUBLIC_HOST}:8180:8080` port strings are written for that shape. Better a
+# escaped in the regex, and this script is not written for that shape. Better a
 # refusal here than a pattern that silently matches nothing.
 if [[ ! "$PUBLIC_ISSUER_ORIGIN" =~ ^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ ]]; then
     echo "entrypoint: PUBLIC_ISSUER_ORIGIN='$PUBLIC_ISSUER_ORIGIN' is not a plain 'http(s)://host[:port]' origin (no trailing slash, no path; host must be a DNS name or IPv4 literal) -- refusing to start rather than interpolate it into the issuer_pattern regex. It defaults to http://\$PUBLIC_HOST:8180, so an unset value means PUBLIC_HOST='$PUBLIC_HOST' is the thing to fix." >&2
@@ -260,9 +259,8 @@ QA_ENVIRONMENTS_ARGO_CONFIG="${QA_ENVIRONMENTS_ARGO_CONFIG:-}"
 # qa-environments to have written the credential Secrets that Workflow's pod
 # mounts. A stack with only the first boots, runs real tests, and every one of
 # them hangs on FailedMount until an operator provisions the Secret by hand --
-# with nothing in any log naming the missing config. The most likely way to
-# arrive here is a stale docker-compose.argo.yml from before 2026-08-28, so the
-# message says exactly that.
+# with nothing in any log naming the missing config, so the message below says
+# exactly that.
 if [[ -n "$QA_RUNS_ARGO_CONFIG" && -z "$QA_ENVIRONMENTS_ARGO_CONFIG" ]]; then
     echo "entrypoint: QA_RUNS_ARGO_CONFIG is set but QA_ENVIRONMENTS_ARGO_CONFIG is not. An Argo deployment needs BOTH -- qa-runs submits the Workflow, and qa-environments writes the runner credential Secrets that Workflow's pod mounts (decision D4). With only the first, every run hangs on FailedMount and nothing says why. Under the Helm chart both come from gears-argo-configmaps.yaml, which always renders the pair -- if only one is present the ConfigMap or its volumeMounts have been edited apart. Refusing to start." >&2
     exit 1
@@ -296,11 +294,10 @@ fi
 # (`argo_client` in qa-environments/src/infra/observer/secret_writer.rs) treats an
 # absent/empty kubeconfig_path as "use Config::infer()", which tries
 # in-cluster ServiceAccount credentials, then $KUBECONFIG, then
-# ~/.kube/config, in that order. Inside a plain Docker container (compose)
-# NONE of those three exist, so a fragment missing kubeconfig_path is
-# unconditionally a misconfiguration there -- that is the premise the
-# `validate_fragment` call below was written against, and it still holds at
-# full strength for compose.
+# ~/.kube/config, in that order. Inside a plain Docker container NONE of those
+# three exist, so a fragment missing kubeconfig_path is unconditionally a
+# misconfiguration there -- that is the premise the `validate_fragment` call
+# below was written against, and it still holds at full strength off-cluster.
 #
 # Inside a Kubernetes POD, the FIRST of those three is real: the kubelet
 # projects a ServiceAccount token at IN_CLUSTER_TOKEN_FILE in every pod
@@ -329,7 +326,7 @@ IN_CLUSTER_TOKEN_FILE=/var/run/secrets/kubernetes.io/serviceaccount/token
 if [[ -n "$QA_ENVIRONMENTS_ARGO_CONFIG" ]]; then
     validate_fragment QA_ENVIRONMENTS_ARGO_CONFIG "$QA_ENVIRONMENTS_ARGO_CONFIG" 'gears.qa-environments.config' \
         '^      # QA_ENVIRONMENTS_ARGO_FRAGMENT$' \
-        "A fragment without render-argo.sh's marker line cannot be told apart from the qa-runs fragment in the rendered file, so the post-condition below could not prove it was inserted"
+        "A fragment without its marker line cannot be told apart from the qa-runs fragment in the rendered file, so the post-condition below could not prove it was inserted"
     if [[ -f "$IN_CLUSTER_TOKEN_FILE" ]]; then
         echo "entrypoint: '$IN_CLUSTER_TOKEN_FILE' exists -- an absent kubeconfig_path in '$QA_ENVIRONMENTS_ARGO_CONFIG' is treated as the in-cluster path (Config::infer() will use the projected ServiceAccount token), not a misconfiguration"
     else

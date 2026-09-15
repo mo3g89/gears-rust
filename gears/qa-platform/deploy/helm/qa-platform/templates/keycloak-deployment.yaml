@@ -25,8 +25,10 @@
      application's public origin behind admin/admin was removed. This
      container serves plain HTTP.
 
-     KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true is carried over from the compose
-     stack deliberately -- keep it.
+     KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true is deliberate -- keep it. It lets
+     Keycloak answer back-channel requests (the gears' JWKS and token fetches,
+     which arrive at the in-cluster Service name) without insisting they carry
+     the public KC_HOSTNAME.
 
      Readiness and liveness both probe
      /realms/qa-platform/.well-known/openid-configuration, not `/` --
@@ -71,11 +73,10 @@ spec:
           image: "{{ .Values.images.keycloak.repository }}:{{ .Values.images.keycloak.tag }}"
           # `args:`, NEVER `command:`. A Kubernetes container's `command:`
           # overrides the image's ENTRYPOINT; `args:` overrides its CMD.
-          # docker-compose.yml's `command:` for this same image means CMD, so
-          # a literal transcription of it into `command:` here silently
-          # discards the image's own entrypoint (/opt/keycloak/bin/kc.sh) and
-          # tries to exec `start-dev` as a program. /opt/keycloak/bin is not on
-          # PATH, so the container never starts at all.
+          # Putting `start-dev` in `command:` here would silently discard the
+          # image's own entrypoint (/opt/keycloak/bin/kc.sh) and try to exec
+          # `start-dev` as a program. /opt/keycloak/bin is not on PATH, so the
+          # container would never start at all.
           #   MEASURED 2026-08-29, both directions:
           #     docker run --entrypoint start-dev quay.io/keycloak/keycloak:26.0 --import-realm
           #       -> exec: "start-dev": executable file not found in $PATH

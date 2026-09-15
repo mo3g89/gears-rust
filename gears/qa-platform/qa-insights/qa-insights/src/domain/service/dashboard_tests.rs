@@ -52,7 +52,7 @@ use std::sync::Arc;
 
 use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_insights_sdk::{
-    DashboardRun, DashboardStats, PlatformsSummary, QualityVectorPassRate, RunTestTrendPoint,
+    DashboardRun, DashboardStats, EnvironmentsSummary, QualityVectorPassRate, RunTestTrendPoint,
     TestResultRecord,
 };
 use qa_runs_sdk::{Run, RunState, RunTarget};
@@ -562,7 +562,7 @@ fn a_window_with_nothing_to_divide_by_has_no_pass_rate_rather_than_zero() {
 /// **Every column of the row reaches its own field on the card.**
 ///
 /// Nine fields, and the shape invites exactly one bug: three of them are
-/// `Uuid`/`Option<Uuid>` (`run_id`, `repo_id`, `platform_id`) and four are
+/// `Uuid`/`Option<Uuid>` (`run_id`, `repo_id`, `environment_id`) and four are
 /// `Option<String>` (`plan_path`, `jira_key`, `launch_id`, and `test_file` once
 /// it is wrapped), so any transposition inside those two groups compiles and
 /// ships. The fixture therefore gives every field a value distinguishable from
@@ -587,7 +587,7 @@ fn a_failure_card_carries_every_column_of_its_row() {
         card.plan_path.as_deref(),
         Some("plans/regression/plan.yaml")
     );
-    assert_eq!(card.platform_id, Some(Uuid::from_u128(0xC3)));
+    assert_eq!(card.environment_id, Some(Uuid::from_u128(0xC3)));
     assert_eq!(card.finished_at, Some(datetime!(2026-08-20 11:30:00 UTC)));
     assert_eq!(card.jira_key.as_deref(), Some("VHP-4711"));
     assert_eq!(card.launch_id.as_deref(), Some("88213"));
@@ -1054,7 +1054,7 @@ impl Fixture {
                 jira_key: None,
                 product_version: Some("8.1.2".to_owned()),
                 app_build: Some(format!("build-{run_id}")),
-                platform_id: None,
+                environment_id: None,
                 repo_id: Some(Uuid::from_u128(0xC0)),
                 plan_path: Some((*plan).to_owned()),
                 branch: None,
@@ -1135,7 +1135,7 @@ impl Fixture {
                 jira_key: None,
                 product_version: Some("8.1.2".to_owned()),
                 app_build: Some(format!("build-{run_id}")),
-                platform_id: None,
+                environment_id: None,
                 repo_id: Some(repo_id),
                 plan_path: Some(plan_path.to_owned()),
                 branch: None,
@@ -1192,7 +1192,7 @@ impl Fixture {
                 jira_key: None,
                 product_version: Some("8.1.2".to_owned()),
                 app_build: Some(format!("build-{run_id}")),
-                platform_id: None,
+                environment_id: None,
                 repo_id: None,
                 plan_path: None,
                 branch: None,
@@ -2267,8 +2267,8 @@ async fn the_fields_with_no_upstream_yet_are_left_untouched() {
     assert_eq!(stats.total_plans, 0, "needs a qa-catalog plan listing");
     assert_eq!(stats.total_schedules, 0, "needs a qa-runs schedule listing");
     assert_eq!(
-        stats.platforms_summary,
-        PlatformsSummary::default(),
+        stats.environments_summary,
+        EnvironmentsSummary::default(),
         "needs a qa-environments port that does not exist"
     );
     assert!(
@@ -2668,7 +2668,7 @@ fn failed_row() -> TestResultRecord {
         jira_key: Some("VHP-4711".to_owned()),
         product_version: Some("9.1.0".to_owned()),
         app_build: Some("9.1.0-4412".to_owned()),
-        platform_id: Some(Uuid::from_u128(0xC3)),
+        environment_id: Some(Uuid::from_u128(0xC3)),
         repo_id: Some(Uuid::from_u128(0xB2)),
         plan_path: Some("plans/regression/plan.yaml".to_owned()),
         branch: Some("release/9.1".to_owned()),

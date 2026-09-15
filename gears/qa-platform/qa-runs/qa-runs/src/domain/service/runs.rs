@@ -52,7 +52,7 @@
 //! Both operator actions are addressed by **queue row id** and both need the
 //! row's `run_id` — to retire the run behind a cancelled row, and to dispatch the
 //! run behind a force-started one. `QueueRepository::row_status` is the by-id
-//! read and returns `{platform_id, state}` only; nothing on the trait maps a
+//! read and returns `{environment_id, state}` only; nothing on the trait maps a
 //! queue id to a run id directly.
 //!
 //! Force start does not need one: after `mark_dispatching` the row **is** a
@@ -411,7 +411,7 @@ where
     ///   returned*. That is the guide's own definition and its own caveat: a
     ///   narrow page pushes older `queued` rows out of the window, collapsing
     ///   the positions behind them toward 1. The guide's remedy is the
-    ///   platform-filtered call, which is why `platform_id` is a first-class
+    ///   platform-filtered call, which is why `environment_id` is a first-class
     ///   parameter here rather than something a caller has to express in
     ///   `OData`.
     /// * **`ttl_expires_at`** — needs [`Self::queue_ttl_seconds`], which is
@@ -456,14 +456,14 @@ where
     pub async fn queue_page(
         &self,
         ctx: &SecurityContext,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
         query: &ODataQuery,
     ) -> Result<Page<QueueEntry>, DomainError> {
         let scope = self.queue_scope(ctx, actions::LIST, None).await?;
         let conn = self.db.conn()?;
         let page = self
             .queue
-            .list_page(&conn, &scope, platform_id, query)
+            .list_page(&conn, &scope, environment_id, query)
             .await?;
 
         let inputs: Vec<PositionInput> = page
@@ -471,7 +471,7 @@ where
             .iter()
             .map(|row| PositionInput {
                 id: row.id,
-                platform_id: row.platform_id,
+                environment_id: row.environment_id,
                 enqueued_at: row.enqueued_at,
                 queued: row.state == QueueState::Queued,
             })
@@ -487,13 +487,13 @@ where
                 let blocked_by = position.map(|position| {
                     describe_blocker(
                         position,
-                        holders.get(&row.platform_id).map_or(&[][..], Vec::as_slice),
+                        holders.get(&row.environment_id).map_or(&[][..], Vec::as_slice),
                     )
                 });
                 QueueEntry {
                     id: row.id,
                     run_id: row.run_id,
-                    platform_id: row.platform_id,
+                    environment_id: row.environment_id,
                     run_kind: row.run_kind,
                     source: row.source,
                     exclusive: row.exclusive,
@@ -536,16 +536,16 @@ where
         let heads: BTreeSet<Uuid> = rows
             .iter()
             .filter(|row| positions.get(&row.id) == Some(&1))
-            .map(|row| row.platform_id)
+            .map(|row| row.environment_id)
             .collect();
 
         let mut holders = HashMap::new();
-        for platform_id in heads {
-            let claims = match self.claims_for_platform(ctx, platform_id).await {
+        for environment_id in heads {
+            let claims = match self.claims_for_platform(ctx, environment_id).await {
                 Ok(claims) => claims,
                 Err(error) => {
                     warn!(
-                        %platform_id,
+                        %environment_id,
                         %error,
                         "could not read a platform's claims for the queue listing's \
                          blocked_by text; reporting the generic reason instead",
@@ -562,7 +562,7 @@ where
                         .map(|run| run.name),
                 );
             }
-            holders.insert(platform_id, names);
+            holders.insert(environment_id, names);
         }
         holders
     }
@@ -808,8 +808,8 @@ where
     /// whose row the TTL sweep already expired. All three are ordinary, so the
     /// caller retires the run either way.
     async fn cancellable_row(&self, ctx: &SecurityContext, run: &Run) -> Option<Uuid> {
-        let platform_id = run.platform_id?;
-        match self.queue_row_for_run(ctx, platform_id, run.id).await {
+        let environment_id = run.environment_id?;
+        match self.queue_row_for_run(ctx, environment_id, run.id).await {
             Ok(row) => row.map(|row| row.id),
             Err(error) => {
                 warn!(
@@ -1076,7 +1076,7 @@ fn replay(run: &Run) -> Result<LaunchRequest, DomainError> {
 
     Ok(LaunchRequest {
         target: run.target.clone(),
-        platform_id: run.platform_id,
+        environment_id: run.environment_id,
         branch: Some(branch),
         include_tags: run.include_tags.clone(),
         exclude_tags: run.exclude_tags.clone(),
@@ -1127,7 +1127,7 @@ where
     ) -> Result<(), DomainError> {
         let status = self.require_queued(ctx, queue_id).await?;
         let row = self
-            .queue_row_by_id(ctx, status.platform_id, queue_id)
+            .queue_row_by_id(ctx, status.environment_id, queue_id)
             .await?;
         // **Read before write.** This used to cancel the row first and read the
         // run afterwards, and the security review executed the consequence: a
@@ -1219,12 +1219,12 @@ where
         let capacity = self.admission.enforce_global_cap().await?;
 
         let claim = self
-            .claim_by_force(ctx, queue_id, status.platform_id)
+            .claim_by_force(ctx, queue_id, status.environment_id)
             .await?;
         warn!(
             %queue_id,
             run_id = %claim.run_id,
-            platform_id = %status.platform_id,
+            environment_id = %status.environment_id,
             exclusive = claim.exclusive,
             "run-queue row FORCE STARTED by an operator; platform occupancy bypassed, \
              max_concurrent_runs still enforced",
@@ -1274,9 +1274,9 @@ where
         &self,
         ctx: &SecurityContext,
         queue_id: Uuid,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<crate::domain::repos::ClaimRow, DomainError> {
-        let lock = self.locks.get(platform_id).await;
+        let lock = self.locks.get(environment_id).await;
         let _guard = lock.lock().await;
 
         if !self.mark_dispatching(ctx, queue_id).await? {
@@ -1285,14 +1285,14 @@ where
         // The row is a claim now, so this is where its run id lives — the same
         // recovery `service::dispatch::claim_batch` performs.
         let claim = self
-            .claims_for_platform(ctx, platform_id)
+            .claims_for_platform(ctx, environment_id)
             .await?
             .into_iter()
             .find(|claim| claim.id == queue_id)
             .ok_or_else(|| {
                 error!(
                     %queue_id,
-                    %platform_id,
+                    %environment_id,
                     "a force-started row was claimed but its run id could not be recovered; \
                      leaving it for the orphan guard rather than dispatching blind",
                 );
@@ -1301,7 +1301,7 @@ where
                 ))
             })?;
 
-        self.take_lease_or_override(ctx, platform_id, &claim).await;
+        self.take_lease_or_override(ctx, environment_id, &claim).await;
         Ok(claim)
     }
 
@@ -1310,7 +1310,7 @@ where
     async fn take_lease_or_override(
         &self,
         ctx: &SecurityContext,
-        platform_id: Uuid,
+        environment_id: Uuid,
         claim: &crate::domain::repos::ClaimRow,
     ) {
         let mode = if claim.exclusive {
@@ -1320,13 +1320,13 @@ where
         };
         match self
             .environments
-            .acquire_lease(ctx, platform_id, claim.run_id, mode)
+            .acquire_lease(ctx, environment_id, claim.run_id, mode)
             .await
         {
             Ok(AcquireOutcome::Acquired) => {}
             Ok(AcquireOutcome::Busy { current }) => warn!(
                 run_id = %claim.run_id,
-                %platform_id,
+                %environment_id,
                 current = ?current,
                 "force start is proceeding without the platform lease because another run \
                  holds it; this run will not register as occupancy and the platform will \
@@ -1335,12 +1335,12 @@ where
             Err(error) => {
                 error!(
                     run_id = %claim.run_id,
-                    %platform_id,
+                    %environment_id,
                     %error,
                     "could not acquire the platform lease for a force-started run; \
                      releasing in case the acquisition landed and only the response was lost",
                 );
-                self.give_back_lease(ctx, platform_id, claim.run_id).await;
+                self.give_back_lease(ctx, environment_id, claim.run_id).await;
             }
         }
     }
@@ -1354,15 +1354,15 @@ where
     /// reconciliation never sees it. `decide_release` removes only a hold the run
     /// actually has, so this is a no-op when the acquisition never landed — which
     /// is what makes it safe to issue unconditionally on the error path.
-    async fn give_back_lease(&self, ctx: &SecurityContext, platform_id: Uuid, run_id: Uuid) {
+    async fn give_back_lease(&self, ctx: &SecurityContext, environment_id: Uuid, run_id: Uuid) {
         if let Err(error) = self
             .environments
-            .release_lease(ctx, platform_id, run_id)
+            .release_lease(ctx, environment_id, run_id)
             .await
         {
             error!(
                 %run_id,
-                %platform_id,
+                %environment_id,
                 %error,
                 "could not release a lease that may have been taken for a force-started \
                  run; the platform will read as busy until it is cleared by hand",
@@ -1453,12 +1453,12 @@ where
     async fn claims_for_platform(
         &self,
         ctx: &SecurityContext,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<Vec<crate::domain::repos::ClaimRow>, DomainError> {
         let scope = self.queue_scope(ctx, actions::LIST, None).await?;
         let conn = self.db.conn()?;
         self.queue
-            .claims_for_platform(&conn, &scope, platform_id)
+            .claims_for_platform(&conn, &scope, environment_id)
             .await
     }
 
@@ -1469,12 +1469,12 @@ where
     async fn queue_window(
         &self,
         ctx: &SecurityContext,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<Vec<QueueRowRecord>, DomainError> {
         let scope = self.queue_scope(ctx, actions::LIST, None).await?;
         let conn = self.db.conn()?;
         self.queue
-            .list_for_read(&conn, &scope, Some(platform_id), MAX_QUEUE_READ_LIMIT)
+            .list_for_read(&conn, &scope, Some(environment_id), MAX_QUEUE_READ_LIMIT)
             .await
     }
 
@@ -1482,17 +1482,17 @@ where
     async fn queue_row_by_id(
         &self,
         ctx: &SecurityContext,
-        platform_id: Uuid,
+        environment_id: Uuid,
         queue_id: Uuid,
     ) -> Result<QueueRowRecord, DomainError> {
-        self.queue_window(ctx, platform_id)
+        self.queue_window(ctx, environment_id)
             .await?
             .into_iter()
             .find(|row| row.id == queue_id)
             .ok_or_else(|| {
                 error!(
                     %queue_id,
-                    %platform_id,
+                    %environment_id,
                     limit = MAX_QUEUE_READ_LIMIT,
                     "a queue row exists but is outside the readable window, so its run \
                      cannot be retired; refusing rather than cancelling the row alone",
@@ -1512,11 +1512,11 @@ where
     async fn queue_row_for_run(
         &self,
         ctx: &SecurityContext,
-        platform_id: Uuid,
+        environment_id: Uuid,
         run_id: Uuid,
     ) -> Result<Option<QueueRowRecord>, DomainError> {
         Ok(self
-            .queue_window(ctx, platform_id)
+            .queue_window(ctx, environment_id)
             .await?
             .into_iter()
             .find(|row| row.run_id == run_id && row.state == QueueState::Queued))

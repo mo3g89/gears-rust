@@ -149,7 +149,7 @@ pub struct Plan {
     pub tags: Vec<String>,
     /// Whether the plan classifies as a *validation* run: the `plan.yaml`
     /// `validation:` bool OR'd with a trimmed, case-insensitively matched
-    /// `validation` tag (`manager/src/services/plans.rs:35-39`). Consumed by
+    /// `validation` tag. Consumed by
     /// qa-runs, which re-homes it as a run classification.
     pub validation: bool,
     pub exclusive: Exclusivity,
@@ -170,23 +170,20 @@ pub struct TestFileMeta {
 ///
 /// # Why `plan_path` exists
 ///
-/// Legacy's equivalent is `CustomPlanTest { plan_id, test_file }`
-/// (`manager/src/models.rs:484-487`), whose `plan_id` names the nested
-/// `plan.yaml` the file belongs to. That association is load-bearing for
-/// exclusivity, not decoration: `custom_plan_tier` groups a custom plan's
-/// entries by it, consults each nested plan's own `exclusive:` declaration
-/// first, and only falls through to a `TEST_META` scan for the nested plans
-/// that declared nothing (`manager/src/services/exclusivity.rs:536-564`,
-/// combined at `:579-582`). An earlier version of this model carried
-/// `(repo_id, path)` pairs with no plan reference at all, so a custom plan
-/// composed of a plan declaring `exclusive: true` whose test files were all
-/// silent resolved **parallel** here and **exclusive** there — a destructive
-/// suite losing its platform-to-itself guarantee with no error and no warning.
+/// An entry names the nested `plan.yaml` the file belongs to, and that
+/// association is load-bearing for exclusivity rather than decoration:
+/// `custom_plan_tier` groups a custom plan's entries by it, consults each nested
+/// plan's own `exclusive:` declaration first, and only falls through to a
+/// `TEST_META` scan for the nested plans that declared nothing. An earlier
+/// version of this model carried `(repo_id, path)` pairs with no plan reference
+/// at all, so a custom plan composed of a plan declaring `exclusive: true` whose
+/// test files were all silent resolved **parallel** — a destructive suite losing
+/// its environment-to-itself guarantee with no error and no warning.
 ///
 /// # Rejected alternative: `plan_id: Uuid`
 ///
-/// The obvious mirror of legacy's field, and it cannot work here. A plan in this
-/// port is **not persisted** — [`Plan`] is materialized on read and there is no
+/// The obvious shape, and it cannot work here. A plan is **not persisted** —
+/// [`Plan`] is materialized on read and there is no
 /// plans table — so it has no UUID to reference. Its identity is
 /// `(repo_id, branch, path)`, exactly what
 /// [`QaCatalogClientV1::get_plan`](crate::QaCatalogClientV1::get_plan) takes.
@@ -209,8 +206,8 @@ pub struct TestFileMeta {
 /// **This is the read model, and its `plan_path` is `Option` because stored rows
 /// legitimately have none.** [`NewCustomPlanEntry`] is the write model and its
 /// `plan_path` is a plain `String`: since 2026-08-14 the API refuses an entry
-/// that names no plan, because legacy's `CustomPlanTest::plan_id: String` is
-/// non-optional and optional-on-write was itself the divergence.
+/// that names no plan, because an entry without its plan loses the plan tier of
+/// exclusivity resolution, and optional-on-write was itself the divergence.
 ///
 /// So `None` means exactly one thing now: **a row written before the field
 /// existed**. Nothing reachable through the API can produce another one.
@@ -226,7 +223,7 @@ pub struct TestFileMeta {
 ///
 /// | type | `plan_path` | why |
 /// |---|---|---|
-/// | [`NewCustomPlanEntry`] | `String` | legacy requires it; a 400 is better than a silent `None` |
+/// | [`NewCustomPlanEntry`] | `String` | required; a 400 is better than a silent `None` |
 /// | [`CustomPlanEntry`] | `Option<String>` | pre-field rows have none |
 /// | `StoredCustomPlanEntry` | `Option<String>`, defaulted | must decode a payload it did not write |
 ///
@@ -243,7 +240,6 @@ pub struct TestFileMeta {
 /// searching the repository for a `plan.yaml` listing that file, and a file may
 /// legitimately appear in several plans — so the answer is a guess, and guessing
 /// wrong in the permissive direction is the exact failure this field prevents.
-/// Legacy never needed one because its `plan_id` was mandatory from the start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CustomPlanEntry {
     /// The repository holding both the test file and, when named, its plan.
@@ -330,8 +326,7 @@ pub struct NewCustomPlan {
 pub struct Product {
     pub id: Uuid,
     pub name: String,
-    /// Durable short code (legacy `Product::key`). Persisted as
-    /// `qa_products.product_key`.
+    /// Durable short code. Persisted as `qa_products.product_key`.
     pub key: String,
     pub description: String,
     pub folder: Option<String>,
@@ -366,7 +361,7 @@ pub struct Product {
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewProduct {
     pub name: String,
-    /// Durable short code (legacy `Product::key`).
+    /// Durable short code.
     pub key: String,
     pub description: String,
     /// `None` = the product lives at the root.
@@ -395,7 +390,7 @@ pub struct NewProduct {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductUpdate {
     pub name: String,
-    /// Durable short code (legacy `Product::key`).
+    /// Durable short code.
     pub key: String,
     pub description: String,
     /// `None` = move the product back to the root.
@@ -466,13 +461,11 @@ pub struct BundleRequest {
 /// signature change. DECOMPOSITION 2.2 sanctions either shape.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SyncRequest {
-    /// Branch to materialize. `None` uses the repository's `default_branch`,
-    /// matching the source system (`manager/src/services/test_repos.rs:498-502`).
+    /// Branch to materialize. `None` uses the repository's `default_branch`.
     pub branch: Option<String>,
     /// Skip (and evict) the freshness TTL entry. The launch path always sets
-    /// this: the source system's launch drops the recency marker before
-    /// syncing so a cached checkout cannot be returned
-    /// (`test_repos.rs:503-508`, called from `routes/runs.rs:649`).
+    /// this, dropping the recency marker before syncing so a cached checkout
+    /// cannot be returned.
     pub force: bool,
 }
 
@@ -480,125 +473,95 @@ pub struct SyncRequest {
 ///
 /// A **projection for qa-insights**, not a catalog concept. It exists because
 /// analytics needs each file's `component` / `tags` / `quality_vectors` and an
-/// expected case count, and the gear split (ADR-0005) puts the repository
-/// content on this side of the boundary. Legacy read all of it off the
-/// checkout directly — `UniverseTest`, `manager/src/routes/analytics.rs:250-264`,
-/// built in the plan walk at `analytics.rs:904-920`.
+/// expected case count, and the gear split
+/// ([ADR-0004](../../docs/ADR/0004-cpt-cf-qa-adr-four-gear-decomposition.md))
+/// puts the repository content on this side of the boundary. qa-insights has no
+/// checkout of its own, so everything it needs per file has to ride across on
+/// this row.
 ///
-/// # Divergences from legacy's `UniverseTest`, and why
+/// # Four field choices worth stating
 ///
-/// Verified field-by-field against `analytics.rs:251-264` on 2026-08-18. Legacy
-/// carries **eleven** fields; this carries twelve. Four differences, each
-/// deliberate:
-///
-/// 1. **`quality_vectors` is here and not there.** Legacy does not keep them on
-///    `UniverseTest` at all — its walk parses them per file and folds them into
-///    a *separate* `quality_vectors_by_file` map (`analytics.rs:839`,
-///    `:871-882`) which becomes `QualityVectorSummary` (`:938`). That map is
-///    built on the same checkout read, which qa-insights does not have, so the
-///    per-file vectors have to ride across the boundary on the only row that
-///    crosses it. Dropping this field does not fail to compile; it silently
+/// 1. **`quality_vectors` rides on this row** rather than on a separate
+///    per-file map. The vectors are parsed from the same checkout read that
+///    builds this projection, and that read happens only on this side of the
+///    boundary. Dropping this field does not fail to compile; it silently
 ///    empties the overview's quality-vector summary.
-/// 2. **`plan_id: Uuid` is replaced by `plan_path` + `repo_id`.** The plan's
-///    draft specified `plan_id: Uuid`. There is nothing to put in it: a plan in
-///    this port is **not persisted** — [`Plan`] is materialized on read, there
-///    is no plans table, and its identity is `(repo_id, branch, path)`. This is
-///    the same conclusion [`CustomPlanEntry`] reached and documented, so the
-///    same shape is used here rather than minting a synthetic UUID that would
-///    resolve against nothing. Legacy's own `plan_id` is not a UUID either: it
-///    is a path-derived slug, `format!("{repo}-{dir_path with / → -}")` run
-///    through `sanitize_k8s` (`manager/src/services/plans.rs:789-801`), so
-///    `plan_path` is closer to legacy's meaning than a `Uuid` would be.
-/// 3. **`repo_id` is `Uuid`, not `Option<Uuid>`.** Legacy's is optional because
-///    its plan index also holds *local* plans scanned from a plans directory
-///    with no repository (`source: "local"`, `manager/src/services/plans.rs:56`).
-///    This gear has no local-plans mode — every discovered plan comes out of a
-///    synced repository working copy — so an `Option` that is never `None` would
-///    only push an `unwrap` onto qa-insights.
-/// 4. **`case_count` is renamed `static_case_count`** (and widened from `usize`
-///    to `u32` for the wire). Same value; the name says out loud that it is the
-///    static estimate, not the collect job's exact count.
-///
-/// The remaining eight fields — `plan_name`, `test_file`, `test_name`,
-/// `title_alias`, `component`, `tags`, `source`, `versions` — match legacy
-/// one-for-one.
+/// 2. **The plan is identified by `plan_path` + `repo_id`, not a `plan_id`.**
+///    A plan is **not persisted** — [`Plan`] is materialized on read, there is
+///    no plans table, and its identity is `(repo_id, branch, path)`. This is the
+///    same conclusion [`CustomPlanEntry`] reached and documented, so the same
+///    shape is used here rather than minting a synthetic UUID that would resolve
+///    against nothing.
+/// 3. **`repo_id` is `Uuid`, not `Option<Uuid>`.** Every discovered plan comes
+///    out of a synced repository working copy — there is no local-plans mode —
+///    so an `Option` that is never `None` would only push an `unwrap` onto
+///    qa-insights.
+/// 4. **The count is named `static_case_count`**, and is `u32` for the wire. The
+///    name says out loud that it is the static estimate, not the collect job's
+///    exact count.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UniverseTest {
     /// The repository the plan and the file both live in.
     ///
-    /// Non-optional — see divergence 3 in this type's docs.
+    /// Non-optional — see field choice 3 in this type's docs.
     pub repo_id: Uuid,
     /// Path of the `plan.yaml` that lists this file, within the repository's
     /// content root (`plans/smoke.yaml`, `infra/plan.yaml`). Together with
     /// `repo_id` and the branch this is the plan's identity in this gear —
-    /// see divergence 2.
+    /// see field choice 2.
     pub plan_path: String,
-    /// `plan.yaml`'s `name:` — legacy `UniverseTest::plan_name`
-    /// (`analytics.rs:258`, filled from `plan.plan.name` at `analytics.rs:915`).
+    /// `plan.yaml`'s `name:`.
     pub plan_name: String,
-    /// Test-file path relative to the content root, normalized the way legacy
-    /// `normalize_test_path` normalizes it.
+    /// Test-file path relative to the content root, normalized by
+    /// `normalize_test_path`.
     pub test_file: String,
     /// Display name: the `TEST_META` title when non-blank, else a name derived
-    /// from the file stem (legacy `fallback_test_name`, `analytics.rs:1805-1812`
-    /// — strip the `test_` prefix, `_` becomes a space).
+    /// from the file stem: strip the `test_` prefix, `_` becomes a space.
     pub test_name: String,
     /// The `TEST_META` title, when the file declares one. **Not decorative**:
-    /// it is one of the four alias sources `build_alias_map` registers
-    /// (`analytics.rs:1714-1748` — `test_file`, the file stem, `test_name`, and
-    /// this),
-    /// so an execution row that names a test by its human title still matches
-    /// its file. Omitting this field silently turns those rows into `not_run`.
+    /// it is one of the four alias sources `build_alias_map` registers —
+    /// `test_file`, the file stem, `test_name`, and this — so an execution row
+    /// that names a test by its human title still matches its file. Omitting
+    /// this field silently turns those rows into `not_run`.
     ///
-    /// Legacy defaults it to the display name when there is no title
-    /// (`analytics.rs:909`), and that default is preserved.
+    /// It defaults to the display name when the file declares no title.
     pub title_alias: Option<String>,
     /// `TEST_META` `component`, else inferred from a `tests/<component>/...`
-    /// path (legacy `infer_component_from_path`, `analytics.rs:1794-1803`).
+    /// path by `infer_component_from_path`.
     pub component: Option<String>,
     /// `TEST_META` tags unioned with the owning plan's tags, trimmed, blanks
-    /// dropped, de-duplicated and sorted (legacy `analytics.rs:891-897` — a
-    /// `BTreeSet`, hence sorted).
+    /// dropped, de-duplicated and sorted (a `BTreeSet`, hence sorted).
     pub tags: Vec<String>,
-    /// `TEST_META` `quality_vectors`, case-folded-deduplicated. Present here
-    /// and absent from legacy's struct — see divergence 1.
+    /// `TEST_META` `quality_vectors`, case-folded-deduplicated. Carried on this
+    /// row rather than a separate map — see field choice 1.
     pub quality_vectors: Vec<String>,
-    /// Where the plan came from — legacy's `UniverseTest::source`
-    /// (`analytics.rs:259`, copied from `TestPlanInfo::source` at `:916`).
+    /// Where the plan came from.
     ///
-    /// **Correction to the plan's draft**, which said the values are `plan`,
-    /// `custom_plan` or `git_plan`. They are not: those three are
-    /// `RunIntent::run_kind()` values (`manager/src/models.rs:1601`), a
-    /// different enum entirely. Legacy's plan `source` takes exactly two
-    /// values, `"repo"` and `"local"` (`manager/src/services/plans.rs:98`
-    /// and `:56`). This gear only ever discovers inside a synced repository,
-    /// so it is always `"repo"` — see [`SOURCE_REPO`].
+    /// **Not to be confused with a run kind.** `plan`, `custom_plan` and
+    /// `git_plan` are `RunIntent::run_kind()` values, a different enum
+    /// entirely. This gear only ever discovers plans inside a synced repository,
+    /// so this is always `"repo"` — see [`SOURCE_REPO`].
     pub source: String,
-    /// Product versions this test is attributed to; rendered as legacy's
-    /// `AnalyticsListItem::versions` (`analytics.rs:119`, via
-    /// `sorted_versions_desc` at `:1418`).
+    /// Product versions this test is attributed to; rendered as
+    /// `AnalyticsListItem::versions`.
     ///
-    /// **Always empty, matching legacy.** Legacy never populates it either:
-    /// `UniverseTest::versions` is written as `Vec::new()` and never touched
-    /// again (`analytics.rs:918`; the underlying `TestPlanInfo::versions` is
-    /// likewise `Vec::new()` at `manager/src/services/plans.rs:581` and `:717`).
-    /// The field is carried rather than dropped so the analytics response
-    /// keeps its shape — an empty list is what legacy renders today, and
-    /// inventing values here would be a behavior change, not a fix.
+    /// **Always empty.** Nothing populates it: the plan walk has no version
+    /// attribution to draw on. The field is carried rather than dropped so the
+    /// analytics response keeps its declared shape, and so a producer can be
+    /// added without a wire change; inventing values here would be a behaviour
+    /// change rather than a fix.
     pub versions: Vec<String>,
-    /// `count_test_functions` over the file's content
-    /// (`analytics.rs:1865`). Parametrize is **not** expanded; the exact count
-    /// lives in qa-insights' `test_case_collect` and wins over this one where
-    /// it exists (`analytics.rs:767-779`).
+    /// `count_test_functions` over the file's content. Parametrize is **not**
+    /// expanded; the exact count lives in qa-insights' `test_case_collect` and
+    /// wins over this one where it exists.
     pub static_case_count: u32,
 }
 
 /// The only [`UniverseTest::source`] value this gear produces.
 ///
-/// Legacy's other value, `"local"`, belongs to plans scanned from a plans
-/// directory outside any repository (`manager/src/services/plans.rs:56`) — a
-/// mode this port does not have, since ADR-0005 confines content to synced
-/// repository working copies.
+/// There is no second value: every plan is discovered inside a synced
+/// repository working copy, so a plans directory outside any repository is not
+/// a mode this gear has.
 pub const SOURCE_REPO: &str = "repo";
 
 #[cfg(test)]

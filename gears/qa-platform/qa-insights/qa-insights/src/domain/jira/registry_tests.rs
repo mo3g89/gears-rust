@@ -33,7 +33,7 @@ fn make_bug(test_name: &str, jira_key: &str, status: &str) -> JiraBug {
         repo_id: Uuid::new_v4(),
         plan_path: "plans/smoke/plan.yaml".to_owned(),
         app_version: None,
-        platform_id: None,
+        environment_id: None,
         status: status.to_owned(),
         summary: "summary".to_owned(),
         created_at: OffsetDateTime::UNIX_EPOCH,

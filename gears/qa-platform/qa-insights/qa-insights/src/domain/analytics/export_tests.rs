@@ -191,15 +191,15 @@ fn the_summary_section_exports_seven_metrics_and_no_case_counters() {
 #[test]
 fn the_lists_section_renders_one_row_per_bucket_with_escaped_fields_and_a_resolved_environment_name()
  {
-    let platform_id = Uuid::from_u128(0xA11);
+    let environment_id = Uuid::from_u128(0xA11);
     let run_id = Uuid::from_u128(0xB22);
     let mut names = HashMap::new();
-    names.insert(platform_id, "Windows, 64-bit".to_owned());
+    names.insert(environment_id, "Windows, 64-bit".to_owned());
 
     let mut lists = AnalyticsLists::default();
     lists.failed.push(AnalyticsListItem {
         component: Some("net,work".to_owned()),
-        last_platform_id: Some(platform_id),
+        last_environment_id: Some(environment_id),
         last_run_id: Some(run_id),
         ..sample_list_item("tests/a.py")
     });
@@ -476,7 +476,7 @@ fn sample_list_item(test_file: &str) -> AnalyticsListItem {
         plan_name: "plan display".to_owned(),
         versions: Vec::new(),
         last_status: "FAILED",
-        last_platform_id: None,
+        last_environment_id: None,
         last_run_id: None,
         last_build: None,
         last_run_finished_at: None,

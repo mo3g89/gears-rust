@@ -120,7 +120,7 @@ fn launch_against(platform: Option<Uuid>) -> LaunchRequest {
             repo_id: REPO,
             path: "plans/smoke.yaml".to_owned(),
         },
-        platform_id: platform,
+        environment_id: platform,
         branch: Some("main".to_owned()),
         include_tags: vec![],
         exclude_tags: vec![],

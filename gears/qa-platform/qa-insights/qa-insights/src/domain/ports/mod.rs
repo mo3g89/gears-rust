@@ -12,7 +12,7 @@
 //!   its adapter, Task 25a).
 //! * [`clock`] — today, as the analytics windows anchor on it (Task 22).
 //! * [`environment_reader`] — an environment's display name for the
-//!   `platform_id` a row carries, read from qa-environments (Task 25a, with
+//!   `environment_id` a row carries, read from qa-environments (Task 25a, with
 //!   its adapter; first called by Task 25b).
 //! * [`runs_launcher`] — the one launch this gear performs against qa-runs, a
 //!   collect-only run (Task 30; its adapter lands in the same commit, on the

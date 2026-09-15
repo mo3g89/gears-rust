@@ -36,7 +36,7 @@ import type { AuthContextValue } from './useAuth';
  *   -> "issuer": "http://localhost:8180/realms/qa-platform"
  *
  * `https://keycloak:8443/realms/qa-platform` is the *gears'* discovery URL. It
- * resolves only inside the compose network and is pinned to a private CA, so a
+ * resolves only inside the cluster and is pinned to a private CA, so a
  * browser cannot use it and it is never an issuer identity. If a `VITE_OIDC_*`
  * value here ever reads `keycloak:8443`, that is the bug.
  *

@@ -12,8 +12,8 @@
 # a re-resolving install is now a real risk of building the UI against
 # different versions than the ones `npm test` and `tsc` were run against.
 #
-# BUILD CONTEXT: gears/qa-platform/qa-platform-ui (set by the `ui` service in
-# gears/qa-platform/deploy/compose/docker-compose.yml). Every COPY below is
+# BUILD CONTEXT: gears/qa-platform/qa-platform-ui (deploy-k8s.sh builds with
+# that directory as the context). Every COPY below is
 # relative to that directory, not to this file's own, which is why they read as
 # bare `package.json` / `.` rather than `qa-platform-ui/...`. That context also
 # brings along qa-platform-ui/.dockerignore, which keeps node_modules and dist
@@ -37,13 +37,13 @@ COPY . .
 # build time, so these cannot be supplied as container environment variables
 # later -- they have to be here or not at all. Both are declared with no default
 # on purpose: an unset ARG becomes an empty string in the bundle, and
-# src/auth/provider.tsx falls back to the compose stack's values on a falsy
-# read, so the default lives in exactly one place (that file) rather than two
-# that can drift.
+# src/auth/provider.tsx falls back to its own local-development values on a
+# falsy read, so the default lives in exactly one place (that file) rather than
+# two that can drift.
 #
 # THE ISSUER IS THE BROWSER'S URL. `https://keycloak:8443/realms/qa-platform` is
-# the *gears'* discovery URL -- private CA, compose-network-only -- and must
-# never be passed here. See qa-platform-ui/.env.example.
+# the *gears'* discovery URL -- private CA, in-cluster only -- and must never
+# be passed here. See qa-platform-ui/.env.example.
 ARG VITE_OIDC_ISSUER
 ARG VITE_OIDC_CLIENT_ID
 ENV VITE_OIDC_ISSUER=$VITE_OIDC_ISSUER
@@ -67,7 +67,7 @@ ENV NGINX_ENVSUBST_FILTER='^(NGINX_RESOLVER|GEARS_UPSTREAM)$'
 
 # NO ENVIRONMENT-SPECIFIC DEFAULTS FOR THESE TWO. They used to be
 # `ENV NGINX_RESOLVER=127.0.0.11` (Docker's embedded DNS) and
-# `ENV GEARS_UPSTREAM=http://gears:8087` (a compose service name) -- both baked
+# `ENV GEARS_UPSTREAM=http://gears:8087` (a bare service name) -- both baked
 # into an image that also ships to Kubernetes, where each is wrong and fails at
 # REQUEST time rather than at start-up.
 #

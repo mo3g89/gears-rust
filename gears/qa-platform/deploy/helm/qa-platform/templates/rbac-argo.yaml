@@ -61,9 +61,9 @@ rules:
        Secret per stored credential into THIS namespace (.Values.argo.namespace) via
        `Api::<Secret>::namespaced(client, argo_namespace)` and a server-side
        apply patch (`PatchParams::apply(FIELD_MANAGER)` /
-       `Patch::Apply(&secret)`). Under compose the gears held a cluster-admin
-       kubeconfig and this never surfaced; with this scoped ServiceAccount
-       the write is Forbidden on every cycle, and the documented symptom
+       `Patch::Apply(&secret)`). A deployment whose gears hold a cluster-admin
+       kubeconfig never surfaces a missing grant; with this scoped
+       ServiceAccount the write is Forbidden on every cycle, and the symptom
        (job-db-migrate.yaml's sibling concern for the OTHER hook-ordering
        race, D4's own design notes for this one) is every workflow run
        hanging on FailedMount while observation keeps working and the stack

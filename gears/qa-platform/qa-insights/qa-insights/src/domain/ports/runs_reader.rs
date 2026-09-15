@@ -84,7 +84,7 @@ pub trait RunsReader: Send + Sync {
     /// One run's metadata.
     ///
     /// The source of every denormalized column on `qa_test_results`:
-    /// `platform_id`, `product_version` (from `Run::app_version`), `app_build`,
+    /// `environment_id`, `product_version` (from `Run::app_version`), `app_build`,
     /// `repo_id` and `plan_path` (from `Run::target`), `branch` (from
     /// `Run::test_version`) and `run_finished_at`. Ingest reads it once per
     /// projected run rather than once per result row.

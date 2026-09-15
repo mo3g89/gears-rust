@@ -1640,7 +1640,7 @@ fn new_result_am(
             MAX_SHORT_TEXT,
             "qa_test_results.app_build",
         )),
-        environment_id: ActiveValue::Set(file.platform_id),
+        environment_id: ActiveValue::Set(file.environment_id),
         repo_id: ActiveValue::Set(file.repo_id),
         plan_path: ActiveValue::Set(truncate_opt(
             file.plan_path,
@@ -1747,7 +1747,7 @@ mod tests {
             jira_key: Some("VHP-1".to_owned()),
             product_version: Some("5.0.1".to_owned()),
             app_build: Some("20260818.3".to_owned()),
-            platform_id: Some(Uuid::from_u128(0x11)),
+            environment_id: Some(Uuid::from_u128(0x11)),
             repo_id: Some(Uuid::from_u128(0x12)),
             plan_path: Some("plans/smoke/plan.yaml".to_owned()),
             branch: Some("main".to_owned()),
@@ -1838,7 +1838,7 @@ mod tests {
              *filter*; a write path that dropped it would empty Task 24's build \
              distribution silently"
         );
-        assert_eq!(row.platform_id, Some(Uuid::from_u128(0x11)));
+        assert_eq!(row.environment_id, Some(Uuid::from_u128(0x11)));
         assert_eq!(row.repo_id, Some(Uuid::from_u128(0x12)));
         assert_eq!(row.plan_path.as_deref(), Some("plans/smoke/plan.yaml"));
         assert_eq!(row.branch.as_deref(), Some("main"));

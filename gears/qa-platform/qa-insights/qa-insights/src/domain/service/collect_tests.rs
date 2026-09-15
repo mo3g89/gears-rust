@@ -114,7 +114,7 @@ impl RunsLauncher for FakeRunsLauncher {
         _repo_id: Uuid,
         _plan_path: &str,
         _test_file: &str,
-        _platform_id: Option<Uuid>,
+        _environment_id: Option<Uuid>,
         _branch: Option<&str>,
     ) -> Result<(), DomainError> {
         unimplemented!("collect never launches a single test")

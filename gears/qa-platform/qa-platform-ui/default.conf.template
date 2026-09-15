@@ -4,8 +4,8 @@
 # block -- which is why the `map` below is legal here).
 #
 # Retargeted from legacy's manager-ui/nginx.conf: legacy proxied /api/ to a
-# Kubernetes ClusterIP service, this proxies /qa/v1/ to the `gears` service on
-# the compose network (docker-compose.yml's `ui` service). The SPA try_files,
+# Kubernetes ClusterIP service, this proxies /qa/v1/ to the `gears` upstream
+# named by ${GEARS_UPSTREAM}. The SPA try_files,
 # the gzip block and the static-asset caching below are legacy's, unchanged.
 
 # Kept for the $connection_upgrade variable the /qa/v1/ block below sets on
@@ -81,9 +81,9 @@ map $http_upgrade $connection_upgrade {
 #
 #   "GET /qa/v1/runs/<id>/logs?access_token=eyJhbGciOi... HTTP/1.1" 200
 #
-# -- and therefore in `docker compose logs ui` too, one line per stream open
-# for the life of the container (`docker compose logs ui | grep -c
-# 'access_token=eyJ'` was 60 while this comment was first written). Review
+# -- and therefore in this container's own stdout log too, one line per stream
+# open for the life of the container (a `grep -c 'access_token=eyJ'` over it
+# was 60 while this comment was first written). Review
 # finding #51. The ACCESS-log half is closed: the SSE location below applies
 # `sse_no_query`, which logs `$uri` instead of `$request`, so the query string
 # -- and the token in it -- is never written there. See that log_format's own
@@ -131,7 +131,7 @@ map $http_upgrade $connection_upgrade {
 # Nothing here can shorten a token's lifetime -- that would need a
 # token-exchange endpoint this deployment does not have. The only bound is the
 # realm's own `"accessTokenLifespan": 300`
-# (gears/qa-platform/deploy/compose/keycloak/realm-qa-platform.json:15), i.e. a
+# (deploy/helm/qa-platform/files/keycloak/realm-qa-platform.json), i.e. a
 # leaked line is good for at most five minutes from issue.
 #
 # `$arg_access_token` is NOT percent-decoded by nginx. A JWT's alphabet
@@ -173,8 +173,9 @@ server {
     # A `listen 443 ssl` here unconditionally would need a certificate to exist
     # in the image, which is a committed private key. So the fragment carrying
     # that listener and its certificate paths is MOUNTED instead --
-    # deploy/compose/ui-tls/tls.conf, by deploy/compose/docker-compose.https.yml
-    # -- and this include is the seam. `tls-conf/` does not exist in this image,
+    # deploy/helm/qa-platform/files/ui-tls/tls.conf, by the chart's
+    # ui-deployment.yaml -- and this include is the seam. `tls-conf/` does not
+    # exist in this image,
     # and a wildcard include that matches nothing is legal in nginx and silent
     # (verified with `nginx -t` in a throwaway nginx:alpine against this exact
     # line, with no such directory present), so the local stack is byte-for-byte
@@ -207,19 +208,18 @@ server {
     # PUBLIC_ISSUER_ORIGIN a bare origin, which is the only shape
     # deploy/docker/entrypoint.sh:137 accepts (it refuses to start on a path).
     #
-    # The compose stack mounts nothing here, so its behaviour is unchanged.
+    # An image run with nothing mounted here behaves exactly as before.
     include /etc/nginx/extra-conf/*.conf;
 
     # Re-resolve `gears` on every request instead of once at startup.
     #
-    # THIS IS NOT OPTIONAL, and the brief's rationale for dropping legacy's
-    # resolver ("in compose the service name resolves directly") is true only
-    # at configuration-load time. `proxy_pass http://gears:8087;` with a
+    # THIS IS NOT OPTIONAL. The tempting rationale for dropping the resolver
+    # ("the service name resolves directly") is true only at
+    # configuration-load time. `proxy_pass http://gears:8087;` with a
     # literal name and no `resolver` is resolved ONCE, when nginx loads its
     # config, and the answer is cached for the worker's lifetime. Recreating
-    # the `gears` container -- which this stack does routinely; see the
-    # `depends_on` note in docker-compose.yml, and Tasks 13/17/18 all do it --
-    # can hand it a different address, after which every /qa/v1 request 502s
+    # the `gears` container -- which every redeploy does routinely -- can hand
+    # it a different address, after which every /qa/v1 request 502s
     # until nginx is reloaded, and nothing in the UI says why.
     #
     # Driven, not reasoned: with the literal form live, holding the old
@@ -236,9 +236,9 @@ server {
     # go together, which is why legacy's file had both. 127.0.0.11 is docker's
     # embedded DNS (verified: it is the sole `nameserver` in this container's
     # /etc/resolv.conf), replacing legacy's kube-dns address. `ipv6=off`
-    # because this network is IPv4-only (`docker network inspect
-    # compose_default` -> `EnableIPv6 false`, subnet 172.22.0.0/16), so the
-    # AAAA half of every lookup is pure overhead.
+    # because the container network this was measured on is IPv4-only
+    # (`EnableIPv6 false`), so the AAAA half of every lookup is pure
+    # overhead.
     #
     # `$gears` carries no path component, so the request URI still passes
     # through unchanged. Verified from the gear's own side rather than from
@@ -247,7 +247,7 @@ server {
     # `GET /qa/v1/runs/00000000-0000-0000-0000-000000000000` comes back with
     # `instance: "/qa/v1/runs/00000000-0000-0000-0000-000000000000"`. The whole
     # experiment is repeatable: stop `gears`, hold its address with
-    # `docker run --rm --network compose_default --ip <old addr> alpine sleep`,
+    # `docker run --rm --network <net> --ip <old addr> alpine sleep`,
     # start `gears` again so it lands elsewhere, and curl through :8080
     # without touching this container. Literal form: 502. This form: 200,
     # across two forced moves (…0.4 -> …0.6 -> …0.7) with nginx's
@@ -256,7 +256,7 @@ server {
     set $gears ${GEARS_UPSTREAM};
 
     # Emit redirects as paths rather than absolute URLs. This server sits
-    # behind a port mapping (compose publishes 8080 -> 80), and nginx's own
+    # behind a port mapping (a published 8080 -> 80, for instance), and nginx's own
     # absolute redirects are built from `$host`, which carries no port -- so
     # any nginx-generated redirect would send the browser to
     # http://localhost/... , i.e. port 80, where nothing listens. A

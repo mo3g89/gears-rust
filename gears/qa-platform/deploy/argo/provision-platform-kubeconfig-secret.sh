@@ -142,9 +142,10 @@ manifest="$(kubectl create secret generic "$SECRET_NAME" \
     --from-file="$SECRET_KEY=$SOURCE_FILE" \
     --dry-run=client -o yaml)"
 
-# `create|replace`, not `apply`, for the same reason as
-# provision-workflow-secret.sh: apply stores the whole object -- material
-# included -- in a last-applied-configuration annotation.
+# `create|replace`, not `apply`: apply stores the whole object -- material
+# included -- in a last-applied-configuration annotation, so the credential
+# would be kept a second time, where nothing reads it and where
+# `kubectl describe` prints it.
 if kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
     printf '%s' "$manifest" | kubectl replace -n "$NAMESPACE" -f - >/dev/null
     echo "provision-platform-kubeconfig-secret: replaced secret/$SECRET_NAME in namespace $NAMESPACE"

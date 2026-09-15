@@ -770,15 +770,15 @@ where
     /// A lease that is not released is the failure that wedges a platform: the
     /// lease is this gear's only occupancy oracle, so a stale exclusive hold makes
     /// every later launch on that platform queue forever. ERROR, not WARN.
-    async fn release_lease(&self, ctx: &SecurityContext, platform_id: Uuid, run_id: Uuid) {
+    async fn release_lease(&self, ctx: &SecurityContext, environment_id: Uuid, run_id: Uuid) {
         if let Err(error) = self
             .environments
-            .release_lease(ctx, platform_id, run_id)
+            .release_lease(ctx, environment_id, run_id)
             .await
         {
             error!(
                 %run_id,
-                %platform_id,
+                %environment_id,
                 %error,
                 "could not release the platform lease; the platform will read as busy \
                  until the lease is cleared",
@@ -1014,8 +1014,8 @@ where
             );
         }
 
-        if let Some(platform_id) = run.platform_id {
-            self.release_lease(ctx, platform_id, run.id).await;
+        if let Some(environment_id) = run.environment_id {
+            self.release_lease(ctx, environment_id, run.id).await;
         }
     }
 }
@@ -1410,7 +1410,7 @@ where
         warn!(
             queue_id = %row.id,
             run_id = %row.run_id,
-            platform_id = %row.platform_id,
+            environment_id = %row.environment_id,
             waited_seconds = waited,
             ttl_seconds = self.limits.queue_ttl_seconds,
             exclusive = row.exclusive,
@@ -1550,7 +1550,7 @@ where
         for platform in platforms {
             let Some(tenant) = TenantBound::new(platform.tenant_id) else {
                 warn!(
-                    platform_id = %platform.platform_id,
+                    environment_id = %platform.environment_id,
                     "a queued row carries a nil tenant id; skipping it rather than writing \
                      under the platform-root identity",
                 );
@@ -1967,10 +1967,10 @@ where
         pass: &'static str,
         report: &mut TickReport,
     ) {
-        let Some(platform_id) = run.platform_id else {
+        let Some(environment_id) = run.environment_id else {
             return;
         };
-        let claims = match self.claims_for_platform(ctx, platform_id).await {
+        let claims = match self.claims_for_platform(ctx, environment_id).await {
             Ok(claims) => claims,
             Err(error) => {
                 report.note_failure(pass, &error);
@@ -1984,19 +1984,19 @@ where
         {
             report.note_failure(pass, &error);
         }
-        self.release_lease(ctx, platform_id, run.id).await;
+        self.release_lease(ctx, environment_id, run.id).await;
     }
 
     /// Unreleased claims on one platform, under the caller's own scope.
     async fn claims_for_platform(
         &self,
         ctx: &SecurityContext,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<Vec<crate::domain::repos::ClaimRow>, DomainError> {
         let scope = self.queue_scope(ctx, actions::LIST, None).await?;
         let conn = self.db.conn()?;
         self.queue
-            .claims_for_platform(&conn, &scope, platform_id)
+            .claims_for_platform(&conn, &scope, environment_id)
             .await
     }
 
@@ -2132,7 +2132,7 @@ where
             report.note_failure(PASS_RECONCILE, &error);
             return;
         }
-        self.release_lease(ctx, claim.platform_id, run.id).await;
+        self.release_lease(ctx, claim.environment_id, run.id).await;
     }
 
     /// Fail a row left mid-dispatch, retire its run, and free its platform.
@@ -2194,7 +2194,7 @@ where
         {
             report.note_failure(PASS_RECONCILE, &error);
         }
-        self.release_lease(ctx, claim.platform_id, run.id).await;
+        self.release_lease(ctx, claim.environment_id, run.id).await;
     }
 
     /// Where the next claim scan resumes.
@@ -2409,16 +2409,16 @@ where
     ) -> u32 {
         let Some(tenant) = TenantBound::new(platform.tenant_id) else {
             warn!(
-                platform_id = %platform.platform_id,
+                environment_id = %platform.environment_id,
                 "a queued platform carries a nil tenant id; skipping it rather than \
                  dispatching under the platform-root identity",
             );
             return 0;
         };
         let ctx = system_actor::for_dispatch(tenant);
-        let platform_id = platform.platform_id;
+        let environment_id = platform.environment_id;
 
-        let claimed = self.claim_batch(&ctx, platform_id, budget, report).await;
+        let claimed = self.claim_batch(&ctx, environment_id, budget, report).await;
         let count = u32::try_from(claimed.len()).unwrap_or(u32::MAX);
 
         // Outside the lock.
@@ -2502,15 +2502,15 @@ where
     async fn claim_batch(
         &self,
         ctx: &SecurityContext,
-        platform_id: Uuid,
+        environment_id: Uuid,
         budget: Option<GlobalCap>,
         report: &mut TickReport,
     ) -> Vec<ClaimedRow> {
-        let lock = self.locks.get(platform_id).await;
+        let lock = self.locks.get(environment_id).await;
         let _guard = lock.lock().await;
 
-        let occupancy = lease_occupancy(self.environments.as_ref(), ctx, platform_id).await;
-        let fifo = match self.queued_rows(ctx, platform_id).await {
+        let occupancy = lease_occupancy(self.environments.as_ref(), ctx, environment_id).await;
+        let fifo = match self.queued_rows(ctx, environment_id).await {
             Ok(rows) => rows,
             Err(error) => {
                 report.note_failure(PASS_DRAIN, &error);
@@ -2536,7 +2536,7 @@ where
         }
 
         // The rows are claims now, so this is where their run ids live.
-        let run_ids: HashMap<Uuid, Uuid> = match self.claims_for_platform(ctx, platform_id).await {
+        let run_ids: HashMap<Uuid, Uuid> = match self.claims_for_platform(ctx, environment_id).await {
             Ok(claims) => claims
                 .into_iter()
                 .map(|claim| (claim.id, claim.run_id))
@@ -2556,7 +2556,7 @@ where
                 // it once `orphan_timeout_seconds` has passed.
                 error!(
                     %queue_id,
-                    %platform_id,
+                    %environment_id,
                     "a claimed run-queue row has no readable run id; leaving it for the \
                      orphan guard rather than dispatching blind",
                 );
@@ -2570,7 +2570,7 @@ where
             let exclusive = planned_row.is_none_or(|row| row.exclusive);
             let enqueued_at = planned_row.map(|row| row.enqueued_at);
             if self
-                .take_lease_for_claim(ctx, platform_id, run_id, exclusive, report)
+                .take_lease_for_claim(ctx, environment_id, run_id, exclusive, report)
                 .await
             {
                 claimed.push(ClaimedRow {
@@ -2590,11 +2590,11 @@ where
     async fn queued_rows(
         &self,
         ctx: &SecurityContext,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<Vec<crate::domain::queue::QueuedRow>, DomainError> {
         let scope = self.queue_scope(ctx, actions::LIST, None).await?;
         let conn = self.db.conn()?;
-        self.queue.queued_rows(&conn, &scope, platform_id).await
+        self.queue.queued_rows(&conn, &scope, environment_id).await
     }
 
     /// Take the lease for a row this tick claimed. `false` means do not dispatch.
@@ -2615,7 +2615,7 @@ where
     async fn take_lease_for_claim(
         &self,
         ctx: &SecurityContext,
-        platform_id: Uuid,
+        environment_id: Uuid,
         run_id: Uuid,
         exclusive: bool,
         report: &mut TickReport,
@@ -2627,14 +2627,14 @@ where
         };
         match self
             .environments
-            .acquire_lease(ctx, platform_id, run_id, mode)
+            .acquire_lease(ctx, environment_id, run_id, mode)
             .await
         {
             Ok(qa_environments_sdk::AcquireOutcome::Acquired) => true,
             Ok(qa_environments_sdk::AcquireOutcome::Busy { current }) => {
                 warn!(
                     %run_id,
-                    %platform_id,
+                    %environment_id,
                     current = ?current,
                     "the platform lease refused a row this tick claimed; failing the row \
                      rather than starting a run against a platform it does not hold",
@@ -2652,7 +2652,7 @@ where
                 // hold this run actually has, so this is a no-op when the acquire
                 // genuinely never landed. Same reasoning as
                 // `admission::AdmissionService::take_lease`'s `Err` arm.
-                self.release_lease(ctx, platform_id, run_id).await;
+                self.release_lease(ctx, environment_id, run_id).await;
                 false
             }
         }
@@ -2907,7 +2907,7 @@ where
                 {
                     report.note_failure(PASS_BOOT, &error);
                 }
-                self.release_lease(&ctx, claim.platform_id, run.id).await;
+                self.release_lease(&ctx, claim.environment_id, run.id).await;
                 report.failed_orphans += 1;
             }
         }

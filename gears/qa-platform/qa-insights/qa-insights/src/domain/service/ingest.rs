@@ -522,7 +522,7 @@ fn project_rows(
             // reported" stays distinguishable from a run that literally
             // reported the string `unknown` — Task 24 owns that fallback.
             app_build: run.app_build.clone(),
-            platform_id: run.platform_id,
+            environment_id: run.environment_id,
             repo_id,
             plan_path: plan_path.clone(),
             // Legacy's analytics branch filter reads `source_ref` and falls

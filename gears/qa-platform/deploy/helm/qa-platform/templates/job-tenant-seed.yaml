@@ -1,18 +1,16 @@
 {{/* Post-install/post-upgrade hook: seeds the one Resource Group row the
-     gears need to boot, reproducing compose's `tenant-seed` service.
+     gears need to boot.
      hook-weight 10 -- higher than job-db-migrate.yaml's 0 -- is what makes
-     Helm run this AFTER migrate finishes, the same ordering compose expresses
-     with `depends_on: db-migrate: condition: service_completed_successfully`:
-     Helm runs hooks of one type in ascending weight order and waits for each
-     to complete before starting the next. before-hook-creation deletes any
+     Helm run this AFTER migrate finishes: Helm runs hooks of one type in
+     ascending weight order and waits for each to complete before starting the
+     next. before-hook-creation deletes any
      leftover Job of the same name from a prior release before creating a new
      one, same reason certs-job.yaml and job-db-migrate.yaml use it.
 
      images.postgres, NOT images.gears: this runs seed-tenant.sh, which shells
-     out to `psql`, a binary the gears image does not carry -- the exact
-     reason compose's tenant-seed service also runs on postgres:16 rather
-     than the gears image. Same tag as the postgres StatefulSet, so client
-     and server never disagree about anything.
+     out to `psql`, a binary the gears image does not carry. Same tag as the
+     postgres StatefulSet, so client and server never disagree about
+     anything.
 
      PGHOST/PGUSER/PGPASSWORD are the standard libpq variables seed-tenant.sh
      itself reads (see its header) -- not POSTGRES_*, and not the same names
@@ -52,12 +50,19 @@ spec:
       containers:
         - name: tenant-seed
           image: "{{ .Values.images.postgres.repository }}:{{ .Values.images.postgres.tag }}"
-          # `command:` here plays the role compose's `entrypoint:` key plays --
-          # a Pod container spec has no `entrypoint` field of its own;
-          # `command:` is what overrides the postgres:16 image's ENTRYPOINT
-          # (docker-entrypoint.sh), same as compose's tenant-seed service.
+          # `command:`, not `args:`, and deliberately so: this container
+          # genuinely means to REPLACE the postgres:16 image's ENTRYPOINT
+          # (docker-entrypoint.sh, which would try to start a server) with the
+          # seed script. Contrast job-db-migrate.yaml, which must use `args:`
+          # to keep its image's entrypoint.sh in the path.
           command: ["bash", "/scripts/seed-tenant.sh"]
           env:
+            {{/* The same value the realm's `tenant_id` claim carries. Passing
+                 it rather than letting the script fall back to its own literal
+                 is what keeps the claim and the row it maps onto in one
+                 place. */}}
+            - name: SEED_TENANT_ID
+              value: {{ .Values.seedTenantId | quote }}
             - name: PGHOST
               value: qa-platform-postgres
             - name: PGUSER

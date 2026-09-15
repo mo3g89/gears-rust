@@ -203,7 +203,7 @@ impl AliasMap {
 /// Legacy's `LatestInfo` (`analytics.rs:286-292`), field for field, with the two
 /// renames this architecture forces: `workflow_name` — legacy's run identity — is
 /// [`Self::run_id`], and `platform`, which legacy carries as a *name*, is
-/// [`Self::platform_id`].
+/// [`Self::environment_id`].
 ///
 /// All five fields are rendered, so none is speculative: `AnalyticsListItem`'s
 /// `last_status`, `last_platform`, `last_run_name`, `last_build` and
@@ -221,15 +221,15 @@ pub struct LatestInfo {
     ///
     /// **A carried obligation, restated here because this is where the value
     /// surfaces:** legacy's is a display *name*, and
-    /// [`ExecRow::platform_id`](super::ExecRow::platform_id) records that a
+    /// [`ExecRow::environment_id`](super::ExecRow::environment_id) records that a
     /// grouped-summaries surface keyed on this would regress to raw UUIDs unless
     /// something resolves ids to names. Task 23 shipped that surface **without**
     /// the resolution and made the gap a type instead —
     /// [`PlatformGroupSummary`](super::aggregates::PlatformGroupSummary) carries
-    /// a `platform_id`, not a `value: String`, so nothing can render the id as a
+    /// a `environment_id`, not a `value: String`, so nothing can render the id as a
     /// name by accident. Closing it needs a qa-environments port this gear does
     /// not have.
-    pub platform_id: Option<Uuid>,
+    pub environment_id: Option<Uuid>,
     /// The run the newest row came from — legacy's `workflow_name`, which is its
     /// run identity. `Option` because [`LatestInfo::default`] must express "no
     /// row", exactly as legacy's does (`:294-303`).
@@ -273,7 +273,7 @@ impl Default for LatestInfo {
     fn default() -> Self {
         Self {
             status_bucket: NOT_RUN,
-            platform_id: None,
+            environment_id: None,
             run_id: None,
             build: None,
             finished_at: None,
@@ -574,7 +574,7 @@ pub fn build_latest_map(
             .entry(row.test_file.clone())
             .or_insert_with(|| LatestInfo {
                 status_bucket: bucketize_status(row.status.as_str()),
-                platform_id: row.platform_id,
+                environment_id: row.environment_id,
                 run_id: Some(row.run_id),
                 build: Some(collapse_build(row.build.as_deref())),
                 finished_at: Some(row.ts),

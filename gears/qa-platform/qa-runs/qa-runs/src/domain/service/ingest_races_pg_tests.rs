@@ -119,7 +119,7 @@ impl qa_environments_sdk::QaEnvironmentsClientV1 for UnreachableEnvironments {
     async fn list_variables(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Option<Uuid>,
+        _environment_id: Option<Uuid>,
     ) -> Result<Vec<qa_environments_sdk::Variable>, qa_environments_sdk::QaEnvironmentsError> {
         unreachable!("a platformless run must not reach the environments client")
     }
@@ -140,7 +140,7 @@ impl qa_environments_sdk::QaEnvironmentsClientV1 for UnreachableEnvironments {
     async fn acquire_lease(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Uuid,
+        _environment_id: Uuid,
         _run_id: Uuid,
         _mode: qa_environments_sdk::LeaseMode,
     ) -> Result<qa_environments_sdk::AcquireOutcome, qa_environments_sdk::QaEnvironmentsError> {
@@ -149,7 +149,7 @@ impl qa_environments_sdk::QaEnvironmentsClientV1 for UnreachableEnvironments {
     async fn release_lease(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Uuid,
+        _environment_id: Uuid,
         _run_id: Uuid,
     ) -> Result<qa_environments_sdk::LeaseState, qa_environments_sdk::QaEnvironmentsError> {
         unreachable!("a platformless run must not reach the environments client")
@@ -157,7 +157,7 @@ impl qa_environments_sdk::QaEnvironmentsClientV1 for UnreachableEnvironments {
     async fn get_lease(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Uuid,
+        _environment_id: Uuid,
     ) -> Result<qa_environments_sdk::LeaseState, qa_environments_sdk::QaEnvironmentsError> {
         unreachable!("a platformless run must not reach the environments client")
     }
@@ -194,7 +194,7 @@ async fn fixture() -> Fixture {
         let mut new = sample_new_run("smoke-1");
         // Platformless, so the completion's release path returns before it
         // reaches the environments client -- see the module header.
-        new.platform_id = None;
+        new.environment_id = None;
         new.state = RunState::Running;
         repo.create(&conn, &scope, OWNER_TENANT, new)
             .await
@@ -242,7 +242,7 @@ impl Fixture {
     async fn another_run(&self, name: &str) -> Uuid {
         let conn = self.provider.conn().unwrap();
         let mut new = sample_new_run(name);
-        new.platform_id = None;
+        new.environment_id = None;
         new.state = RunState::Running;
         self.repo
             .create(&conn, &self.scope, OWNER_TENANT, new)

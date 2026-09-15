@@ -1,12 +1,44 @@
-{{/* .Values.keycloakRealmJson is NOT a template-time render of render-realm.sh
-     -- it is set by deploy-k8s.sh (Task 11) with --set-file, from a copy the
-     deploy script already rendered for this release's publicOrigin before
-     invoking Helm. Keycloak 26.0.8 will not expand a `${env.VAR}` placeholder
-     in an import file (measured: it aborts start-up), so the substitution has
-     to happen before this ConfigMap is even built, not at Keycloak start-up
-     and not in this template. See render-realm.sh's header for the full
-     rationale, including why the workflow client's secret is pinned here
-     rather than provisioned per-restart. */}}
+{{/* The realm is rendered HERE, from `files/keycloak/realm-qa-platform.json`.
+
+     Keycloak 26.0.8 will not expand a `${env.VAR}` placeholder in an import
+     file — measured, it aborts start-up — so the browser-facing origin, the
+     seed tenant and the workflow client's secret have to be substituted before
+     the file reaches the container. That used to mean rendering the realm with
+     a shell script and handing the result to Helm with `--set-file`, which made
+     `helm install` alone insufficient to install the stack.
+
+     `tpl` does the same substitution at template time, from the same values the
+     rest of the chart reads, so the chart installs on its own. What the file
+     carries is three placeholders and nothing else: publicOrigin (added to the
+     UI client's redirectUris and webOrigins, beside the localhost entries a
+     port-forward needs), seedTenantId (the `tenant_id` claim every seeded user
+     gets, which oidc-authn-plugin maps onto the tenant seed-tenant.sh creates)
+     and argo.workflowClientSecret (pinned here and read back by
+     `workflow-oidc-secret.yaml`, so the realm and the Secret cannot disagree).
+
+     publicOrigin is added BESIDE the `http://localhost:8080` entries rather
+     than replacing them, so the same realm serves a browser reaching the UI
+     through the ingress and one reaching it through `kubectl port-forward`.
+     It is a whole ORIGIN, never a bare host: an https deploy serves on 443,
+     443 is https's default port, and Keycloak compares `webOrigins` against
+     the browser's `Origin:` header as STRINGS — so `https://host:443` does not
+     match an `Origin:` of `https://host` and the CORS preflight on the token
+     request fails after the redirect, at the point that looks least like an
+     origin problem.
+
+     `webOrigins` gets the concrete origin and never `"*"`: `"*"` makes Keycloak
+     answer `Access-Control-Allow-Origin: *` for this client, turning a
+     deliberate two-origin allowance into an any-origin one.
+
+     NOTE THE ONE-SHOT TRAP: Keycloak reads its import directory only on a
+     FIRST start against an empty database, so changing this ConfigMap does not
+     re-import anything on a Keycloak that has already started once. Restart the
+     pod (its H2 store is ephemeral by design — see keycloak-deployment.yaml) or
+     make the change through the admin API.
+
+     `.Values.keycloakRealmJson` remains an escape hatch: set it — with
+     `--set-file` or otherwise — to supply a realm this chart did not build,
+     and this template uses it verbatim. */}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,4 +48,8 @@ metadata:
     app.kubernetes.io/component: keycloak
 data:
   realm-qa-platform.json: |
+{{- if .Values.keycloakRealmJson }}
 {{ .Values.keycloakRealmJson | indent 4 }}
+{{- else }}
+{{ tpl (.Files.Get "files/keycloak/realm-qa-platform.json") . | indent 4 }}
+{{- end }}

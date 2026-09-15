@@ -389,7 +389,7 @@ fn run_fixture(name: &str) -> Run {
             repo_id: REPO_ID,
             path: "tests/plan.yaml".to_owned(),
         },
-        platform_id: None,
+        environment_id: None,
         test_version: None,
         app_version: None,
         app_build: None,
@@ -453,7 +453,7 @@ impl RunsRepository for MockRunsRepository {
             id: Uuid::new_v4(),
             name: new.name,
             target: new.target,
-            platform_id: new.platform_id,
+            environment_id: new.environment_id,
             test_version: new.test_version,
             app_version: new.app_version,
             app_build: new.app_build,
@@ -1485,7 +1485,7 @@ impl QaEnvironmentsClientV1 for MockEnvironments {
     async fn list_variables(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Option<Uuid>,
+        _environment_id: Option<Uuid>,
     ) -> Result<Vec<Variable>, QaEnvironmentsError> {
         Err(environments_unsupported("list_variables"))
     }
@@ -1509,7 +1509,7 @@ impl QaEnvironmentsClientV1 for MockEnvironments {
     async fn acquire_lease(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Uuid,
+        _environment_id: Uuid,
         _run_id: Uuid,
         _mode: LeaseMode,
     ) -> Result<AcquireOutcome, QaEnvironmentsError> {
@@ -1519,7 +1519,7 @@ impl QaEnvironmentsClientV1 for MockEnvironments {
     async fn release_lease(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Uuid,
+        _environment_id: Uuid,
         _run_id: Uuid,
     ) -> Result<LeaseState, QaEnvironmentsError> {
         Err(environments_unsupported("release_lease"))
@@ -1528,7 +1528,7 @@ impl QaEnvironmentsClientV1 for MockEnvironments {
     async fn get_lease(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Uuid,
+        _environment_id: Uuid,
     ) -> Result<LeaseState, QaEnvironmentsError> {
         Err(environments_unsupported("get_lease"))
     }

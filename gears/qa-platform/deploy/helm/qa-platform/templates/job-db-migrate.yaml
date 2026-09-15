@@ -1,5 +1,5 @@
-{{/* Post-install/post-upgrade hook: runs the gears' `migrate` subcommand,
-     reproducing compose's `db-migrate` service. hook-weight 0 (lower than
+{{/* Post-install/post-upgrade hook: runs the gears' `migrate` subcommand.
+     hook-weight 0 (lower than
      job-tenant-seed.yaml's 10) is what makes this run first -- Helm executes
      hooks sharing a hook type in ascending weight order, and waits for one to
      complete before starting the next. before-hook-creation deletes any
@@ -8,15 +8,11 @@
      immutable, so a second `helm upgrade` would otherwise hit "Job is
      immutable" trying to recreate it in place.
 
-     `args:`, NEVER `command:` -- AND THIS FILE GOT IT WRONG UNTIL THE FINAL
-     REVIEW. qa-platform.Dockerfile:251-252 sets
+     `args:`, NEVER `command:`. qa-platform.Dockerfile sets
      ENTRYPOINT ["/usr/local/bin/entrypoint.sh"] and CMD to the server's
-     normal `run` invocation. In KUBERNETES, `command:` overrides ENTRYPOINT
-     and `args:` overrides CMD -- the opposite mapping from compose, where a
-     service's `command:` key means CMD and `entrypoint:` means ENTRYPOINT.
-     So compose's db-migrate service `command:` is correct there, and a
-     literal transcription of it into `command:` HERE would replace
-     entrypoint.sh entirely and exec the binary directly.
+     normal `run` invocation. In Kubernetes `command:` overrides ENTRYPOINT and
+     `args:` overrides CMD, so putting the migrate argv in `command:` HERE
+     would replace entrypoint.sh entirely and exec the binary directly.
 
      THE SYMPTOM IF THAT REGRESSES, because it is not "the container fails to
      start": the binary comes up fine and reads /etc/cf-gears/
@@ -28,8 +24,8 @@
      Postgres fields (and the issuer_pattern, defaulted here since
      PUBLIC_ISSUER_ORIGIN is unset) into a copy of the config under
      /var/lib/cf-gears and then execs whatever argv it was handed. With
-     `args:` below, that argv is exactly what compose's db-migrate service
-     passes, and it reaches the binary through the same rendering step.
+     `args:` below, the migrate argv reaches the binary through that rendering
+     step instead of bypassing it.
 
      job-tenant-seed.yaml's `command:` is NOT the same mistake and must stay
      as it is: that container genuinely does mean to replace postgres:16's
@@ -40,11 +36,11 @@
      entrypoint.sh requires POSTGRES_HOST/POSTGRES_USER/POSTGRES_PASSWORD and
      refuses to start without all three (its `: "${VAR:?...}"` lines), so they
      are set here even though `migrate` itself only needs them for the DB
-     connection, exactly as compose's db-migrate service comment explains.
+     connection.
 
      NO QA_RUNS_ARGO_CONFIG / QA_ENVIRONMENTS_ARGO_CONFIG, deliberately.
-     compose's db-migrate service sets neither, and entrypoint.sh refuses to
-     start if only one of the pair is set -- migration runs pre_init and the
+     entrypoint.sh refuses to start if only one of the pair is set -- and
+     migration runs pre_init and the
      DB migration phases only (libs/toolkit/src/bootstrap/run.rs:124), never
      reaching anything that reads the Argo executor config, so there is
      nothing here for that pair to configure.
@@ -68,16 +64,14 @@
      above), while still giving up instead of retrying forever if postgres
      never comes up.
 
-     HELM RUNS THIS AFTER THE GEARS DEPLOYMENT ALREADY EXISTS, THE REVERSE OF
-     COMPOSE'S ORDERING, AND THAT IS EXPECTED RATHER THAN A BUG. Helm applies
-     every "normal" (non-hook) resource in a release first -- the postgres
-     StatefulSet, the gears Deployment, all of it -- and only afterwards runs
-     post-install/post-upgrade hooks, in ascending hook-weight order. Compose
-     instead orders the `gears` service to start AFTER `tenant-seed`
-     (`depends_on: tenant-seed: condition: service_completed_successfully`),
-     so on a fresh `helm install` the gears pod starts with no migrated
-     schema and no seeded tenant row at all -- this Job and
-     job-tenant-seed.yaml have not run yet.
+     HELM RUNS THIS AFTER THE GEARS DEPLOYMENT ALREADY EXISTS, AND THAT IS
+     EXPECTED RATHER THAN A BUG. Helm applies every "normal" (non-hook)
+     resource in a release first -- the postgres StatefulSet, the gears
+     Deployment, all of it -- and only afterwards runs post-install/
+     post-upgrade hooks, in ascending hook-weight order. There is no way to
+     express "start the gears only after this Job succeeds", so on a fresh
+     `helm install` the gears pod starts with no migrated schema and no seeded
+     tenant row at all -- this Job and job-tenant-seed.yaml have not run yet.
 
      THE CONSEQUENCE IS A CRASH LOOP, AND IT IS SELF-HEALING. oagw's
      post_init calls `TenantResolverClient::get_root_tenant` against a
@@ -85,7 +79,7 @@
      error into an `anyhow!` (gears/system/oagw/oagw/src/gear.rs:242-252),
      and `run_post_init_phase` propagates it with `?`
      (libs/toolkit/src/runtime/host_runtime.rs:371-377) -- the exact failure
-     seed-tenant.sh's own header documents for the compose stack. The gears
+     seed-tenant.sh's own header documents. The gears
      Deployment's pod therefore aborts boot, and Kubernetes restarts it
      (`restartPolicy: Always`, the Deployment default), CrashLoopBackOff-ing
      with the usual exponential backoff until this Job and

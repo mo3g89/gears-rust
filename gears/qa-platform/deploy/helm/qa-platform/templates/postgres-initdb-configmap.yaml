@@ -1,8 +1,6 @@
-{{/* Carries files/initdb/01-create-qa-platform-databases.sh verbatim
-     (copied into this chart's files/initdb/ so .Files.Get can reach it --
-     Helm's .Files is scoped to the chart directory and cannot read files
-     outside it via ../). Do not edit the embedded script here; edit the
-     source under the chart's own files/ directory and re-copy it. */}}
+{{/* Carries files/initdb/01-create-qa-platform-databases.sh, read at render
+     time with .Files.Get. The file under files/ IS the script -- there is no
+     second copy to keep in sync; edit it there. */}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

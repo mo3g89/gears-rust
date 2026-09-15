@@ -26,10 +26,9 @@ pub struct Model {
     pub repo_id: Uuid,
     pub plan_path: String,
     pub app_version: Option<String>,
-    /// Physical column stays `platform_id`: Phase B renames the aggregate and
+    /// Physical column stays `environment_id`: Phase B renames the aggregate and
     /// this Rust field, not the column. The rename to the column itself is
     /// deferred to this plan's later expand/contract migrations.
-    #[sea_orm(column_name = "platform_id")]
     pub environment_id: Option<Uuid>,
     /// Free JIRA workflow text, not a closed set — legacy's default is
     /// `'Open'` and `resolve_bug` writes `'Resolved'`

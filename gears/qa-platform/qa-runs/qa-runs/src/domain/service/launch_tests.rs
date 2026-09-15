@@ -143,7 +143,7 @@ fn plan_request() -> LaunchRequest {
             repo_id: REPO_ID,
             path: "tests/plan.yaml".to_owned(),
         },
-        platform_id: None,
+        environment_id: None,
         branch: None,
         include_tags: Vec::new(),
         exclude_tags: Vec::new(),
@@ -278,7 +278,7 @@ async fn a_platforms_default_branch_overrides_the_repository_default_end_to_end(
         .await;
 
     let request = LaunchRequest {
-        platform_id: Some(PLATFORM_ID),
+        environment_id: Some(PLATFORM_ID),
         ..plan_request()
     };
     harness
@@ -322,7 +322,7 @@ async fn an_explicit_branch_still_beats_a_pinned_platform_end_to_end() {
 
     let request = LaunchRequest {
         branch: Some("hotfix/x".to_owned()),
-        platform_id: Some(PLATFORM_ID),
+        environment_id: Some(PLATFORM_ID),
         ..plan_request()
     };
     harness
@@ -1715,7 +1715,7 @@ async fn a_reserved_parameter_name_fails_the_launch_before_any_catalog_call() {
     let harness = Builder::new().build().await;
     let request = LaunchRequest {
         parameters: vec![param("TEST_FILES", "a.py")],
-        platform_id: Some(PLATFORM_ID),
+        environment_id: Some(PLATFORM_ID),
         ..plan_request()
     };
 
@@ -1933,7 +1933,7 @@ async fn a_blocked_launch_returns_queued_with_its_queue_id() {
         .await;
 
     let request = LaunchRequest {
-        platform_id: Some(PLATFORM_ID),
+        environment_id: Some(PLATFORM_ID),
         ..plan_request()
     };
     let outcome = harness
@@ -1992,7 +1992,7 @@ async fn a_platformless_launch_is_never_queued() {
 async fn a_full_queue_surfaces_the_queue_full_error_naming_the_limit() {
     let harness = Builder::new()
         .admitter(RecordingAdmitter::refusing(DomainError::QueueFull {
-            platform_id: PLATFORM_ID,
+            environment_id: PLATFORM_ID,
             queued: 20,
             limit: 20,
         }))
@@ -2078,7 +2078,7 @@ async fn the_run_row_records_the_resolved_exclusivity_tier() {
 async fn a_refused_admission_retires_the_run() {
     let harness = Builder::new()
         .admitter(RecordingAdmitter::refusing(DomainError::QueueFull {
-            platform_id: PLATFORM_ID,
+            environment_id: PLATFORM_ID,
             queued: 20,
             limit: 20,
         }))
@@ -2167,8 +2167,8 @@ async fn a_database_admission_failure_does_not_reach_the_run_row() {
 /// over with the nil sentinel.**
 ///
 /// `Admission::Queued` means the admitter wrote a `qa_run_queue` row, whose
-/// `platform_id` is not nullable. This case used to be papered over with
-/// `run.platform_id.unwrap_or_else(Uuid::nil)` under a comment asserting the
+/// `environment_id` is not nullable. This case used to be papered over with
+/// `run.environment_id.unwrap_or_else(Uuid::nil)` under a comment asserting the
 /// fallback was unreachable *because of what Task 14's admitter does*. Nil is
 /// this subsystem's platform-root / cross-tenant sentinel, so a consumer
 /// aggregating queue depth by platform would have booked the run against
@@ -2176,7 +2176,7 @@ async fn a_database_admission_failure_does_not_reach_the_run_row() {
 #[tokio::test]
 async fn queueing_a_platformless_run_is_an_internal_error_not_a_nil_platform_event() {
     let harness = Builder::new()
-        // `plan_request()` carries `platform_id: None`, so this admitter answers
+        // `plan_request()` carries `environment_id: None`, so this admitter answers
         // an outcome that cannot be described.
         .admitter(RecordingAdmitter::answering(Admission::Queued {
             queue_id: QUEUE_ID,
@@ -2257,7 +2257,7 @@ async fn a_nil_tenant_context_is_denied_and_writes_nothing() {
 
 /// The launch path must not submit anything to the executor when the platform
 /// belongs to another tenant. `qa_environment_leases` (renamed from
-/// `qa_platform_leases`) is keyed on a bare `platform_id` and is **not**
+/// `qa_platform_leases`) is keyed on a bare `environment_id` and is **not**
 /// tenant-partitioned, so a run row carrying a
 /// foreign platform drives its dispatcher to take the *global* lease on it.
 #[tokio::test]
@@ -2271,7 +2271,7 @@ async fn a_platform_owned_by_another_tenant_fails_the_launch() {
         .await;
 
     let request = LaunchRequest {
-        platform_id: Some(PLATFORM_ID),
+        environment_id: Some(PLATFORM_ID),
         ..plan_request()
     };
     let error = harness
@@ -2311,7 +2311,7 @@ async fn the_platforms_version_and_build_are_snapshotted_onto_the_run() {
         .await;
 
     let request = LaunchRequest {
-        platform_id: Some(PLATFORM_ID),
+        environment_id: Some(PLATFORM_ID),
         ..plan_request()
     };
     harness
@@ -2859,7 +2859,7 @@ async fn a_collect_launch_may_not_name_a_platform() {
         .await;
 
     let mut request = collect_request(REPO_ID, "main", COLLECT_URL);
-    request.platform_id = Some(PLATFORM_ID);
+    request.environment_id = Some(PLATFORM_ID);
 
     let error = harness
         .service

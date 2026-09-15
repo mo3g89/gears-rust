@@ -45,7 +45,7 @@
 //! [`launch_collect`](RunsLauncher::launch_collect) returns one error shape
 //! for every failure qa-runs can report — a denied subject, an unreachable
 //! transport, or (per `collect_target_facts`'s own doc) a validation this
-//! gear's caller never itself constructs (a `platform_id`, which this port's
+//! gear's caller never itself constructs (a `environment_id`, which this port's
 //! caller never sets). It does **not** distinguish "this repository does not
 //! have this branch" from any other failure, and that is a discovered fact
 //! about qa-runs' `Collect` target rather than a choice made here: branch
@@ -134,7 +134,7 @@ pub trait RunsLauncher: Send + Sync {
     ) -> Result<(), DomainError>;
 
     /// Launch a single-test run: `repo_id`'s plan at `plan_path`, exactly the
-    /// one file `test_file` names, targeting `platform_id` on `branch`.
+    /// one file `test_file` names, targeting `environment_id` on `branch`.
     ///
     /// `qa_runs_sdk::QaRunsClientV1::launch` wrapped with `RunTarget::Test {
     /// repo_id, path: plan_path, test_file }` — Task 35's auto-rerun, the port
@@ -162,7 +162,7 @@ pub trait RunsLauncher: Send + Sync {
     /// `exclusive: None` on the request — legacy's own choice
     /// (`jira_poller.rs:182-186`, *"No opinion, like a UI launch left on Auto:
     /// let plan.yaml and `TEST_META` decide"*, the comment directly above the
-    /// field it annotates) — and `platform_id`/`branch` travel
+    /// field it annotates) — and `environment_id`/`branch` travel
     /// exactly as given; this port does not default a branch itself. Whoever
     /// calls this has already resolved the branch it wants the plan searched
     /// on and the run executed against, and must pass the **same** value to
@@ -189,7 +189,7 @@ pub trait RunsLauncher: Send + Sync {
         repo_id: Uuid,
         plan_path: &str,
         test_file: &str,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
         branch: Option<&str>,
     ) -> Result<(), DomainError>;
 }

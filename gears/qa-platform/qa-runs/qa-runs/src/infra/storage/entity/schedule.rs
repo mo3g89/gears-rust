@@ -39,10 +39,9 @@ pub struct Model {
     /// through a tenant-scoped qa-environments client and nowhere else — see
     /// the migration's column comment.
     ///
-    /// Physical column stays `platform_id`: Phase B renames the aggregate and
+    /// Physical column stays `environment_id`: Phase B renames the aggregate and
     /// this Rust field, not the column. The rename to the column itself is
     /// deferred to this plan's later expand/contract migrations.
-    #[sea_orm(column_name = "platform_id")]
     pub environment_id: Option<Uuid>,
     /// The branch a fire resolves against; `None` defers to the repository's
     /// default branch.

@@ -3,7 +3,7 @@
 //! File-level test outcomes, and the table every analytics surface reads.
 //!
 //! **Eight of these columns are denormalized copies of run attributes** —
-//! `product_version`, `app_build`, `platform_id`, `repo_id`, `plan_path`,
+//! `product_version`, `app_build`, `environment_id`, `repo_id`, `plan_path`,
 //! `branch`, `run_finished_at` and `run_created_at` (the last added by Task
 //! 21b). Legacy gets them from a `JOIN run_results`
 //! (`manager/src/routes/analytics.rs:2450`); here that join is a cross-gear
@@ -52,10 +52,9 @@ pub struct Model {
     /// consumer's substitution, not this column's — see
     /// [`crate::domain::analytics::ExecRow::build`].
     pub app_build: Option<String>,
-    /// Physical column stays `platform_id`: Phase B renames the aggregate and
+    /// Physical column stays `environment_id`: Phase B renames the aggregate and
     /// this Rust field, not the column. The rename to the column itself is
     /// deferred to this plan's later expand/contract migrations.
-    #[sea_orm(column_name = "platform_id")]
     pub environment_id: Option<Uuid>,
     pub repo_id: Option<Uuid>,
     pub plan_path: Option<String>,

@@ -316,7 +316,7 @@ fn every_field_variant_is_advertised() {
     assert_eq!(names.len(), VARIABLE_FILTER_FIELD_VARIANTS, "{names:?}");
 }
 
-/// **The physical column is `platform_id`; no wire name is.**
+/// **The physical column is `environment_id`; no wire name is.**
 ///
 /// `entity/environment_variable.rs`'s `#[sea_orm(column_name = "platform_id")]`
 /// is what keeps the two apart, and `qa-runs`' `RunFilterField::EnvironmentId`

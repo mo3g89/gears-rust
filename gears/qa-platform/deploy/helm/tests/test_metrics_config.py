@@ -54,7 +54,7 @@ guard, and because the 22 series names exist in three places that nothing tied
 together:
 
   1. the constants in each gear's `domain::metrics` -- the source of truth;
-  2. the table in `docs/DESIGN.md` 3.9 -- the OPERATOR-FACING copy, the one
+  2. the table in `docs/DESIGN.md` 3.11 -- the OPERATOR-FACING copy, the one
      someone reads to write a dashboard query, and so the copy whose drift
      costs the most;
   3. the `CATALOG` heredoc in `deploy/remote/verify-k8s.sh`'s metric-catalog
@@ -159,7 +159,7 @@ def gears_config(docs):
     if otel is None:
         return None, (f"{CONFIGMAP}'s {CONFIG_KEY} carries no `opentelemetry` block. "
                       "Nothing else decides whether the 22 metric families leave the "
-                      "process, so every series in docs/DESIGN.md 3.9 is unreachable "
+                      "process, so every series in docs/DESIGN.md 3.11 is unreachable "
                       "and the gears report no error about it.")
     return otel, None
 
@@ -334,7 +334,7 @@ def constants_catalog(failures):
 
 
 def check_catalog(failures):
-    """Constants, DESIGN 3.9's table and verify-k8s.sh's heredoc must agree."""
+    """Constants, DESIGN 3.11's table and verify-k8s.sh's heredoc must agree."""
     constants = constants_catalog(failures)
     if not constants:
         failures.append(
@@ -360,7 +360,7 @@ def check_catalog(failures):
         return
     verify = {line.strip() for line in heredoc.group(1).splitlines() if line.strip()}
 
-    for label, other in (("docs/DESIGN.md 3.9's table", design),
+    for label, other in (("docs/DESIGN.md 3.11's table", design),
                          (f"{VERIFY.name}'s CATALOG heredoc", verify)):
         missing = sorted(constants - other)
         invented = sorted(other - constants)
@@ -375,7 +375,7 @@ def check_catalog(failures):
                 "with no error anywhere. The constants are the source of truth.")
     if not any(f.startswith("FAIL (catalog)") for f in failures):
         print(f"PASS: all {len(constants)} catalog series names agree across the "
-              "gears' constants, DESIGN 3.9's table and verify-k8s.sh's heredoc")
+              "gears' constants, DESIGN 3.11's table and verify-k8s.sh's heredoc")
 
 
 def main():

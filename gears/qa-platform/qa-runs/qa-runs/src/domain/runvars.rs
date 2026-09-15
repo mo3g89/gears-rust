@@ -99,7 +99,7 @@
 //!    result-callback URL embeds it (`argo.rs:438-441`).
 //! 2. **`APP_VERSION` / `APP_BUILD` read the run's own snapshotted columns, not
 //!    a live platform lookup** (user decision 2026-08-13, recorded at the head
-//!    of the plan's Task 9). Re-deriving them from `platform_id` would let a
+//!    of the plan's Task 9). Re-deriving them from `environment_id` would let a
 //!    platform upgrade silently change a queued run's or a re-run's
 //!    `APP_VERSION`.
 //! 3. **The caller decides which statics exist; this module does not filter
@@ -187,7 +187,7 @@ impl From<qa_environments_sdk::Variable> for RunVar {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TieredRunVars {
     /// Global pipeline variables — qa-environments rows with
-    /// `platform_id = None`.
+    /// `environment_id = None`.
     pub pipeline: Vec<RunVar>,
     /// The target platform's own variables. More specific than `pipeline`, so
     /// they override it.
@@ -197,7 +197,7 @@ pub struct TieredRunVars {
 /// Split one `list_variables` response into its two precedence tiers.
 ///
 /// `qa_environments_sdk::Variable` carries the scope in `environment_id`
-/// (renamed from `platform_id`) (`None` = global pipeline variable, `Some(_)` =
+/// (renamed from `environment_id`) (`None` = global pipeline variable, `Some(_)` =
 /// per-platform), and `QaEnvironmentsClient::list_variables` returns both in
 /// one list with the comment "Precedence is applied by the caller (qa-runs),
 /// not here" — this is that caller.
@@ -415,7 +415,7 @@ pub fn assemble(inputs: RunVarInputs) -> BTreeMap<String, String> {
 /// `E2E_VHP_BASE_URL` (`:493`), no `KUBECONFIG` (`:504-521`), no `APP_VERSION`,
 /// `APP_BUILD`, `E2E_K8S_NAMESPACE` or `PRODUCT_KEY`, and **no run parameters**
 /// (`:144` passes `&[]`). In this gear those absences follow from a collect run
-/// carrying no `platform_id` and no parameters rather than from a second
+/// carrying no `environment_id` and no parameters rather than from a second
 /// assembly path, so [`assemble`] produces them without a special case; see
 /// `service::dispatch_spec`, which merges this pair into the statics tier.
 ///
@@ -683,7 +683,7 @@ mod tests {
     /// identical hazard. That one is also caught incidentally by
     /// `the_scope_split_sends_global_variables_to_the_pipeline_tier` — but that
     /// test's name pins scope splitting, so a later edit narrowing it to check
-    /// only `platform_id` routing would take the field-order coverage with it
+    /// only `environment_id` routing would take the field-order coverage with it
     /// and nothing would say so.
     #[test]
     fn a_run_parameter_converts_field_for_field() {

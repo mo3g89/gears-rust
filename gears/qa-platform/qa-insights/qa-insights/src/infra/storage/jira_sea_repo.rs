@@ -202,7 +202,7 @@ impl JiraRepository for OrmJiraRepository {
             repo_id: ActiveValue::Set(bug.repo_id),
             plan_path: ActiveValue::Set(bug.plan_path),
             app_version: ActiveValue::Set(bug.app_version),
-            environment_id: ActiveValue::Set(bug.platform_id),
+            environment_id: ActiveValue::Set(bug.environment_id),
             // Legacy's column default, spelled here because this gear writes
             // every column explicitly rather than relying on DDL defaults.
             status: ActiveValue::Set(STATUS_OPEN.to_owned()),
@@ -570,7 +570,7 @@ mod tests {
             repo_id: plan.repo_id,
             plan_path: plan.plan_path,
             app_version: Some("5.0.1".to_owned()),
-            platform_id: Some(Uuid::from_u128(0x11)),
+            environment_id: Some(Uuid::from_u128(0x11)),
             summary: summary.to_owned(),
         }
     }

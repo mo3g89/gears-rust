@@ -284,7 +284,7 @@ pub(crate) fn test_result_to_sdk(m: test_result::Model) -> TestResultRecord {
         jira_key: m.jira_key,
         product_version: m.product_version,
         app_build: m.app_build,
-        platform_id: m.environment_id,
+        environment_id: m.environment_id,
         repo_id: m.repo_id,
         plan_path: m.plan_path,
         branch: m.branch,
@@ -403,7 +403,7 @@ pub(crate) fn exec_row_from_result(m: test_result::Model) -> ExecRow {
         test_name: m.test_name,
         status: m.status,
         build: m.app_build,
-        platform_id: m.environment_id,
+        environment_id: m.environment_id,
         ts,
         day: ts.date(),
     }
@@ -424,7 +424,7 @@ pub(crate) fn plan_exec_row_from_result(m: test_result::Model) -> PlanExecRow {
         test_name: m.test_name,
         status: m.status,
         version: m.product_version,
-        platform_id: m.environment_id,
+        environment_id: m.environment_id,
         jira_key: m.jira_key,
     }
 }
@@ -537,7 +537,7 @@ pub(crate) fn jira_bug_to_sdk(m: jira_bug::Model) -> JiraBug {
         repo_id: m.repo_id,
         plan_path: m.plan_path,
         app_version: m.app_version,
-        platform_id: m.environment_id,
+        environment_id: m.environment_id,
         status: m.status,
         summary: m.summary,
         created_at: m.created_at,

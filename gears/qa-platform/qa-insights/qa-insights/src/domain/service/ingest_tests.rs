@@ -68,7 +68,7 @@ fn run_with(target: RunTarget) -> Run {
         id: uuid(1),
         name: "smoke-1".to_owned(),
         target,
-        platform_id: Some(uuid(2)),
+        environment_id: Some(uuid(2)),
         test_version: Some("release/9.1".to_owned()),
         app_version: Some("9.1.0".to_owned()),
         app_build: Some("9.1.0-4412".to_owned()),
@@ -146,7 +146,7 @@ fn every_denormalized_column_comes_from_its_own_field_on_the_run() {
     let row = &files[0];
     assert_eq!(row.product_version.as_deref(), Some("9.1.0"));
     assert_eq!(row.app_build.as_deref(), Some("9.1.0-4412"));
-    assert_eq!(row.platform_id, Some(uuid(2)));
+    assert_eq!(row.environment_id, Some(uuid(2)));
     assert_eq!(row.repo_id, Some(uuid(3)));
     assert_eq!(row.plan_path.as_deref(), Some("plans/smoke.yaml"));
     assert_eq!(row.branch.as_deref(), Some("release/9.1"));
@@ -335,14 +335,14 @@ fn only_the_two_plan_bearing_kinds_carry_a_plan_identity() {
 #[test]
 fn absent_run_metadata_projects_as_null_not_as_empty_text() {
     let mut run = run_with(RunTarget::CustomPlan { id: uuid(4) });
-    run.platform_id = None;
+    run.environment_id = None;
     run.test_version = None;
     run.app_version = None;
     run.app_build = None;
 
     let (files, _) = project_rows(&run, vec![result("tests/a.py", "test_a", "")]);
 
-    assert_eq!(files[0].platform_id, None);
+    assert_eq!(files[0].environment_id, None);
     assert_eq!(files[0].branch, None);
     assert_eq!(files[0].product_version, None);
     assert_eq!(files[0].app_build, None);

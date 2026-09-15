@@ -347,8 +347,8 @@ mod tests {
     }
 
     /// The runner image's ACTUAL output, captured from a real `pytest -p
-    /// pytest_markers -v` run over `deploy/compose/fixtures/smoke-repo` and
-    /// pasted here verbatim (only pytest's environment-specific header lines --
+    /// pytest_markers -v` run over a smoke-test repository and pasted here
+    /// verbatim (only pytest's environment-specific header lines --
     /// `platform`, `rootdir`, `plugins` -- were dropped).
     ///
     /// # Why a captured log and not a hand-written one

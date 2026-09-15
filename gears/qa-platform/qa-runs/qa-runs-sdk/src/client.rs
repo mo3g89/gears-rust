@@ -119,13 +119,13 @@ pub trait QaRunsClientV1: Send + Sync {
 
     // ==================== Queue ====================
 
-    /// Queue rows, newest first, all states. `platform_id` filters to one
+    /// Queue rows, newest first, all states. `environment_id` filters to one
     /// platform — the reliable call, since positions and blockers are computed
     /// over the returned window (guide lines 179-184).
     async fn list_queue(
         &self,
         ctx: &SecurityContext,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
         limit: u32,
     ) -> Result<Vec<QueueEntry>, QaRunsError>;
 

@@ -30,8 +30,9 @@ data:
   `issuer_pattern` and `discovery_url` are DIFFERENT settings. The first says
   which `iss` claim to trust; the second says where to GO for the metadata and
   JWKS that validate it. entrypoint.sh rewrites the first from
-  PUBLIC_ISSUER_ORIGIN and does not touch the second, because in compose the
-  second is already correct: the IdP really is the `keycloak` service on 8443.
+  PUBLIC_ISSUER_ORIGIN and does not touch the second -- it is correct as
+  committed only for a deployment where the IdP really is reachable at
+  `https://keycloak:8443`.
 
   In this deployment there is no such host. Keycloak is a ClusterIP Service on
   plain http behind the UI's nginx, and the only TLS anywhere is at the edge --
@@ -52,8 +53,9 @@ data:
   the committed file ever stops carrying the string this depends on, so a
   silent no-op becomes a loud template error instead of a 503 at runtime.
 
-  Done HERE rather than in entrypoint.sh so that shared script -- and with it
-  the compose stack -- stays untouched.
+  Done HERE rather than in entrypoint.sh, so that the shared image entrypoint
+  stays deployment-agnostic and this cluster-shaped rewrite lives with the
+  cluster-shaped manifests.
 */}}
 {{- $cfg := .Files.Get "files/qa-platform-stack.yaml" }}
 {{- $from := "https://keycloak:8443/realms/qa-platform" }}
@@ -67,7 +69,7 @@ data:
 
   `collect_report_base_url` is the origin a WORKFLOW POD posts its exact case
   counts back to, so the committed loopback address (correct for `cargo run`)
-  is wrong here for the same reason compose's is: a pod's 127.0.0.1 is the pod.
+  is wrong here: a pod's 127.0.0.1 is the pod itself, not the gears.
   The value it becomes is the in-cluster Service -- byte-for-byte the one
   gears-argo-configmaps.yaml already computes for `bundle_base_url`, because it
   is the same journey by the same pod to the same Service, and the two must not

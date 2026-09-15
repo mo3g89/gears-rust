@@ -324,7 +324,7 @@ impl QaRunsClientV1 for FakeQaRuns {
     async fn list_queue(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Option<Uuid>,
+        _environment_id: Option<Uuid>,
         _limit: u32,
     ) -> Result<Vec<qa_runs_sdk::QueueEntry>, qa_runs_sdk::QaRunsError> {
         unimplemented!("not on the ingest path")
@@ -612,7 +612,7 @@ impl QaCatalogClientV1 for FakeQaCatalog {
 }
 
 /// The qa-environments double: one platform, so the overview's group chart can
-/// resolve the display name `ExecRow::platform_id` stands in for.
+/// resolve the display name `ExecRow::environment_id` stands in for.
 struct FakeQaEnvironments {
     platform: Environment,
 }
@@ -662,7 +662,7 @@ impl QaEnvironmentsClientV1 for FakeQaEnvironments {
     async fn list_variables(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Option<Uuid>,
+        _environment_id: Option<Uuid>,
     ) -> Result<Vec<qa_environments_sdk::Variable>, qa_environments_sdk::QaEnvironmentsError> {
         unimplemented!("not on the read path")
     }
@@ -686,7 +686,7 @@ impl QaEnvironmentsClientV1 for FakeQaEnvironments {
     async fn acquire_lease(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Uuid,
+        _environment_id: Uuid,
         _run_id: Uuid,
         _mode: qa_environments_sdk::LeaseMode,
     ) -> Result<qa_environments_sdk::AcquireOutcome, qa_environments_sdk::QaEnvironmentsError> {
@@ -696,7 +696,7 @@ impl QaEnvironmentsClientV1 for FakeQaEnvironments {
     async fn release_lease(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Uuid,
+        _environment_id: Uuid,
         _run_id: Uuid,
     ) -> Result<qa_environments_sdk::LeaseState, qa_environments_sdk::QaEnvironmentsError> {
         unimplemented!("not on the read path")
@@ -705,7 +705,7 @@ impl QaEnvironmentsClientV1 for FakeQaEnvironments {
     async fn get_lease(
         &self,
         _ctx: &SecurityContext,
-        _platform_id: Uuid,
+        _environment_id: Uuid,
     ) -> Result<qa_environments_sdk::LeaseState, qa_environments_sdk::QaEnvironmentsError> {
         unimplemented!("not on the read path")
     }
@@ -841,7 +841,7 @@ fn fixture_run(finished_at: OffsetDateTime) -> Run {
             repo_id: REPO_ID,
             path: PLAN_PATH.to_owned(),
         },
-        platform_id: Some(PLATFORM_ID),
+        environment_id: Some(PLATFORM_ID),
         test_version: Some("main".to_owned()),
         app_version: Some(APP_VERSION.to_owned()),
         app_build: Some("9.1.0-4412".to_owned()),

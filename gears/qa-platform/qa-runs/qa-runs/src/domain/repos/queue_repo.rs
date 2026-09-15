@@ -90,9 +90,9 @@ pub struct NewQueueRow {
     /// lives in qa-environments and only the launch path holds a client to
     /// check it against. There is no oracle — the column has no foreign key,
     /// so an unowned id neither succeeds nor fails informatively — but there is
-    /// a real harm the schema states in full on `qa_runs.platform_id`:
+    /// a real harm the schema states in full on `qa_runs.environment_id`:
     /// `qa_environment_leases` (renamed from `qa_platform_leases`) is keyed on a
-    /// bare `platform_id` and is therefore **not** tenant-partitioned, so a row
+    /// bare `environment_id` and is therefore **not** tenant-partitioned, so a row
     /// carrying another tenant's platform
     /// drives its dispatcher to take the *global* lease on that platform and
     /// block the owning tenant's runs.
@@ -102,7 +102,7 @@ pub struct NewQueueRow {
     /// struct.** Nothing downstream re-checks, and no type in this layer can
     /// make it. Recorded here as well as in the migration because this is the
     /// struct someone fills in.
-    pub platform_id: Uuid,
+    pub environment_id: Uuid,
     pub run: OwnedRunId,
     /// Denormalized from the run so the FIFO planner needs no join, exactly as
     /// legacy's `run_queue` carries them
@@ -129,7 +129,7 @@ pub struct QueueRowRecord {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub run_id: Uuid,
-    pub platform_id: Uuid,
+    pub environment_id: Uuid,
     pub run_kind: RunKind,
     pub source: RunSource,
     pub exclusive: bool,
@@ -167,7 +167,7 @@ pub struct ClaimAge {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub run_id: Uuid,
-    pub platform_id: Uuid,
+    pub environment_id: Uuid,
     pub age_basis: OffsetDateTime,
 }
 
@@ -179,7 +179,7 @@ pub struct ClaimAge {
 #[domain_model]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueuedPlatform {
-    pub platform_id: Uuid,
+    pub environment_id: Uuid,
     pub tenant_id: Uuid,
 }
 
@@ -195,7 +195,7 @@ pub struct ExpiredRow {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub run_id: Uuid,
-    pub platform_id: Uuid,
+    pub environment_id: Uuid,
     pub exclusive: bool,
     pub enqueued_at: OffsetDateTime,
 }
@@ -213,7 +213,7 @@ pub struct ExpiredRow {
 #[domain_model]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowStatus {
-    pub platform_id: Uuid,
+    pub environment_id: Uuid,
     pub state: QueueState,
 }
 
@@ -257,7 +257,7 @@ pub trait QueueRepository: Send + Sync {
         &self,
         runner: &C,
         scope: &AccessScope,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<usize, DomainError>;
 
     /// Queued rows for a platform, oldest first — the dispatcher's FIFO input
@@ -270,7 +270,7 @@ pub trait QueueRepository: Send + Sync {
         &self,
         runner: &C,
         scope: &AccessScope,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<Vec<crate::domain::queue::QueuedRow>, DomainError>;
 
     /// Unreleased claims on a platform — rows in `dispatching` or `running`
@@ -283,7 +283,7 @@ pub trait QueueRepository: Send + Sync {
         &self,
         runner: &C,
         scope: &AccessScope,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<Vec<ClaimRow>, DomainError>;
 
     /// Platforms that currently have at least one queued row (`:260-267`),
@@ -579,7 +579,7 @@ pub trait QueueRepository: Send + Sync {
 
     /// Rows for the read endpoint, newest first, all states (`:454-483`).
     ///
-    /// `platform_id` of `None` spans every platform in the same window, as
+    /// `environment_id` of `None` spans every platform in the same window, as
     /// legacy's does. Positions, TTL deadlines and blocker text are computed
     /// by the caller over the rows this returns — see
     /// `domain::queue::assign_positions`.
@@ -598,7 +598,7 @@ pub trait QueueRepository: Send + Sync {
         &self,
         runner: &C,
         scope: &AccessScope,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
         limit: u64,
     ) -> Result<Vec<QueueRowRecord>, DomainError>;
 
@@ -612,7 +612,7 @@ pub trait QueueRepository: Send + Sync {
     /// must not be handed [`MAX_QUEUE_READ_LIMIT`] rows to satisfy a request
     /// for twenty.
     ///
-    /// `platform_id` of `None` spans every platform. It is a separate parameter
+    /// `environment_id` of `None` spans every platform. It is a separate parameter
     /// rather than something the caller expresses through `query`, because the
     /// guide's own remedy for a distorted `queue_position` is the
     /// platform-filtered call and that remedy should not require knowing
@@ -631,7 +631,7 @@ pub trait QueueRepository: Send + Sync {
         &self,
         runner: &C,
         scope: &AccessScope,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
         query: &ODataQuery,
     ) -> Result<Page<QueueRowRecord>, DomainError>;
 

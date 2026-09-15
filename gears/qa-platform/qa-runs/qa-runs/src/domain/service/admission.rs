@@ -238,10 +238,10 @@ type PlatformLock = Arc<Mutex<()>>;
 /// awaits four I/O calls, and a `std` guard held across an `await` is both
 /// denied by clippy and a deadlock hazard on a single-threaded runtime.
 ///
-/// **Keyed by `platform_id` alone, so the lock is not tenant-partitioned — and
+/// **Keyed by `environment_id` alone, so the lock is not tenant-partitioned — and
 /// that is correct here.** `qa_environment_leases` (renamed from
-/// `qa_platform_leases`) is keyed on a bare `platform_id`
-/// (`domain::repos::NewQueueRow::platform_id` states the
+/// `qa_platform_leases`) is keyed on a bare `environment_id`
+/// (`domain::repos::NewQueueRow::environment_id` states the
 /// consequence in full), so the resource two tenants would contend for is the
 /// same row. A tenant-prefixed lock would let two tenants enter the critical
 /// section for one platform simultaneously and race on that row. Ownership is
@@ -284,15 +284,15 @@ pub struct PlatformLocks {
 impl PlatformLocks {
     /// This platform's mutex, creating it on first use.
     ///
-    /// The returned `Arc` is the *same* one for the same `platform_id`, which is
+    /// The returned `Arc` is the *same* one for the same `environment_id`, which is
     /// the entire property: `the_same_platform_maps_to_the_same_lock` asserts it
     /// with `Arc::ptr_eq`, because a registry that minted a fresh mutex per call
     /// would compile, would look right, and would serialise nothing.
-    pub async fn get(&self, platform_id: Uuid) -> PlatformLock {
+    pub async fn get(&self, environment_id: Uuid) -> PlatformLock {
         let mut registry = self.locks.lock().await;
         Arc::clone(
             registry
-                .entry(platform_id)
+                .entry(environment_id)
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
     }
@@ -316,13 +316,13 @@ impl PlatformLocks {
 pub(in crate::domain::service) async fn lease_occupancy(
     environments: &dyn QaEnvironmentsClientV1,
     ctx: &SecurityContext,
-    platform_id: Uuid,
+    environment_id: Uuid,
 ) -> Occupancy {
-    match environments.get_lease(ctx, platform_id).await {
+    match environments.get_lease(ctx, environment_id).await {
         Ok(state) => Occupancy::from_lease(&state),
         Err(error) => {
             error!(
-                %platform_id,
+                %environment_id,
                 %error,
                 "could not read the platform lease; treating the platform as exclusively \
                  held so nothing is dispatched blind",
@@ -567,19 +567,19 @@ where
     async fn take_lease(
         &self,
         ctx: &SecurityContext,
-        platform_id: Uuid,
+        environment_id: Uuid,
         run: &Run,
     ) -> AdmissionDecision {
         match self
             .environments
-            .acquire_lease(ctx, platform_id, run.id, lease_mode(run.resolved_exclusive))
+            .acquire_lease(ctx, environment_id, run.id, lease_mode(run.resolved_exclusive))
             .await
         {
             Ok(AcquireOutcome::Acquired) => AdmissionDecision::Dispatch,
             Ok(AcquireOutcome::Busy { current }) => {
                 info!(
                     run_id = %run.id,
-                    %platform_id,
+                    %environment_id,
                     current = ?current,
                     "the platform lease refused a run the planner admitted; queueing it \
                      instead - the lease is the source of truth",
@@ -589,7 +589,7 @@ where
             Err(error) => {
                 error!(
                     run_id = %run.id,
-                    %platform_id,
+                    %environment_id,
                     %error,
                     "could not acquire the platform lease; queueing the run rather than \
                      starting it against an unknown platform state, and releasing in \
@@ -598,7 +598,7 @@ where
                 // The acquisition may have committed server-side. See this method's
                 // doc: without this, a lost response leaves the platform leased by a
                 // run that will never be dispatched and that no later pass can free.
-                self.give_back_lease(ctx, platform_id, run.id).await;
+                self.give_back_lease(ctx, environment_id, run.id).await;
                 AdmissionDecision::Queue
             }
         }
@@ -612,15 +612,15 @@ where
     /// the platform reads busy forever. Best-effort: the caller's error is the
     /// one that matters, and a failure here is logged at ERROR because it is the
     /// one that wedges a platform.
-    async fn give_back_lease(&self, ctx: &SecurityContext, platform_id: Uuid, run_id: Uuid) {
+    async fn give_back_lease(&self, ctx: &SecurityContext, environment_id: Uuid, run_id: Uuid) {
         if let Err(error) = self
             .environments
-            .release_lease(ctx, platform_id, run_id)
+            .release_lease(ctx, environment_id, run_id)
             .await
         {
             error!(
                 %run_id,
-                %platform_id,
+                %environment_id,
                 %error,
                 "could not release a lease taken for a queue row that was never written; \
                  the platform will read as busy until the lease is cleared by hand",
@@ -672,14 +672,14 @@ where
         // 76; `run_dispatcher.rs:103-106`) — no row, no lease, no lock. It still
         // occupies cluster capacity, which is why the cap is above this line and
         // why the slot travels with this outcome too.
-        let Some(platform_id) = run.platform_id else {
+        let Some(environment_id) = run.environment_id else {
             return Ok(self.recorded(Admitted {
                 admission: Admission::Unqueued,
                 slot,
             }));
         };
 
-        let lock = self.locks.get(platform_id).await;
+        let lock = self.locks.get(environment_id).await;
         let _guard = lock.lock().await;
 
         let conn = self.db.conn()?;
@@ -692,20 +692,20 @@ where
         let depth_scope = self.queue_scope(ctx, actions::LIST, None).await?;
         let queued = self
             .queue
-            .queued_depth(&conn, &depth_scope, platform_id)
+            .queued_depth(&conn, &depth_scope, environment_id)
             .await?;
         let limit = depth_limit(self.limits.queue_max_depth);
         if queue_is_full(queued, limit) {
             let limit = limit.unwrap_or(0);
             warn!(
                 run_id = %run.id,
-                %platform_id,
+                %environment_id,
                 queued,
                 limit,
                 exclusive = run.resolved_exclusive,
                 "launch refused: this platform's queue is at queue_max_depth",
             );
-            // Safe to disclose the count: `platform_id` was ownership-verified
+            // Safe to disclose the count: `environment_id` was ownership-verified
             // at launch and `qa_run_queue` is tenant-partitioned, so `queued` is
             // this tenant's own depth. If an occupancy read ever spanned
             // tenants sharing a platform, this number would become a
@@ -714,7 +714,7 @@ where
             // **What the limit actually binds, which is not "per platform".**
             // `queued_depth` is a *scoped* count, and `contains_uuid` /
             // `InPredicate` admit a **set** — so the bound is per
-            // (access scope, platform). Two tenants sharing a `platform_id` each
+            // (access scope, platform). Two tenants sharing a `environment_id` each
             // get a full `queue_max_depth`, making the platform-wide ceiling
             // Σ over the tenants that use it; and under a hierarchical policy whose
             // scope admits several tenants, this read counts all of them while
@@ -730,13 +730,13 @@ where
             // a worse denial of service than an over-generous ceiling.
             // `DESIGN.md` §3.7 carries the full analysis.
             return Err(DomainError::QueueFull {
-                platform_id,
+                environment_id,
                 queued,
                 limit,
             });
         }
 
-        let occupancy = lease_occupancy(self.environments.as_ref(), ctx, platform_id).await;
+        let occupancy = lease_occupancy(self.environments.as_ref(), ctx, environment_id).await;
         let planned = decide_admission(occupancy, queued, run.resolved_exclusive);
 
         // The ownership precheck, before the child insert and before the lease:
@@ -746,7 +746,7 @@ where
         let owned = self.runs.resolve_owned(&conn, &get_scope, run.id).await?;
 
         let decision = match planned {
-            AdmissionDecision::Dispatch => self.take_lease(ctx, platform_id, run).await,
+            AdmissionDecision::Dispatch => self.take_lease(ctx, environment_id, run).await,
             AdmissionDecision::Queue => AdmissionDecision::Queue,
         };
 
@@ -758,7 +758,7 @@ where
                 &create_scope,
                 ctx.subject_tenant_id(),
                 NewQueueRow {
-                    platform_id,
+                    environment_id,
                     run: owned,
                     run_kind: run.target.kind(),
                     source: run.source,
@@ -771,7 +771,7 @@ where
             Ok(row) => row,
             Err(error) => {
                 if decision == AdmissionDecision::Dispatch {
-                    self.give_back_lease(ctx, platform_id, run.id).await;
+                    self.give_back_lease(ctx, environment_id, run.id).await;
                 }
                 return Err(error);
             }
@@ -780,7 +780,7 @@ where
         info!(
             run_id = %run.id,
             queue_id = %row.id,
-            %platform_id,
+            %environment_id,
             exclusive = run.resolved_exclusive,
             occupancy = ?occupancy,
             queued,

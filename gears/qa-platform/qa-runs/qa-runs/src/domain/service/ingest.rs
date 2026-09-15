@@ -370,7 +370,7 @@ const COMPLETION_REASON: &str = "the execution finished and its claim was releas
 /// `Succeeded`, and this function recorded it `failed` with
 /// [`NO_RESULTS_REASON`].
 ///
-/// **Matched on the kind, not on `counts.total == 0 && platform_id.is_none()`
+/// **Matched on the kind, not on `counts.total == 0 && environment_id.is_none()`
 /// or any other proxy** — the same choice, for the same reason,
 /// `service::launch` records where it bypasses admission for this kind: a
 /// correctness property held up by a coincidence two functions away
@@ -1597,26 +1597,26 @@ where
     /// help. A lease that could not be released is logged at ERROR because it is
     /// the failure that wedges a platform.
     async fn release(&self, ctx: &SecurityContext, run: &Run) {
-        let Some(platform_id) = run.platform_id else {
+        let Some(environment_id) = run.environment_id else {
             return;
         };
         if let Err(error) = self
             .environments
-            .release_lease(ctx, platform_id, run.id)
+            .release_lease(ctx, environment_id, run.id)
             .await
         {
             error!(
                 run_id = %run.id,
-                %platform_id,
+                %environment_id,
                 %error,
                 "could not release the platform lease of a finished run; the platform will \
                  read as busy until the lease is cleared",
             );
         }
-        if let Err(error) = self.release_claim(ctx, run, platform_id).await {
+        if let Err(error) = self.release_claim(ctx, run, environment_id).await {
             warn!(
                 run_id = %run.id,
-                %platform_id,
+                %environment_id,
                 %error,
                 "could not release the queue claim of a finished run; the next tick's \
                  reconciliation owns it",
@@ -1632,13 +1632,13 @@ where
         &self,
         ctx: &SecurityContext,
         run: &Run,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<(), DomainError> {
         let list_scope = self.queue_scope(ctx, actions::LIST, None).await?;
         let conn = self.db.conn()?;
         let claims = self
             .queue
-            .claims_for_platform(&conn, &list_scope, platform_id)
+            .claims_for_platform(&conn, &list_scope, environment_id)
             .await?;
         let Some(claim) = claims.into_iter().find(|claim| claim.run_id == run.id) else {
             return Ok(());

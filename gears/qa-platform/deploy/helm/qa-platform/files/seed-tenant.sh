@@ -26,8 +26,8 @@
 # Hence SQL rather than the obvious `curl` against
 # `POST /resource-group/v1/groups`. That endpoint works fine -- it is how this
 # row's exact shape was first produced and read back -- but it cannot be
-# reached before the boot it is a precondition of. The ordering the compose
-# file builds instead is:
+# reached before the boot it is a precondition of. The ordering the chart
+# builds instead is:
 #
 #     postgres healthy
 #       -> db-migrate      (the gears image, `migrate` subcommand: runs only
@@ -62,15 +62,14 @@
 # DEFAULT_TENANT_ID in agreement. A mismatch does not announce itself: a
 # well-formed but wrong UUID fails the same way a missing one does.
 #
-# IDEMPOTENT. Re-running against an already-seeded database is a no-op, so
-# `docker compose up -d` on a surviving volume behaves the same as on a fresh
-# one. It is also NON-DESTRUCTIVE: it never updates or deletes an existing
+# IDEMPOTENT. Re-running against an already-seeded database is a no-op, so a
+# `helm upgrade` against a surviving PVC behaves the same as a fresh install. It is also NON-DESTRUCTIVE: it never updates or deletes an existing
 # row, so a real tenant tree grown through the API later is left alone.
 #
 # Usage: seed-tenant.sh
 #
-#   PGHOST / PGUSER / PGPASSWORD  Standard libpq variables, set by the compose
-#                                 service. PGDATABASE is NOT used -- the
+#   PGHOST / PGUSER / PGPASSWORD  Standard libpq variables, set by
+#                                 job-tenant-seed.yaml. PGDATABASE is NOT used -- the
 #                                 database name is fixed below, because this
 #                                 script seeds exactly one gear's database and
 #                                 pointing it at another would silently do
@@ -133,8 +132,8 @@ for table in gts_type resource_group resource_group_closure; do
     if [ "$exists" != "t" ]; then
         die "table '${table}' does not exist in the '${RG_DATABASE}' database.
   This script seeds rows into a schema it does not create. The schema is
-  created by the gears' migration phase -- the compose 'db-migrate' service,
-  which must complete before this one. Check that it ran and succeeded."
+  created by the gears' migration phase -- the 'db-migrate' hook Job, which
+  must complete before this one. Check that it ran and succeeded."
     fi
 done
 say "schema present in '$RG_DATABASE'"

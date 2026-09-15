@@ -9,7 +9,7 @@
 //! Legacy's "platform" is this gear's `Environment`; the names in that citation
 //! are legacy's and do not rename with it. This architecture has no such
 //! column:
-//! [`ExecRow::platform_id`](crate::domain::analytics::ExecRow::platform_id) is a
+//! [`ExecRow::environment_id`](crate::domain::analytics::ExecRow::environment_id) is a
 //! `Uuid`, because qa-environments owns the environment and a denormalized name
 //! would be a second copy of it that drifts on rename.
 //!

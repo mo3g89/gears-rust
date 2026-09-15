@@ -33,10 +33,9 @@ pub struct Model {
     /// every other kind, and legal-but-`NULL` for a collect run that reports
     /// nowhere — see `m20260818_000006_collect_target`.
     pub target_collect_url: Option<String>,
-    /// Physical column stays `platform_id`: Phase B renames the aggregate and
+    /// Physical column stays `environment_id`: Phase B renames the aggregate and
     /// this Rust field, not the column. The rename to the column itself is
     /// deferred to this plan's later expand/contract migrations.
-    #[sea_orm(column_name = "platform_id")]
     pub environment_id: Option<Uuid>,
     /// Branch actually resolved and executed against.
     pub test_version: Option<String>,

@@ -29,7 +29,7 @@ pub(super) fn register_queue_routes(mut router: Router, openapi: &dyn OpenApiReg
         .query_param_typed(
             "limit",
             false,
-            "Legacy page size; defaults to 200, clamped to 1-500. $top takes precedence.",
+            "Bare page size; defaults to 200, clamped to 1-500. $top takes precedence.",
             "integer",
         )
         .handler(handlers::queue::list_queue)

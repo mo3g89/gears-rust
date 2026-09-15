@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Verification suite for the in-cluster (Helm/k3s) qa-platform deploy -- the
-# k8s counterpart to sync.sh's own VERIFY / VERIFY-ARGO heredocs, which this
-# file ports rather than reinvents. Same idea as that script: "the deploy
-# printed no errors" is not "the deploy is correct", and every check below
-# exists because a specific failure once looked like success.
+# Verification suite for the qa-platform Helm/k3s deploy. The premise: "the
+# deploy printed no errors" is not "the deploy is correct", and every check
+# below exists because a specific failure once looked like success.
 #
-# RUNS ON THE NODE ITSELF, not over ssh. Unlike sync.sh/deploy-k8s.sh (which
-# drive a REMOTE host from a local machine via lib.sh's remote_sh/ssh_ro),
+# RUNS ON THE NODE ITSELF, not over ssh. Unlike deploy-k8s.sh (which drives a
+# REMOTE host from a local machine via lib.sh's remote_sh/ssh_ro),
 # this script IS the thing that runs on the remote -- deploy-k8s.sh rsyncs it
 # over like any other file and then, from inside its own remote_sh heredoc,
 # does:
@@ -38,12 +36,9 @@
 #                   cluster's own kubeconfig path; every other script in this
 #                   directory that touches k3s defaults it the same way).
 #
-# STOPS AT THE FIRST FAILURE, deliberately unlike sync.sh's own VERIFY block
-# (which accumulates `fail=1` across every check in the block and only exits
-# at the very end, so one failure does not hide the rest). Here every check
-# below `exit 1`s the moment it fails, immediately after printing a `FAIL:`
-# line naming what is wrong and what to do about it -- the shape Task 12's
-# brief specifies for the four new checks, applied uniformly. The trade-off
+# STOPS AT THE FIRST FAILURE. Every check below `exit 1`s the moment it fails,
+# immediately after printing a `FAIL:` line naming what is wrong and what to do
+# about it. The trade-off
 # is real (a run that fails check 3 never learns whether check 9 would also
 # have failed) but the alternative -- swallowing exit codes so every check
 # can "run" regardless -- is exactly the false-green shape this project has
@@ -229,7 +224,7 @@ echo "PASS: gears, ui and keycloak Deployments are all Available"
 step "1: the dev CA, extracted from the qa-platform-tls Secret (cluster-sourced, not a file on disk)"
 # Every https check below needs this as --cacert's trust anchor. Read out of
 # the Secret directly, NOT via `kubectl exec ... cat /etc/keycloak-tls/ca.crt`
-# the way sync.sh reads it out of the gears container: that container may
+# out of the gears container: that container may
 # still be mid-CrashLoopBackOff even after step 0 above (Available only means
 # the CURRENT pod passed its readiness probe, not that a previous restart
 # didn't happen moments ago), and more fundamentally the Secret is the
@@ -258,27 +253,12 @@ if [ "$rc" -ne 0 ] || [ ! -s "$CA_CRT" ]; then
 fi
 echo "PASS: extracted the dev CA to $CA_CRT ($(openssl x509 -in "$CA_CRT" -noout -subject 2>/dev/null || echo 'subject unreadable'))"
 
-# ================================================== ported from sync.sh ====
-# Same probes' LOGIC as sync.sh's VERIFY / VERIFY-ARGO heredocs
-# (deploy/remote/sync.sh, from its "step Verification" on), `docker compose
-# exec`/`docker compose logs` swapped for `kubectl exec`/`kubectl logs`. See
-# this task's own report (task-12-report.md) for the full table of which of
-# sync.sh's ~24 individual checks were ported here, which were dropped, and
-# why -- the short version: checks that were regression tests for specific
-# historical compose-only bugs (the qa-catalog credstore-ref string, the
-# repos-table "Sync failed" string), and the workflow-Secret-exists /
-# imported-realm-service-account-client checks that belong to deploy/argo/
-# provision-workflow-secret.sh's own concern rather than this chart's, are
-# not ported. Two are MERGED rather than dropped: the compose "Keycloak's own
-# advertised issuer" check and this chart's own new "discovery served through
-# the UI nginx" check become the literal same HTTP request once there is only
-# one public origin (no separate PUBLIC_ISSUER_ORIGIN) -- see the "k8s 4/4"
-# check near the end of this file. VERIFY-ARGO's "qa-environments reaches the
-# same cluster" pair (its check 2b) is RESTORED below (check 14), not
-# dropped, after review round 1 -- see that check's own comment for why the
-# CONFIG half stays dropped (Config::infer() is this chart's intended path,
-# not compose's broken fallback) while the RUNTIME half (does the Secret
-# write actually succeed) remains exactly as meaningful in-cluster.
+# ====================================================== platform probes ====
+# The checks below probe the platform itself rather than the chart's
+# mechanics: the issuer the UI bundle was built against, the issuer the gears
+# were rendered with, and whether the two agree with what Keycloak actually
+# advertises. They are the ones that catch a stack which installed cleanly and
+# cannot log anyone in.
 
 # Shared by several checks below (the UI bundle's baked issuer, the gears'
 # own rendered issuer_pattern) -- defined once so both compare against the
@@ -393,7 +373,7 @@ else
 fi
 
 step "4: the gears' rendered issuer_pattern names this exact PUBLIC_ORIGIN"
-# RESTORED in review round 1 (sync.sh's own check 4). "k8s 4/4" below tests
+# "k8s 4/4" below tests
 # what KEYCLOAK itself asserts as its issuer, and check 5 tests what the UI
 # BUNDLE was built believing it is -- neither reads what the GEARS
 # themselves rendered, which is the third, independent place this exact
@@ -407,9 +387,8 @@ step "4: the gears' rendered issuer_pattern names this exact PUBLIC_ORIGIN"
 # THE DOTS ARE BACKSLASH-ESCAPED in the rendered line, because
 # issuer_pattern is a regex (see entrypoint.sh) -- the rendered line reads
 # `https://10\.136\.20\.200/...` and does NOT contain the literal issuer
-# string; strip the backslashes before matching, same as sync.sh's own
-# check 4 (verified there: `case` on the raw line does not match, on the
-# stripped line it does).
+# string; strip the backslashes before matching (verified: `case` on the raw
+# line does not match, on the stripped line it does).
 iss_line="$(kubectl exec -n "$NAMESPACE" deploy/qa-platform-gears -- grep -h 'issuer_pattern:' /var/lib/cf-gears/.rendered-qa-platform-stack.yaml 2>/dev/null || true)"
 iss_unescaped="${iss_line//\\/}"
 case "$iss_line" in
@@ -445,28 +424,24 @@ else
 fi
 
 step "6: the public origin is served by the IN-CLUSTER UI pod, and answers 200"
-# RESTORED in review round 1 (sync.sh's own check 7, "UI over HTTPS"). "k8s
-# 4/4" below only exercises the Keycloak-proxy location block
+# "k8s 4/4" below only exercises the Keycloak-proxy location block
 # (ui-extraconf-configmap.yaml's `^/(realms|resources)/` regex); the
 # SPA's own `location /` is a DIFFERENT block, and nothing else in this file
 # fetches it over the wire -- check 5 above only reads the bundle's files via
-# `kubectl exec`, never through nginx. No retry budget, unchanged from
-# sync.sh's own reasoning: nginx opens its listener at start and does not
-# import a realm, so this either answers or it is broken.
+# `kubectl exec`, never through nginx. No retry budget: nginx opens its
+# listener at start and does not import a realm, so this either answers or it
+# is broken.
 #
-# A 200 ALONE IS NOT EVIDENCE THE IN-CLUSTER UI SERVED IT, and that is the
-# half added in the final review. The compose stack this deployment is
-# CUTTING OVER FROM binds the same node's 80/443 and serves the same SPA, so
-# during the cutover window "curl $PUBLIC_ORIGIN/ -> 200" is satisfied just as
-# happily by the compose nginx -- and every FAIL further down would then be
-# read against the wrong process. deploy-k8s.sh now preflights that 80/443 are
-# free before installing (see its port preflight), and this check closes the
-# other end: it compares the LEAF CERTIFICATE the origin actually presents
-# against the ui.crt inside the cluster's own qa-platform-tls Secret. Those
-# two agree only if the pod terminating this TLS connection is the one this
-# chart's certs Job minted a leaf for. The compose stack has its own,
-# independently generated CA and leaf under deploy/compose/.generated, so its
-# fingerprint cannot match.
+# A 200 ALONE IS NOT EVIDENCE THE IN-CLUSTER UI SERVED IT. hostPort 80/443 is a
+# node-wide reservation, so any other web server already holding those ports
+# answers `curl $PUBLIC_ORIGIN/` with a 200 just as happily -- and every FAIL
+# further down would then be read against the wrong process. deploy-k8s.sh
+# preflights that 80/443 are free before installing (see its port preflight),
+# and this check closes the other end: it compares the LEAF CERTIFICATE the
+# origin actually presents against the ui.crt inside the cluster's own
+# qa-platform-tls Secret. Those two agree only if the pod terminating this TLS
+# connection is the one this chart's certs Job minted a leaf for; an unrelated
+# server's certificate cannot match.
 UI_CRT_B64="$WORKDIR/ui.crt.b64"
 UI_CRT="$WORKDIR/ui.crt"
 rc=0
@@ -518,7 +493,7 @@ if [ "$rc" -ne 0 ] || [ -z "$want_fp" ]; then
     exit 1
 fi
 if [ "$served_fp" != "$want_fp" ]; then
-    echo "FAIL: $ORIGIN_HOSTPORT is served by something OTHER than this chart's UI pod. The leaf it presents is [$served_fp]; secret/qa-platform-tls's ui.crt is [$want_fp]. The overwhelmingly likely cause during the cutover is that the docker-compose stack still holds hostPort 80/443 on this node -- 'docker compose -f gears/qa-platform/deploy/compose/docker-compose.yml ps' on the node, then stop it (NEVER with '-v') and 'kubectl -n $NAMESPACE delete pod -l app.kubernetes.io/component=ui' so the UI pod can bind the port. Every check below that goes through \$PUBLIC_ORIGIN would otherwise be measuring the wrong process." >&2
+    echo "FAIL: $ORIGIN_HOSTPORT is served by something OTHER than this chart's UI pod. The leaf it presents is [$served_fp]; secret/qa-platform-tls's ui.crt is [$want_fp]. hostPort 80/443 is a node-wide reservation, so the likely cause is that another process on this node holds it: 'ss -ltnp' names the process. Stop it, then 'kubectl -n $NAMESPACE delete pod -l app.kubernetes.io/component=ui' so the UI pod can bind the port. Every check below that goes through \$PUBLIC_ORIGIN would otherwise be measuring the wrong process." >&2
     exit 1
 fi
 echo "PASS: the leaf served at $ORIGIN_HOSTPORT is byte-identical to secret/qa-platform-tls's ui.crt -- the in-cluster UI pod owns this origin"
@@ -580,12 +555,11 @@ case "$api_code" in
 esac
 
 step "7: the gears' rendered config selects the persistent credstore backend"
-# THE THREE-PLACE SWITCH, same as sync.sh's own check 8: the Dockerfile's ARG
-# CARGO_FEATURES default, deploy/cargo-features.argo, and
-# credstore.config.vendor in qa-platform-stack.yaml must all agree, or
-# secrets silently live in a HashMap and die on every pod restart -- which is
-# how this got noticed on the compose stack (an SSH key lost four times in
-# one day). Read as a rendered-config claim AND a database fact (this check
+# THE THREE-PLACE SWITCH: the Dockerfile's ARG CARGO_FEATURES default,
+# deploy/cargo-features.argo, and credstore.config.vendor in
+# qa-platform-stack.yaml must all agree, or secrets silently live in a HashMap
+# and die on every pod restart -- which is how this got noticed (an SSH key
+# lost four times in one day). Read as a rendered-config claim AND a database fact (this check
 # and the next), because either alone is ambiguous.
 if kubectl exec -n "$NAMESPACE" deploy/qa-platform-gears -- grep -qE '^      vendor: "constructorfabric-postgres"$' /var/lib/cf-gears/.rendered-qa-platform-stack.yaml 2>/dev/null; then
     echo "PASS: the rendered config selects vendor constructorfabric-postgres"
@@ -677,8 +651,8 @@ step "9b: GET /qa/v1/product-plugins answers 200 with a non-empty catalogue -- t
 # PUBLIC origin for one check's convenience, and was the proxy's only
 # consumer. This check does NOT repeat that: it takes a client-credentials
 # token for the qa-platform-workflow SERVICE-ACCOUNT client (confirmed in
-# deploy/realm/keycloak/realm-qa-platform.json: serviceAccountsEnabled=true,
-# secret="qa-platform-workflow-dev-secret") from the realm's ORDINARY token
+# the chart's files/keycloak/realm-qa-platform.json: serviceAccountsEnabled=true,
+# with the secret pinned from argo.workflowClientSecret) from the realm's ORDINARY token
 # endpoint, /realms/qa-platform/protocol/openid-connect/token. That endpoint
 # is not new surface -- it is already published and already exercised
 # unauthenticated by check 6/"k8s 4/4"'s discovery-document fetch, which
@@ -844,8 +818,7 @@ step "13: the runner image is in containerd, not merely in Docker"
 # The one that produces ImagePullBackOff on every workflow run, minutes in,
 # naming a registry the image was never in: docker build alone does not make
 # an image visible to k3s's containerd. Read runner_image out of the
-# ConfigMap gears-argo-configmaps.yaml renders (the chart's equivalent of
-# sync.sh's ./.generated/qa-runs-argo.yaml), not out of values.yaml directly,
+# ConfigMap gears-argo-configmaps.yaml renders, not out of values.yaml directly,
 # so this is checking what the CLUSTER actually has, not what the chart
 # source merely intends.
 rc=0
@@ -901,25 +874,19 @@ step "14: qa-environments' runner-credential Secret write into \$ARGO_NAMESPACE 
 # `runner_secret_writer::ensure_runner_secret` in
 # qa-environments/src/infra/runner_secret_writer.rs --
 # `Api::<Secret>::namespaced(client, argo_namespace)` then a server-side
-# apply `patch`). Under compose the gears held a cluster-admin kubeconfig,
-# so a missing grant never surfaced; with this scoped ServiceAccount the
+# apply `patch`). A deployment whose gears hold a cluster-admin kubeconfig
+# never surfaces a missing grant; with this scoped ServiceAccount the
 # write is Forbidden on every cycle, and the documented symptom is every
 # workflow run hanging on FailedMount while observation (checks 10/11 above)
 # keeps working and the stack otherwise looks healthy -- nothing in checks
 # 2/3/13/15 touches this code path at all, since qa-environments is not
 # qa-runs.
 #
-# THE CONFIG HALF OF sync.sh's original check (VERIFY-ARGO 2b) STAYS
-# DROPPED, deliberately, not merely forgotten: that half asserted
-# qa-environments must have a `kubeconfig_path`, because under compose an
-# absent one meant a broken fallback to `Config::infer()` (finding I2). In
-# THIS chart, gears-argo-configmaps.yaml's own header states the opposite:
-# an absent kubeconfig_path making both Argo clients fall back to
-# `Config::infer()` IS the intended in-cluster credential path. Porting that
-# config-half check unchanged would assert the exact opposite of what this
-# chart's own design says is correct. The RUNTIME half below -- does
-# inference and the Secret write actually SUCCEED -- carries no such
-# assumption and remains exactly as meaningful here as it was under compose.
+# THERE IS DELIBERATELY NO `kubeconfig_path` ASSERTION HERE. An absent
+# kubeconfig_path making both Argo clients fall back to `Config::infer()` IS
+# the intended in-cluster credential path -- see gears-argo-configmaps.yaml's
+# own header. What is worth checking is the RUNTIME half below: does inference
+# and the Secret write actually SUCCEED.
 #
 # FIRST, PROVE THE TWO FAILURE STRINGS ARE STILL ALIVE IN THE BINARY, same
 # idiom as check 2/9's absence-and-presence pairs: an absence check whose
@@ -1049,9 +1016,8 @@ step "16: the realm Keycloak imports lists the UI origin as a redirect URI"
 # convenience. It was the only consumer of that proxy.
 #
 # THE CONFIGMAP IS NOT A WEAKER SOURCE THAN THE ADMIN API HERE. It is the
-# EXACT document Keycloak imports: deploy-k8s.sh renders it with
-# render-realm.sh for this PUBLIC_ORIGIN and hands it to Helm with
-# --set-file, the chart writes it into configmap/qa-platform-realm, and
+# EXACT document Keycloak imports: keycloak-realm-configmap.yaml renders it
+# for this release's publicOrigin into configmap/qa-platform-realm, and
 # keycloak-deployment.yaml mounts that at /opt/keycloak/data/import for
 # `--import-realm`. Reading the ConfigMap therefore checks the same pin the
 # admin API would have -- "does the realm this cluster will import name this
@@ -1070,7 +1036,7 @@ rc=0
 kubectl -n "$NAMESPACE" get configmap qa-platform-realm \
     -o jsonpath='{.data.realm-qa-platform\.json}' > "$WORKDIR/realm.json" 2>"$WORKDIR/realm.err" || rc=$?
 if [ "$rc" -ne 0 ] || [ ! -s "$WORKDIR/realm.json" ]; then
-    echo "FAIL: could not read configmap/qa-platform-realm's realm-qa-platform.json key in namespace $NAMESPACE (exit $rc): $(cat "$WORKDIR/realm.err" 2>/dev/null). deploy-k8s.sh renders it with render-realm.sh and passes it to Helm with --set-file; an empty value means that step did not run or rendered nothing." >&2
+    echo "FAIL: could not read configmap/qa-platform-realm's realm-qa-platform.json key in namespace $NAMESPACE (exit $rc): $(cat "$WORKDIR/realm.err" 2>/dev/null). keycloak-realm-configmap.yaml renders it from the chart's files/keycloak/realm-qa-platform.json; an empty value means that template produced nothing, or keycloakRealmJson was overridden with an empty file." >&2
     exit 1
 fi
 rc=0
@@ -1080,14 +1046,14 @@ if [ "$rc" -ne 0 ]; then
     exit 1
 fi
 if [ -z "$uris" ]; then
-    echo "FAIL: the realm ConfigMap has no qa-platform-ui client, or that client has an empty redirectUris list. An absent client is not an absent problem: the SPA cannot complete a login at all. Check render-realm.sh's output." >&2
+    echo "FAIL: the realm ConfigMap has no qa-platform-ui client, or that client has an empty redirectUris list. An absent client is not an absent problem: the SPA cannot complete a login at all. Check the chart's files/keycloak/realm-qa-platform.json." >&2
     exit 1
 fi
 case " $uris " in
     *" $PUBLIC_ORIGIN/* "*)
         echo "PASS: the realm this cluster imports lists $PUBLIC_ORIGIN/* as a qa-platform-ui redirect URI (all: [$uris])" ;;
     *)
-        echo "FAIL: the realm this cluster imports does NOT list $PUBLIC_ORIGIN/* for qa-platform-ui -- it lists [$uris]. render-realm.sh was run against a different origin than this script was invoked with; re-run deploy-k8s.sh with the right --public-origin. Note the realm imports only on Keycloak's FIRST start (H2 is ephemeral by design, see keycloak-deployment.yaml), so after correcting the ConfigMap 'kubectl -n $NAMESPACE delete pod -l app.kubernetes.io/component=keycloak' is what makes the new realm take effect." >&2
+        echo "FAIL: the realm this cluster imports does NOT list $PUBLIC_ORIGIN/* for qa-platform-ui -- it lists [$uris]. The release was installed with a different publicOrigin than this script was invoked with; re-run with a matching --public-origin, or 'helm upgrade' the release with the right one. Note the realm imports only on Keycloak's FIRST start (H2 is ephemeral by design, see keycloak-deployment.yaml), so after correcting the ConfigMap 'kubectl -n $NAMESPACE delete pod -l app.kubernetes.io/component=keycloak' is what makes the new realm take effect." >&2
         exit 1 ;;
 esac
 
@@ -1177,7 +1143,7 @@ kubectl exec -n "$NAMESPACE" deploy/qa-platform-gears -- \
     sed -n '/^opentelemetry:/,/^[^ #]/p' /var/lib/cf-gears/.rendered-qa-platform-stack.yaml \
     > "$WORKDIR/otel.block" 2>"$WORKDIR/otel.err" || rc=$?
 if [ "$rc" -ne 0 ] || [ ! -s "$WORKDIR/otel.block" ]; then
-    echo "FAIL: the gears' rendered /var/lib/cf-gears/.rendered-qa-platform-stack.yaml carries no 'opentelemetry:' block (exit $rc): $(cat "$WORKDIR/otel.err" 2>/dev/null). Every one of the 22 metric families in DESIGN 3.9 is then unreachable, silently -- the gears report nothing about it. The mount itself is already proven above, so this is the committed config or the chart's transform having lost the block: check gears/qa-platform/config/qa-platform-stack.yaml and gears-config-configmap.yaml's fourth transform." >&2
+    echo "FAIL: the gears' rendered /var/lib/cf-gears/.rendered-qa-platform-stack.yaml carries no 'opentelemetry:' block (exit $rc): $(cat "$WORKDIR/otel.err" 2>/dev/null). Every one of the 22 metric families in DESIGN 3.11 is then unreachable, silently -- the gears report nothing about it. The mount itself is already proven above, so this is the committed config or the chart's transform having lost the block: check gears/qa-platform/config/qa-platform-stack.yaml and gears-config-configmap.yaml's fourth transform." >&2
     exit 1
 fi
 otel_service="$(sed -n 's/^    service_name: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$WORKDIR/otel.block" | head -1)"
@@ -1223,7 +1189,7 @@ if [ "$otel_metrics" = "true" ]; then
     esac
     echo "PASS: metrics are ENABLED and push to '$otel_endpoint' (service_name=$otel_service, tracing=$otel_tracing)"
 else
-    echo "PASS: the metrics block is present and correctly shaped, in a config proven above to have come from the ConfigMap; metrics are DISABLED (the chart default). NOTE: nothing from DESIGN 3.9 leaves this stack. Turn it on with --set opentelemetry.metrics.enabled=true --set opentelemetry.metrics.endpoint=<collector>."
+    echo "PASS: the metrics block is present and correctly shaped, in a config proven above to have come from the ConfigMap; metrics are DISABLED (the chart default). NOTE: nothing from DESIGN 3.11 leaves this stack. Turn it on with --set opentelemetry.metrics.enabled=true --set opentelemetry.metrics.endpoint=<collector>."
 fi
 
 step "18: the deployed binary carries exactly the metric catalog, name for name"
@@ -1288,19 +1254,18 @@ if [ ! -s "$WORKDIR/metrics.have" ]; then
     exit 1
 fi
 if diff -u "$WORKDIR/metrics.want" "$WORKDIR/metrics.have" > "$WORKDIR/metrics.diff" 2>&1; then
-    echo "PASS: the deployed binary carries exactly the $(grep -c '' "$WORKDIR/metrics.want") catalog series names (DESIGN 3.9)"
+    echo "PASS: the deployed binary carries exactly the $(grep -c '' "$WORKDIR/metrics.want") catalog series names (DESIGN 3.11)"
 else
-    echo "FAIL: the deployed binary's metric names are not the catalog. '-' lines are names DESIGN 3.9 documents and the binary does not carry; '+' lines are names the binary carries and the catalog does not document. Either is the defect this check exists for -- an operator's query names one of the '-' lines and gets nothing back, forever, with no error anywhere." >&2
+    echo "FAIL: the deployed binary's metric names are not the catalog. '-' lines are names DESIGN 3.11 documents and the binary does not carry; '+' lines are names the binary carries and the catalog does not document. Either is the defect this check exists for -- an operator's query names one of the '-' lines and gets nothing back, forever, with no error anywhere." >&2
     cat "$WORKDIR/metrics.diff" >&2
     exit 1
 fi
 
 # ========================================================= new for k8s ====
-# The four checks Task 12's brief specifies by name -- nothing here exists
-# for the compose stack because nothing here has a compose analogue: Helm's
-# no-op-on-unchanged-PodSpec behaviour, PersistentVolumeClaims, cross-
-# namespace RBAC, and a single public origin proxying Keycloak through the
-# UI's nginx are all k8s-shaped concerns.
+# Four checks for the cluster-shaped concerns the probes above do not touch:
+# Helm's no-op-on-unchanged-PodSpec behaviour, PersistentVolumeClaims,
+# cross-namespace RBAC, and a single public origin proxying Keycloak through
+# the UI's nginx.
 
 step "k8s 1/4: every Deployment rolled to \$IMAGE_TAG"
 # THE IMAGE TAG IS NOT COSMETIC (deploy-k8s.sh's own header makes the same
@@ -1398,9 +1363,9 @@ done
 echo "PASS: qa-platform-gears can create AND patch secrets in namespace $ARGO_NAMESPACE (the D4 runner-credential write, checked statically -- works on a cold stack, unlike check 14's log half)"
 
 step "k8s 4/4: /realms serves Keycloak's discovery document through the UI nginx"
-# THIS CHECK ALSO STANDS IN FOR sync.sh's "Keycloak's own advertised issuer"
-# check (its check 5): compose could hit Keycloak's OWN https listener
-# directly at a separate PUBLIC_ISSUER_ORIGIN (port 8443); this chart never
+# THIS CHECK ALSO COVERS "Keycloak's own advertised issuer": a deployment that
+# exposed Keycloak's own https listener at a separate origin could probe it
+# directly, but this chart never
 # exposes Keycloak outside the cluster at all (keycloak-service.yaml is
 # ClusterIP-only) -- the UI's nginx (ui-extraconf-configmap.yaml) is the
 # ONLY path to it, proxying /realms and /resources to the Service (/admin is

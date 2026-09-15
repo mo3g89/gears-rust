@@ -7,8 +7,7 @@
  * Idiom follows the existing pages (see `src/pages/settings/SettingsJiraPage.tsx`):
  * shadcn `Card`/`CardHeader`/`CardTitle`/`CardDescription`/`CardContent`, the
  * `Button` from `@/components/ui/button`, a `lucide-react` icon, and the house
- * error branch `<p className="text-destructive">` that `deploy/compose/ui-gate.js`
- * detects structurally.
+ * error branch `<p className="text-destructive">`.
  *
  * It fetches nothing. That is a requirement, not an accident: it is one of the
  * two routes outside `RequireAuth`, so a data hook here would be a hook running

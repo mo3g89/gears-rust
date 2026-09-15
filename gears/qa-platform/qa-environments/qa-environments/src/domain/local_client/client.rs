@@ -193,7 +193,7 @@ impl QaEnvironmentsClientV1 for QaEnvironmentsLocalClient {
     /// 500, so the truncation never fires, the cursor is real, and this drain
     /// follows it to the end of `qa_pipeline_variables` for the tenant. There is
     /// no page cap in [`drain_pages`] either. `qa-runs`' `dispatch_spec` calls
-    /// this with `run.platform_id`, so a run with no environment now assembles
+    /// this with `run.environment_id`, so a run with no environment now assembles
     /// from *every* pipeline variable the tenant has, where the pre-paging code
     /// gave it at most 500.
     ///

@@ -292,7 +292,7 @@ fn register_notification_routes(mut router: Router, openapi: &dyn OpenApiRegistr
              swallowed - an operator testing a channel deserves to know it does not work, \
              including a 501 when the channel this deployment ships has no adapter at all (D10). \
              This endpoint's OpenAPI schema shows the body as required; posting no body at all \
-             is also accepted, matching legacy. Requires the qa.notification_config/test grant.",
+             is also accepted. Requires the qa.notification_config/test grant.",
         )
         .tag(API_TAG)
         .authenticated()

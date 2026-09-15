@@ -61,7 +61,7 @@ impl VariablesRepository for OrmVariablesRepository {
         query: &ODataQuery,
     ) -> Result<Page<Variable>, DomainError> {
         // `EnvironmentVarColumn::EnvironmentId` is the SeaORM *variant*; the
-        // physical column it renders is `platform_id`
+        // physical column it renders is `environment_id`
         // (`entity/environment_variable.rs`'s `#[sea_orm(column_name = ...)]`).
         // That is also why `environment_id` is pinned here rather than left to
         // a `$filter` — see `VariableFilterField`'s doc.

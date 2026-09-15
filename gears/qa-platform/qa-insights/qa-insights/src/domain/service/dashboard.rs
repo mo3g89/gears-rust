@@ -277,7 +277,7 @@
 //! unfilled fields says what each of the two still needs. So the bullet's list is
 //! **not** complete, this sentence said it was, and the requirement is doubly
 //! undischarged — the coverage half is the paragraph below, and
-//! `platforms_summary` is unowned.
+//! `environments_summary` is unowned.
 //!
 //! **The coverage half is a different matter, and Task 19 did not discharge it.**
 //! This section read "the requirement is satisfied across Tasks 18, 19, 21 and 23
@@ -305,7 +305,7 @@
 //!   schedule listing. Neither is on any port in this gear, and plan ruling R3
 //!   forbids adding a port method no test here exercises. **Both are genuinely
 //!   unowned** — no task in the plan claims them, and neither does
-//!   `platforms_summary`, which is qa-environments' data behind a port that does
+//!   `environments_summary`, which is qa-environments' data behind a port that does
 //!   not exist (legacy fans out a health *check* per platform,
 //!   `manager/src/routes/dashboard.rs:421-460`). **Task 25a's
 //!   [`crate::domain::ports::EnvironmentReader`] is not that port** and does not
@@ -890,7 +890,7 @@ where
             pass_rate_prev_24h: previous.pass_rate,
             flaky_tests: flaky.into_iter().map(flaky_card).collect(),
             // The three still unfilled, and each is a missing read or a missing
-            // upstream: `total_plans`, `total_schedules` and `platforms_summary`
+            // upstream: `total_plans`, `total_schedules` and `environments_summary`
             // need cross-gear reads no port in this gear has, and **no task in
             // the plan owns any of the three**. This module's header names them
             // one by one and `qa_insights_sdk::DashboardStats` carries what each
@@ -1147,7 +1147,7 @@ fn dashboard_run(run: &Run) -> DashboardRun {
         phase: run.state.as_str().to_owned(),
         repo_id,
         plan_path,
-        platform_id: run.platform_id,
+        environment_id: run.environment_id,
         product_key: None,
         app_version: run.app_version.clone(),
         started_at: run.started_at,
@@ -1377,7 +1377,7 @@ fn failure_card(row: TestResultRecord) -> FailedTestCard {
         run_id: row.run_id,
         repo_id: row.repo_id,
         plan_path: row.plan_path,
-        platform_id: row.platform_id,
+        environment_id: row.environment_id,
         finished_at: row.run_finished_at.or(row.run_created_at),
         jira_key: row.jira_key,
         launch_id: row.launch_id,

@@ -42,7 +42,7 @@ pub use errors::QaInsightsError;
 pub use models::{
     CollectCount, CoverageBuild, CoverageSummary, DailyStatusPoint, DashboardRun, DashboardStats,
     FailedTestCard, FlakyTestCard, JiraBug, JiraConfig, JiraPollerConfig, NewJiraBug, NewSavedView,
-    NotificationConfig, NotificationLogEntry, PlatformBrief, PlatformsSummary,
+    NotificationConfig, NotificationLogEntry, EnvironmentBrief, EnvironmentsSummary,
     QualityVectorPassRate, RunTestTrendPoint, SavedView, SavedViewScope, ScheduledRunSlackTemplate,
     ScheduledRunSlackTemplates, SkipListEntry, TestCaseResultRecord, TestResultRecord,
 };

@@ -74,11 +74,6 @@ const CITATIONS_THAT_INTENTIONALLY_DO_NOT_RESOLVE: &[(&str, &str)] = &[
         "legacy `manager/src`",
     ),
     (
-        "scheduled_run_event_serializes_to_snake_case",
-        "legacy `manager/src/models.rs`, cited as the proof that the event \
-         vocabulary is snake_case on the wire",
-    ),
-    (
         "list_persisted_workflow_names_by_prefix",
         "legacy `manager/src`",
     ),

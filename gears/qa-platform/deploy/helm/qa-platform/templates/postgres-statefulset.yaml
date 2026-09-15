@@ -35,9 +35,9 @@ spec:
                 secretKeyRef:
                   name: qa-platform-postgres
                   key: POSTGRES_PASSWORD
-            # Matches compose: POSTGRES_DB alone provisions exactly one
-            # database ("postgres"); the eight per-gear databases come from
-            # the initdb script mounted below.
+            # POSTGRES_DB alone provisions exactly one database ("postgres");
+            # the eight per-gear databases come from the initdb script mounted
+            # below.
             - name: POSTGRES_DB
               value: postgres
             # Keep PGDATA a level below the mount point -- local-path's PV

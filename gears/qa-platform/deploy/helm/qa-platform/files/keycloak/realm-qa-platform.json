@@ -4,9 +4,9 @@
   "displayName": "QA Platform (dev)",
   "attributes": {
     "x-qa-platform-provenance": "REDUCED KEYCLOAK REALM EXPORT (26.0.8), not hand-written. Configured via kcadm.sh, exported with `kc.sh export --users same_file`, then stripped of every key that only restated a Keycloak default -- notably components['org.keycloak.keys.KeyProvider'], which would have committed the realm's private signing key. Do not paste it back.",
-    "x-qa-platform-docs": "Full rationale lives in the `keycloak` service comment in gears/qa-platform/deploy/compose/docker-compose.yml. This file cannot carry JSON comments: an unrecognised top-level key such as `_comment` aborts import with 'Unrecognized field ... RealmRepresentation, not marked as ignorable'. This `attributes` map is the one place a note fits.",
+    "x-qa-platform-docs": "Rendered by the Helm chart's keycloak-realm-configmap.yaml, which carries the full rationale; the placeholders below are substituted at template time. This file cannot carry JSON comments: an unrecognised top-level key such as `_comment` aborts import with 'Unrecognized field ... RealmRepresentation, not marked as ignorable'. This `attributes` map is the one place a note fits.",
     "x-qa-platform-tenant-claim": "The tenant-id protocol mapper must emit a UUID: oidc-authn-plugin parses it with Uuid::parse_str. The value is toolkit_security::constants::DEFAULT_TENANT_ID, which owns every row created while auth_disabled was true. Changing it hides that data silently rather than erroring.",
-    "x-qa-platform-dev-only": "DEV FIXTURE. Passwords are in this file and directAccessGrantsEnabled is on so the compose gates can get a token without a browser. Not a template for a real deployment."
+    "x-qa-platform-dev-only": "DEV FIXTURE. Passwords are in this file and directAccessGrantsEnabled is on so an automated gate can get a token without a browser. Not a template for a real deployment."
   },
   "sslRequired": "external",
   "registrationAllowed": false,
@@ -28,10 +28,12 @@
       "consentRequired": false,
       "fullScopeAllowed": true,
       "redirectUris": [
-        "http://localhost:8080/*"
+        "http://localhost:8080/*",
+        "{{ .Values.publicOrigin }}/*"
       ],
       "webOrigins": [
-        "http://localhost:8080"
+        "http://localhost:8080",
+        "{{ .Values.publicOrigin }}"
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256"
@@ -79,7 +81,7 @@
       "serviceAccountsEnabled": true,
       "consentRequired": false,
       "fullScopeAllowed": true,
-      "secret": "qa-platform-workflow-dev-secret",
+      "secret": "{{ .Values.argo.workflowClientSecret }}",
       "protocolMappers": [
         {
           "name": "qa-platform-audience",
@@ -99,7 +101,7 @@
           "consentRequired": false,
           "config": {
             "claim.name": "tenant_id",
-            "claim.value": "00000000-df51-5b42-9538-d2b56b7ee953",
+            "claim.value": "{{ .Values.seedTenantId }}",
             "jsonType.label": "String",
             "access.token.claim": "true",
             "id.token.claim": "false",
@@ -120,7 +122,7 @@
       "lastName": "user",
       "attributes": {
         "tenant_id": [
-          "00000000-df51-5b42-9538-d2b56b7ee953"
+          "{{ .Values.seedTenantId }}"
         ]
       },
       "credentials": [
@@ -143,7 +145,7 @@
       "lastName": "user",
       "attributes": {
         "tenant_id": [
-          "00000000-df51-5b42-9538-d2b56b7ee953"
+          "{{ .Values.seedTenantId }}"
         ]
       },
       "credentials": [

@@ -1,12 +1,6 @@
-{{/* Carries files/keycloak-tls/gen-cert.sh verbatim (copied into this
-     chart's files/keycloak-tls/ so .Files.Get can reach it -- Helm's .Files is
-     scoped to the chart directory and cannot read files outside it via ../,
-     same constraint as postgres-initdb-configmap.yaml's copy of the initdb
-     script). Do not edit the embedded script here: edit the source under
-     the chart's own files/ directory and re-copy it. The two copies are kept
-     byte-identical by deploy/helm/tests/test_chart_file_sync.py, which is a
-     table-driven generalisation of the guard that used to cover only the
-     initdb script.
+{{/* Carries files/keycloak-tls/gen-cert.sh, read at render time with
+     .Files.Get. The file under files/ IS the script -- there is no second copy
+     to keep in sync; edit it there.
 
      THIS CONFIGMAP IS ITSELF A HOOK, AND MUST STAY ONE. certs-job.yaml's Job
      is a `pre-install,pre-upgrade` hook that MOUNTS this ConfigMap. Helm

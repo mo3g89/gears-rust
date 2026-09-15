@@ -28,7 +28,7 @@
  * a transient error, so "retry until it works" is never the right answer — and
  * on this deployment it is actively harmful: an unauthenticated tab left on
  * `/runs` was measured issuing 20 `/qa/v1` requests in 25 seconds (34 once
- * `smoke.sh` had seeded the stack), all 401, with no end condition — which is
+ * the stack had been seeded), all 401, with no end condition — which is
  * what wedged the gateway's rate limiter for twelve hours (see the Task 15
  * report). The structural half of the fix is
  * `RequireAuth`, which stops the queries mounting at all; this counter is the

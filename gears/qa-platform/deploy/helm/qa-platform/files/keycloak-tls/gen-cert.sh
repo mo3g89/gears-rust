@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# One-shot TLS material for the compose stack: a self-signed dev CA and two
-# leaf server certificates signed by it -- one for `keycloak`, one for the
-# `ui` service's nginx.
+# One-shot TLS material for the stack: a self-signed dev CA and two leaf
+# server certificates signed by it -- one for Keycloak, one for the UI's
+# nginx. certs-job.yaml runs this as a pre-install hook and stores the result
+# in the qa-platform-tls Secret.
 #
 # WHY TLS AT ALL. oidc-authn-plugin refuses to fetch OIDC metadata over
-# plaintext HTTP, so the IdP the gears talk to has to speak TLS even in a local
-# compose stack. Three separate checks enforce it, all against
+# plaintext HTTP, so the IdP the gears talk to has to speak TLS even in a
+# throwaway dev stack. Three separate checks enforce it, all against
 # `UrlSecurityPolicy::STRICT`:
 #   - the configured trusted-issuer `discovery_url`, at config load
 #     (gears/system/authn-resolver/plugins/oidc-authn-plugin/src/config.rs:469);
@@ -25,8 +26,8 @@
 # reached at a bare IP over http is neither, and login fails with "Crypto.subtle
 # is available only in secure contexts (HTTPS)" no matter how well the rest of
 # the chain agrees. That is a browser rule, not a misconfiguration, so a
-# non-localhost deploy has to serve the UI over https -- see
-# docker-compose.https.yml.
+# non-localhost deploy has to serve the UI over https -- which is what
+# ui-tls/tls.conf and this script's `ui` leaf are for.
 #
 # WHY A CA AND NOT ONE SELF-SIGNED CERTIFICATE. The obvious shortcut -- one
 # self-signed certificate used both as Keycloak's server certificate and as the
@@ -49,15 +50,15 @@
 # at the same public host, so one certificate would satisfy both handshakes.
 # What it would not survive is the key: `keycloak.key` is Keycloak's identity,
 # and serving it from nginx means the `ui` container holds it. Two leaves keep
-# each private key mounted into exactly one container (by `volume.subpath`, see
-# docker-compose.yml and docker-compose.https.yml) while one CA means a human
+# each private key projected into exactly one container (see the `items` lists
+# in ui-deployment.yaml and gears-deployment.yaml) while one CA means a human
 # trusts ONE certificate to reach both.
 #
 # WHY GENERATED AND NOT COMMITTED. A committed certificate means a committed
-# private key. This runs as a one-shot compose service instead, writing into
-# the `keycloak-tls` named volume that `keycloak`, `gears` and (over https) `ui`
-# all mount, so nothing secret lives in git and each fresh stack gets its own
-# key.
+# private key. This runs as a one-shot job instead, writing into the
+# qa-platform-tls Secret that keycloak, gears and ui each project the keys they
+# need out of -- so nothing secret lives in git and each fresh stack gets its
+# own key.
 #
 # WHY postgres:16 RUNS IT. It is already an image this stack pulls and it ships
 # openssl 3.5.6 (checked: `command -v openssl` in postgres:16 -> /usr/bin/openssl).
@@ -101,11 +102,11 @@ OWNER_GID=1000
 
 # The host a BROWSER reaches this stack at, which is the name its TLS handshake
 # checks the certificate against. Optional and defaulted, like everywhere else
-# this variable appears: unset means the localhost stack, whose SANs have always
-# been covered. docker-compose.https.yml is what passes it here.
+# this variable appears: unset means a localhost stack, whose SANs have always
+# been covered. `certs-job.yaml` passes this release's publicHost here.
 PUBLIC_HOST="${PUBLIC_HOST:-localhost}"
 
-# Same charset as deploy/docker/entrypoint.sh and render-realm.sh enforce. Here
+# Same charset as deploy/docker/entrypoint.sh enforces. Here
 # it keeps a stray character out of an openssl `-addext` argument, where it
 # would either be rejected with an opaque message or silently produce a
 # certificate with the wrong SAN.
@@ -124,11 +125,11 @@ else
     PUBLIC_SAN="DNS:$PUBLIC_HOST"
 fi
 
-# CN and SAN are `keycloak`, the compose service name, because that is the host
-# the gears dial (`https://keycloak:8443/...`) and therefore the name rustls
-# checks the certificate against -- rustls matches on SAN, not CN, so the SAN is
-# the load-bearing one. `localhost` and 127.0.0.1 are included so a human can
-# verify either endpoint with `curl --cacert ca.crt` from the Docker host.
+# CN and SAN are `keycloak`, the Service name, because that is the host the
+# gears dial (`https://keycloak:8443/...`) and therefore the name rustls checks
+# the certificate against -- rustls matches on SAN, not CN, so the SAN is the
+# load-bearing one. `localhost` and 127.0.0.1 are included so a human can
+# verify either endpoint with `curl --cacert ca.crt` from inside a pod.
 KC_SANS=(DNS:keycloak DNS:localhost IP:127.0.0.1)
 UI_SANS=(DNS:localhost IP:127.0.0.1)
 # Appended, not substituted: the local names must keep working on a stack that
@@ -250,13 +251,12 @@ fi
 # would have made it readable by both application processes, since both images
 # happen to run as uid 1000 and so file ownership cannot tell them apart.
 #
-# `ui.key` goes to ROOT for the same reason, from the other direction: `ui`
-# mounts it by `volume.subpath` and its nginx master is root, so root ownership
-# costs that container nothing -- while `keycloak`, which mounts this whole
-# volume as uid 1000, then cannot read the UI's private key. (The gears mount
-# `ca.crt` alone, so no key is even visible there -- see the `gears` service in
-# docker-compose.yml. These chowns are the second layer, for the container that
-# does mount the whole volume.)
+# `ui.key` goes to ROOT for the same reason, from the other direction: the UI
+# pod's nginx master runs as root, so root ownership costs that container
+# nothing -- while a container reading this material as uid 1000 cannot read
+# the UI's private key. (The gears project `ca.crt` alone, so no key is even
+# visible there -- see gears-deployment.yaml's `items`. These chowns are the
+# second layer, for anything that does read the whole set.)
 chown "$OWNER_UID:$OWNER_GID" "$CA_CRT" "$KC_CRT" "$KC_KEY" "$UI_CRT"
 chown 0:0 "$CA_KEY" "$UI_KEY"
 chmod 644 "$CA_CRT" "$KC_CRT" "$UI_CRT"

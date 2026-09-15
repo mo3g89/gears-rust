@@ -719,10 +719,8 @@ mod ssh_invocation_tests {
     /// config override, gix's transport dispatch) shows up here.
     ///
     /// A real clone against a real private remote is not possible in this
-    /// suite — there are no credentials, and the compose stack's
-    /// `git-fixture` serves smart-HTTP only (`deploy/compose/git-fixture/serve.sh`
-    /// runs `git http-backend` behind a Python CGI server; it has no sshd).
-    /// This is the closest honest substitute.
+    /// suite — there are no credentials, and no sshd to clone from. This is
+    /// the closest honest substitute.
     #[test]
     #[cfg(unix)]
     fn gix_actually_invokes_the_configured_ssh_command_for_an_ssh_remote() {

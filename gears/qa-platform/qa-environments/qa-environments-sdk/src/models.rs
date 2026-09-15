@@ -147,7 +147,7 @@ pub struct Environment {
     pub observed_build: Option<String>,
     /// Per-environment default branch **override**: the middle tier of qa-runs'
     /// branch-resolution chain, which is `explicit → this → the repository's
-    /// own default_branch` (parity spec §3.4 rule 1).
+    /// own default_branch`.
     ///
     /// `None` means "no override", not "no branch" — the repository default
     /// then applies. Always either `None` or a trimmed, non-empty string:
@@ -157,17 +157,10 @@ pub struct Environment {
     /// # Why this exists
     ///
     /// Added 2026-08-14 by user decision (qa-runs Task 13b), raised by Task 13.
-    /// The source system has the column — `platforms_meta.default_branch TEXT`
-    /// (`manager/migrations/001_initial.sql:233`) — read by **legacy's**
-    /// `PlatformsService::get_platform_default_branch`, whose own doc calls it
-    /// *"the per-platform default branch override (falls back to repo
-    /// default)"* (`manager/src/services/platforms.rs:845-848`). Legacy's
-    /// "platform" is this gear's [`Environment`]; the names in that citation
-    /// are legacy's and do not rename with it. This gear
-    /// shipped without it, so a launch that named no branch silently used the
-    /// *repository's* default where the source system would have used the
-    /// environment's — with no error and no warning for an operator who had
-    /// pinned an environment to a release branch.
+    /// Without this tier a launch that named no branch silently used the
+    /// *repository's* default rather than the environment's — with no error and
+    /// no warning for an operator who had pinned an environment to a release
+    /// branch.
     ///
     /// Unlike [`Self::observed_version`] and [`Self::observed_build`], which are
     /// machine-written and therefore appear in no write DTO, this field is
@@ -178,19 +171,13 @@ pub struct Environment {
     /// Whether this environment is its product's **default** — what the Run and
     /// Schedule dialogs' "Default cluster" option resolves to.
     ///
-    /// # Why this exists, and why it is not the source system's behaviour
+    /// # Why this exists
     ///
-    /// In the source system "Default cluster" meant *no platform at all* — legacy's
-    /// name for what this gear calls an environment — and the
-    /// runner fell through to its own in-cluster `ServiceAccount`
-    /// (`manager/src/routes/runs.rs` resolves the platform context to
-    /// `(None, None, None, None)`; `manager/src/services/argo.rs` mounts a
-    /// kubeconfig only `if let Some(platform_name)`). That worked because the
-    /// source system's manager ran **inside** the cluster under test. qa-platform
-    /// runs beside the clusters it tests, so that meaning is dead here — it
-    /// produced runs that dispatched and then failed every test on missing
-    /// credentials. **Decision (user, 2026-08-31): the option resolves to the
-    /// product's default environment instead.**
+    /// The control plane runs **beside** the environments it tests, not inside
+    /// one, so "Default cluster" cannot mean "no environment, fall through to an
+    /// in-cluster `ServiceAccount`": that produces runs which dispatch and then
+    /// fail every test on missing credentials. **Decision (user, 2026-08-31):
+    /// the option resolves to the product's default environment instead.**
     ///
     /// **At most one environment per (tenant, product) has this set.**
     /// `EnvironmentsService` enforces it by clearing the previous holder in the same
@@ -217,7 +204,7 @@ pub struct Environment {
     /// material lives behind. Empty for an environment whose credentials have
     /// never been written through the plugin path.
     ///
-    /// Populated by the plugin path; the legacy column beside it
+    /// Populated by the plugin path; the single-reference column beside it
     /// ([`Self::kubeconfig_credstore_ref`]) is still authoritative until the
     /// contract migration. `m20260903_000011_environment_plugin_columns`
     /// backfills this from that field, so the two agree from the moment the
@@ -257,13 +244,13 @@ pub struct Environment {
     /// Populated by the plugin path;
     /// `m20260903_000011_environment_plugin_columns` backfills it from each
     /// environment's `VPADM_NAMESPACE` variable, which stays authoritative
-    /// for the legacy observer until the contract migration.
+    /// for the existing observer until the contract migration.
     pub config: serde_json::Value,
     /// The `FieldRole::BaseUrl` projection of [`Self::observed_attrs`] —
     /// [`Self::vhp_base_url`] with the product's name taken out of it. `None`
     /// means "never conclusively detected", exactly as it does there.
     ///
-    /// Populated by the plugin path; the legacy column beside it
+    /// Populated by the plugin path; the product-specific column beside it
     /// (`vhp_base_url`) is still authoritative until the contract migration,
     /// and both are written from the same observation until then.
     pub observed_base_url: Option<String>,
@@ -272,8 +259,8 @@ pub struct Environment {
     /// looked at and for one whose health read failed —
     /// [`Self::health_checked_at`] is what separates those two.
     ///
-    /// Populated by the plugin path; the legacy [`Self::cluster`] view beside
-    /// it is still authoritative until the contract migration.
+    /// Populated by the plugin path; the [`Self::cluster`] view beside it is
+    /// still authoritative until the contract migration.
     pub health_state: HealthState,
     /// Why the most recent health read reached the state it did, when there is
     /// something to say. Classified text only — never a formatted error, and
@@ -484,7 +471,8 @@ pub struct NewEnvironment {
     /// [`FieldDesc::key`](qa_product_sdk::descriptor::FieldDesc::key).
     ///
     /// This is the plugin-shaped channel and the one Task 22's generated form
-    /// uses; the legacy [`Self::kubeconfig`]/[`Self::kubeconfig_credstore_ref`]
+    /// uses; the single-credential
+    /// [`Self::kubeconfig`]/[`Self::kubeconfig_credstore_ref`]
     /// pair is still accepted so the shipped UI keeps working, and
     /// `EnvironmentsService` desugars it into one entry of this map keyed by
     /// [`sole_required_secret_key`](qa_product_sdk::descriptor::sole_required_secret_key)
@@ -504,31 +492,18 @@ pub struct NewEnvironment {
     /// this struct only ever describes a row that does not exist yet, so "leave
     /// it unchanged" has no referent and `None` can mean "no override" without
     /// ambiguity. That is the whole argument, and it stands on this gear's own
-    /// create semantics rather than on legacy's.
+    /// create semantics.
     ///
-    /// It is worth saying what does **not** justify it, because an earlier version
-    /// of this comment used exactly that reasoning: legacy's create path is an
-    /// *upsert* that assigns `default_branch = $7` unconditionally, so there an
-    /// absent value **clears** an existing row's override
-    /// (`manager/src/services/platforms.rs:385-410`). That cannot be the reason
-    /// two states suffice here, because **this gear's create can never reach an
-    /// existing row** — it mints a fresh `Uuid::new_v4()` and a name collision
-    /// becomes `EnvironmentNameExists` rather than an update
-    /// (`environments_sea_repo.rs:66`, `:96-100`). Legacy's clear-on-create is
-    /// unreachable in this port, so it justifies nothing.
-    ///
-    /// That unreachability is itself a divergence, and it is **pre-existing and
-    /// deliberately left alone**: legacy `POST`ing an existing platform name with
-    /// `default_branch` absent silently clears the stored override, where this gear
-    /// returns a conflict. It predates this field, applies identically to
-    /// `description` and `product_id`, and changing it would be a change to the
-    /// gear's create contract rather than to this column. Recorded so the
-    /// asymmetry with [`EnvironmentPatch::default_branch`] is not mistaken for an
-    /// oversight.
+    /// What makes it stand is that **create can never reach an existing row**: it
+    /// mints a fresh `Uuid::new_v4()`, and a name collision becomes
+    /// `EnvironmentNameExists` rather than an update
+    /// (`environments_sea_repo.rs:66`, `:96-100`). A create therefore has no
+    /// stored override it could clear, so there is no third state to express.
+    /// Recorded so the asymmetry with [`EnvironmentPatch::default_branch`] is
+    /// not mistaken for an oversight.
     ///
     /// Whatever is supplied is trimmed, with blank normalised to `None`, by
-    /// `EnvironmentsService` — as legacy's create normaliser also does
-    /// (`platforms.rs:385-392`).
+    /// `EnvironmentsService`.
     pub default_branch: Option<String>,
     /// Make this environment its product's default. Defaults to `false`.
     ///
@@ -589,22 +564,19 @@ pub struct EnvironmentPatch {
     ///
     /// # Why three states and not two
     ///
-    /// The source system's patch path is genuinely three-state, via a
-    /// `"__NULL__"` sentinel string: an **absent** field keeps the stored value
-    /// (`WHEN $6 IS NULL THEN platforms_meta.default_branch`), an **empty or
-    /// whitespace-only** one clears the column, and any other value sets the
-    /// trimmed text (`manager/src/services/platforms.rs:447-496`). A plain
-    /// `Option<String>` here would collapse "absent" and "explicitly emptied"
-    /// into one `None` and drop the clear, so an operator who unpinned an
-    /// environment would find the old branch still in force with no error and no
-    /// warning — the same silent-divergence failure this field was added to
-    /// fix. `Option<Option<String>>` is also already this struct's convention
-    /// for `product_id` and `description`.
+    /// The patch path is genuinely three-state, carried over the wire by a
+    /// `"__NULL__"` sentinel string: an **absent** field keeps the stored value,
+    /// an **empty or whitespace-only** one clears the column, and any other
+    /// value sets the trimmed text. A plain `Option<String>` here would collapse
+    /// "absent" and "explicitly emptied" into one `None` and drop the clear, so
+    /// an operator who unpinned an environment would find the old branch still
+    /// in force with no error and no warning — the silent failure this field was
+    /// added to prevent. `Option<Option<String>>` is also already this struct's
+    /// convention for `product_id` and `description`.
     ///
-    /// [`NewEnvironment::default_branch`] needs only two states, for a reason of this
-    /// gear's own — a row being created has no stored value to keep. See that
-    /// field's doc, which also records why legacy's clear-on-create upsert is
-    /// *not* the reason, being unreachable in this port.
+    /// [`NewEnvironment::default_branch`] needs only two states, for a reason of
+    /// this gear's own — a row being created has no stored value to keep. See
+    /// that field's doc.
     #[allow(
         clippy::option_option,
         reason = "tri-state patch field: unchanged vs. cleared vs. set"
@@ -646,22 +618,19 @@ pub struct NewVariable {
 /// Environment-variable names the test runner owns. No pipeline or environment
 /// variable may take one, compared **case-insensitively**.
 ///
-/// Exactly the source system's `RESERVED_PIPELINE_VARIABLE_NAMES`
-/// (`../testrunner/manager/src/routes/settings.rs:15-27`), name for name and in
-/// the same order.
+/// The list is frozen: it is part of the runner contract
+/// (`cpt-cf-qa-fr-runner-contract`), so a name may not be added or removed
+/// without changing every existing test repository.
 ///
 /// # Why this is enforced, and why it lives in the SDK
 ///
-/// The source system rejects these names on **all three** environment write
-/// paths — run parameters (`routes/settings.rs:153`), pipeline variables
-/// (`:105-108`) and platform variables, which reach the same check indirectly
-/// (`routes/platforms.rs:473` → `:505 merge_pipeline_variables` →
-/// `routes/settings.rs:243` → `:108`) — all landing on one
-/// `eq_ignore_ascii_case` sweep at `routes/settings.rs:80-88`.
+/// The names are rejected on **all three** environment write paths — run
+/// parameters, pipeline variables, and environment variables — by one
+/// `eq_ignore_ascii_case` sweep.
 ///
 /// That is not cosmetic. `RP_API_KEY` is supplied to the runner as a secret
-/// **reference**, never a value (`manager/src/services/argo.rs:443-452`), and
-/// the later environment tiers override earlier ones by name. A variable
+/// **reference**, never a value, and the later environment tiers override
+/// earlier ones by name. A variable
 /// literally named `RP_API_KEY` would therefore replace the reference with
 /// operator-supplied text — which qa-runs' `RunExecutor` port
 /// (`domain::ports::run_executor::RunEnv::new`) documents as its safety

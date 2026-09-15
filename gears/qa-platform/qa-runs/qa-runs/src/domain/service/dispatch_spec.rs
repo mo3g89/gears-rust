@@ -683,7 +683,7 @@ where
         run: &Run,
         nodes: Vec<ExecutionNode>,
     ) -> Result<RunSpec, DomainError> {
-        let dispatch = match run.platform_id {
+        let dispatch = match run.environment_id {
             None => None,
             Some(environment_id) => Some(self.plugin_dispatch(ctx, environment_id).await?),
         };
@@ -727,7 +727,7 @@ where
 
         let variables = self
             .environments
-            .list_variables(ctx, run.platform_id)
+            .list_variables(ctx, run.environment_id)
             .await
             .map_err(|error| environments_error(&error))?;
 
@@ -757,7 +757,7 @@ where
 
         let env = runvars::assemble(RunVarInputs {
             statics,
-            variables: runvars::split_by_scope(variables, run.platform_id),
+            variables: runvars::split_by_scope(variables, run.environment_id),
             plugin_env,
             // The *stored* parameters, already normalized by
             // `params::normalize` at launch — a raw `"  FOO  "` would otherwise

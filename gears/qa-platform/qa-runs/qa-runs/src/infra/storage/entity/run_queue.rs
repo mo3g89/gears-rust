@@ -22,11 +22,10 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
     pub tenant_id: Uuid,
-    /// Queue partition key. Physical column stays `platform_id`: Phase B
+    /// Queue partition key. Physical column stays `environment_id`: Phase B
     /// renames the aggregate and this Rust field, not the column. The rename
     /// to the column itself is deferred to this plan's later expand/contract
     /// migrations.
-    #[sea_orm(column_name = "platform_id")]
     pub environment_id: Uuid,
     /// The waiting run. Unique per tenant — see `idx_qa_run_queue_tenant_run`.
     pub run_id: Uuid,

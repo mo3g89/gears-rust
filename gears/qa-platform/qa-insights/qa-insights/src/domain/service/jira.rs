@@ -959,13 +959,13 @@ where
             plan: plan_path.clone(),
             app_version: row.product_version.clone(),
             // No resolved display name: this gear denormalizes only
-            // `platform_id` (a UUID) on `qa_test_results`, not a platform
+            // `environment_id` (a UUID) on `qa_test_results`, not a platform
             // name, and resolving one would mean handing this service a
             // `EnvironmentReader` dependency for a value that is prose in the
             // issue body only — never matched on, never stored. The port's
             // own `None` fallback (legacy's `"default"`, `jira.rs:129`)
-            // already covers the absence. `platform_id` itself is not lost:
-            // it goes onto `NewJiraBug::platform_id` below, which is what the
+            // already covers the absence. `environment_id` itself is not lost:
+            // it goes onto `NewJiraBug::environment_id` below, which is what the
             // registry and the skip list actually need.
             platform: None,
             run_name: row.run_id.to_string(),
@@ -1006,7 +1006,7 @@ where
                     repo_id,
                     plan_path,
                     app_version: row.product_version.clone(),
-                    platform_id: row.platform_id,
+                    environment_id: row.environment_id,
                     summary: bug_summary(&row.test_name),
                 },
             )

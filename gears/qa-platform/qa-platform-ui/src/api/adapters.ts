@@ -63,54 +63,29 @@ import type {
 type S = components['schemas'];
 
 // ---------------------------------------------------------------------------
-// Stale-schema widenings (Task 26 review C-3)
+// Wire-type aliases.
 //
-// Task 25 renamed `platform_id`/`platform`/`last_platform(_id)` to
-// `environment_id`/`environment`/`last_environment(_id)` on the ACTUAL wire, on every
-// DTO below. `generated/openapi.d.ts` was not regenerated (`EnvironmentDtoWithPluginFields`
-// below explains why that is a decision, U5, not an oversight), so it still declares the
-// retired names and not the real ones. Every one of these types widens one generated DTO
-// to admit the field it actually carries today, alongside the stale one the schema still
-// declares — so a caller reads/writes the REAL wire key while still passing `tsc` against
-// the frozen schema. Read the field names directly off the gears' own `dto.rs` files, not
-// off this generated schema, before touching any of these.
-//
-// This is not optional plumbing: sending the stale name is a 400 (`LaunchRunReq`,
-// `NewScheduleReq`, `QueueQuery` each carry a ruling-G-4 trap that rejects `platform_id`
-// by name), and reading the stale name off a response is silently `undefined` forever,
-// which is exactly the defect C-3 found — the UI compiled and its tests passed while it
-// sent a field the gear now refuses.
+// These were widenings: `generated/openapi.d.ts` predated Task 25's rename and
+// the product-plugin columns, so each of these intersected a generated DTO with
+// the field it actually carried. The schema is regenerated and declares those
+// fields itself, so the intersections are gone and these are plain aliases —
+// kept only so the consuming modules keep one import apiece. Inline them freely.
 // ---------------------------------------------------------------------------
-export type LaunchRunReqWithEnvironmentId = S['LaunchRunReq'] & { environment_id?: string | null };
-export type NewScheduleReqWithEnvironmentId = S['NewScheduleReq'] & { environment_id?: string | null };
-export type RunDtoWithEnvironmentId = S['RunDto'] & { environment_id?: string | null };
-export type ScheduleDtoWithEnvironmentId = S['ScheduleDto'] & { environment_id?: string | null };
-export type QueueEntryDtoWithEnvironmentId = S['QueueEntryDto'] & { environment_id: string };
-export type TestResultDtoWithEnvironmentId = S['TestResultDto'] & { environment_id?: string | null };
-export type DashboardRunDtoWithEnvironmentId = S['DashboardRunDto'] & { environment_id?: string | null };
-export type FailedTestCardDtoWithEnvironmentId = S['FailedTestCardDto'] & { environment_id?: string | null };
-export type JiraBugDtoWithEnvironmentId = S['JiraBugDto'] & { environment_id?: string | null };
-export type PlanTestAnalyticsDtoWithEnvironment = S['PlanTestAnalyticsDto'] & {
-  last_environment?: string | null;
-  last_environment_id?: string | null;
-};
-export type AnalyticsListItemDtoWithEnvironment = S['AnalyticsListItemDto'] & {
-  last_environment?: string | null;
-  last_environment_id?: string | null;
-};
-/** `DashboardStatsDto`, with its three nested DTO arrays each widened the same way. */
-export type DashboardStatsDtoWithEnvironmentIds = Omit<
-  S['DashboardStatsDto'],
-  'recent_runs' | 'active_runs_list' | 'failed_recent'
-> & {
-  recent_runs: DashboardRunDtoWithEnvironmentId[];
-  active_runs_list: DashboardRunDtoWithEnvironmentId[];
-  failed_recent: FailedTestCardDtoWithEnvironmentId[];
-};
-/** `GroupedSummariesDto.environment[]` — the real wire key for what the stale schema
- *  still calls `grouped.platform[]` (itself an array of the type Task 25 renamed from
- *  `PlatformGroupSummaryDto` to `EnvironmentGroupSummaryDto`, fields `platform_id`/
- *  `platform` -> `environment_id`/`environment`). */
+export type LaunchRunReqWithEnvironmentId = S['LaunchRunReq'];
+export type NewScheduleReqWithEnvironmentId = S['NewScheduleReq'];
+export type RunDtoWithEnvironmentId = S['RunDto'];
+export type ScheduleDtoWithEnvironmentId = S['ScheduleDto'];
+export type QueueEntryDtoWithEnvironmentId = S['QueueEntryDto'];
+export type TestResultDtoWithEnvironmentId = S['TestResultDto'];
+export type DashboardRunDtoWithEnvironmentId = S['DashboardRunDto'];
+export type FailedTestCardDtoWithEnvironmentId = S['FailedTestCardDto'];
+export type JiraBugDtoWithEnvironmentId = S['JiraBugDto'];
+export type PlanTestAnalyticsDtoWithEnvironment = S['PlanTestAnalyticsDto'];
+export type AnalyticsListItemDtoWithEnvironment = S['AnalyticsListItemDto'];
+export type DashboardStatsDtoWithEnvironmentIds = S['DashboardStatsDto'];
+/** `GroupedSummariesDto.environment[]` — an array of
+ *  `EnvironmentGroupSummaryDto`, whose id and name fields are `environment_id`
+ *  and `environment`. */
 export type EnvironmentGroupRow = {
   environment_id: string;
   environment?: string | null;
@@ -1263,26 +1238,7 @@ export function customPlanReq(
  *  `version_detected_at` and `version_detect_error` are still served directly. `available` IS carried
  *  since Task 21 (a fixed leading column in the environments table);
  *  `kubeconfig_credstore_ref` is not, and Task 19 dropped it anyway. */
-/**
- * The fields `EnvironmentDto` gained after `generated/openapi.d.ts` was last
- * regenerated.
- *
- * **The generated schema is stale by decision** (U5 keeps `make openapi` a
- * documented decision rather than a step, because it needs a running server and
- * a database this environment does not have). Every field here exists on the
- * gear -- `observed_attrs` and the health trio since Task 15, both asserted by
- * `dto.rs`' own tests -- and none of them is in the checked-in schema.
- *
- * Declared, not cast away: an `as any` here would also swallow a field that
- * really is misspelt, and the whole point of the generated types is catching
- * that. **Delete this the moment the schema is regenerated**, which is a
- * branch-close item.
- */
-type EnvironmentDtoWithPluginFields = S['EnvironmentDto'] & {
-  observed_attrs?: Record<string, string>;
-  health_state?: string;
-  health_detail?: string | null;
-};
+type EnvironmentDtoWithPluginFields = S['EnvironmentDto'];
 
 export function environmentFromDto(dto: EnvironmentDtoWithPluginFields): EnvironmentInfo {
   return {

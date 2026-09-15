@@ -202,7 +202,7 @@ pub enum DomainError {
     /// Not "the environment's queue", which is what this line used to say
     /// (as "the platform's queue", before Task 25's wire rename). `queued_depth`
     /// is a scoped count, so the limit binds per (scope, environment) rather
-    /// than per environment: two tenants sharing a `platform_id` each get
+    /// than per environment: two tenants sharing a `environment_id` each get
     /// their own budget, and a hierarchical policy whose scope admits several
     /// tenants counts all of them while `insert` stamps only
     /// `subject_tenant_id`. See `service::admission`'s depth check and
@@ -213,9 +213,9 @@ pub enum DomainError {
     /// causes for the launch path's 429 and gives each its own knob (guide lines
     /// 74, 240-242). One variant could not name which setting an operator has to
     /// change, which is the only actionable content either message has.
-    #[error("run queue for environment {platform_id} is full: {queued} of {limit} slots used")]
+    #[error("run queue for environment {environment_id} is full: {queued} of {limit} slots used")]
     QueueFull {
-        platform_id: Uuid,
+        environment_id: Uuid,
         queued: usize,
         limit: u32,
     },
@@ -259,10 +259,10 @@ pub enum DomainError {
     ///
     /// A launch whose platform cannot be read **fails**, and that is deliberate:
     /// `qa_environment_leases` (renamed from `qa_platform_leases`) is keyed on a
-    /// bare `platform_id` and is not tenant-partitioned, so persisting an
+    /// bare `environment_id` and is not tenant-partitioned, so persisting an
     /// unverified platform id would let one
     /// tenant's run take the global lease on another tenant's platform. See
-    /// `domain::repos::NewQueueRow::platform_id`.
+    /// `domain::repos::NewQueueRow::environment_id`.
     #[error("environments error: {0}")]
     Environments(String),
 
@@ -756,16 +756,16 @@ impl From<DomainError> for CanonicalError {
             // rather than a claim about which row the caller should go and
             // look at.
             DomainError::QueueFull {
-                platform_id,
+                environment_id,
                 queued,
                 limit,
             } => RunResourceError::resource_exhausted(format!(
-                "Run queue for environment {platform_id} is full: {queued} of {limit} slots used"
+                "Run queue for environment {environment_id} is full: {queued} of {limit} slots used"
             ))
             // The subject is the *setting*, which is what an operator changes.
             .with_quota_violation(
                 "queue_max_depth",
-                format!("{queued} of {limit} queued rows for environment {platform_id}"),
+                format!("{queued} of {limit} queued rows for environment {environment_id}"),
             )
             .create(),
             DomainError::ConcurrencyLimit { limit } => RunResourceError::resource_exhausted(
@@ -1039,7 +1039,7 @@ mod canonical_mapping_tests {
             (DomainError::ExecutorFailed(SENTINEL.to_owned()), None),
             (
                 DomainError::QueueFull {
-                    platform_id: id,
+                    environment_id: id,
                     queued: 20,
                     limit: 20,
                 },
@@ -1285,7 +1285,7 @@ mod canonical_mapping_tests {
     fn both_capacity_refusals_are_429_and_name_their_setting() {
         let platform = Uuid::from_u128(0x17);
         let (status, body) = rendered(DomainError::QueueFull {
-            platform_id: platform,
+            environment_id: platform,
             queued: 20,
             limit: 20,
         });
@@ -1443,7 +1443,7 @@ mod tests {
     #[test]
     fn a_callers_own_refusal_survives_verbatim() {
         let full = DomainError::QueueFull {
-            platform_id: Uuid::from_u128(0x0C01),
+            environment_id: Uuid::from_u128(0x0C01),
             queued: 20,
             limit: 20,
         };

@@ -157,13 +157,13 @@ impl QaRunsClientV1 for QaRunsLocalClient {
     async fn list_queue(
         &self,
         ctx: &SecurityContext,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
         limit: u32,
     ) -> Result<Vec<QueueEntry>, QaRunsError> {
         Ok(self
             .services
             .runs
-            .queue_page(ctx, platform_id, &page_of(limit))
+            .queue_page(ctx, environment_id, &page_of(limit))
             .await
             .map_err(|e| as_queue_error(None, e))?
             .items)
@@ -334,7 +334,7 @@ mod tests {
                 repo_id: Uuid::from_u128(0x0B01),
                 path: "plans/smoke.yaml".to_owned(),
             },
-            platform_id: None,
+            environment_id: None,
             branch: Some("main".to_owned()),
             cron: "0 3 * * *".to_owned(),
             exclusive_choice: None,

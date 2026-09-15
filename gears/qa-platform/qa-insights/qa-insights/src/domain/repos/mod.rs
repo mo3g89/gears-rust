@@ -14,7 +14,7 @@
 //!
 //! # There are no foreign keys, in either direction
 //!
-//! `run_id`, `repo_id` and `platform_id` all name rows in *other gears'*
+//! `run_id`, `repo_id` and `environment_id` all name rows in *other gears'*
 //! schemas, and DESIGN §3.7 forbids cross-schema foreign keys — so unlike
 //! qa-runs' repositories, nothing here can lean on the database to reject a
 //! write against a parent that does not exist.

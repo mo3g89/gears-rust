@@ -4,18 +4,14 @@ Postgres is reachable in-cluster at qa-platform-postgres:5432 (headless Service)
 Public origin: {{ .Values.publicOrigin }}
 Public host:   {{ include "qa-platform.publicHost" . }}
 Issuer:        {{ include "qa-platform.issuer" . }}
-{{- if not .Values.keycloakRealmJson }}
+{{- if .Values.keycloakRealmJson }}
 
-WARNING: keycloakRealmJson is empty. The qa-platform-realm ConfigMap was
-created with an empty realm-qa-platform.json, which Keycloak will fail to
-import at start-up (an opaque error with nothing pointing back at this) --
-and that realm is what pins the qa-platform-workflow client's secret, the
-premise the whole ephemeral-H2-across-restarts design rests on (spec §3.3).
-Render the realm for this release's publicOrigin and re-install/upgrade with
-its output:
-  ./render-realm.sh '{{ .Values.publicOrigin }}' <out-dir>
-  helm upgrade --install qa-platform ... \
-    --set-file keycloakRealmJson=<out-dir>/realm-qa-platform.json
+NOTE: keycloakRealmJson is set, so the qa-platform-realm ConfigMap carries the
+realm you supplied rather than the one this chart renders. It must already list
+{{ .Values.publicOrigin }} in the qa-platform-ui client's redirectUris and
+webOrigins, and must pin the qa-platform-workflow client's secret to
+argo.workflowClientSecret -- nothing checks either, and a mismatch surfaces as a
+failed login or a 401 from a workflow pod, neither of which names this setting.
 {{- end }}
 {{- if and .Values.gears.hostAliases.enabled (not .Values.uiServiceClusterIP) }}
 

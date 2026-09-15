@@ -930,7 +930,7 @@ enum ExclusivitySource {
 /// touches — inside the struct the three per-kind resolvers each build differently.
 struct Resolved {
     target: RunTarget,
-    platform_id: Option<Uuid>,
+    environment_id: Option<Uuid>,
     /// Rule 6: the branch label **is** the recorded test version. There is no
     /// version-to-branch mapping and looking for one is the withdrawn
     /// requirement `DECOMPOSITION.md:123`'s Withdrawn bullet records (`:122` is the
@@ -986,7 +986,7 @@ impl Resolved {
         NewRun {
             name,
             target: self.target.clone(),
-            platform_id: self.platform_id,
+            environment_id: self.environment_id,
             test_version: Some(self.test_version.clone()),
             app_version: self.app_version.clone(),
             app_build: self.app_build.clone(),
@@ -1121,12 +1121,12 @@ impl<R: RunsRepository> LaunchService<R> {
     /// Read the target platform, which is also the **tenant-ownership check**.
     ///
     /// Not an optimisation and not decoration. `qa_environment_leases`
-    /// (renamed from `qa_platform_leases`)' primary key is a bare `platform_id`,
+    /// (renamed from `qa_platform_leases`)' primary key is a bare `environment_id`,
     /// so the lease is **not** tenant-partitioned: a
-    /// run row carrying another tenant's `platform_id` drives its dispatcher to
+    /// run row carrying another tenant's `environment_id` drives its dispatcher to
     /// acquire the *global* lease on that platform and block the owning tenant's
-    /// runs. Nothing downstream re-checks — `qa_runs.platform_id` has no foreign
-    /// key and `domain::repos::NewQueueRow::platform_id` says in full that it is
+    /// runs. Nothing downstream re-checks — `qa_runs.environment_id` has no foreign
+    /// key and `domain::repos::NewQueueRow::environment_id` says in full that it is
     /// unverifiable there. This read is where ownership is established, and it
     /// is established by qa-environments' own PEP, under the caller's context.
     ///
@@ -1136,9 +1136,9 @@ impl<R: RunsRepository> LaunchService<R> {
     async fn read_platform(
         &self,
         ctx: &SecurityContext,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
     ) -> Result<Option<Environment>, DomainError> {
-        match platform_id {
+        match environment_id {
             None => Ok(None),
             Some(id) => self
                 .environments
@@ -1386,7 +1386,7 @@ impl<R: RunsRepository> LaunchService<R> {
     /// platform-derived argument of `submit_workflow`, and says why at
     /// `:146-148`: *"Collection runs never target a real platform (see the
     /// `None`s above), so there is nothing to be exclusive about."* A collect
-    /// launch carrying a `platform_id` would therefore be a shape the source
+    /// launch carrying a `environment_id` would therefore be a shape the source
     /// system cannot produce, and accepting it silently would mount that
     /// platform's kubeconfig, snapshot its `APP_VERSION`/`APP_BUILD` and admit
     /// its variables tier into a run that only enumerates. Refused, so the
@@ -1413,7 +1413,7 @@ impl<R: RunsRepository> LaunchService<R> {
         request: &LaunchRequest,
         repo_id: Uuid,
     ) -> Result<TargetFacts, DomainError> {
-        if request.platform_id.is_some() {
+        if request.environment_id.is_some() {
             return Err(DomainError::Validation {
                 field: "platform_id".to_owned(),
                 message: "a collect run enumerates test cases and never targets a platform"
@@ -2502,11 +2502,11 @@ impl<R: RunsRepository> LaunchService<R> {
     /// # Why this matches on the pair, and not on the admission alone
     ///
     /// [`Admission::Queued`] means the admitter wrote a `qa_run_queue` row, whose
-    /// `NewQueueRow::platform_id` is not nullable - there is nothing to queue
+    /// `NewQueueRow::environment_id` is not nullable - there is nothing to queue
     /// against without a platform. So `(Queued, None)` should not occur.
     ///
     /// It is nevertheless matched rather than filled in with a fallback. The
-    /// previous shape was `run.platform_id.unwrap_or_else(Uuid::nil)` under a
+    /// previous shape was `run.environment_id.unwrap_or_else(Uuid::nil)` under a
     /// comment asserting the fallback was unreachable *because of what Task 14's
     /// admitter does* - an assertion about another module, backed by a silent
     /// sentinel. And nil is not an innocent placeholder here: it is this
@@ -2521,7 +2521,7 @@ impl<R: RunsRepository> LaunchService<R> {
     /// row the admitter wrote stays `queued`, which is recoverable rather than
     /// lost **if the queue row is coherent**: Task 14's tick claims that row and
     /// `Created -> Dispatching` is a legal transition, so the run resumes. That
-    /// holds only because the row carries its *own* `platform_id`, which came from
+    /// holds only because the row carries its *own* `environment_id`, which came from
     /// the admitter rather than from this run - and the whole reason this arm exists
     /// is that those two disagreed. If the row's platform is also wrong, the tick
     /// dispatches against the wrong platform's lease and the recovery is worse than
@@ -2542,7 +2542,7 @@ impl<R: RunsRepository> LaunchService<R> {
         admitted: Admitted,
     ) -> Result<LaunchOutcome, DomainError> {
         let Admitted { admission, slot } = admitted;
-        match (admission, run.platform_id) {
+        match (admission, run.environment_id) {
             (Admission::Queued { queue_id, .. }, Some(_)) => {
                 self.transition(ctx, &run, RunState::Queued, RunStatePatch::default())
                     .await?;
@@ -2620,7 +2620,7 @@ impl<R: RunsRepository> LaunchService<R> {
         // The platform read is the tenant-ownership check - see
         // `read_platform`. It runs before the catalog reads so a launch aimed at
         // somebody else's platform is refused before it costs a plan lookup.
-        let platform = self.read_platform(ctx, request.platform_id).await?;
+        let platform = self.read_platform(ctx, request.environment_id).await?;
 
         // Rules 1, 2, 3 and (through `branch`) 6.
         let facts = self.resolve_target(ctx, request, platform.as_ref()).await?;
@@ -2640,7 +2640,7 @@ impl<R: RunsRepository> LaunchService<R> {
 
         Ok(Resolved {
             target: request.target.clone(),
-            platform_id: request.platform_id,
+            environment_id: request.environment_id,
             // Rule 6: the branch label *is* the recorded test version.
             test_version: facts.branch.clone(),
             // Snapshotted from the platform at launch, never re-derived: a
@@ -2765,7 +2765,7 @@ impl<R: RunsRepository> LaunchService<R> {
         // was not updated. An auto-rerun (Task 15's re-run, and qa-insights'
         // Task 31) is an ordinary launch and must stay one.
         //
-        // Matched on the **kind**, not on `platform_id.is_none()`. The
+        // Matched on the **kind**, not on `environment_id.is_none()`. The
         // platformless arm inside `Admitter::admit` reaches the same
         // `Unqueued` outcome, and relying on it would make the bypass a
         // consequence of `collect_target_facts` refusing a platform — a

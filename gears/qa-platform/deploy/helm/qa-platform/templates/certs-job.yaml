@@ -11,10 +11,9 @@
      applying the resulting Secret needs kubectl. No single image gives a
      reproducible, first-party answer for both:
        - `images.postgres` (already pinned, already pulled by this chart)
-         is exactly what the compose stack's own gen-cert.sh already runs
-         under, and its header explains why (postgres:16 ships openssl,
-         the keycloak image does not) -- reused here as an initContainer
-         rather than adding a second cert-generation image to trust.
+         ships both bash and openssl, which the keycloak image does not --
+         see gen-cert.sh's own header. Reused here as an initContainer rather
+         than adding a second cert-generation image to trust.
        - `images.kubectl` is `registry.k8s.io/kubectl`, the Kubernetes
          project's own distroless kubectl image, pinned to an immutable
          version tag (see values.yaml's comment for how that tag was
@@ -170,9 +169,8 @@ spec:
       serviceAccountName: qa-platform-certs
       restartPolicy: Never
       # gen-cert.sh chowns the CA key and the ui leaf's key to root, and the
-      # keycloak leaf and its key to uid 1000 (matching the keycloak/gears
-      # images it targets in compose) -- both chowns require root inside the
-      # initContainer. postgres:16 itself runs as root by default, but this
+      # keycloak leaf and its key to uid 1000 (the uid the keycloak and gears
+      # images run as) -- both chowns require root inside the initContainer. postgres:16 itself runs as root by default, but this
       # is set explicitly rather than relied on implicitly.
       securityContext:
         runAsUser: 0

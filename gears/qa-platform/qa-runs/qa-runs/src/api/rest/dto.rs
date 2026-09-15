@@ -168,9 +168,8 @@ pub struct RunTargetDto {
     pub custom_plan_id: Option<Uuid>,
     /// Where a `collect` run's runner posts its per-file case counts, becoming
     /// `VHP_COLLECT_URL`. Required for `collect` - though an empty string is
-    /// accepted and means "collect but report nowhere", which is the source
-    /// system's own behaviour for a blank URL
-    /// (`manager/src/services/argo.rs:52-58`). Ignored for the other kinds.
+    /// accepted and means "collect but report nowhere". Ignored for the other
+    /// kinds.
     pub collect_url: Option<String>,
 }
 
@@ -312,9 +311,9 @@ impl TryFrom<RunTargetDto> for sdk::RunTarget {
 /// A run's lifecycle state. Note `canceled`, one `l` - a queue row's
 /// equivalent state is spelled `cancelled`, and the difference is deliberate.
 ///
-/// A client ported from the source system must **re-map, not merely re-case**:
-/// `created`, `queued`, `dispatching`, `canceled`, `timed_out` and `expired`
-/// have no equivalent there.
+/// The set is `created`, `queued`, `dispatching`, `running`, `succeeded`,
+/// `failed`, `canceled`, `timed_out`, `expired` and `error`; a client must match
+/// on the whole set rather than assume a smaller one.
 //
 // Mirrors `sdk::RunState`, and everything below is why rather than what a
 // caller needs - kept off the doc comment so it stays out of the published
@@ -539,23 +538,18 @@ pub struct RunDto {
     /// text names the run holding an environment.
     pub name: String,
     pub target: RunTargetDto,
-    /// Renamed from `platform_id` (Task 25): the wire now agrees with the
-    /// Rust field. The physical column is unmoved — it is still
-    /// `platform_id`, and `infra::storage::entity::run::Model` still pins
-    /// `#[sea_orm(column_name = "platform_id")]` on its own `environment_id`
-    /// field — but that attribute is now the *only* bridge between two names
-    /// instead of standing beside a second, wire-level one. The column
-    /// itself waits for this plan's later expand/contract migrations (ruling
-    /// B3); only the wire moved here. Every other `platform_id` on this
+    /// Renamed from `environment_id` (Task 25): the wire now agrees with the
+    /// Rust field. The column moved with it: `environment_id` is now the
+    /// column, the Rust field and the wire key alike. Every other `environment_id` on this
     /// crate's wire (requests and responses alike) was renamed the same way
     /// — this is the one place it is spelled out in full.
     ///
     /// **This was a breaking API change** (Task 25): a client reading
-    /// `platform_id` out of a response now finds it absent, replaced by
+    /// `environment_id` out of a response now finds it absent, replaced by
     /// `environment_id`. (This type is a response - a client never *sends*
     /// one, so there is no 400 to raise here. The 400 for a stale *request*
     /// is on the request-side types: [`LaunchRunReq::environment_id`] and
-    /// [`NewScheduleReq::environment_id`] both refuse a `platform_id` sent in
+    /// [`NewScheduleReq::environment_id`] both refuse a `environment_id` sent in
     /// their place explicitly - see the first one's doc, and ruling G-4.)
     pub environment_id: Option<Uuid>,
     /// Branch actually resolved and executed against.
@@ -629,7 +623,7 @@ impl From<sdk::Run> for RunDto {
             id: r.id,
             name: r.name,
             target: r.target.into(),
-            environment_id: r.platform_id,
+            environment_id: r.environment_id,
             test_version: r.test_version,
             app_version: r.app_version,
             app_build: r.app_build,
@@ -669,10 +663,10 @@ impl From<RunWithResult> for RunDto {
 
 /// A run's five outcome counters.
 ///
-/// `failed` is the failed-**or-errored** count. The source system keeps
-/// `FAILED` and `ERROR` as distinct per-test statuses and folds them together
-/// in every aggregate that produces these numbers; `sdk::RunResult` explains
-/// why a sixth counter would be a silent regression.
+/// `failed` is the failed-**or-errored** count: `FAILED` and `ERROR` are
+/// distinct per-test statuses and are folded together in every aggregate that
+/// produces these numbers. `sdk::RunResult` explains why a sixth counter would
+/// be a silent regression.
 #[derive(Debug, Clone, Copy)]
 #[toolkit_macros::api_dto(response)]
 pub struct RunResultDto {
@@ -771,7 +765,7 @@ pub struct RunDetailDto {
 pub struct QueueEntryDto {
     pub id: Uuid,
     pub run_id: Uuid,
-    /// Renamed from `platform_id` (Task 25) — see [`RunDto::environment_id`]'s
+    /// Renamed from `environment_id` (Task 25) — see [`RunDto::environment_id`]'s
     /// doc for why.
     pub environment_id: Uuid,
     /// `plan`, `test`, or `custom_plan`.
@@ -808,7 +802,7 @@ impl From<sdk::QueueEntry> for QueueEntryDto {
         Self {
             id: q.id,
             run_id: q.run_id,
-            environment_id: q.platform_id,
+            environment_id: q.environment_id,
             run_kind: q.run_kind.as_str().to_owned(),
             source: q.source.into(),
             exclusive: q.exclusive,
@@ -864,7 +858,7 @@ pub struct StartedRunDto {
 pub struct LaunchRunReq {
     pub target: RunTargetDto,
     /// `null` launches a run with no target environment. Such a run is never
-    /// queued and never blocks anything. Renamed from `platform_id`
+    /// queued and never blocks anything. Renamed from `environment_id`
     /// (Task 25) — see [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// Test-content branch. When absent, resolution falls back to the
@@ -900,7 +894,7 @@ pub struct LaunchRunReq {
     // A plain comment, not a doc comment, and `#[schema(ignore = true)]`
     // alongside it - NEW-I-1 of the Task 25 re-review: `pub(crate)` stops
     // other crates seeing this field, but does nothing to stop `utoipa`
-    // deriving a `platform_id` schema property from it (and publishing this
+    // deriving a `environment_id` schema property from it (and publishing this
     // comment as that property's description, back when it was a `///`).
     // Both halves are fixed here: the attribute hides the property, and the
     // demoted comment means there is nothing to publish even if the
@@ -916,7 +910,8 @@ impl LaunchRunReq {
     /// # What is checked here and why it is here rather than downstream
     ///
     /// * **The pre-Task-25 field name.** The private `legacy_platform_id`
-    ///   field being `Some` means the caller sent `platform_id`, and this is refused
+    ///   field being `Some` means the caller sent the superseded `environment_id`
+    ///   key, and this is refused
     ///   before anything else - ruling G-4, closing Critical-1 of the Task 25
     ///   review, which found the field was otherwise silently ignored rather
     ///   than refused.
@@ -937,20 +932,16 @@ impl LaunchRunReq {
     ///
     /// # Why `collect` is refused *here* and not in the codec
     ///
-    /// A collect run bypasses admission entirely (`service::launch`, and
-    /// `manager/src/services/argo.rs:369-372`): no per-environment queue, no
-    /// `queue_max_depth`, no `max_concurrent_runs`. Accepting one on the run
-    /// submission endpoint would hand **any authenticated caller** an unbounded
-    /// third path around both 429 causes the frozen guide enumerates (guide
-    /// lines 240-242) - a starvation vector aimed at the very hourly cycle the
-    /// bypass exists to protect.
+    /// A collect run bypasses admission entirely (`service::launch`): no
+    /// per-environment queue, no `queue_max_depth`, no `max_concurrent_runs`.
+    /// Accepting one on the run submission endpoint would hand **any
+    /// authenticated caller** an unbounded third path around both 429 causes the
+    /// frozen guide enumerates (guide lines 240-242) - a starvation vector aimed
+    /// at the very hourly cycle the bypass exists to protect.
     ///
-    /// It is also a divergence from the source system, which is the deciding
-    /// argument. Legacy has **no** path from a run-submission API to a collect
-    /// launch: `run_collect_cycle` is internal
-    /// (`manager/src/services/collect.rs:157-179`), and the Analytics button
-    /// posts to `POST /api/analytics/collect` - a different endpoint on a
-    /// different surface. Our REST surface should have none either.
+    /// Collect has its own entry point for the same reason: `POST
+    /// /qa/v1/analytics/collect` on qa-insights, a different endpoint on a
+    /// different surface. The run-submission surface should have none.
     ///
     /// **The refusal is here rather than in [`TryFrom<RunTargetDto>`] on
     /// purpose.** That impl is the *codec*, shared with the read path: it is the
@@ -972,8 +963,8 @@ impl LaunchRunReq {
         if self.legacy_platform_id.is_some() {
             return Err(DomainError::Validation {
                 field: "platform_id".to_owned(),
-                message: "was renamed to `environment_id` (Task 25); send `environment_id` \
-                          instead of `platform_id`."
+                message: "was renamed to `environment_id` (Task 25); send \
+                          `environment_id` instead of `platform_id`."
                     .to_owned(),
             });
         }
@@ -1020,7 +1011,7 @@ impl LaunchRunReq {
 
         Ok(sdk::LaunchRequest {
             target,
-            platform_id: self.environment_id,
+            environment_id: self.environment_id,
             branch: self.branch,
             include_tags: self.include_tags,
             exclude_tags: self.exclude_tags,
@@ -1069,9 +1060,8 @@ pub const MAX_SCHEDULE_NAME_LEN: usize = 255;
 /// absent case to confuse - a missing key is a deserialization failure, not a
 /// silent `auto`.
 ///
-/// It is also the vocabulary the source system stores
-/// (`manager/src/services/exclusivity.rs`, `format_exclusive_annotation`), so an
-/// operator reading a schedule here and the same schedule there sees the same
+/// It is also the vocabulary the column stores, so an operator reading a
+/// schedule over the API and the same schedule in the database sees the same
 /// three words.
 ///
 /// # This is a second home for the vocabulary, and the test is what pays for it
@@ -1123,7 +1113,7 @@ pub struct ScheduleDto {
     pub name: String,
     pub target: RunTargetDto,
     /// `null` schedules a run with no target environment. Such a run is
-    /// never queued and never blocks anything. Renamed from `platform_id`
+    /// never queued and never blocks anything. Renamed from `environment_id`
     /// (Task 25) — see [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// Branch each fire resolves against. `null` falls back to the
@@ -1150,8 +1140,8 @@ pub struct ScheduleDto {
     pub slack_notifications_enabled: bool,
     /// Channel override; `null` means the deployment-wide default channel.
     pub slack_channel: Option<String>,
-    /// The events that notify, as the six lowercase tokens legacy serializes -
-    /// `pending`, `in_progress`, `succeeded`, `failed`, `error`, `skipped`.
+    /// The events that notify, as the six lowercase tokens - `pending`,
+    /// `in_progress`, `succeeded`, `failed`, `error`, `skipped`.
     pub slack_notification_events: Vec<String>,
     /// Latest due time this schedule has fired for; `null` if it never has.
     ///
@@ -1172,7 +1162,7 @@ impl From<sdk::Schedule> for ScheduleDto {
             id: s.id,
             name: s.name,
             target: s.target.into(),
-            environment_id: s.platform_id,
+            environment_id: s.environment_id,
             branch: s.branch,
             cron: s.cron,
             exclusive_choice: exclusive_choice_to_wire(s.exclusive_choice).to_owned(),
@@ -1196,9 +1186,7 @@ impl From<sdk::Schedule> for ScheduleDto {
 ///
 /// The PUT is a **full replace** matching `sdk::NewSchedule`, so the two bodies
 /// are the same body and a second near-identical type would be a place for them
-/// to drift. The source system's edit endpoint takes its *create* form too
-/// (`manager/src/routes/schedules.rs`, `api_update`), so this is also what a
-/// ported caller already sends.
+/// to drift.
 ///
 /// It is not a PATCH: `serde_with` is absent (see this module's header), so a
 /// tri-state patch on [`Self::exclusive_choice`] - itself a tri-state - would
@@ -1237,8 +1225,7 @@ impl From<sdk::Schedule> for ScheduleDto {
 /// the one omission whose blast radius is the whole schedule rather than one of
 /// its fields, and the next section is why that one earns the exception.
 ///
-/// ## `enabled` is required, and that is the legacy quirk this port exists not
-/// to repeat
+/// ## `enabled` is required
 ///
 /// `ScheduleService::update` preserves `enabled` by construction - it is a field
 /// of `NewSchedule`, so a replace states it. That is only safe while the wire
@@ -1247,13 +1234,8 @@ impl From<sdk::Schedule> for ScheduleDto {
 /// `#[serde(default = "…true")]` into a silent *re-enable* of a schedule an
 /// operator had paused.
 ///
-/// The source system has exactly the second failure, from the other direction:
-/// its edit form carries no suspended flag at all
-/// (`manager/src/models.rs`, `CreateScheduleForm`), so it edits by deleting the
-/// `CronWorkflow`, recreating it, and re-suspending it by hand - with an error
-/// message that has to tell the operator the schedule is now running when the
-/// restore fails. Requiring the field is what makes that unrepresentable here
-/// rather than merely unlikely.
+/// Requiring the field is what makes a silent enable or disable
+/// unrepresentable rather than merely unlikely.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
 pub struct NewScheduleReq {
@@ -1261,7 +1243,7 @@ pub struct NewScheduleReq {
     pub name: String,
     pub target: RunTargetDto,
     /// `null` schedules a run with no target environment. Renamed from
-    /// `platform_id` (Task 25) — see [`RunDto::environment_id`]'s doc for why.
+    /// `environment_id` (Task 25) — see [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// `null` resolves the branch at launch time, as a manual launch does.
     pub branch: Option<String>,
@@ -1285,7 +1267,7 @@ pub struct NewScheduleReq {
     // the `TryFrom` below refuses a `Some` the same way `into_domain` does.
     // Plain comment and `#[schema(ignore = true)]`, not a doc comment, for
     // the same reason (NEW-I-1 of the Task 25 re-review): otherwise `utoipa`
-    // publishes both a `platform_id` schema property and this text as its
+    // publishes both a `environment_id` schema property and this text as its
     // description.
     #[serde(rename = "platform_id")]
     #[schema(ignore = true)]
@@ -1358,8 +1340,8 @@ impl TryFrom<NewScheduleReq> for sdk::NewSchedule {
         if req.legacy_platform_id.is_some() {
             return Err(ScheduleFieldError::from(DomainError::Validation {
                 field: "platform_id".to_owned(),
-                message: "was renamed to `environment_id` (Task 25); send `environment_id` \
-                          instead of `platform_id`."
+                message: "was renamed to `environment_id` (Task 25); send \
+                          `environment_id` instead of `platform_id`."
                     .to_owned(),
             }));
         }
@@ -1399,7 +1381,7 @@ impl TryFrom<NewScheduleReq> for sdk::NewSchedule {
             // Untrimmed on purpose - see above; the service normalises.
             name: req.name,
             target: req.target.try_into()?,
-            platform_id: req.environment_id,
+            environment_id: req.environment_id,
             branch: req.branch,
             cron: req.cron,
             exclusive_choice: exclusive_choice_from_wire(&req.exclusive_choice)?,
@@ -1413,34 +1395,27 @@ impl TryFrom<NewScheduleReq> for sdk::NewSchedule {
 
 /// The body of `PUT /qa/v1/schedules/{id}/notifications`.
 ///
-/// # `PUT`, where the source system uses `POST`
+/// # Why `PUT`
 ///
-/// Legacy registers this as `axum::routing::post`
-/// (`manager/src/routes/mod.rs:95-98`). The divergence is deliberate and is
-/// already recorded in the PRD and DESIGN, so it is cited here rather than
-/// re-argued: the frozen contract for this subsystem is the **test-facing** one
-/// (environment variables, `plan.yaml`, `TEST_META` -
-/// `cpt-cf-qa-fr-runner-contract`), and the REST surface explicitly is
-/// not. This route already changes its prefix (`/api` -> `/qa/v1`) and its key
-/// (`{name}` -> `{id}`); a full, idempotent replacement of a settings
-/// sub-resource is a `PUT`, which is also what the sibling gears do.
+/// A full, idempotent replacement of a settings sub-resource is a `PUT`, which
+/// is also what the sibling gears do. The frozen contract for this subsystem is
+/// the **test-facing** one — environment variables, `plan.yaml`, `TEST_META`
+/// (`cpt-cf-qa-fr-runner-contract`) — and the REST surface explicitly is not,
+/// so the method is chosen on its own merits.
 ///
 /// # A replacement, so every field is required
 ///
 /// All three are stated on every call - there is no partial edit here for the
-/// same reason `NewScheduleReq` is not a `PATCH`. Legacy defaults `channel` and
-/// `events` (`UpdateScheduleNotificationsForm`,
-/// `manager/src/models.rs:291-299`), and its UI compensates by re-sending the
-/// current values whenever it toggles the switch
-/// (`manager-ui/src/pages/SchedulesPage.tsx:118-127`). Requiring them makes the
-/// same outcome a property of the contract instead of the client's diligence.
+/// same reason `NewScheduleReq` is not a `PATCH`. Defaulting `channel` or
+/// `events` would leave correctness to a client that remembers to re-send the
+/// current values whenever it toggles the switch; requiring them makes the
+/// outcome a property of the contract instead of the client's diligence.
 ///
 /// # What it cannot touch
 ///
-/// Everything else on the schedule. That is the half of legacy's handler that is
-/// behaviour rather than annotation plumbing - *"this endpoint edits Slack
-/// settings only, so a schedule pinned to exclusive (or to parallel) must come
-/// back pinned the same way"* (`manager/src/routes/schedules.rs:854-856`).
+/// Everything else on the schedule: this endpoint edits Slack settings only, so
+/// a schedule pinned to exclusive (or to parallel) must come back pinned the
+/// same way.
 ///
 /// # Where its two checks live
 ///
@@ -1453,7 +1428,7 @@ impl TryFrom<NewScheduleReq> for sdk::NewSchedule {
 /// The `slack_` prefix is kept against `clippy::struct_field_names`, for the
 /// reason [`sdk::ScheduleNotificationSettings`] gives: `ScheduleDto::enabled`
 /// already exists on the same aggregate and means whether the schedule fires,
-/// and these are legacy's own field names.
+/// so the prefix is what keeps the two readable side by side.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
 #[allow(clippy::struct_field_names)]
@@ -1464,8 +1439,8 @@ pub struct UpdateScheduleNotificationsReq {
     pub slack_enabled: bool,
     /// `null` uses the deployment-wide default channel.
     pub slack_channel: Option<String>,
-    /// The events that notify, as the six lowercase tokens legacy serializes:
-    /// `pending`, `in_progress`, `succeeded`, `failed`, `error`, `skipped`.
+    /// The events that notify, as the six lowercase tokens: `pending`,
+    /// `in_progress`, `succeeded`, `failed`, `error`, `skipped`.
     /// An empty list notifies on nothing; an unrecognised name is a 400.
     pub slack_events: Vec<String>,
 }
@@ -1501,16 +1476,9 @@ pub const QUEUE_LIMIT_MIN: u32 = 1;
 #[derive(Debug, Clone, Default)]
 #[toolkit_macros::api_dto(request)]
 pub struct QueueQuery {
-    /// Absent spans every environment in the same window — the same behaviour
-    /// the source system has when its own `platform_id` is absent. **Both
-    /// nouns are deliberate**: this gear's aggregate is the environment, the
-    /// source system's is the platform, and an earlier edit renamed only the
-    /// first half of this sentence, leaving "as the source system's does" to
-    /// claim legacy spans every *environment* — a concept it does not have.
-    /// `domain::repos::queue_repo`'s sibling doc keeps "platform" on both
-    /// sides because it describes the legacy behaviour throughout.
+    /// Absent spans every environment in the same window.
     ///
-    /// Renamed from `platform_id` (Task 25) — see
+    /// Renamed from `environment_id` (Task 25) — see
     /// [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// Absent means [`QUEUE_LIMIT_DEFAULT`]. Out-of-range values are **clamped,
@@ -1549,14 +1517,14 @@ impl QueueQuery {
     ///
     /// # Errors
     ///
-    /// [`DomainError::Validation`] naming `platform_id`, which the error
+    /// [`DomainError::Validation`] naming `environment_id`, which the error
     /// mapping renders as a 400.
     pub fn reject_legacy_field(&self) -> Result<(), DomainError> {
         if self.legacy_platform_id.is_some() {
             return Err(DomainError::Validation {
                 field: "platform_id".to_owned(),
-                message: "was renamed to `environment_id` (Task 25); send `environment_id` \
-                          instead of `platform_id`."
+                message: "was renamed to `environment_id` (Task 25); send \
+                          `environment_id` instead of `platform_id`."
                     .to_owned(),
             });
         }
@@ -1588,7 +1556,7 @@ impl QueueQuery {
             .clamp(QUEUE_LIMIT_MIN, QUEUE_LIMIT_MAX)
     }
 
-    /// Fold the legacy `limit` parameter into an `OData` query.
+    /// Fold the bare `limit` parameter into an `OData` query.
     ///
     /// Two spellings of "how many rows" reach this endpoint: `limit`, which the
     /// frozen guide specifies and which every caller ported from the source
@@ -1720,8 +1688,8 @@ mod tests {
                 repo_id: Uuid::from_u128(1),
                 collect_url: "https://insights.example/qa/v1/collect/r/main".to_owned(),
             },
-            // A blank URL is legal and means "collect but report nowhere"
-            // (`manager/src/services/argo.rs:52-58`). Included so the `TryFrom`
+            // A blank URL is legal and means "collect but report nowhere".
+            // Included so the `TryFrom`
             // cannot start rejecting it as missing: `required` tests for
             // `None`, not for emptiness, and the two must stay different.
             sdk::RunTarget::Collect {
@@ -1741,9 +1709,8 @@ mod tests {
     /// The capability withheld is not the `VHP_COLLECT_URL` variable — that is
     /// unreserved and a launch parameter could always set it — it is the
     /// **admission bypass**: no `max_concurrent_runs`, no `queue_max_depth`, no
-    /// 429. Legacy exposes no such path from run submission
-    /// (`manager/src/services/collect.rs:157-179` is internal; the Analytics
-    /// button posts to `POST /api/analytics/collect`).
+    /// 429. Collect is reachable only through qa-insights'
+    /// `POST /qa/v1/analytics/collect`, never through run submission.
     ///
     /// Break-verified: removing the `matches!(.., RunKind::Collect)` guard in
     /// `into_domain` turns exactly this test red, and
@@ -2140,9 +2107,9 @@ mod tests {
     }
 
     /// **Critical-1 of the Task 25 review, closed.** A client still sending
-    /// `platform_id` used to get a 200 with `environment_id` silently left
+    /// `environment_id` used to get a 200 with `environment_id` silently left
     /// `None` - the CHANGELOG claimed a 400 that did not happen. Driven from a
-    /// JSON literal naming `platform_id`, not `environment_id`, so this is the
+    /// JSON literal naming `environment_id`, not `environment_id`, so this is the
     /// wire shape a stale client actually sends.
     #[test]
     fn a_legacy_platform_id_in_the_launch_body_is_refused_not_silently_dropped() {
@@ -2170,6 +2137,16 @@ mod tests {
                 assert!(
                     message.contains("environment_id"),
                     "the refusal must name the new field: {message}"
+                );
+                // **Both names, and they must differ.** `field` already carries
+                // the refused one, so a message that lost it still contained
+                // "platform_id" through that and read "send `environment_id`
+                // instead of `environment_id`" — which is what a blanket rename
+                // produced, and what shipped to the stand before this assertion
+                // existed.
+                assert!(
+                    message.contains("platform_id"),
+                    "the refusal must also name the field the caller sent: {message}"
                 );
             }
             other => panic!("expected a Validation on platform_id, got {other:?}"),
@@ -2221,7 +2198,7 @@ mod tests {
             target: sdk::RunTarget::CustomPlan {
                 id: Uuid::from_u128(0x22),
             },
-            platform_id: None,
+            environment_id: None,
             test_version: Some("main".to_owned()),
             app_version: None,
             app_build: None,
@@ -2265,7 +2242,7 @@ mod tests {
     }
 
     /// **`RunDto` and `QueueEntryDto` serialize `environment_id`, never
-    /// `platform_id`.**
+    /// `environment_id`.**
     ///
     /// Important-4 of the Task 25 review: a struct-field read
     /// (`assert_eq!(dto.environment_id, ...)`) is a proxy for the wire shape,
@@ -2283,7 +2260,7 @@ mod tests {
             target: sdk::RunTarget::CustomPlan {
                 id: Uuid::from_u128(0x42),
             },
-            platform_id: Some(Uuid::from_u128(0x43)),
+            environment_id: Some(Uuid::from_u128(0x43)),
             test_version: None,
             app_version: None,
             app_build: None,
@@ -2319,7 +2296,7 @@ mod tests {
         let entry = sdk::QueueEntry {
             id: Uuid::from_u128(0x51),
             run_id: Uuid::from_u128(0x52),
-            platform_id: Uuid::from_u128(0x53),
+            environment_id: Uuid::from_u128(0x53),
             run_kind: sdk::RunKind::Plan,
             source: sdk::RunSource::Manual,
             exclusive: false,
@@ -2429,6 +2406,16 @@ mod tests {
                     message.contains("environment_id"),
                     "the refusal must name the new field: {message}"
                 );
+                // **Both names, and they must differ.** `field` already carries
+                // the refused one, so a message that lost it still contained
+                // "platform_id" through that and read "send `environment_id`
+                // instead of `environment_id`" — which is what a blanket rename
+                // produced, and what shipped to the stand before this assertion
+                // existed.
+                assert!(
+                    message.contains("platform_id"),
+                    "the refusal must also name the field the caller sent: {message}"
+                );
             }
             other => panic!("expected a Validation on platform_id, got {other:?}"),
         }
@@ -2436,7 +2423,7 @@ mod tests {
 
     /// **NEW-Minor-1 of the Task 25 re-review.** Naming both parameters is
     /// refused the same as naming only the legacy one - the check does not
-    /// treat a present `environment_id` as license to ignore `platform_id`.
+    /// treat a present `environment_id` as license to ignore `environment_id`.
     #[test]
     fn a_queue_query_naming_both_the_legacy_and_the_new_parameter_is_still_refused() {
         let scoped: QueueQuery = serde_urlencoded::from_str(
@@ -2511,11 +2498,11 @@ mod tests {
     }
 
     /// **Critical-1 of the Task 25 review, closed.** A `PUT
-    /// /qa/v1/schedules/{id}` still sending `platform_id` used to get a 200
+    /// /qa/v1/schedules/{id}` still sending `environment_id` used to get a 200
     /// with `environment_id` silently `None` - detaching an exclusive
     /// schedule from its environment without telling the caller, exactly the
     /// worst of the four silent-replace effects this type's own doc
-    /// describes. Adds `platform_id` beside the fixture's `environment_id`,
+    /// describes. Adds `environment_id` beside the fixture's `environment_id`,
     /// so this is what a client that has not migrated actually sends.
     #[test]
     fn a_legacy_platform_id_in_the_schedule_body_is_refused_not_silently_dropped() {
@@ -2532,11 +2519,15 @@ mod tests {
             error.contains("environment_id"),
             "the refusal must name the new field: {error}"
         );
+        assert!(
+            error.contains("platform_id"),
+            "the refusal must also name the field the caller sent: {error}"
+        );
     }
 
     /// **NEW-Minor-1 of the Task 25 re-review.** Naming both fields is
     /// refused the same as naming only the legacy one - a caller cannot pair
-    /// `platform_id` with a stated `environment_id` and have the refusal
+    /// `environment_id` with a stated `environment_id` and have the refusal
     /// stand down.
     #[test]
     fn a_schedule_body_naming_both_the_legacy_and_the_new_field_is_still_refused() {
@@ -2601,8 +2592,8 @@ mod tests {
     }
 
     /// The tri-state survives a round trip, and `None` is **written** as `auto`
-    /// rather than omitted - the conflation of "inherit" with "parallel" is the
-    /// one mistake the source system made and had to undo.
+    /// rather than omitted - conflating "inherit" with "parallel" is the mistake
+    /// the three-token spelling exists to prevent.
     #[test]
     fn the_exclusive_choice_tri_state_round_trips_through_the_wire() {
         for choice in [Some(true), Some(false), None] {
@@ -2642,14 +2633,12 @@ mod tests {
 
     /// **`enabled` has no default, and an edit that omits it is refused.**
     ///
-    /// This is the legacy quirk the port exists not to repeat, stated as a wire
-    /// property. `ScheduleService::update` preserves `enabled` across an edit by
-    /// construction - but only because a `NewSchedule` always carries one, and
-    /// this DTO is what decides whether the *caller* has to. An
+    /// Stated as a wire property. `ScheduleService::update` preserves `enabled`
+    /// across an edit by construction - but only because a `NewSchedule` always
+    /// carries one, and this DTO is what decides whether the *caller* has to. An
     /// `#[serde(default)]` here would make every edit that forgets the field a
     /// silent disable, and a `default = true` would silently resume a schedule
-    /// an operator had paused, which is verbatim what the source system does
-    /// when its hand-rolled restore fails.
+    /// an operator had paused.
     ///
     /// Both directions are asserted, because a rule that only refuses absence
     /// is half a rule: a stated `false` must survive to the domain request
@@ -2719,7 +2708,7 @@ mod tests {
         full["parameters"] = serde_json::json!([{"name": "K", "value": "v"}]);
 
         let stated = parse_schedule(&full).expect("a complete body parses");
-        assert_eq!(stated.platform_id, Some(Uuid::from_u128(0xB1)));
+        assert_eq!(stated.environment_id, Some(Uuid::from_u128(0xB1)));
         assert_eq!(stated.branch.as_deref(), Some("release/9.0"));
         assert_eq!(stated.include_tags, ["smoke"]);
         assert_eq!(stated.exclude_tags, ["slow"]);
@@ -2728,7 +2717,7 @@ mod tests {
         // The same schedule, replaced by a caller who sent only what they meant
         // to change. Every one of the five is gone.
         let cleared = parse_schedule(&schedule_body()).expect("the fixture parses");
-        assert_eq!(cleared.platform_id, None, "a replace detaches the platform");
+        assert_eq!(cleared.environment_id, None, "a replace detaches the platform");
         assert_eq!(cleared.branch, None);
         assert!(cleared.include_tags.is_empty());
         assert!(cleared.exclude_tags.is_empty());
@@ -2795,7 +2784,7 @@ mod tests {
             target: sdk::RunTarget::CustomPlan {
                 id: Uuid::from_u128(0x32),
             },
-            platform_id: Some(Uuid::from_u128(0x33)),
+            environment_id: Some(Uuid::from_u128(0x33)),
             branch: None,
             cron: "0 3 * * *".to_owned(),
             exclusive_choice: None,
@@ -3055,7 +3044,7 @@ mod tests {
             target: sdk::RunTarget::CustomPlan {
                 id: Uuid::from_u128(0x62),
             },
-            platform_id: None,
+            environment_id: None,
             test_version: None,
             app_version: None,
             app_build: None,
@@ -3086,7 +3075,7 @@ mod tests {
         let entry = QueueEntryDto::from(sdk::QueueEntry {
             id: Uuid::from_u128(0x71),
             run_id: Uuid::from_u128(0x72),
-            platform_id: Uuid::from_u128(0x73),
+            environment_id: Uuid::from_u128(0x73),
             run_kind: sdk::RunKind::Plan,
             source: sdk::RunSource::Scheduled,
             exclusive: false,

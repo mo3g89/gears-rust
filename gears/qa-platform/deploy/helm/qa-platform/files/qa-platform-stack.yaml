@@ -21,16 +21,16 @@
 # plugin crate did.
 #
 # Run this way and the IdP has to be reachable at the `discovery_url` in the
-# oidc-authn-plugin block, which names the compose service `keycloak`; outside
-# compose that name does not resolve. The stack this file is written for is
-# gears/qa-platform/deploy/compose/docker-compose.yml.
+# oidc-authn-plugin block, which names the host `keycloak`; anywhere that name
+# does not resolve, the value has to be rewritten. The Helm chart does exactly
+# that -- see deploy/helm/qa-platform/templates/gears-config-configmap.yaml.
 #
 # `tenant-resolver-rg`, not `single-tenant`: Phase C (Task 14) replaced
 # single-tenant-tr-plugin with rg-tr-plugin. That command line ALSO needs a
 # tenant-typed group already present in the `resource_group` database, or the
 # boot aborts in oagw's post_init before anything listens -- see the
 # `resource-group` gear section near the bottom of this file for the mechanism,
-# and gears/qa-platform/deploy/compose/seed-tenant.sh for the seed itself.
+# and deploy/helm/qa-platform/files/seed-tenant.sh for the seed itself.
 
 server:
   home_dir: "~/.cf-gears"
@@ -53,7 +53,7 @@ server:
 # four-character-plus string, not an expanded value. So this block is pinned
 # to the values Step 4's local Postgres uses. A real deployment overrides
 # this file rather than relying on expansion that does not happen -- that is
-# what the compose file (Task 4) and the Helm chart (Task 17) are for.
+# what deploy/docker/entrypoint.sh's rendering and the Helm chart are for.
 database:
   servers:
     pg_qa_platform:
@@ -183,8 +183,7 @@ gears:
   # which minted a SecurityContext for any caller. Every field below was taken
   # from the plugin's own input structs in
   # gears/system/authn-resolver/plugins/oidc-authn-plugin/src/config.rs, and
-  # the IdP is the `keycloak` service in
-  # gears/qa-platform/deploy/compose/docker-compose.yml.
+  # the IdP is the `keycloak` Service the Helm chart deploys.
   #
   # THE ISSUER/DISCOVERY SPLIT IS THE ONE THING TO UNDERSTAND HERE.
   # `issuer_pattern` matches an `http://` URL while `discovery_url` is
@@ -213,7 +212,7 @@ gears:
   #     Keycloak's private key, and the key material is still fetched over a
   #     TLS connection pinned by config to a CA in this file.
   #
-  #     That jwks.rs check is also why docker-compose.yml has to set
+  #     That jwks.rs check is also why keycloak-deployment.yaml has to set
   #     `KC_HOSTNAME` and `KC_HOSTNAME_BACKCHANNEL_DYNAMIC`. Left to Keycloak's
   #     defaults, the document the gears fetch says
   #     `issuer: https://keycloak:8443/...` while a token minted through the
@@ -309,7 +308,7 @@ gears:
       # `invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))`, which
       # reaches the caller as a 503 "identity provider unreachable" and reads
       # like the IdP being down). See
-      # gears/qa-platform/deploy/compose/keycloak-tls/gen-cert.sh.
+      # deploy/helm/qa-platform/files/keycloak-tls/gen-cert.sh.
       http_client:
         request_timeout: "5s"
         custom_ca_certificate_paths:
@@ -453,9 +452,9 @@ gears:
   #      iterate REGISTERED gears -- libs/toolkit/src/runtime/host_runtime.rs
   #      -- not config keys, so an unmatched key opens no connection and runs
   #      no migration; the credstore gear then fails to find its vendor)
-  #   3. `postgres-credstore` in deploy/compose/docker-compose.argo.yml's
-  #      `CARGO_FEATURES:` default, which is a SECOND COPY of the feature list
-  #      -- and the one that governs every `--argo` deploy, i.e. the remote
+  #   3. `postgres-credstore` in deploy/cargo-features.argo, which is a SECOND
+  #      COPY of the feature list -- and the one that governs every argo build,
+  #      i.e. the remote
   #
   # WHAT THIS COSTS, on the record: secret values are stored UNENCRYPTED in
   # `credstore.credstore_plugin_values.secret_value` (BYTEA). That matches the
@@ -479,7 +478,7 @@ gears:
   # `credstore_plugin_values` here, `credstore_secrets` in the gear -- do not
   # collide. Verified against a throwaway PostgreSQL 16. No initdb change is
   # needed: `credstore` is already in
-  # deploy/compose/initdb/01-create-qa-platform-databases.sh.
+  # deploy/helm/qa-platform/files/initdb/01-create-qa-platform-databases.sh.
   #
   # DO NOT set this gear's log level to `trace`. sea-orm annotates its driver
   # entry points with `#[instrument(level = "trace")]` and the span carries
@@ -512,9 +511,9 @@ gears:
   # degraded, and the REST API that could create that group is the API of the
   # server that just exited.
   #
-  # That circle is why deploy/compose gained a `tenant-seed` one-shot service
-  # (deploy/compose/seed-tenant.sh) that runs BEFORE `gears`, and why the
-  # `gears` service now waits on it. The row it seeds has
+  # That circle is why the chart runs a `tenant-seed` Job
+  # (deploy/helm/qa-platform/files/seed-tenant.sh) as a post-install hook,
+  # ordered after db-migrate. The row it seeds has
   # `id = 00000000-df51-5b42-9538-d2b56b7ee953`, which is not an arbitrary
   # choice twice over: it is the token's `tenant_id` claim (so requests and
   # tenant rows agree -- the RG create path sets `tenant_id = group.id` for a
@@ -572,18 +571,17 @@ gears:
       # `qa-environments.argo.kubeconfig_path` names the kubeconfig this gear
       # uses to write each platform's runner `Secret` into the ARGO cluster
       # (decision D4) -- a different cluster from any platform's own. Its path
-      # is a per-deployment fact (`/etc/qa-platform/k3s-kubeconfig.yaml` is a
-      # bind mount that only docker-compose.argo.yml creates), and this file is
-      # baked into the image, so it cannot be edited per deployment. Committing
-      # a path here would point every non-argo stack -- including the local one
-      # -- at a file that is not mounted.
+      # is a per-deployment fact, and this file is baked into the image, so it
+      # cannot be edited per deployment. Committing a path here would point
+      # every non-argo stack at a file that is not mounted.
       #
       # `deploy/docker/entrypoint.sh` therefore INSERTS a YAML fragment after
       # the anchor line below when $QA_ENVIRONMENTS_ARGO_CONFIG names one,
-      # exactly as it does for qa-runs twenty lines down. The fragment lives in
-      # `deploy/compose/.generated/qa-environments-argo.yaml`, rendered by
-      # `deploy/compose/render-argo.sh` and mounted by
-      # `deploy/compose/docker-compose.argo.yml`.
+      # exactly as it does for qa-runs twenty lines down. In-cluster that
+      # fragment comes from the ConfigMap
+      # `deploy/helm/qa-platform/templates/gears-argo-configmaps.yaml` renders
+      # -- which deliberately omits `kubeconfig_path`, because a pod has a
+      # projected ServiceAccount token instead. Read that file's header.
       #
       # WITHOUT IT, D4 IS INERT AND SILENT: `kubeconfig_path` defaults to
       # `None`, `secret_writer::argo_client` falls back to `Config::infer()`,
@@ -638,17 +636,16 @@ gears:
       #
       # THE ARGO BLOCK IS NOT WRITTEN HERE, AND THE ANCHOR BELOW IS WHY.
       # A committed `executor: argo` would break every deployment built without
-      # the feature -- including the local compose stack, which must stay
-      # kube-free -- and this file is baked into the image, so it cannot be
-      # edited per deployment. `deploy/docker/entrypoint.sh` therefore INSERTS a
-      # YAML fragment after the anchor line below when $QA_RUNS_ARGO_CONFIG
-      # names one, exactly as it already substitutes the database block and the
-      # issuer pattern. The fragment lives in
-      # `deploy/compose/.generated/qa-runs-argo.yaml`, rendered by
-      # `deploy/compose/render-argo.sh` and mounted by
-      # `deploy/compose/docker-compose.argo.yml`; read render-argo.sh for what
-      # every value in it means, and `qa-runs/src/config.rs`
-      # (`ArgoExecutorConfig`) for the knobs themselves.
+      # the `argo` feature, and this file is baked into the image, so it cannot
+      # be edited per deployment. `deploy/docker/entrypoint.sh` therefore
+      # INSERTS a YAML fragment after the anchor line below when
+      # $QA_RUNS_ARGO_CONFIG names one, exactly as it already substitutes the
+      # database block and the issuer pattern. In-cluster that fragment comes
+      # from the ConfigMap
+      # `deploy/helm/qa-platform/templates/gears-argo-configmaps.yaml` renders;
+      # read that file for what every value in it means, and
+      # `qa-runs/src/config.rs` (`ArgoExecutorConfig`) for the knobs
+      # themselves.
       #
       # DO NOT DELETE OR REINDENT THE NEXT LINE. entrypoint.sh requires it to
       # appear exactly once and refuses to start if it does not -- which is the
@@ -668,8 +665,9 @@ gears:
     # WARNING, carried from the qa-insights plan's release-gate items: starting
     # the jira-poller ticker under the default `NoopLeaderElector` makes EVERY
     # replica a leader, and its auto-rerun is bounded only by a local write --
-    # "a race, not a lock", in that gear's own words. Single-replica compose is
-    # safe. Do not raise the gears replica count above 1 without deciding that.
+    # "a race, not a lock", in that gear's own words. A single replica is safe,
+    # which is what the chart deploys. Do not raise the gears replica count
+    # above 1 without deciding that.
     config:
       enable_tickers: true
       reconcile_interval_seconds: 300
@@ -728,7 +726,7 @@ gears:
 # OpenTelemetry configuration (resource identity, tracing, metrics)
 #
 # THE METRICS HALF IS NOW LOAD-BEARING. The four qa-platform gears declare 22
-# metric families between them (the catalog is docs/DESIGN.md 3.9, enumerated
+# metric families between them (the catalog is docs/DESIGN.md 3.11, enumerated
 # from the constants in each gear's `domain::metrics`), and this block is the
 # only switch that decides whether any of them leaves the process.
 #

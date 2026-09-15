@@ -73,7 +73,7 @@
 //!
 //! [`FakePlatforms`] is the `Vec`-backed double behind
 //! [`EnvironmentReader`](crate::domain::ports::EnvironmentReader), which Task 25a added
-//! because `ExecRow::platform_id` is a `Uuid` where legacy's `platform` was a
+//! because `ExecRow::environment_id` is a `Uuid` where legacy's `platform` was a
 //! display name. It lives here rather than in the analytics test modules for
 //! [`FakeCatalog`]'s reason: Task 25b's service is what resolves the names, and
 //! the DTO tier renders them, so two modules need the same double.
@@ -505,7 +505,7 @@ pub fn finished_run(id: Uuid) -> Run {
             repo_id: Uuid::from_u128(0x30),
             path: "plans/smoke.yaml".to_owned(),
         },
-        platform_id: Some(Uuid::from_u128(0x31)),
+        environment_id: Some(Uuid::from_u128(0x31)),
         test_version: Some("main".to_owned()),
         app_version: Some("9.1.0".to_owned()),
         app_build: Some("9.1.0-4412".to_owned()),
@@ -1014,11 +1014,11 @@ pub struct FakePlatforms {
 
 impl FakePlatforms {
     /// Register one platform's display name.
-    pub fn add(&self, platform_id: Uuid, name: &str) {
+    pub fn add(&self, environment_id: Uuid, name: &str) {
         self.names
             .lock()
             .unwrap()
-            .insert(platform_id, name.to_owned());
+            .insert(environment_id, name.to_owned());
     }
 
     /// Make every resolution fail with [`DomainError::Forbidden`].
@@ -1033,12 +1033,12 @@ impl FakePlatforms {
         self.batches.lock().unwrap().clone()
     }
 
-    /// Register `platform_id`'s default-branch override.
-    pub fn set_default_branch(&self, platform_id: Uuid, branch: &str) {
+    /// Register `environment_id`'s default-branch override.
+    pub fn set_default_branch(&self, environment_id: Uuid, branch: &str) {
         self.default_branches
             .lock()
             .unwrap()
-            .insert(platform_id, branch.to_owned());
+            .insert(environment_id, branch.to_owned());
     }
 }
 
@@ -1069,7 +1069,7 @@ impl EnvironmentReader for FakePlatforms {
     async fn default_branch(
         &self,
         _ctx: &SecurityContext,
-        platform_id: Uuid,
+        environment_id: Uuid,
     ) -> Result<Option<String>, DomainError> {
         if *self.fail_reads.lock().unwrap() {
             return Err(DomainError::Forbidden);
@@ -1078,7 +1078,7 @@ impl EnvironmentReader for FakePlatforms {
             .default_branches
             .lock()
             .unwrap()
-            .get(&platform_id)
+            .get(&environment_id)
             .cloned())
     }
 }
@@ -1158,7 +1158,7 @@ pub fn exec_row_at(test_file: &str, status: &str, at: OffsetDateTime) -> ExecRow
         test_name: test_file.to_owned(),
         status: status.to_owned(),
         build: Some("9.1.0-4412".to_owned()),
-        platform_id: Some(Uuid::from_u128(0x31)),
+        environment_id: Some(Uuid::from_u128(0x31)),
         ts: at,
         day: at.date(),
     }
@@ -1196,7 +1196,7 @@ impl RunsLauncher for UnreachableRunsLauncher {
         _repo_id: Uuid,
         _plan_path: &str,
         _test_file: &str,
-        _platform_id: Option<Uuid>,
+        _environment_id: Option<Uuid>,
         _branch: Option<&str>,
     ) -> Result<(), DomainError> {
         unreachable!("Fleet's tests do not launch a single-test run")

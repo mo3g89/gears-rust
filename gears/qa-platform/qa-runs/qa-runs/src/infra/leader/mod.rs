@@ -33,7 +33,7 @@
 //!
 //! * Admission is **N-writer**. Every REST launch can commit a claim inline,
 //!   on any replica, and no election gates that path. Closing it needs a
-//!   database advisory lock keyed on `platform_id`; nothing here is that lock.
+//!   database advisory lock keyed on `environment_id`; nothing here is that lock.
 //! * What election covers is the **tickers**: one replica running `run_tick`,
 //!   so claim reconciliation, the TTL sweep and the timeout sweep are not done
 //!   N times over, and the tick-side cap evaluation has a single evaluator

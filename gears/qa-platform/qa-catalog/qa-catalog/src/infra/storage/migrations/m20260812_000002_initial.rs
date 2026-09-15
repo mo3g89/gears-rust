@@ -6,7 +6,7 @@
 //! JSON array columns (`files`, `tags`) mirror the `holders` column pattern
 //! used by qa-environments' `qa_environment_leases` (renamed from
 //! `qa_platform_leases`). Column, index, and FK order
-//! is kept identical across `POSTGRES_UP`, `MYSQL_UP`, and `SQLITE_UP`,
+//! is kept identical across `POSTGRES_UP` and `SQLITE_UP`,
 //! because a three-way eyeball diff is the only thing that catches a
 //! forgotten dialect — tests exercise `SQLite` only.
 //!
@@ -68,7 +68,11 @@ CREATE TABLE IF NOT EXISTS qa_products (
     description TEXT NOT NULL DEFAULT '',
     folder VARCHAR(255) NULL,
     created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL,
+    -- The product plugin that owns this product's behaviour. Every product
+    -- names one and there is no fallback path (decision D6), so this is
+    -- NOT NULL from the start rather than nullable-then-tightened.
+    plugin_instance_id VARCHAR(512) NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_products_tenant_name ON qa_products(tenant_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_products_tenant_key ON qa_products(tenant_id, product_key);
@@ -133,85 +137,6 @@ CREATE TABLE IF NOT EXISTS qa_test_bundles (
 CREATE INDEX IF NOT EXISTS idx_qa_bundles_expiry ON qa_test_bundles(expires_at);
 ";
 
-const MYSQL_UP: &str = r"
-CREATE TABLE IF NOT EXISTS qa_products (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    product_key VARCHAR(255) NOT NULL,
-    description TEXT NOT NULL DEFAULT (''),
-    folder VARCHAR(255) NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_products_tenant_name (tenant_id, name),
-    UNIQUE KEY idx_qa_products_tenant_key (tenant_id, product_key)
-);
-
-CREATE TABLE IF NOT EXISTS qa_test_repositories (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    product_id VARCHAR(36) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    url VARCHAR(1024) NOT NULL,
-    default_branch VARCHAR(255) NOT NULL,
-    content_root VARCHAR(1024) NOT NULL DEFAULT '',
-    credential_ref VARCHAR(1024) NULL,
-    last_synced_at TIMESTAMP NULL,
-    sync_error TEXT NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_repos_tenant_name (tenant_id, name),
-    KEY idx_qa_repos_product (tenant_id, product_id),
-    CONSTRAINT fk_qa_repos_product FOREIGN KEY (product_id) REFERENCES qa_products(id) ON DELETE RESTRICT
-);
-
-CREATE TABLE IF NOT EXISTS qa_repo_branches (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    repo_id VARCHAR(36) NOT NULL,
-    name VARCHAR(512) NOT NULL,
-    refreshed_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_branches_unique (tenant_id, repo_id, name),
-    CONSTRAINT fk_qa_repo_branches_repo FOREIGN KEY (repo_id) REFERENCES qa_test_repositories(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS qa_ssh_keys (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    credstore_ref VARCHAR(1024) NOT NULL,
-    fingerprint VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_ssh_keys_tenant_name (tenant_id, name)
-);
-
-CREATE TABLE IF NOT EXISTS qa_custom_plans (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    -- Expression defaults (MySQL 8.0.13+) for symmetry with the Postgres
-    -- (`JSONB NOT NULL DEFAULT '[]'`) and SQLite (`TEXT NOT NULL DEFAULT
-    -- '[]'`) definitions; application code always writes these columns
-    -- explicitly on insert.
-    files JSON NOT NULL DEFAULT ('[]'),
-    tags JSON NOT NULL DEFAULT ('[]'),
-    timeout_seconds BIGINT NULL,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    UNIQUE KEY idx_qa_custom_plans_tenant_name (tenant_id, name)
-);
-
-CREATE TABLE IF NOT EXISTS qa_test_bundles (
-    id VARCHAR(36) PRIMARY KEY NOT NULL,
-    tenant_id VARCHAR(36) NOT NULL,
-    storage_ref VARCHAR(2048) NOT NULL,
-    checksum_sha256 VARCHAR(64) NOT NULL,
-    size_bytes BIGINT NOT NULL,
-    expires_at TIMESTAMP NOT NULL,
-    created_at TIMESTAMP NOT NULL,
-    KEY idx_qa_bundles_expiry (expires_at)
-);
-";
 
 const SQLITE_UP: &str = r"
 CREATE TABLE IF NOT EXISTS qa_products (
@@ -222,7 +147,9 @@ CREATE TABLE IF NOT EXISTS qa_products (
     description TEXT NOT NULL DEFAULT '',
     folder TEXT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- See POSTGRES_UP's comment on this column.
+    plugin_instance_id TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_products_tenant_name ON qa_products(tenant_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_products_tenant_key ON qa_products(tenant_id, product_key);
@@ -297,8 +224,11 @@ impl MigrationTrait for Migration {
 
         let sql = match backend {
             sea_orm::DatabaseBackend::Postgres => POSTGRES_UP,
-            sea_orm::DatabaseBackend::MySql => MYSQL_UP,
             sea_orm::DatabaseBackend::Sqlite => SQLITE_UP,
+            // No MySQL schema, and that is a subsystem property rather than
+            // this gear's: qa-insights' indexes exceed InnoDB's 3072-byte key
+            // limit, and the `qa-platform` feature deploys all four gears
+            // together, so no deployment could reach a MySQL arm here.
             other => {
                 return Err(DbErr::Migration(format!(
                     "unsupported database backend: {other:?}"

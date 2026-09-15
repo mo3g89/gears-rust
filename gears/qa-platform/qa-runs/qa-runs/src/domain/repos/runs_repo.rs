@@ -206,7 +206,7 @@ pub struct NewRun {
     /// `{slug}-{n}`, unique within the tenant.
     pub name: String,
     pub target: RunTarget,
-    pub platform_id: Option<Uuid>,
+    pub environment_id: Option<Uuid>,
     pub test_version: Option<String>,
     /// Snapshotted from the target platform at launch, never re-derived.
     pub app_version: Option<String>,

@@ -217,7 +217,7 @@ struct RecordedLaunch {
         dead_code,
         reason = "carried for completeness; no test in this file reads it"
     )]
-    platform_id: Option<Uuid>,
+    environment_id: Option<Uuid>,
     branch: Option<String>,
     bypassed_admission: bool,
 }
@@ -270,7 +270,7 @@ impl RunsLauncher for FakeLauncher {
             repo_id,
             plan_path: String::new(),
             test_file: String::new(),
-            platform_id: None,
+            environment_id: None,
             branch: Some(branch.to_owned()),
             bypassed_admission: true,
         });
@@ -283,14 +283,14 @@ impl RunsLauncher for FakeLauncher {
         repo_id: Uuid,
         plan_path: &str,
         test_file: &str,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
         branch: Option<&str>,
     ) -> Result<(), DomainError> {
         self.launches.lock().unwrap().push(RecordedLaunch {
             repo_id,
             plan_path: plan_path.to_owned(),
             test_file: test_file.to_owned(),
-            platform_id,
+            environment_id,
             branch: branch.map(str::to_owned),
             bypassed_admission: false,
         });
@@ -322,7 +322,7 @@ struct Fixture {
     /// Set by [`fixture_with_platform_branch`]; unused (and left nil) by every
     /// other fixture in this file, which files its bug with no platform at
     /// all — legacy's own `platform: None` branch.
-    platform_id: Uuid,
+    environment_id: Uuid,
     /// The elector this fixture's replica contends under.
     ///
     /// **Task 26's, and the only field here that is not a collaborator of the
@@ -465,7 +465,7 @@ async fn build_on(
         catalog,
         platforms,
         db,
-        platform_id: Uuid::nil(),
+        environment_id: Uuid::nil(),
         elector,
         metrics,
     }
@@ -473,7 +473,7 @@ async fn build_on(
 
 impl Fixture {
     /// File [`JIRA_KEY`] against `test_name`, with `app_version` and
-    /// `platform_id` as given — always under [`UNIVERSE_TEST_REPO_ID`]/
+    /// `environment_id` as given — always under [`UNIVERSE_TEST_REPO_ID`]/
     /// [`UNIVERSE_TEST_PLAN_PATH`], so a catalog entry built from
     /// `universe_test_full` (via [`FakeCatalog::add_test_on_branch_only`])
     /// matches it by `repo_id`.
@@ -481,7 +481,7 @@ impl Fixture {
         &self,
         test_name: &str,
         app_version: Option<&str>,
-        platform_id: Option<Uuid>,
+        environment_id: Option<Uuid>,
     ) {
         let conn = self.db.conn().unwrap();
         let tenant_scope = scope(TENANT);
@@ -496,7 +496,7 @@ impl Fixture {
                     repo_id: UNIVERSE_TEST_REPO_ID,
                     plan_path: UNIVERSE_TEST_PLAN_PATH.to_owned(),
                     app_version: app_version.map(str::to_owned),
-                    platform_id,
+                    environment_id,
                     summary: "s".to_owned(),
                 },
             )
@@ -525,7 +525,7 @@ impl Fixture {
                     jira_key: None,
                     product_version: Some(product_version.to_owned()),
                     app_build: None,
-                    platform_id: None,
+                    environment_id: None,
                     repo_id: Some(UNIVERSE_TEST_REPO_ID),
                     plan_path: Some(UNIVERSE_TEST_PLAN_PATH.to_owned()),
                     branch: branch.map(str::to_owned),
@@ -610,7 +610,7 @@ async fn fixture_with_resolved_bug_auto_rerun_off() -> Fixture {
 }
 
 /// A resolved bug with a genuinely newer build recorded for its plan, and a
-/// catalog entry on the repository default branch (`platform_id: None`, so
+/// catalog entry on the repository default branch (`environment_id: None`, so
 /// the poller never resolves an override) that declares the same test name —
 /// everything the rerun needs to actually launch.
 async fn fixture_with_resolved_bug_and_new_build() -> Fixture {
@@ -630,19 +630,19 @@ async fn fixture_with_resolved_bug_and_new_build() -> Fixture {
 /// two-call fixture shape.
 async fn fixture_with_platform_branch(branch: &str) -> Fixture {
     let mut f = build().await;
-    let platform_id = Uuid::new_v4();
-    f.platforms.set_default_branch(platform_id, branch);
-    f.platform_id = platform_id;
+    let environment_id = Uuid::new_v4();
+    f.platforms.set_default_branch(environment_id, branch);
+    f.environment_id = environment_id;
     f
 }
 
 impl Fixture {
     /// File a resolved bug for `test_name`, with a newer build recorded on
-    /// `branch` — against [`Self::platform_id`], which
+    /// `branch` — against [`Self::environment_id`], which
     /// [`fixture_with_platform_branch`] already registered a default-branch
     /// override for.
     async fn add_resolved_bug_with_new_build(&self, test_name: &str, branch: &str) {
-        self.file_bug(test_name, Some(OLD_VERSION), Some(self.platform_id))
+        self.file_bug(test_name, Some(OLD_VERSION), Some(self.environment_id))
             .await;
         self.record_build(NEW_VERSION, Some(branch)).await;
     }
@@ -889,7 +889,7 @@ async fn a_pass_does_not_touch_another_tenants_open_bug() {
                     repo_id: UNIVERSE_TEST_REPO_ID,
                     plan_path: UNIVERSE_TEST_PLAN_PATH.to_owned(),
                     app_version: Some(OLD_VERSION.to_owned()),
-                    platform_id: None,
+                    environment_id: None,
                     summary: "the other tenant's bug".to_owned(),
                 },
             )

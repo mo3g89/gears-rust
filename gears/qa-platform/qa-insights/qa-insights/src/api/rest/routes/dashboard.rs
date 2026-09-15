@@ -97,9 +97,9 @@ pub(super) fn register_dashboard_routes(router: Router, openapi: &dyn OpenApiReg
              with a row in that window, highest total first; a file declaring two \
              vectors contributes its executions to both, so the totals across that \
              array are not a row count, and an entry whose counters are all zero \
-             means every file carrying that vector was skipped. Three fields of the legacy dashboard payload are deliberately \
+             means every file carrying that vector was skipped. Three fields of the payload are deliberately \
              absent rather than reported as zero, because nothing computes them yet: \
-             total_plans, total_schedules and platforms_summary. product_id narrows every \
+             total_plans, total_schedules and environments_summary. product_id narrows every \
              measured number on this payload to one product - the counts, both lists, the \
              per-run trend, the daily trend, the 24-hour block, flaky_tests and \
              quality_vectors_pass_rate all narrow with it, and none of them stays \

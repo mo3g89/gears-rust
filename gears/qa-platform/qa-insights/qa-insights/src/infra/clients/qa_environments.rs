@@ -462,7 +462,7 @@ mod tests {
     /// coverage.
     ///
     /// What survives of it is the *fixture*: `[b, a, a, c]` is what a caller
-    /// handing over `rows.iter().filter_map(ExecRow::platform_id)` unreduced
+    /// handing over `rows.iter().filter_map(ExecRow::environment_id)` unreduced
     /// actually passes, so this test now exercises the shape the port's doc
     /// promises ("duplicates and ordering are the caller's business") rather than
     /// a tidied one.

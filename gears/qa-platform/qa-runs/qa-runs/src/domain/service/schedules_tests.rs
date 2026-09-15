@@ -62,7 +62,7 @@ fn schedule_payload(name: &str, cron: &str) -> NewSchedule {
             repo_id: REPO,
             path: "plans/smoke.yaml".to_owned(),
         },
-        platform_id: Some(PLATFORM_A),
+        environment_id: Some(PLATFORM_A),
         branch: Some("main".to_owned()),
         cron: cron.to_owned(),
         exclusive_choice: None,
@@ -332,7 +332,7 @@ async fn a_collect_target_cannot_be_scheduled() {
             repo_id: REPO,
             collect_url: "https://insights.example/qa/v1/collect/r/main".to_owned(),
         },
-        platform_id: None,
+        environment_id: None,
         ..schedule_payload(name, HOURLY)
     };
 
@@ -430,7 +430,7 @@ async fn updating_notification_settings_leaves_every_other_field_untouched() {
     assert_eq!(after.id, before.id);
     assert_eq!(after.name, before.name);
     assert_eq!(after.target, before.target);
-    assert_eq!(after.platform_id, before.platform_id);
+    assert_eq!(after.environment_id, before.environment_id);
     assert_eq!(after.branch, before.branch);
     assert_eq!(after.cron, before.cron);
     assert_eq!(
@@ -702,7 +702,7 @@ async fn notification_settings_cannot_smuggle_a_collect_target_past_the_guard() 
                     repo_id: REPO,
                     collect_url: "https://insights.example/qa/v1/collect/r/main".to_owned(),
                 },
-                platform_id: None,
+                environment_id: None,
                 ..pinned_payload("nightly")
             },
         )
@@ -1230,7 +1230,7 @@ async fn the_produced_run_records_its_schedule_id_and_scheduled_source() {
     // Read back off the stored row, not off the request: this is what a
     // consumer reading the run — directly or through the reconcile sweep —
     // actually sees.
-    assert_eq!(runs[0].platform_id, Some(PLATFORM_A));
+    assert_eq!(runs[0].environment_id, Some(PLATFORM_A));
 }
 
 /// **A pass fires at most [`MAX_FIRES_PER_TICK`], and defers the rest rather
