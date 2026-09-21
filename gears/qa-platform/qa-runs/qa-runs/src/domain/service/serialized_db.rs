@@ -13,6 +13,26 @@ use tracing::warn;
 
 use super::DbProvider;
 use crate::domain::error::DomainError;
+// `DE0301` (no infra in domain) is allowed for this one import. The lint is
+// right that a domain module should not name `crate::infra` -- but the
+// alternative here is worse, not better: `is_retryable_contention` takes a
+// `&toolkit_db::Db` because the backend decides which SQLSTATEs are
+// retryable, so moving it into the domain moves a driver handle in with it and
+// trades one DE0301 for a less honest one. The retry policy is domain, the
+// classification of a driver error is not. Kept at the import so a second
+// `crate::infra` use in this module still has to argue for itself.
+//
+// `clippy::useless_attribute` is a false positive here and is allowed on the
+// same item. That lint fires on any `allow` attached to a `use`, because for
+// the lints it knows about the diagnostic lands at the *usage* site, not the
+// import. `DE0301` is a Dylint lint clippy has never heard of, and it emits at
+// the `use` item itself -- verified by deleting the `allow` below, after which
+// `cargo gears lint --dylint -P qa-runs` fails with `DE0301` pointing at
+// exactly this line. Clippy's suggested `#![allow(..)]` would be wrong twice
+// over: an inner attribute is not permitted in this position, and hoisted to
+// the module header it would suppress `DE0301` for the whole file -- the thing
+// the paragraph above says was deliberately not done.
+#[allow(unknown_lints, clippy::useless_attribute, de0301_no_infra_in_domain)]
 use crate::infra::storage::db::is_retryable_contention;
 
 /// A [`DbProvider`] that cannot open an un-escalated transaction.

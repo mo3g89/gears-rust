@@ -13,8 +13,10 @@
 //!
 //! Instance id layout (the suffix needs ≥5 dot-separated tokens):
 //! `gts.cf.toolkit.authz.permission.v1~cf.qa.catalog.<pep_entity>_<action>.v1`,
-//! where `pep_entity` is the `resource_type` string with its `qa.` prefix
-//! stripped (e.g. `qa.test_repo` → `test_repo`). This reuses qa-catalog's own
+//! where `pep_entity` is the entity token of the resource type's GTS id:
+//! strip the registry's `GTS_ID_PREFIX` (`gts.`), then this gear's own
+//! `cf.qa.catalog.` prefix, then the trailing `.v1~` suffix (e.g.
+//! `gts.cf.qa.catalog.test_repo.v1~` → `test_repo`). This reuses qa-catalog's own
 //! GTS namespace (`cf.qa.catalog.*`, the same one its RFC-9457 error surface
 //! uses), not `cf.core.*` — that namespace belongs to the system gears, and
 //! qa-catalog is not one of them. `permissions_tests` asserts every hand-written

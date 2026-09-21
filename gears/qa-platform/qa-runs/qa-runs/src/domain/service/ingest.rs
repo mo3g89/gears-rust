@@ -230,11 +230,12 @@ fn normalize_status(status: &str) -> String {
     status.trim().to_owned()
 }
 
-/// What a per-test status contributes to the four categorised counters.
+/// What a per-test status contributes to the six categorised counters.
 ///
 /// The mapping is the migration's, which is its only definitive record
 /// (`infra::storage::migrations`, the `qa_run_test_results.status` column
-/// comment), ported from `../testrunner/manager/src/routes/plans.rs:188-192`:
+/// comment), ported from `../testrunner/manager/src/routes/plans.rs:188-192`
+/// and extended by two counters this gear owns:
 ///
 /// | Counter | Statuses |
 /// |---|---|
@@ -242,21 +243,46 @@ fn normalize_status(status: &str) -> String {
 /// | `failed` | `FAILED`, `ERROR` — the fold; there is no `error` counter |
 /// | `skipped` | `SKIPPED` |
 /// | `in_progress` | `PENDING`, `RUNNING` |
+/// | `xfail` | `XFAIL` — **this port's own counter**, not the source system's |
+/// | `xpass` | `XPASS` — likewise |
 ///
-/// [`Bucket::Uncategorised`] is not an error case. `XFAIL` and `XPASS` are two of
-/// the eight **known** values and land here on purpose: they count toward `total`
-/// and toward none of the four, so the four do not sum to the total on a run with
-/// expected-failure results. The source system counts them as their own two
-/// categories in analytics (`../testrunner/manager/src/routes/analytics.rs:1359-1360`)
-/// and never folds them into `passed` — **do not correct that by adding them.**
-/// A ninth, unknown value lands here too, which is the open-set rule working:
-/// count what is recognised, store what arrives.
+/// # Why `XFAIL` and `XPASS` are counted, and counted apart
+///
+/// Both used to land in [`Bucket::Uncategorised`], which meant they reached
+/// `total` and no counter, so `passed + failed + skipped + in_progress` fell
+/// short of `total` on any suite containing either — a difference a reader of
+/// the run card or the report could see and not account for. `XFAIL` got a
+/// counter first and `XPASS` was left out; that closed the common case and
+/// left the identity conditional on the rarer one, which was not what the
+/// owner asked for. Both are counted now, and the sum closes for any suite
+/// whose statuses are all recognised.
+///
+/// They are two counters rather than one, and neither is folded into a
+/// neighbour. The source system counts them as their own two categories in
+/// analytics (`../testrunner/manager/src/routes/analytics.rs:1359-1360`) and
+/// never folds either into `passed` — **do not correct that.** They are
+/// different outcomes: an `XFAIL` is a suite behaving as written, an `XPASS`
+/// is a suite whose expectation is now stale. Neither is read by
+/// `domain::state_machine::derive_terminal_state`, so adding them changed no
+/// run's terminal state.
+///
+/// # `Uncategorised` is still not an error case
+///
+/// An unknown value lands there, which is the open-set rule working: count what
+/// is recognised, store what arrives. A lower-case `passed` lands there too
+/// ([`bucket`] is case-sensitive, and says why). So the counters sum to `total`
+/// exactly when every row's status is one of the eight this table names, and
+/// that condition — not a universal invariant — is what
+/// `every_categorised_counter_sums_to_the_total`
+/// pins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Bucket {
     Passed,
     Failed,
     Skipped,
     InProgress,
+    Xfail,
+    Xpass,
     /// Counted in `total` alone.
     Uncategorised,
 }
@@ -275,6 +301,8 @@ fn bucket(status: &str) -> Bucket {
         "FAILED" | "ERROR" => Bucket::Failed,
         "SKIPPED" => Bucket::Skipped,
         "PENDING" | "RUNNING" => Bucket::InProgress,
+        "XFAIL" => Bucket::Xfail,
+        "XPASS" => Bucket::Xpass,
         _ => Bucket::Uncategorised,
     }
 }
@@ -305,6 +333,8 @@ fn apply_bucket(delta: &mut RunResultDelta, bucket: Bucket, sign: i64) {
         Bucket::Failed => delta.failed += sign,
         Bucket::Skipped => delta.skipped += sign,
         Bucket::InProgress => delta.in_progress += sign,
+        Bucket::Xfail => delta.xfail += sign,
+        Bucket::Xpass => delta.xpass += sign,
         Bucket::Uncategorised => {}
     }
 }
@@ -412,6 +442,8 @@ fn tally(rows: &[TestResultRow]) -> RunResult {
             Bucket::Failed => counts.failed += 1,
             Bucket::Skipped => counts.skipped += 1,
             Bucket::InProgress => counts.in_progress += 1,
+            Bucket::Xfail => counts.xfail += 1,
+            Bucket::Xpass => counts.xpass += 1,
             Bucket::Uncategorised => {}
         }
     }
@@ -438,6 +470,8 @@ fn correction(stored: RunResult, wanted: RunResult) -> RunResultDelta {
         failed: diff(wanted.failed, stored.failed),
         skipped: diff(wanted.skipped, stored.skipped),
         in_progress: diff(wanted.in_progress, stored.in_progress),
+        xfail: diff(wanted.xfail, stored.xfail),
+        xpass: diff(wanted.xpass, stored.xpass),
         total: diff(wanted.total, stored.total),
     }
 }
@@ -870,8 +904,12 @@ where
             // emitted: [`Self::apply`] excludes this arm from the measured
             // population, and its comment says why.
             ExecutionEvent::Started => Ok(IngestOutcome::Applied),
-            ExecutionEvent::Log { node, line } => self
-                .fan_out_log(ctx, run_id, &node, &line)
+            ExecutionEvent::Log {
+                node,
+                line,
+                emitted_at,
+            } => self
+                .fan_out_log(ctx, run_id, &node, &line, emitted_at)
                 .await
                 .map(|()| IngestOutcome::Applied),
             ExecutionEvent::TestResult(observation) => self
@@ -1007,6 +1045,7 @@ where
         run_id: Uuid,
         node: &str,
         line: &str,
+        emitted_at: Option<OffsetDateTime>,
     ) -> Result<(), DomainError> {
         self.read_run(ctx, run_id).await?;
         // One line means no embedded line terminator anywhere in the string
@@ -1016,12 +1055,14 @@ where
         // scan over the whole prefixed string: the allocation is sized once
         // and each half is copied exactly once. `flatten_log_char`
         // (`domain::repos::run_logs_repo`) rather than a local closure: it is
-        // the one shared definition of this flattening, and
-        // `infra::executor::argo::watch`'s `LineSkip` must normalise a
-        // freshly re-read line the same way before comparing it against an
-        // anchor built from this method's own output — see that function's
-        // doc for the fix-round 3 bug two independent copies of this rule
-        // once produced.
+        // the one shared definition of this flattening, and this method's
+        // own output is what `domain::repos::log_line::sanitize_line` and
+        // `sanitize_line_for_archive` re-flatten every time this same text is
+        // replayed (live SSE and archive reads alike) -- a second, drifted
+        // copy of the rule would make a re-read of an already-archived line
+        // come back with different bytes than what was actually stored --
+        // see `domain::repos::log_line`'s private `flatten` for the earlier
+        // bug two independent copies of this rule once produced.
         let mut prefixed = String::with_capacity(node.len() + line.len() + 3);
         prefixed.push('[');
         prefixed.extend(node.chars().map(flatten_log_char));
@@ -1064,9 +1105,14 @@ where
         }
         prefixed.extend(line.chars().map(flatten_log_char));
         // The archive gets the **same string** the subscribers get — see this
-        // method's "The prefix" doc section above.
+        // method's "The prefix" doc section above. `node` (unflattened -- the
+        // same key `infra::executor::argo::watch` uses for `node_of`/
+        // `LogResume::last_emitted_for`) and `emitted_at` are Task 2 (WS5):
+        // alongside the archived text, the buffer tracks this node's most
+        // recent emission instant, so the flush that writes `prefixed` can
+        // also upsert `qa_run_log_positions` for it.
         self.archive
-            .record(ctx.subject_tenant_id(), run_id, &prefixed);
+            .record(ctx.subject_tenant_id(), run_id, node, &prefixed, emitted_at);
         self.logs.publish(run_id, prefixed);
         Ok(())
     }

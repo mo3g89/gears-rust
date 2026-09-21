@@ -44,10 +44,9 @@ fn the_declared_schemas_pass_the_registration_check() {
 /// different halves of the same function, and this half is the one the
 /// 2026-08-28 leak was actually in.
 ///
-/// All eight methods are driven and gated as of Task 10, but only seven are
-/// VHP's own: `health_check` is the trait default (`QaProductPluginV1`
-/// supplies it, and `crate::VhpProductPlugin`'s own doc records why this
-/// plugin accepts it — it is stateless, so it caches nothing to echo). The
+/// All seven of VHP's own methods are driven and gated as of Task 10. (There
+/// were eight: the trait carried a `health_check` default that VHP accepted
+/// unchanged. It never had a production caller and was deleted.) The
 /// three that were honest stubs through Task 9 — `prepare_run_access`,
 /// `runner` and `env_contract` — now return real values, and
 /// `prepare_run_access` in particular is driven twice here, once with

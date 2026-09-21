@@ -1,6 +1,8 @@
 //! How a run reaches its target environment: the mounts, environment
-//! variables, and runner shape a plugin hands back to `qa-runs` (spec §5.2,
-//! §7).
+//! variables, and runner shape a plugin hands back to `qa-runs` (see
+//! `gears/qa-platform/docs/features/product-plugins.md`'s
+//! `prepare_run_access` section; `PRODUCT-PLUGINS-DESIGN.md` §5.2 and §7,
+//! cited here before the docs squash, no longer exist).
 //!
 //! `qa-runs`' `KubeconfigMount` generalises into [`RunAccess`] here — one
 //! plugin-shaped seam instead of an inline kubeconfig block, with no other
@@ -131,12 +133,16 @@ impl RunVarContract {
     /// # What the floor actually contains, and what it does not
     ///
     /// Corrected at the Phase E review (finding I-2). This doc used to
-    /// enumerate the floor as spec §7 does — "`TEST_FILES`,
-    /// `TEST_BUNDLE_URL`, `TEST_VERSION`, `COLLECT_ONLY`, and the collect and
-    /// progress URLs" — and that list is **not** what `qa-runs` passes.
-    /// `qa_runs::domain::params::RESERVED_NAMES` is the source system's
-    /// eleven names verbatim, and three of the six §7 names are absent from
-    /// it: `COLLECT_ONLY`, `VHP_COLLECT_URL` and `VHP_PROGRESS_URL`.
+    /// enumerate the floor the way `PRODUCT-PLUGINS-DESIGN.md` §7 once did
+    /// — "`TEST_FILES`, `TEST_BUNDLE_URL`, `TEST_VERSION`, `COLLECT_ONLY`,
+    /// and the collect and progress URLs" — and that list was **not** what
+    /// `qa-runs` passes. (That document is not in the repository any more;
+    /// its successor, `gears/qa-platform/docs/features/product-plugins.md`,
+    /// does not enumerate the floor at all.) `qa_runs::domain::params::RESERVED_NAMES`
+    /// carries the source system's eleven names verbatim plus a twelfth,
+    /// `QA_RUNNER_PYTEST_ARGS` (added later, not a legacy port), and none of
+    /// the three names below is among them: `COLLECT_ONLY`,
+    /// `VHP_COLLECT_URL` and `VHP_PROGRESS_URL`.
     ///
     /// That absence is an **inherited parity exposure, not a regression**: the
     /// source system's own reserved list omits them too, so a run parameter

@@ -163,8 +163,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: qa-platform
-        app.kubernetes.io/component: certs
+        {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "certs") | nindent 8 }}
     spec:
       serviceAccountName: qa-platform-certs
       restartPolicy: Never

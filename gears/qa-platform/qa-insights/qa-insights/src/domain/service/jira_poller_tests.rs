@@ -42,6 +42,7 @@ use crate::domain::ports::metrics::{JiraBugOutcome, JiraPollMetrics, JiraPollOut
 use crate::domain::ports::{CatalogReader, EnvironmentReader, RunsLauncher};
 use crate::domain::repos::{JiraRepository, NewTestResult, ResultsRepository};
 use crate::domain::service::jira::{JiraConfigInput, JiraService};
+use crate::domain::service::resources;
 use crate::domain::service::test_support::{
     DEFAULT_BRANCH, FakeCatalog, FakePlatforms, SlowCatalog, TenantScopedAuthZ,
     UNIVERSE_TEST_PLAN_PATH, UNIVERSE_TEST_REPO_ID, ctx,
@@ -65,6 +66,22 @@ const NEW_VERSION: &str = "2.0.0";
 /// The one `jira_key` every fixture in this file uses — matching the brief's
 /// own `f.bug_is_resolved("V-1")`.
 const JIRA_KEY: &str = "V-1";
+
+/// A second repository of the same tenant, declaring the same
+/// [`UNIVERSE_TEST_PLAN_PATH`] as [`UNIVERSE_TEST_REPO_ID`] — task 2's
+/// composite-key fix (`(tenant_id, repo_id, plan_path)`,
+/// `results_sea_repo.rs:838`) is unreachable by any fixture that never gives
+/// two repositories the same `plan_path`. See
+/// [`a_build_in_one_repository_does_not_gate_a_rerun_for_another`].
+const OTHER_REPO_ID: Uuid = Uuid::from_u128(0x31);
+
+/// [`JIRA_KEY`]'s twin, for the one test in this file that files two bugs in
+/// a single poll pass. A resolved bug drops out of `open_bugs`, so two
+/// *sequential* polls of the same key could never distinguish "no rerun
+/// because the other repository's build doesn't count" from "no rerun
+/// because the bug was already gone" — see
+/// [`a_build_in_one_repository_does_not_gate_a_rerun_for_another`].
+const OTHER_JIRA_KEY: &str = "V-2";
 
 // ---------------------------------------------------------------------------
 // The JIRA double: a scripted status category, nothing else
@@ -545,6 +562,70 @@ impl Fixture {
             .expect("recording the fixture build must succeed");
     }
 
+    /// [`Self::file_bug`] with the JIRA key as a parameter instead of
+    /// [`JIRA_KEY`], still under [`UNIVERSE_TEST_REPO_ID`]/
+    /// [`UNIVERSE_TEST_PLAN_PATH`] — what
+    /// [`a_build_in_one_repository_does_not_gate_a_rerun_for_another`] needs
+    /// to file two bugs of the *same* repository and have both survive one
+    /// poll pass.
+    async fn file_bug_with_key(&self, jira_key: &str, test_name: &str, app_version: Option<&str>) {
+        let conn = self.db.conn().unwrap();
+        let tenant_scope = scope(TENANT);
+        OrmJiraRepository
+            .upsert_bug(
+                &conn,
+                &tenant_scope,
+                TENANT,
+                NewJiraBug {
+                    jira_key: jira_key.to_owned(),
+                    test_name: test_name.to_owned(),
+                    repo_id: UNIVERSE_TEST_REPO_ID,
+                    plan_path: UNIVERSE_TEST_PLAN_PATH.to_owned(),
+                    app_version: app_version.map(str::to_owned),
+                    environment_id: None,
+                    summary: "s".to_owned(),
+                },
+            )
+            .await
+            .expect("filing the fixture bug must succeed");
+    }
+
+    /// [`Self::record_build`] against a caller-supplied repository, still
+    /// under [`UNIVERSE_TEST_PLAN_PATH`] — the fixture for "a different
+    /// repository of the same tenant declares the same plan path", the shape
+    /// the `(tenant_id, repo_id, plan_path)` composite key exists to
+    /// disambiguate.
+    async fn record_build_for_repo(&self, repo_id: Uuid, product_version: &str) {
+        let conn = self.db.conn().unwrap();
+        let tenant_scope = scope(TENANT);
+        OrmResultsRepository
+            .upsert_run_results(
+                &conn,
+                &tenant_scope,
+                TENANT,
+                Uuid::new_v4(),
+                vec![NewTestResult {
+                    test_file: "tests/build_marker_other_repo.py".to_owned(),
+                    test_name: "build_marker_other_repo".to_owned(),
+                    status: "PASSED".to_owned(),
+                    duration: None,
+                    launch_id: None,
+                    jira_key: None,
+                    product_version: Some(product_version.to_owned()),
+                    app_build: None,
+                    environment_id: None,
+                    repo_id: Some(repo_id),
+                    plan_path: Some(UNIVERSE_TEST_PLAN_PATH.to_owned()),
+                    branch: None,
+                    run_finished_at: None,
+                    run_created_at: Some(OffsetDateTime::now_utc()),
+                }],
+                Vec::new(),
+            )
+            .await
+            .expect("recording the fixture build must succeed");
+    }
+
     /// Whether [`JIRA_KEY`] is stored as resolved — a direct repository read,
     /// deliberately not through [`JiraPollerService`]: the property under
     /// test is what the poller *wrote*, and reading it back through the same
@@ -720,6 +801,80 @@ async fn an_auto_rerun_goes_through_the_normal_launch_path() {
     assert_eq!(launch.repo_id, UNIVERSE_TEST_REPO_ID);
     assert_eq!(launch.plan_path, UNIVERSE_TEST_PLAN_PATH);
     assert_eq!(launch.test_file, "tests/t1.py");
+}
+
+/// Task 2: `plan_path` is repository-relative, so a query gated only on
+/// `(tenant_id, plan_path)` — `latest_version_for_plan` dropping
+/// `bug.repo_id`, prior to this task's fix — cannot tell two repositories of
+/// one tenant that both declare [`UNIVERSE_TEST_PLAN_PATH`] apart. One poll
+/// pass, two bugs, so neither assertion depends on the other bug having
+/// already resolved and dropped out of `open_bugs`:
+///
+/// * `T1` ([`JIRA_KEY`]) is filed under [`UNIVERSE_TEST_REPO_ID`] at
+///   [`NEW_VERSION`] — exactly the version that repository's own recorded
+///   build already carries, i.e. *no* new build of `T1`'s own repository
+///   exists. [`OTHER_REPO_ID`] — a second repository of the same tenant,
+///   same `plan_path` — has a build recorded at a different version,
+///   inserted after repository B's so it sorts newest under the four-key
+///   `ORDER BY` if nothing filters it out by repository. A query that drops
+///   `repo_id` sees that row as "the plan's latest" and reruns `T1` — a
+///   rerun this test's first assertion must not observe.
+/// * `T2` ([`OTHER_JIRA_KEY`]) is filed under the *same* repository
+///   ([`UNIVERSE_TEST_REPO_ID`]) at [`OLD_VERSION`], and that repository's
+///   own recorded build (`NEW_VERSION`) really is newer than `T2`'s. This
+///   half is what keeps the test two-way: an implementation that "fixed" the
+///   leak by refusing to match anything (or by comparing against the wrong
+///   repository) would fail to rerun `T2`, and a test asserting only `T1`'s
+///   half would pass against exactly that implementation, which never
+///   reruns anything.
+///
+/// Both outcomes are asserted through the *total* launch count and the
+/// identity of the one launch that must happen — `T1` alone leaking would
+/// show up as 2 launches, and over-correcting to suppress everything would
+/// show up as 0; only the fix leaves exactly 1, and it must be `T2`'s.
+#[tokio::test]
+async fn a_build_in_one_repository_does_not_gate_a_rerun_for_another() {
+    let f = build().await;
+
+    f.catalog
+        .add_test_on_branch_only(DEFAULT_BRANCH, "tests/t1.py", "T1");
+    f.catalog
+        .add_test_on_branch_only(DEFAULT_BRANCH, "tests/t2.py", "T2");
+
+    // Repository B's (`UNIVERSE_TEST_REPO_ID`'s) own build — exactly what
+    // `T1`'s bug already reflects. Inserted first so `OTHER_REPO_ID`'s build
+    // below sorts newer under the shared `ORDER BY`.
+    f.record_build(NEW_VERSION, None).await;
+    // A second repository of the same tenant, same `plan_path`, a
+    // different, later-sorting version that must never leak into
+    // repository B's gate.
+    f.record_build_for_repo(OTHER_REPO_ID, "9.9.9").await;
+
+    f.file_bug_with_key(JIRA_KEY, "T1", Some(NEW_VERSION)).await;
+    f.file_bug_with_key(OTHER_JIRA_KEY, "T2", Some(OLD_VERSION))
+        .await;
+
+    f.service.poll_once(&f.ctx).await.expect("poll");
+
+    assert!(
+        f.bug_is_resolved(JIRA_KEY).await,
+        "the poller resolves every bug it processes, regardless of the rerun decision",
+    );
+    assert!(f.bug_is_resolved(OTHER_JIRA_KEY).await);
+
+    let launches = f.launcher.launches();
+    assert_eq!(
+        launches, 1,
+        "repository A's build must not gate T1's rerun (that alone would leak in a \
+         second, spurious launch), and repository B's own newer build must still gate \
+         T2's rerun (dropping that would leave zero); got {launches} launches total",
+    );
+    assert_eq!(
+        f.launcher.last_launch().test_file,
+        "tests/t2.py",
+        "the one launch that does happen must be T2's: T1's own repository has no new \
+         build, and repository A's newer build belongs to a different repository",
+    );
 }
 
 /// The branch is resolved once and reused (`jira_poller.rs:100-118`). Two
@@ -1221,7 +1376,7 @@ async fn a_refused_pass_is_not_a_failed_pass() {
         StatusCategory::DONE,
         true,
         Arc::new(DenyOneAuthZ {
-            resource: "qa.jira_config",
+            resource: resources::JIRA_CONFIG_NAME,
             action: "get",
         }),
     )
@@ -1314,7 +1469,7 @@ async fn every_swallowed_per_bug_failure_is_counted_under_its_own_class() {
         StatusCategory::DONE,
         true,
         Arc::new(DenyOneAuthZ {
-            resource: "qa.jira_bug",
+            resource: resources::JIRA_BUG_NAME,
             action: "update",
         }),
     )
@@ -1327,7 +1482,7 @@ async fn every_swallowed_per_bug_failure_is_counted_under_its_own_class() {
         StatusCategory::DONE,
         true,
         Arc::new(DenyOneAuthZ {
-            resource: "qa.test_result",
+            resource: resources::TEST_RESULT_NAME,
             action: "list",
         }),
     )

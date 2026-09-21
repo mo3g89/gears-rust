@@ -27,11 +27,14 @@ use crate::domain::error::DomainError;
 use crate::domain::local_client::{QaCatalogLocalClient, QaProductPluginResolverLocalClient};
 use crate::domain::ports::bundle_store::BundleStore;
 use crate::domain::ports::repo_sync::RepoSyncPort;
-use crate::domain::service::{AppServices, QaProductRegistry, ServiceDeps, SyncCache};
+use crate::domain::service::{
+    AppServices, BundleDownloadSigningSecret, QaProductRegistry, ServiceDeps, SyncCache,
+};
 use crate::domain::system_actor;
 use crate::infra::bundle_store::LocalFsBundleStore;
 use crate::infra::fs::create_private_dir_all;
 use crate::infra::git::GixSyncEngine;
+use crate::domain::ports::metrics::{BundleDownloadMetrics, PluginResolutionMetrics};
 use crate::infra::metrics::build_default_adapter;
 use crate::infra::storage::{
     OrmBundlesRepository, OrmCustomPlansRepository, OrmProductsRepository, OrmSshKeysRepository,
@@ -124,6 +127,27 @@ impl Gear for QaCatalog {
             cfg.branch_refresh_interval_seconds,
             cfg.branch_freshness_ttl_seconds
         );
+        // The one loud signal for an unset download signing secret. It is
+        // fail-closed at request time -- `BundlesService::verify_download_
+        // signature` refuses every download, so a deployment in this state
+        // runs no tests at all -- and a per-request 403 in a workflow pod's
+        // log is not where an operator looks. `signing_secret_is_configured`
+        // is the single predicate this check and that refusal share, so the
+        // two cannot drift the way qa-insights' pair once did (its boot check
+        // tested `is_empty()` while the refusal had been raised to a 16-byte
+        // floor, and a short secret then passed boot and failed every
+        // request).
+        if !crate::domain::service::bundles::signing_secret_is_configured(
+            &cfg.bundle_download_signing_secret,
+        ) {
+            warn!(
+                "bundle_download_signing_secret is empty or too short; EVERY test-bundle \
+                 download will be refused with Forbidden and no run will execute a single \
+                 test (fail-closed by design - an empty HMAC key is a publicly known key, \
+                 not 'no protection'). Set this to a random per-deployment secret of at \
+                 least 16 characters.",
+            );
+        }
 
         // Acquire DB capability, re-parameterized with DomainError so
         // transaction closures preserve domain variants (see
@@ -193,7 +217,7 @@ impl Gear for QaCatalog {
             Arc::new(OrmProductsRepository),
             PolicyEnforcer::new(Arc::clone(&authz)),
             ctx.client_hub(),
-            Some(metrics),
+            Some(Arc::clone(&metrics) as Arc<dyn PluginResolutionMetrics>),
         ));
 
         let services = Arc::new(AppServices::new(
@@ -211,6 +235,14 @@ impl Gear for QaCatalog {
                 bundle_store,
                 repos_dir: PathBuf::from(&cfg.repos_dir),
                 bundle_ttl,
+                bundle_download_signing_secret: BundleDownloadSigningSecret(
+                    cfg.bundle_download_signing_secret.clone(),
+                ),
+                // The SAME adapter the plugin registry holds, narrowed to the
+                // one trait `BundlesService` needs. `build_default_adapter` is
+                // still called exactly once -- see
+                // `init_installs_exactly_one_metrics_adapter_into_the_plugin_registry`.
+                bundle_download_metrics: metrics as Arc<dyn BundleDownloadMetrics>,
                 sync_cache: Arc::new(SyncCache::new(Duration::from_secs(
                     cfg.branch_freshness_ttl_seconds,
                 ))),
@@ -724,9 +756,11 @@ mod tests {
     /// the disagreement's symptom is a gear that exports nothing while the
     /// deployment believes telemetry is on.
     ///
-    /// The registry is the only thing in this gear that emits, which is why
-    /// there is one wiring assertion and not two: `AppServices::new` takes the
-    /// same `Arc` by clone.
+    /// **Two consumers now, still one adapter.** The plugin registry emits
+    /// plugin-resolution samples; `BundlesService` emits the anonymous
+    /// download route's access-control counter. Both are handed the SAME
+    /// `Arc`, narrowed to the trait each needs — so a deployment builds one
+    /// meter and the two families cannot end up on different providers.
     #[test]
     fn init_installs_exactly_one_metrics_adapter_into_the_plugin_registry() {
         let init = init_source();
@@ -737,9 +771,15 @@ mod tests {
             "init must build the adapter once and share the Arc"
         );
         assert!(
-            init.contains("Some(metrics)"),
+            init.contains("Some(Arc::clone(&metrics) as Arc<dyn PluginResolutionMetrics>)"),
             "the adapter init built must reach QaProductRegistry::new, or nothing in this \
-             gear emits anything"
+             gear emits a plugin-resolution sample"
+        );
+        assert!(
+            init.contains("bundle_download_metrics: metrics as Arc<dyn BundleDownloadMetrics>"),
+            "the SAME adapter must reach BundlesService, or the anonymous download route's \
+             signature refusals -- the only operator-visible difference between 'no secret \
+             configured' and 'someone is guessing' -- are counted nowhere"
         );
         assert!(
             !init.contains("metrics.enabled"),

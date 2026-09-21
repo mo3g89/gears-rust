@@ -71,7 +71,7 @@ function runDto(overrides: Record<string, unknown> = {}) {
     error: null,
     created_at: '2026-08-28T09:59:00Z',
     updated_at: '2026-08-28T10:02:00Z',
-    result: { passed: 10, failed: 0, skipped: 0, in_progress: 0, total: 10 },
+    result: { passed: 10, failed: 0, skipped: 0, in_progress: 0, xfail: 0, xpass: 0, total: 10 },
     ...overrides,
   };
 }
@@ -136,7 +136,7 @@ describe('RunsPage — status quick-filter chips against real (lowercase) phases
   it('narrows the table to the succeeded run when the "Succeeded" chip is toggled on', async () => {
     mockApiFor([
       runDto({ id: '11111111-1111-1111-1111-111111111111', name: 'smoke-succeeded', state: 'succeeded' }),
-      runDto({ id: '22222222-2222-2222-2222-222222222222', name: 'smoke-failed', state: 'failed', result: { passed: 5, failed: 1, skipped: 0, in_progress: 0, total: 6 } }),
+      runDto({ id: '22222222-2222-2222-2222-222222222222', name: 'smoke-failed', state: 'failed', result: { passed: 5, failed: 1, skipped: 0, in_progress: 0, xfail: 0, xpass: 0, total: 6 } }),
     ]);
     renderPage();
 

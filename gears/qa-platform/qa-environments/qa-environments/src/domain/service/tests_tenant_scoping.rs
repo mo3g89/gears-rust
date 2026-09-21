@@ -194,7 +194,7 @@ async fn lease_scoped_by_tenant() {
         .acquire(&ctx(tenant_a), environment.id, run_id, LeaseMode::Parallel)
         .await
         .unwrap();
-    assert_eq!(outcome, AcquireOutcome::Acquired);
+    assert!(matches!(outcome, AcquireOutcome::Acquired { .. }));
 
     // Tenant B must not observe tenant A's holders. The environment itself was
     // created under tenant A, so under B's tenant-scoped AccessScope the
@@ -347,7 +347,7 @@ async fn delete_leased_environment_blocked_until_release() {
         .acquire(&ctx(tenant_a), environment.id, run_id, LeaseMode::Exclusive)
         .await
         .unwrap();
-    assert_eq!(outcome, AcquireOutcome::Acquired);
+    assert!(matches!(outcome, AcquireOutcome::Acquired { .. }));
 
     // Deletion must be blocked while the environment holds an active lease.
     let delete_err = services

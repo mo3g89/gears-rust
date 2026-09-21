@@ -90,6 +90,12 @@ struct FakeGateway {
     route_outcome: RouteOutcome,
     search_response: Scripted,
     other_response: Scripted,
+    /// When set, [`FakeGateway::proxy_request`] never resolves — the
+    /// black-holing JIRA instance
+    /// `infra::notify::slack_oagw_tests::FakeGateway::hanging`'s own reason,
+    /// mirrored here for
+    /// [`the_bound_is_actually_applied_to_a_hanging_gateway`].
+    hang: bool,
 }
 
 /// How [`FakeGateway::create_route`] answers.
@@ -114,6 +120,7 @@ impl FakeGateway {
             route_outcome: RouteOutcome::Created,
             search_response: search,
             other_response: other,
+            hang: false,
         }
     }
 
@@ -129,6 +136,15 @@ impl FakeGateway {
                 body: body.to_owned(),
             },
         )
+    }
+
+    /// A gateway whose `proxy_request` never resolves — the black-holing
+    /// JIRA instance [`OagwJiraClient::REQUEST_TIMEOUT`]'s own doc names.
+    /// [`the_bound_is_actually_applied_to_a_hanging_gateway`]'s fixture.
+    fn hanging() -> Self {
+        let mut gateway = Self::answering("");
+        gateway.hang = true;
+        gateway
     }
 
     fn upstreams(&self) -> Vec<oagw_sdk::CreateUpstreamRequest> {
@@ -225,6 +241,10 @@ impl oagw_sdk::api::ServiceGatewayClientV1 for FakeGateway {
         _: SecurityContext,
         req: http::Request<oagw_sdk::Body>,
     ) -> Result<http::Response<oagw_sdk::Body>, CanonicalError> {
+        if self.hang {
+            return std::future::pending().await;
+        }
+
         let method = req.method().to_string();
         let uri = req.uri().to_string();
         let header_names = req
@@ -517,6 +537,88 @@ fn the_stored_summary_matches_the_one_sent_to_jira() {
     assert_eq!(
         summary_for(test_name),
         crate::domain::service::jira::bug_summary(test_name),
+    );
+}
+
+/// The same pin, past the truncation boundary. `test_name` is `VARCHAR(512)`,
+/// wide enough that a parameterised name routinely exceeds JIRA's
+/// 255-character `summary` field; [`summary_for`] truncates for that reason
+/// (this module's `the_summary_is_truncated_at_jiras_field_limit`). Before
+/// this task, `bug_summary` did not, so the two literals — identical for any
+/// short name, which is all [`the_stored_summary_matches_the_one_sent_to_jira`]
+/// above exercises — diverged the moment a name pushed past the bound, and
+/// the locally stored record claimed a summary JIRA never actually received.
+#[test]
+fn the_stored_summary_matches_the_one_sent_to_jira_past_the_truncation_boundary() {
+    let test_name = "x".repeat(1000);
+    assert_eq!(
+        summary_for(&test_name),
+        crate::domain::service::jira::bug_summary(&test_name),
+    );
+}
+
+/// **This task's bug.** `test_name` is `VARCHAR(512)`, wider than JIRA's own
+/// 255-character `summary` field; before this task, a parameterised name
+/// anywhere near that width produced a summary JIRA refused with a 400 —
+/// logged and skipped, so the failing test never got a bug at all.
+/// Characters, not bytes, [`the_summary_truncation_never_panics_mid_codepoint`]'s
+/// reason.
+#[test]
+fn the_summary_is_truncated_at_jiras_field_limit() {
+    let test_name = "x".repeat(1000);
+    let summary = summary_for(&test_name);
+    assert_eq!(summary.chars().count(), 255);
+    assert!(summary.starts_with("[VHP] Test Failed: "));
+}
+
+/// The same boundary as [`the_log_excerpt_is_truncated_by_characters_and_never_panics_mid_codepoint`],
+/// on the summary instead of the log excerpt: a byte-based cut on a
+/// multi-byte fixture would either panic or split a codepoint, and
+/// `test_name` can carry non-ASCII from a parameterised test.
+#[test]
+fn the_summary_truncation_never_panics_mid_codepoint() {
+    let test_name = "\u{e9}".repeat(1000);
+    let summary = summary_for(&test_name);
+    assert_eq!(summary.chars().count(), 255);
+}
+
+/// A summary that already fits needs no truncation at all — `.chars().take()`
+/// is a no-op below the bound, so nothing about a normal test name changes.
+#[test]
+fn a_short_summary_is_not_truncated() {
+    assert_eq!(summary_for("AuthN Login"), "[VHP] Test Failed: AuthN Login");
+}
+
+// ---------------------------------------------------------------------------
+// REQUEST_TIMEOUT
+// ---------------------------------------------------------------------------
+
+/// The one test in this module that can actually fail on the timeout wiring:
+/// if `send` stopped wrapping the proxy call in `tokio::time::timeout`, this
+/// would hang instead of returning within the assertion's deadline. A
+/// millisecond-scale bound stands in for the real ten seconds via
+/// `OagwJiraClient::with_timeout` so the suite does not pay for it —
+/// production code has no way to reach that constructor and always gets
+/// [`OagwJiraClient::REQUEST_TIMEOUT`]. Mirrors
+/// `infra::notify::slack_oagw_tests::the_bound_is_actually_applied_to_a_hanging_gateway`.
+#[tokio::test]
+async fn the_bound_is_actually_applied_to_a_hanging_gateway() {
+    let client = OagwJiraClient::with_timeout(
+        std::sync::Arc::new(FakeGateway::hanging()),
+        std::time::Duration::from_millis(20),
+    );
+
+    let started = std::time::Instant::now();
+    let result = client.get_issue(&ctx(TENANT), &config(), "VHP-1").await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        result.is_err(),
+        "a hanging gateway must not be reported as a successful fetch"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "the call must return promptly once its own bound elapses, took {elapsed:?}"
     );
 }
 

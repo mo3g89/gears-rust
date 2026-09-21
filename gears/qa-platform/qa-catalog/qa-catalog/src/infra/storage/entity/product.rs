@@ -21,9 +21,9 @@ pub struct Model {
     pub folder: Option<String>,
     /// Full GTS instance id of the product plugin bound to this product —
     /// the key the resolver hands to `ClientScope::gts_id` unchanged, not the
-    /// instance segment (see `m20260903_000003_product_plugin_instance`).
+    /// instance segment (see `m20260903_000003_product_plugin_instance` (folded into `migrations::m20260812_000002_initial` by the docs squash)).
     ///
-    /// Non-optional since Task 20a: `m20260903_000004_plugin_instance_id_not_null`
+    /// Non-optional since Task 20a: `m20260903_000004_plugin_instance_id_not_null` (folded into `migrations::m20260812_000002_initial` by the docs squash)
     /// tightened the column and the model followed in the same commit. It was
     /// an `Option` through the expand half of the expand/contract pair, and
     /// this comment still said so afterwards (review finding IMPORTANT-4).

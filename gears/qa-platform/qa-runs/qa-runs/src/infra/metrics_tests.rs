@@ -227,6 +227,12 @@ fn every_duration_histogram_carries_the_declared_boundaries() {
 /// different question, settled in the negative in
 /// [`crate::domain::metrics::QA_RUNS_DISPATCH_DURATION`]'s doc and settled
 /// two-sidedly in [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`]'s.
+///
+/// `10.0` and `5.0` here are the thresholds DESIGN 1.2's table states, and the
+/// retracted 2026-09-18 measurement moved neither — it measured a different
+/// quantity. See [`super::DURATION_BUCKETS`]'s own doc for what it did and did
+/// not establish, and `docs/DESIGN.md` §3.11, "The dispatch-latency window,
+/// and the measurement that was retracted", for the account behind it.
 #[test]
 fn the_declared_boundaries_put_the_nfr_thresholds_on_bucket_edges() {
     for (threshold, what) in [

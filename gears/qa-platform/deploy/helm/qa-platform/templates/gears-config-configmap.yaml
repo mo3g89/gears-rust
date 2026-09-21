@@ -5,7 +5,7 @@
      certs-scripts-configmap.yaml's copies hit). Do not edit the embedded copy
      here: edit gears/qa-platform/config/qa-platform-stack.yaml and re-copy
      it. The two copies are kept byte-identical by
-     deploy/helm/tests/test_chart_file_sync.py.
+     deploy/helm/tests/check_chart_file_sync.py.
 
      This file is mounted read-only at /etc/cf-gears in gears-deployment.yaml
      -- the same path qa-platform.Dockerfile bakes it into and
@@ -79,17 +79,22 @@ data:
   `POST /qa/v1/collect/{repo_id}` (that route is `.public()` and genuinely
   anonymous -- see qa-insights' own routes/collect.rs), so the committed dev
   literal must not reach a cluster: anyone who could reach the route would be
-  able to write case counts for any tenant they named. An unset
-  `collectReportSigningSecret` therefore becomes a per-render random value
-  rather than the literal.
+  able to write case counts for any tenant they named.
 
-  WHY A PER-RENDER RANDOM IS SAFE HERE, since a rotating secret usually is not:
-  the URL is signed and the report is verified by the SAME running gears
-  process, minutes apart, and nothing persists a tag across a restart. Nor does
-  a changed value churn anything -- this Deployment carries no configmap
-  checksum annotation, so a re-rendered ConfigMap does not roll the pod, and
-  the gears render this file into their own copy once at start-up. Set the
-  value to keep it stable across upgrades anyway (see values.yaml).
+  IT IS `required`, AND IT USED TO BE A PER-RENDER `randAlphaNum 32`. The
+  fallback was argued safe on the grounds that the URL is signed and the
+  report verified by the same running gears process minutes apart, and that a
+  re-rendered ConfigMap did not roll the pod anyway. The second half of that
+  argument is now false on purpose: gears-deployment.yaml hashes this template
+  into a `checksum/gears-config` pod annotation, so a re-render DOES roll the
+  pod. With a random in here, every `helm upgrade` -- including one that
+  changes nothing at all -- would produce a different ConfigMap, a different
+  hash and a Recreate outage, while silently rotating the key under any
+  collect job that was already in flight.
+
+  `required` is the same treatment `keycloak.adminPassword` got, for the same
+  class of reason: a real secret with no safe default fails at install time,
+  which is the loudest and earliest place to fail. See values.yaml.
 
   BOTH are `fail`-guarded like the rewrite above: a silent no-op here is a
   collect cycle that runs hourly, forever, delivering nothing -- which is
@@ -101,25 +106,67 @@ data:
 {{- fail (printf "files/qa-platform-stack.yaml no longer contains %q -- qa-insights' collect_report_base_url would keep the committed loopback value, and a workflow pod cannot reach its own 127.0.0.1, so every exact case count would be dropped. Update this template together with the config." $collectFrom) }}
 {{- end }}
 {{- $secretFrom := "dev-collect-report-signing-secret" }}
-{{- $secretTo := .Values.collectReportSigningSecret | default (randAlphaNum 32) }}
+{{- $secretTo := required "collectReportSigningSecret is required: it is the only access control on the anonymous collect-report route and there is no safe default. It used to fall back to a per-render random, which rotated the key on every render and -- now that the gears Deployment carries a checksum/gears-config annotation -- would also roll the pod on every upgrade. Set it once and keep it, e.g. --set collectReportSigningSecret=\"$(openssl rand -hex 24)\"" .Values.collectReportSigningSecret }}
 {{- if not (contains $secretFrom $cfg) }}
 {{- fail (printf "files/qa-platform-stack.yaml no longer contains %q -- the committed dev signing key would ship to this cluster, and it is the only access control on the anonymous collect-report route. Update this template together with the config." $secretFrom) }}
 {{- end }}
 {{- $cfg = $cfg | replace $collectFrom $collectTo | replace $secretFrom $secretTo }}
 {{/*
-  THE FOURTH TRANSFORM: the OpenTelemetry metrics switch and its collector
+  THE FOURTH TRANSFORM: qa-catalog's bundle-download signing secret.
+
+  `bundle_download_signing_secret` is the ONLY access control on
+  `GET /qa/v1/test-bundles/{id}` -- that route is `.anonymous().exposed()`,
+  because its caller is an Argo runner pod with no user to borrow a session
+  from. It replaced a confidential OIDC client secret that used to sit in every
+  runner pod's environment (see values.yaml's `argo:` block for what that
+  credential could reach from inside a pod running tenant-authored pytest), so
+  the committed dev literal must not reach a cluster for exactly the reason the
+  transform above exists: anyone who could reach the route would be able to
+  forge a tag for any bundle they named.
+
+  `required` FOR THE SAME REASON AS `collect_report_signing_secret` ABOVE, and
+  this is the one where the per-render random was actually observed to bite.
+  A bundle built before a re-render and fetched after one gets a 403; the
+  window is `bundle_ttl_seconds` (default 1h) and the failure is loud --
+  fetch_bundle.py exits 1 before a single test runs. On the dev stand the
+  value had never been set, so every `helm upgrade` had been rotating it, and
+  the only thing hiding the breakage was the other defect: the pod was not
+  being rolled, so the process kept using the key it booted with.
+
+  WHY NOT `lookup`, WHICH WOULD HAVE KEPT INSTALLS ONE-COMMAND. `lookup`
+  returns nothing during `helm template` and `--dry-run`, and this chart's
+  guards are `helm template` -- check_bundle_token.py's
+  `check_signing_secret_is_rewritten` asserts this very value is present and
+  is not the dev literal. Under `lookup` that assertion would be made against
+  a value the guard itself caused to be empty, which either fails for the
+  wrong reason or, with a fallback behind it, passes while testing nothing.
+  `lookup` also does not help the case that prompted this: on the stand there
+  is no stored value to find, so the first upgrade would rotate anyway -- and
+  now that the pod rolls, it would break in-flight bundles immediately rather
+  than at the next restart. `required` fails that upgrade loudly instead, with
+  a message naming the value to set.
+
+  FAIL-CLOSED ON THE OTHER SIDE: qa-catalog refuses every download when this is
+  empty or shorter than 16 characters, so a no-op here is a deployment that runs
+  no tests at all -- which is why this is `fail`-guarded like the three above.
+*/}}
+{{- $bundleSecretFrom := "dev-bundle-download-signing-secret" }}
+{{- $bundleSecretTo := required "bundleDownloadSigningSecret is required: it is the only access control on the anonymous test-bundle download route and there is no safe default. It used to fall back to a per-render random, which rotated the key on every render and made a bundle built before an upgrade 403 when fetched after it. Set it once and keep it, e.g. --set bundleDownloadSigningSecret=\"$(openssl rand -hex 24)\"" .Values.bundleDownloadSigningSecret }}
+{{- if not (contains $bundleSecretFrom $cfg) }}
+{{- fail (printf "files/qa-platform-stack.yaml no longer contains %q -- the committed dev signing key would ship to this cluster, and it is the only access control on the anonymous test-bundle download route. Update this template together with the config." $bundleSecretFrom) }}
+{{- end }}
+{{- $cfg = $cfg | replace $bundleSecretFrom $bundleSecretTo }}
+{{/*
+  THE FIFTH TRANSFORM: the OpenTelemetry metrics switch and its collector
   address. Applied ONLY when .Values.opentelemetry.metrics.enabled is true, so
   a default install renders the committed file's `false` unchanged and this
   block is a no-op it costs nothing to leave in.
 
-  WHY THIS IS A CONFIG REWRITE AND NOT A CONTAINER PORT. The four gears'
-  22 metric families are PUSHED over OTLP by a periodic reader
-  (libs/toolkit's `init_metrics_provider` builds an
-  `opentelemetry_otlp::MetricExporter`); nothing in this repository serves a
-  `/metrics` route and no chart in it carries a scrape annotation. A metrics
-  port here would expose nothing and would be a second convention beside the
-  one mini-chat's configmap already established. See the committed config's own
-  `opentelemetry:` header.
+  THIS IS THE PUSH HALF ONLY. The PULL half -- the Prometheus scrape endpoint
+  the gears now serve on `.Values.gears.metricsPort` -- is the sixth and seventh
+  transforms below, and it IS backed by a container port (gears-deployment.yaml)
+  and a Service port (gears-service.yaml). The two are independent readers on
+  one meter provider; see the committed config's own `opentelemetry:` header.
 
   BOTH HALVES ARE REWRITTEN TOGETHER, on purpose. Flipping the flag while
   leaving the loopback address is the worst of the three states: the reader
@@ -134,7 +181,7 @@ data:
   pipeline whose collector is down, and is exactly the false-green this chart's
   other guards exist to prevent.
 
-  deploy/helm/tests/test_metrics_config.py holds all of it: the default-off
+  deploy/helm/tests/check_metrics_config.py holds all of it: the default-off
   render, the enabled render, and that the ConfigMap this produces is the one
   the gears Deployment mounts.
 */}}
@@ -151,5 +198,98 @@ data:
 {{- fail (printf "files/qa-platform-stack.yaml no longer contains the metrics exporter endpoint this transform rewrites (%q) -- the gears would push OTLP into their own pod's loopback address and every export would fail. Update this template together with the config." $otelEndpointFrom) }}
 {{- end }}
 {{- $cfg = $cfg | replace $otelFrom $otelTo | replace $otelEndpointFrom $otelEndpointTo }}
+{{- end }}
+{{/*
+  THE SIXTH TRANSFORM: the scrape listener's bind address, from
+  .Values.gears.metricsPort.
+
+  ALWAYS APPLIED, unlike the fifth. The port is not an on/off switch with a
+  safe committed default -- it is one number that has to be the same in four
+  places (this config's `bind_addr`, the Deployment's containerPort, the
+  Service's targetPort and the pod's `prometheus.io/port` annotation), and
+  three of those read `.Values.gears.metricsPort` directly. Rewriting the
+  fourth unconditionally is what stops an operator's `--set
+  gears.metricsPort=...` from producing a pod that advertises one port and
+  listens on another -- a stack that looks scrapeable and answers nothing,
+  with no error anywhere.
+
+  `0.0.0.0`, not the pod IP: the container has to answer the kubelet's and the
+  Service's view of itself, and binding a loopback or a guessed address would
+  refuse both.
+*/}}
+{{- $scrapeBindFrom := "bind_addr: \"0.0.0.0:9464\"" }}
+{{- $scrapeBindTo := printf "bind_addr: \"0.0.0.0:%v\"" (.Values.gears.metricsPort | int) }}
+{{- if not (contains $scrapeBindFrom $cfg) }}
+{{- fail (printf "files/qa-platform-stack.yaml no longer contains the scrape bind address this transform rewrites (%q) -- the gears would listen on whatever port the committed config names while the Deployment, the Service and the prometheus.io/port annotation all advertise .Values.gears.metricsPort, and every scrape would connect to nothing. Update this template together with the config." $scrapeBindFrom) }}
+{{- end }}
+{{- $cfg = $cfg | replace $scrapeBindFrom $scrapeBindTo }}
+{{/*
+  THE SEVENTH TRANSFORM: turning the scrape endpoint OFF.
+
+  The committed config says `enabled: true` and this chart's default leaves it
+  alone, which is the point -- a fresh install is observable without anyone
+  asking. This transform exists so `--set
+  opentelemetry.metrics.scrape.enabled=false` is a real escape hatch rather
+  than a value nothing reads.
+
+  THE SENTINEL IS THE TWO-LINE PAIR, not `enabled: true` alone: that string
+  occurs nowhere else in the committed config today, but `tracing:` and
+  `metrics:` already proved (the fourth transform's comment) that a one-line
+  sentinel in this file is a bug waiting for the next block to be added.
+*/}}
+{{- if not .Values.opentelemetry.metrics.scrape.enabled }}
+{{- $scrapeFrom := "    scrape:\n      enabled: true" }}
+{{- $scrapeTo := "    scrape:\n      enabled: false" }}
+{{- if not (contains $scrapeFrom $cfg) }}
+{{- fail (printf "files/qa-platform-stack.yaml no longer contains the scrape enable block this transform rewrites (%q) -- opentelemetry.metrics.scrape.enabled was set to false and the gears would open the port anyway, while helm reported success. Update this template together with the config." $scrapeFrom) }}
+{{- end }}
+{{- $cfg = $cfg | replace $scrapeFrom $scrapeTo }}
+{{- end }}
+{{/*
+  THE EIGHTH TRANSFORM: qa-insights' SMTP relay allow-list, and the only thing
+  in this chart that lets the gears open a mail connection at all.
+
+  ALWAYS GUARDED, APPLIED ONLY WHEN ASKED. The committed config carries
+  `smtp_allowed_hosts: []`, which binds qa-insights'
+  `UnsupportedMailClient`: every email notification fails with
+  `unsupported_egress` and is audited as such. A non-empty list here binds the
+  real SMTP transport.
+
+  WHY THIS IS A CONFIG TRANSFORM AND NOT A NETWORKPOLICY, since a reader
+  looking for the egress rule will look for one first: this chart has exactly
+  one NetworkPolicy (runner-networkpolicy.yaml) and it selects the RUNNER pod.
+  Adding a second that selected the GEARS pod would not narrow anything and
+  would break the stack -- a pod that no policy selects has unrestricted
+  egress, and the first policy with `policyTypes: [Egress]` to select it
+  denies everything it does not list. The gears pod's own egress set includes
+  Postgres, Keycloak, the Argo and Kubernetes APIs, arbitrary git remotes
+  (qa-catalog) and arbitrary tenant-supplied management nodes
+  (qa-environments), the last two of which the runner policy's own rule 3
+  already had to concede are not statically expressible. Any policy covering
+  them has to permit 0.0.0.0/0, at which point an SMTP rule inside it
+  constrains nothing. On top of that the relay address is a PER-TENANT
+  database column typed into the settings page at runtime, and a NetworkPolicy
+  matches CIDRs and pod labels, never DNS names.
+
+  So the allow-list is enforced in the application, per send, against the host
+  the tenant actually configured -- and this transform is how a deployment
+  states it. ADR-0011 (`docs/ADR/0011-cpt-cf-qa-adr-smtp-egress.md`) carries
+  the decision; deploy/helm/tests/check_smtp_egress.py is the guard.
+
+  `fail`-guarded like every transform above: a silent no-op here means an
+  operator allow-listed a relay, helm reported success, and every notification
+  still failed with `unsupported_egress`.
+*/}}
+{{- $smtpFrom := "smtp_allowed_hosts: []" }}
+{{- if not (contains $smtpFrom $cfg) }}
+{{- fail (printf "files/qa-platform-stack.yaml no longer contains %q -- qa-insights' SMTP allow-list is the only thing that enables mail egress and the only control on where it goes, so neither qaInsights.smtpAllowedHosts nor the safe default could be applied. Update this template together with the config." $smtpFrom) }}
+{{- end }}
+{{- if .Values.qaInsights.smtpAllowedHosts }}
+{{- $hosts := list }}
+{{- range .Values.qaInsights.smtpAllowedHosts }}
+{{- $hosts = append $hosts (printf "%q" .) }}
+{{- end }}
+{{- $smtpTo := printf "smtp_allowed_hosts: [%s]" (join ", " $hosts) }}
+{{- $cfg = $cfg | replace $smtpFrom $smtpTo }}
 {{- end }}
 {{ $cfg | indent 4 }}

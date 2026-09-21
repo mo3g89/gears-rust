@@ -105,7 +105,7 @@ pub use jira_client::{
     CREDSTORE_REF_SCHEME, IssueRef, JiraClient, JiraIssue, NewIssue, StatusCategory,
     validate_credstore_ref,
 };
-pub use mail_client::{MailClient, MailMessage};
+pub use mail_client::{MailClient, MailCredentials, MailMessage};
 pub use runs_launcher::RunsLauncher;
 pub use runs_reader::RunsReader;
 pub use slack_client::{SlackBlock, SlackClient, SlackMessage};
@@ -117,18 +117,30 @@ pub use slack_client::{SlackBlock, SlackClient, SlackMessage};
 ///
 /// # This is the R102 seam
 ///
-/// [`Self::UnsupportedEgress`] is a **value**, not an error: an adapter with
-/// nothing to send through (Task 39's inert mail client, and this port's own
-/// `mail_client` module doc) reports it rather than failing. Mapping this
-/// variant to the audit log's `"unsupported_egress"` outcome string is
-/// [`crate::domain::service::notify`]'s job and is tested there,
-/// directly against the variant-to-string conversion and not only through
-/// the end-to-end send path — no other task's tests cover that mapping.
+/// Mapping this enum to the audit log's `outcome` string is
+/// [`crate::domain::service::notify`]'s job
+/// ([`outcome_str`](crate::domain::service::notify::outcome_str)) and is tested
+/// there, directly against the variant-to-string conversion and not only
+/// through the end-to-end send path — no other task's tests cover that mapping.
+///
+/// # One variant, and that is a residue rather than a design
+///
+/// There were two. `UnsupportedEgress` was a **value** rather than an error, so
+/// that an adapter with nothing to send through (D10's inert mail client) could
+/// report it and have the caller log it. The SMTP follow-up removed the reason:
+/// mail now sends, and the remaining no-adapter case fails with
+/// [`DomainError::UnsupportedEgress`](crate::domain::error::DomainError::UnsupportedEgress)
+/// instead — `mail_client`'s own header carries why a value was the wrong shape
+/// for "an operator was told the test succeeded and received nothing".
+///
+/// Collapsing `Result<SendOutcome, DomainError>` to `Result<(), DomainError>`
+/// across both egress ports is the obvious follow-on. It is **deliberately not
+/// bundled here**: it is a mechanical change with no behaviour in it, across
+/// two ports, their adapters and every test double, and folding it into the
+/// change that made mail actually send would have made that diff about the
+/// wrong thing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendOutcome {
     /// The message was accepted by the far side.
     Sent,
-    /// This deployment has no working adapter for the channel the message
-    /// was addressed to.
-    UnsupportedEgress,
 }

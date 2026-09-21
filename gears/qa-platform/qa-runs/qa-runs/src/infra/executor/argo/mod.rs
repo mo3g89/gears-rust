@@ -2,12 +2,13 @@
 //! [`RunExecutor`](crate::domain::ports::run_executor::RunExecutor) port.
 //!
 //! **Behind the non-default `argo` cargo feature**, and that is a governance
-//! requirement rather than a build convenience. ADR-0001 chose the platform
-//! serverless runtime specifically to remove Kubernetes from the product, and
-//! its Confirmation criterion is "no `kube`/`k8s-openapi` in any qa-platform
-//! crate". The waiver recorded in that ADR on 2026-08-27 permits this adapter
-//! only if the dependency is optional, the port is untouched, `domain/` never
-//! learns Kubernetes exists, and the mock stays the default. All four hold; the
+//! requirement rather than a build convenience. ADR-0001 chose the internal
+//! `RunExecutor` port specifically to keep Kubernetes out of a default build,
+//! and its Confirmation section checks that three ways: `cargo tree -p
+//! qa-runs -i kube -e normal` prints nothing for a default build,
+//! `qa-runs/src/domain/ports/run_executor.rs` declares the trait with no
+//! service above it naming an adapter type, and the `MockRunExecutor` suite
+//! covers every service that depends on execution. All three hold; the
 //! `Cargo.toml` `[features]` comment carries the verification commands.
 //!
 //! # Where the mapping comes from
@@ -165,59 +166,72 @@ impl std::fmt::Debug for ArgoRunExecutor {
 }
 
 impl ArgoRunExecutor {
-    /// Check the two halves of bundle delivery against each other.
+    /// Warn when nothing tells a runner pod where to fetch its bundle.
     ///
     /// Split out of [`Self::connect`] because it is a rule about the config and
     /// not about the cluster — and because `clippy::cognitive_complexity`
     /// denies a `connect` that carries both.
     ///
-    /// # Errors
-    /// When `bundle_auth` is configured without a `bundle_base_url`, or when
-    /// any `bundle_auth` field is blank.
-    fn check_bundle_delivery(config: &ArgoExecutorConfig) -> anyhow::Result<()> {
-        // The two halves of bundle delivery, checked together because either
-        // alone produces a run that executes NO TEST CONTENT and still finishes.
-        // That is the failure mode worth a boot check: a pytest run over an
-        // empty directory exits 5 ("no tests collected"), and a deployment
-        // reading only the run's state sees a red run with no explanation, or —
-        // depending on how the runner treats it — a green one with zero tests.
+    /// # This used to check *two* halves, and the second half is gone
+    ///
+    /// It also validated `bundle_auth` — the token endpoint, client id and
+    /// `Secret` reference a pod needed to authenticate its download — and
+    /// refused the combinations that would have left a pod with credentials
+    /// and no URL, or a URL and no credentials. There are no credentials any
+    /// more: qa-catalog's download route is anonymous and authorised by a
+    /// per-bundle HMAC tag the dispatcher already put on
+    /// `ExecutionNode::bundle_token`, which travels with the node rather than
+    /// with this config. So one half remains, and it is still worth checking
+    /// for the reason the pair was checked at all: a pod that cannot fetch its
+    /// bundle runs pytest over an empty directory, and a deployment reading
+    /// only the run's state sees a red run with no explanation or — depending
+    /// on how the runner treats exit 5 — a green one with zero tests.
+    ///
+    /// A missing signing secret is the other way this path fails, and it is
+    /// **not** checkable here: it is qa-catalog's config, in a different gear,
+    /// and that gear warns on it at its own boot (`qa-catalog`'s `gear::init`).
+    fn check_bundle_delivery(config: &ArgoExecutorConfig) {
         let bundle_base_url = config
             .bundle_base_url
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        match (bundle_base_url, config.bundle_auth.as_ref()) {
-            (None, Some(_)) => anyhow::bail!(
-                "qa-runs.argo.bundle_auth is configured but bundle_base_url is \
-                 not: the pod would receive credentials and no URL to use them \
-                 on, so it would run no tests at all"
-            ),
-            (Some(url), None) => warn!(
-                bundle_base_url = %url,
-                "qa-runs.argo.bundle_base_url is set with no bundle_auth: \
-                 GET /qa/v1/test-bundles/{{id}} is authenticated, so every \
-                 runner pod will get a 401 on download. Configure \
-                 qa-runs.argo.bundle_auth."
-            ),
-            (None, None) => warn!(
+        if bundle_base_url.is_none() {
+            warn!(
                 "qa-runs.argo.bundle_base_url is unset: runner pods receive \
                  TEST_BUNDLE_REF (a path on the qa-catalog gear's own \
                  filesystem) and no way to fetch the bundle"
-            ),
-            (Some(_), Some(auth)) => {
-                if auth.token_url.trim().is_empty()
-                    || auth.client_id.trim().is_empty()
-                    || auth.client_secret_secret.trim().is_empty()
-                    || auth.client_secret_key.trim().is_empty()
-                {
-                    anyhow::bail!(
-                        "qa-runs.argo.bundle_auth has a blank token_url, \
-                         client_id, client_secret_secret or client_secret_key"
-                    );
-                }
-            }
+            );
         }
+    }
 
+    /// Refuse a config that names no `ServiceAccount`, rather than letting the
+    /// runner pod inherit the namespace `default` account's undeclared
+    /// permissions.
+    ///
+    /// Split out of [`Self::connect`] for the same reason as
+    /// [`Self::check_bundle_delivery`]: it is a rule about the config, not
+    /// about the cluster, so it is worth being able to exercise without one.
+    ///
+    /// # Errors
+    /// When [`ArgoExecutorConfig::workflow_service_account`] is `None` or
+    /// blank. The message names the setting, so an operator sees which knob
+    /// to fill in rather than a bare "forbidden" surfacing minutes later out
+    /// of a run that already produced its output — see that field's own doc.
+    fn check_service_account(config: &ArgoExecutorConfig) -> anyhow::Result<()> {
+        let account = config
+            .workflow_service_account
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if account.is_none() {
+            anyhow::bail!(
+                "qa-runs.argo.workflow_service_account must be set: an unset \
+                 account leaves the runner pod running as the namespace's \
+                 `default` ServiceAccount, whose permissions nobody in this \
+                 subsystem declared or reviewed"
+            );
+        }
         Ok(())
     }
 
@@ -246,7 +260,8 @@ impl ArgoRunExecutor {
             );
         }
 
-        Self::check_bundle_delivery(&config)?;
+        Self::check_service_account(&config)?;
+        Self::check_bundle_delivery(&config);
 
         let kube_config = match config.kubeconfig_path.as_deref().map(str::trim) {
             Some(path) if !path.is_empty() => {
@@ -464,5 +479,58 @@ impl RunExecutor for ArgoRunExecutor {
             .filter_map(|workflow| workflow.metadata.name)
             .map(ExecutionRef::new)
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ArgoExecutorConfig, ArgoRunExecutor};
+
+    /// A config good enough to pass every check `connect` runs before it
+    /// ever touches the cluster, so a test can flip exactly the one field
+    /// it means to exercise.
+    fn cfg() -> ArgoExecutorConfig {
+        ArgoExecutorConfig {
+            runner_image: "vhp-test-runner:latest".to_owned(),
+            workflow_service_account: Some("qa-platform-runner".to_owned()),
+            ..ArgoExecutorConfig::default()
+        }
+    }
+
+    /// A configuration naming no `ServiceAccount` is refused, rather than
+    /// silently yielding the namespace's `default` account.
+    #[test]
+    fn a_workflow_without_a_service_account_is_refused() {
+        let mut config = cfg();
+        config.workflow_service_account = None;
+
+        let error = ArgoRunExecutor::check_service_account(&config)
+            .expect_err("a config naming no ServiceAccount must be refused");
+
+        assert!(
+            error.to_string().contains("workflow_service_account"),
+            "the error must name the setting so an operator knows what to \
+             fill in, got: {error}"
+        );
+    }
+
+    /// A blank name is not a name: whitespace must be refused exactly like
+    /// `None`, not treated as an account called `"   "`.
+    #[test]
+    fn a_blank_service_account_is_also_refused() {
+        let mut config = cfg();
+        config.workflow_service_account = Some("   ".to_owned());
+
+        let error = ArgoRunExecutor::check_service_account(&config)
+            .expect_err("a blank ServiceAccount name must be refused");
+
+        assert!(error.to_string().contains("workflow_service_account"));
+    }
+
+    /// The positive case: a named account passes construction's own check.
+    #[test]
+    fn a_named_service_account_is_accepted() {
+        ArgoRunExecutor::check_service_account(&cfg())
+            .expect("a config naming a ServiceAccount must be accepted");
     }
 }

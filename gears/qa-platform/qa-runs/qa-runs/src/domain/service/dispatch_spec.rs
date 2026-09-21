@@ -286,6 +286,14 @@ where
             nodes.push(ExecutionNode {
                 name: node_name(*repo_id),
                 bundle_ref: bundle.storage_ref,
+                // The id and the download tag, both straight off
+                // `create_bundle`'s answer. `download_sig` is the ONLY place
+                // this value exists -- qa-catalog stores no column for it and
+                // recomputes it on every verification -- so dropping it here
+                // is not recoverable later, and a node without it fetches
+                // nothing.
+                bundle_id: bundle.id,
+                bundle_token: bundle.download_sig,
                 test_files: files.clone(),
             });
         }
@@ -767,6 +775,14 @@ where
 
         Ok(RunSpec {
             run_id: run.id,
+            // Not re-fetched: `read_run` (`dispatch.rs`) only returns `run`
+            // at all because `ctx`'s tenant already matched the row's own
+            // tenant under `SecureORM` row-level scoping, and `ctx` is the
+            // same value threaded unchanged from there through `submit` to
+            // here. Asking the repository again for what scoping the read
+            // already proved would be a second query for a fact this
+            // function already holds.
+            tenant_id: ctx.subject_tenant_id(),
             run_name: run.name.clone(),
             nodes,
             env: RunEnv::new(env, BTreeMap::new()),

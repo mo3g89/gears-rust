@@ -6,13 +6,16 @@
 //!   for this gear, in this gear's own migration-history table.
 //! * [`repo`] — the repository: the **only** place secret bytes cross into or
 //!   out of the database.
-//! * [`error`] — the storage error type and its mapping to
-//!   [`credstore_sdk::CredStoreError`].
+//! * [`store`] — the [`ValueStore`](crate::domain::ValueStore) adapter over
+//!   [`repo`]: the only place that decides what runs in a transaction, and
+//!   the seam that keeps `SeaORM` out of `domain/` (DE0301).
+//! * [`error`] — the storage error type.
 
 pub mod entity;
 pub mod error;
 pub mod migrations;
 pub mod repo;
+pub mod store;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

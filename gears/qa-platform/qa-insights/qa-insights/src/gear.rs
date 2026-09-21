@@ -77,7 +77,7 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
-use time::Duration;
+use time::{Duration, OffsetDateTime};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use toolkit::api::OpenApiRegistry;
@@ -86,6 +86,7 @@ use toolkit_db::DBProvider;
 use tracing::{debug, error, info, warn};
 
 use authz_resolver_sdk::AuthZResolverApi;
+use credstore_sdk::CredStoreClientV1;
 use oagw_sdk::api::ServiceGatewayClientV1;
 use qa_catalog_sdk::QaCatalogClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
@@ -108,7 +109,7 @@ use crate::infra::leader::{
     LeaderElector, ROLE_COLLECT, ROLE_JIRA_POLLER, ROLE_RECONCILER, elector, jira_poller_elector,
     work_fn,
 };
-use crate::infra::notify::{SlackOagwClient, UnsupportedMailClient};
+use crate::infra::notify::{SlackOagwClient, SmtpMailClient, UnsupportedMailClient};
 use crate::infra::storage::collect_sea_repo::OrmCollectRepository;
 use crate::infra::storage::jira_sea_repo::OrmJiraRepository;
 use crate::infra::storage::notify_sea_repo::OrmNotifyRepository;
@@ -375,7 +376,7 @@ pub(crate) type ConcreteAppServices = AppServices<
 /// six.
 #[toolkit::gear(
     name = "qa-insights",
-    deps = [authz_resolver, qa_runs, qa_catalog, qa_environments, oagw, cluster],
+    deps = [authz_resolver, qa_runs, qa_catalog, qa_environments, oagw, credstore, cluster],
     capabilities = [db, rest, stateful],
     lifecycle(entry = "serve", stop_timeout = "30s")
 )]
@@ -506,6 +507,24 @@ impl Gear for QaInsights {
             .get::<dyn ServiceGatewayClientV1>()
             .map_err(|e| anyhow::anyhow!("failed to get oagw client: {e}"))?;
 
+        // The fifth `deps` client, wired by **the SMTP follow-up** — and the
+        // first credential this gear resolves for itself. Every other secret it
+        // touches is a reference oagw fetches and injects on its behalf; SMTP
+        // cannot go through oagw at all (ADR-0011), so
+        // `infra::notify::SmtpMailClient` reads the relay password here, under
+        // the sending tenant's own context.
+        //
+        // **Resolved unconditionally, even when no SMTP host is allow-listed.**
+        // A `ClientHub` lookup that only happens on some deployments is a boot
+        // failure that only happens on some deployments; the `deps` token above
+        // makes credstore mandatory for anything that links this gear either
+        // way, so failing here is better than failing the first time an
+        // operator enables mail.
+        let credstore = ctx
+            .client_hub()
+            .get::<dyn CredStoreClientV1>()
+            .map_err(|e| anyhow::anyhow!("failed to get credstore client: {e}"))?;
+
         // **Both numbers, because this file has been counting two different
         // things and never said so** (fix round 1, after a review counted the
         // `client_hub().get` call sites and got a different answer from the
@@ -516,12 +535,15 @@ impl Gear for QaInsights {
         // a `PolicyEnforcer` rather than held. There are therefore **four**
         // `deps` clients (qa-runs, qa-catalog, qa-environments, oagw) and
         // **five** lookups (those four plus `AuthZResolverApi`), and a
-        // deployment that links this gear has to register all five: a fifth,
+        // deployment that links this gear has to register all six: another
         // optional `event_broker` lookup lived here from Task 40 until it was
         // deleted, once it was established that no deployment ever registered
         // that client and the reconcile sweep was already carrying every
         // deployment's event ingest. See this file's header, "Event ingest, and
         // why there is only one path".
+        //
+        // **Five `deps` clients and six lookups, not four and five, since the
+        // SMTP follow-up** added the `credstore` token and its lookup above.
         //
         // One `QaRunsReader`, two ports: `RunsReader` for the ingest/reconcile
         // reads and, since Task 30, `RunsLauncher` for the collect launch.
@@ -590,14 +612,10 @@ impl Gear for QaInsights {
                 // `OUTCOME_FAILED` audit row, instead of `UnsupportedEgress` —
                 // not how many outcomes there are.
                 slack_client: Arc::new(SlackOagwClient::new(oagw)) as Arc<dyn SlackClient>,
-                // **Task 40's**: Task 39's real mail adapter, replacing Task
-                // 38's `NeverWiredMailClient`. Behaviourally identical to it and
-                // permanently so — D10 defers the SMTP send itself — which is
-                // why this one is not a placeholder for a future adapter but the
-                // shipped answer. `mail_unsupported.rs`' module doc carries the
-                // replacement recipe for whoever eventually adds SMTP: implement
-                // `MailClient`, bind it on this line, delete nothing else.
-                mail_client: Arc::new(UnsupportedMailClient) as Arc<dyn MailClient>,
+                // **The SMTP follow-up's**, and the one binding in this block
+                // that is a *choice* rather than a construction — see
+                // [`mail_client`].
+                mail_client: mail_client(&cfg, credstore),
                 // Resolved to their final values here rather than carried as
                 // config into the service, so nothing re-reads a knob per
                 // request.
@@ -663,6 +681,53 @@ impl Gear for QaInsights {
 /// # Why a ceiling exists at all
 ///
 /// `reconcile_lookback_seconds` is a `u64` and the sweep computes
+/// The [`MailClient`] this deployment gets, and why it is a choice.
+///
+/// `smtp_allowed_hosts` empty — the default, and the state of every deployment
+/// that has not opted in — binds [`UnsupportedMailClient`], which **fails**
+/// every send with `DomainError::UnsupportedEgress`. Non-empty binds
+/// [`SmtpMailClient`], which dials the relay and enforces the same list per
+/// send.
+///
+/// # The empty case is not "mail off", it is "mail refused, loudly"
+///
+/// This distinction is the whole defect the SMTP follow-up closed. The inert
+/// adapter used to answer `Ok(SendOutcome::UnsupportedEgress)`, which the
+/// settings `/test` route rendered as a success and the run-completed path
+/// logged as a non-failure. Both now surface it: the route answers `501`
+/// naming the channel, and the audit row carries
+/// `outcome = "unsupported_egress"` with its dedupe claim released.
+///
+/// # Logged at `init`, once
+///
+/// An operator debugging "why did no email arrive" should be able to answer it
+/// from the startup log rather than from this source file — the same reason
+/// `collect_report_base_url` and `collect_report_signing_secret` warn here.
+/// This is an `info!` rather than a `warn!` in the enabled case and a `warn!`
+/// in the disabled one, because a deployment with no mail configured is a
+/// normal deployment and a notification that cannot be delivered is not.
+fn mail_client(
+    cfg: &QaInsightsConfig,
+    credstore: Arc<dyn CredStoreClientV1>,
+) -> Arc<dyn MailClient> {
+    if cfg.smtp_allowed_hosts.is_empty() {
+        warn!(
+            "smtp_allowed_hosts is empty, so this deployment has no SMTP egress: every email \
+             notification will fail with unsupported_egress and be audited as such. Set it to \
+             the relay hostnames this deployment may reach (ADR-0011) to enable mail."
+        );
+        return Arc::new(UnsupportedMailClient) as Arc<dyn MailClient>;
+    }
+    info!(
+        hosts = ?cfg.smtp_allowed_hosts,
+        "SMTP egress enabled; mail to any other relay host will be refused"
+    );
+    Arc::new(SmtpMailClient::new(
+        credstore,
+        cfg.smtp_allowed_hosts.clone(),
+    )) as Arc<dyn MailClient>
+}
+
 /// `watermark - lookback`. `OffsetDateTime`'s `Sub` **panics** on overflow, and
 /// the type only spans years -9999 to 9999, so a config carrying `u64::MAX` — a
 /// typo, a unit confusion, a templating accident — would take the process down
@@ -885,14 +950,31 @@ impl QaInsights {
     /// (schema change, no task) or nothing (the operator greps).
     ///
     /// The history is deliberately the *smallest* thing that answers the
-    /// question: a `HashMap<Uuid, u32>` of consecutive wedged passes per tenant,
-    /// local to one leadership term, incremented on a `stopped_at_gap` and
-    /// **removed** on a clean pass. Every wedged pass still logs at `WARN`; the
-    /// count rides that line, and crossing [`WEDGED_PASSES_BEFORE_ERROR`]
-    /// escalates it to `ERROR` and keeps it there. That gives an operator two
-    /// distinguishable stories — "one run failed to backfill, it may be
-    /// transient" and "this tenant has not advanced in a quarter of an hour" — from one
-    /// grep, which a stateless `WARN` cannot.
+    /// question: a [`ProgressByTenant`] map of [`TenantProgress`], local to one
+    /// leadership term, incremented on a stalled pass and zeroed on one that
+    /// moved forward. Every stalled pass still logs at `WARN`; the count rides
+    /// that line, and crossing [`WEDGED_PASSES_BEFORE_ERROR`] escalates it to
+    /// `ERROR` and keeps it there. That gives an operator two distinguishable
+    /// stories — "one run failed to backfill, it may be transient" and "this
+    /// tenant has not advanced in a quarter of an hour" — from one grep, which a
+    /// stateless `WARN` cannot.
+    ///
+    /// ## The condition this escalates on is not the one it shipped with, and
+    /// ## the difference is a three-day outage
+    ///
+    /// It read `stopped_at_gap` and nothing else. The sentence above — "has not
+    /// advanced this tenant's watermark" — is what the `ERROR` claims, and from
+    /// 2026-09-18 that claim was true of a tenant for three days while
+    /// `stopped_at_gap` was `false` on all 864 passes. Each one took the clean
+    /// branch and reset the counter. The value that would have caught it was
+    /// already on the `debug!` line and nothing branched on it.
+    ///
+    /// [`stall_of`] is the condition now, and it is built from what the sweep
+    /// can observe about the *stored row* rather than about its own walk: see
+    /// its doc, [`ReconcileOutcome::watermark_at`] for the field the old
+    /// `watermark_advanced_to` could not be, and
+    /// [`ReconcileOutcome::caught_up`] for what keeps a quiet tenant from
+    /// tripping it.
     ///
     /// *Rejected:* a persisted counter (needs a column and turns a diagnostic
     /// into schema), and escalating on the *same* `stopped_at_run` only (a tenant
@@ -927,8 +1009,7 @@ impl QaInsights {
                     // Per leadership term, not per process: `run_role` may invoke
                     // this closure again after a re-election, and a fresh term is
                     // a fresh view of what is wedged. See this function's doc.
-                    let mut wedged: std::collections::HashMap<uuid::Uuid, u32> =
-                        std::collections::HashMap::new();
+                    let mut wedged: ProgressByTenant = ProgressByTenant::new();
                     let mut ticker = tokio::time::interval(period);
                     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     loop {
@@ -1076,8 +1157,8 @@ impl QaInsights {
     }
 }
 
-/// Consecutive wedged passes before a tenant's `stopped_at_gap` is reported at
-/// `ERROR` rather than `WARN`.
+/// Consecutive stalled passes before a tenant is reported at `ERROR` rather
+/// than `WARN`.
 ///
 /// Three, so the escalation lands at three times the tick interval — fifteen
 /// minutes on the default 300-second reconciler. Chosen against what the two
@@ -1087,6 +1168,43 @@ impl QaInsights {
 /// still be waiting". One pass is too eager for the first reading and ten would
 /// put the second most of an hour after the fact.
 const WEDGED_PASSES_BEFORE_ERROR: u32 = 3;
+
+/// What the reconcile ticker remembers about one tenant between passes.
+///
+/// # It grew a second field because one field could not see the outage
+///
+/// This was a bare `u32` of consecutive `stopped_at_gap` passes. That counter
+/// answers one question — "is a run refusing to backfill" — and the 2026-09-18
+/// outage was not that question: `stopped_at_gap` was `false` on every pass for
+/// three days while the mark did not move, so every pass took the clean branch
+/// and **cleared the counter it was supposed to be filling**, once every five
+/// minutes.
+///
+/// Detecting a mark that is not moving needs the previous pass' mark to compare
+/// against, and nothing else in the process holds one:
+/// [`ReconcileOutcome`] is `Copy` and stateless by design, and the sweep reads
+/// the mark fresh every pass. So it rides here, next to the count it feeds.
+///
+/// `Copy` so [`report_reconcile_outcome`] can read the previous value out of
+/// the map before it takes the mutable borrow that updates it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TenantProgress {
+    /// Consecutive passes that did not move this tenant's projection forward,
+    /// by either failure mode. Reset to zero by a pass that did.
+    stalled_passes: u32,
+    /// [`ReconcileOutcome::watermark_at`] as of the last pass that reported
+    /// one, so the next pass can tell "the mark stands still" from "the mark
+    /// moved".
+    ///
+    /// **Recorded on every pass, including clean ones**, which is why a clean
+    /// pass zeroes [`Self::stalled_passes`] rather than removing the whole
+    /// entry as the old `u32` map did: forgetting the mark would blind the next
+    /// pass, and the outage's passes all looked clean.
+    watermark_at: Option<OffsetDateTime>,
+}
+
+/// The ticker's per-tenant history for one leadership term.
+type ProgressByTenant = std::collections::HashMap<uuid::Uuid, TenantProgress>;
 
 /// The tenants a pass will work on: `Some(list)` when the directory answered —
 /// possibly with an empty list — and `None` when the read was refused or failed.
@@ -1162,10 +1280,7 @@ async fn tenants_for(
 /// facts, `Option` is what distinguishes them, and
 /// [`a_refused_enumeration_does_not_clear_a_standing_wedge_count`](tests::a_refused_enumeration_does_not_clear_a_standing_wedge_count)
 /// is what holds it to that.
-fn prune_wedged(
-    wedged: &mut std::collections::HashMap<uuid::Uuid, u32>,
-    tenants: Option<&[TenantBound]>,
-) {
+fn prune_wedged(wedged: &mut ProgressByTenant, tenants: Option<&[TenantBound]>) {
     let Some(tenants) = tenants else {
         return;
     };
@@ -1186,7 +1301,7 @@ fn prune_wedged(
 /// from there, same as any other pass that ends partway through.
 async fn reconcile_pass(
     services: &Arc<ConcreteAppServices>,
-    wedged: &mut std::collections::HashMap<uuid::Uuid, u32>,
+    wedged: &mut ProgressByTenant,
     cancel: &CancellationToken,
 ) {
     let tenants = tenants_for(services, ROLE_RECONCILER).await;
@@ -1211,63 +1326,154 @@ async fn reconcile_pass(
     }
 }
 
-/// Log one tenant's sweep, escalating a tenant that has been wedged for
-/// [`WEDGED_PASSES_BEFORE_ERROR`] consecutive passes.
+/// Why a pass counts as one that did not move this tenant's projection forward.
+///
+/// Two spellings of the same operator-visible fact — the mark is where it was —
+/// kept apart because the remedy differs and because one of them is a *named
+/// run* an operator can go and look at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stall {
+    /// A run would not backfill. The sweep stopped short of it deliberately and
+    /// nothing that finished later will be projected until it can be.
+    Gap,
+    /// No gap, no error, and the mark is nonetheless the same instant it was on
+    /// the previous pass while the sweep still had runs it had not reached.
+    ///
+    /// **This is the 2026-09-18 outage's shape**, and it is the one no signal
+    /// in this process reported for three days.
+    MarkStandingStill,
+}
+
+impl Stall {
+    /// The phrase that goes on the log line, so the two stories are one
+    /// `tracing` expansion rather than four.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gap => "a run that could not be backfilled",
+            Self::MarkStandingStill => {
+                "a watermark that did not move while the sweep had not caught up"
+            }
+        }
+    }
+}
+
+/// Whether this pass moved the tenant's projection forward, and if not, why not.
+///
+/// # The second arm is the whole of Item 1, and the trap it steps around
+///
+/// The obvious predicate — "`ReconcileOutcome::watermark_advanced_to` is
+/// `None`" — was available throughout the outage and would have been wrong:
+/// that field was `Some(...)` on every pass, because it reported the instant
+/// the walk had *something to advance to*, not the instant the stored row
+/// ended up holding. `advance` is monotonic, so an instant at or behind the
+/// mark is a successful no-op. The field is gone; `watermark_at` is the stored
+/// value, and comparing it across passes is a statement about the row.
+///
+/// ## `scanned > 0` alone is not enough, and a live deployment is the evidence
+///
+/// The brief for this fix proposed "the same instant on consecutive passes
+/// while `scanned > 0`". That fires on a perfectly healthy quiet tenant, and
+/// not rarely: `ReconcileService::sweep`'s floor is `mark - lookback`, derived
+/// from the *mark* rather than from the clock, so a tenant whose last run
+/// finished an hour ago re-lists that same run on every tick forever —
+/// `scanned = 1`, mark unchanged, nothing wrong. On the default 300-second
+/// cadence that is an `ERROR` every fifteen minutes on an idle stand, which is
+/// how an alarm gets ignored and how this outage stays silent a second time.
+///
+/// [`ReconcileOutcome::caught_up`] is what separates the two: it is `false`
+/// exactly when the walk stopped with more to read. A quiet tenant's walk ends
+/// on a short page and is caught up; the outage's walk ended on a saturated
+/// page it could not step past and was not.
+fn stall_of(outcome: &ReconcileOutcome, previous: Option<TenantProgress>) -> Option<Stall> {
+    if outcome.stopped_at_gap {
+        return Some(Stall::Gap);
+    }
+    // `previous` is `None` on the first pass of a leadership term: one
+    // observation is not two, and "consecutive" needs two. That costs one tick
+    // of latency after a restart and nothing else.
+    let standing_still = previous.is_some_and(|prev| prev.watermark_at == outcome.watermark_at)
+        && !outcome.caught_up
+        && outcome.scanned > 0;
+    standing_still.then_some(Stall::MarkStandingStill)
+}
+
+/// Log one tenant's sweep, escalating a tenant whose projection has not moved
+/// forward for [`WEDGED_PASSES_BEFORE_ERROR`] consecutive passes.
 ///
 /// Split out of [`reconcile_pass`] because it is where the obligation lives and
 /// because it is the only part of the pass with a decision in it — see
 /// [`QaInsights::reconcile_ticker`]'s doc for the whole argument, including what
-/// the alternatives to a per-term map were and why they were rejected.
+/// the alternatives to a per-term map were and why they were rejected, and
+/// [`stall_of`] for what now counts as not moving forward.
 #[allow(
     clippy::cognitive_complexity,
     reason = "inflated by the three `tracing` macros, which are the whole function: a clean pass, \
-              a first wedge and a persistent wedge are three different operator stories and the \
-              metric counts every field of every expansion as a branch. Splitting further would \
-              put one log line per function. Same diagnosis qa-runs' `supervise` records"
+              a first stall and a persistent stall are three different operator stories and the \
+              metric counts every field of every expansion as a branch. The two *kinds* of stall \
+              share their two macros through `Stall::as_str` rather than adding two more. \
+              Splitting further would put one log line per function. Same diagnosis qa-runs' \
+              `supervise` records"
 )]
 fn report_reconcile_outcome(
     tenant: TenantBound,
     outcome: &ReconcileOutcome,
-    wedged: &mut std::collections::HashMap<uuid::Uuid, u32>,
+    progress: &mut ProgressByTenant,
 ) {
-    if !outcome.stopped_at_gap {
-        // A clean pass clears the history, so the escalation below means
-        // "consecutive" and not "ever".
-        wedged.remove(&tenant.get());
+    // Copied out before the mutable borrow below, which is why
+    // `TenantProgress` is `Copy`.
+    let previous = progress.get(&tenant.get()).copied();
+    let stall = stall_of(outcome, previous);
+
+    let entry = progress.entry(tenant.get()).or_default();
+    // **Unconditionally, including on a clean pass.** The next pass' comparison
+    // is only as good as this record, and every pass of the outage was clean by
+    // the old reading.
+    entry.watermark_at = outcome.watermark_at;
+
+    let Some(stall) = stall else {
+        // A pass that moved forward clears the count, so the escalation below
+        // means "consecutive" and not "ever". The entry itself stays, for the
+        // mark it carries.
+        entry.stalled_passes = 0;
         debug!(
             tenant_id = %tenant.get(),
             scanned = outcome.scanned,
             backfilled = outcome.backfilled,
-            watermark_advanced_to = ?outcome.watermark_advanced_to,
+            result_rows_written = outcome.result_rows_written,
+            caught_up = outcome.caught_up,
+            watermark_at = ?outcome.watermark_at,
             "qa-insights reconcile pass"
         );
         return;
-    }
+    };
 
-    let passes = *wedged
-        .entry(tenant.get())
-        .and_modify(|n| *n += 1)
-        .or_insert(1);
+    entry.stalled_passes += 1;
+    let passes = entry.stalled_passes;
     if passes >= WEDGED_PASSES_BEFORE_ERROR {
         error!(
             tenant_id = %tenant.get(),
+            stalled_on = stall.as_str(),
             stopped_at_run = ?outcome.stopped_at_run,
+            watermark_at = ?outcome.watermark_at,
             consecutive_wedged_passes = passes,
             "qa-insights reconciler has not advanced this tenant's watermark for several \
-             consecutive passes: its projection is FROZEN from the named run onward and no later \
-             run will be backfilled until that run can be. Replay a narrow window with POST \
-             /qa/v1/insights/rebuild, and if that fails too the run needs a look in qa-runs"
+             consecutive passes: its projection is FROZEN at the reported instant and no run \
+             finishing after it is being backfilled. Replay a narrow window with POST \
+             /qa/v1/insights/rebuild; if a run is named, and the replay fails too, that run \
+             needs a look in qa-runs"
         );
     } else {
         warn!(
             tenant_id = %tenant.get(),
+            stalled_on = stall.as_str(),
             stopped_at_run = ?outcome.stopped_at_run,
+            watermark_at = ?outcome.watermark_at,
             consecutive_wedged_passes = passes,
             scanned = outcome.scanned,
             backfilled = outcome.backfilled,
-            "qa-insights reconciler stopped at a run it could not backfill; the watermark did \
-             not advance past it, so nothing that finished later is projected for this tenant \
-             until it can be"
+            result_rows_written = outcome.result_rows_written,
+            "qa-insights reconciler did not move this tenant's watermark on this pass, so \
+             nothing that finished after it is projected for this tenant until it does"
         );
     }
 }
@@ -1531,13 +1737,12 @@ mod tests {
     //! `UnsupportedMailClient` and `SlackOagwClient` each carry their own tests.
 
     use super::{
-        Cadence, MAX_LOOKBACK_SECONDS, WEDGED_PASSES_BEFORE_ERROR, prune_wedged,
+        Cadence, MAX_LOOKBACK_SECONDS, ProgressByTenant, WEDGED_PASSES_BEFORE_ERROR, prune_wedged,
         reconcile_lookback, report_reconcile_outcome,
     };
     use crate::config::{MIN_COLLECT_INTERVAL_SECONDS, QaInsightsConfig};
     use crate::domain::service::reconcile::ReconcileOutcome;
     use crate::domain::system_actor::TenantBound;
-    use std::collections::HashMap;
     use time::{Duration, OffsetDateTime};
     use uuid::Uuid;
 
@@ -1546,6 +1751,22 @@ mod tests {
 
     fn bound(id: Uuid) -> TenantBound {
         TenantBound::new(id).expect("non-nil")
+    }
+
+    /// The consecutive-pass count this tenant stands at, or `None` if the
+    /// directory has pruned it away.
+    ///
+    /// The map's value grew a second field (the previous pass' mark, which the
+    /// stall detector compares against), so the assertions that used to read
+    /// `wedged.get(&TENANT_A)` read this instead. **What they assert did not
+    /// change**: a pass that moved forward still resets the count to
+    /// "consecutive means consecutive", and a pruned tenant is still absent
+    /// from the map entirely. Only a clean pass' spelling changed, from
+    /// "entry removed" to "count zeroed" — it must keep the entry now, because
+    /// the mark it carries is what the next pass compares against, and every
+    /// pass of the 2026-09-18 outage looked clean.
+    fn passes(progress: &ProgressByTenant, tenant: Uuid) -> Option<u32> {
+        progress.get(&tenant).map(|p| p.stalled_passes)
     }
 
     fn wedged_outcome() -> ReconcileOutcome {
@@ -1557,11 +1778,43 @@ mod tests {
         }
     }
 
+    /// A pass that moved forward: one run scanned, one backfilled with rows
+    /// that landed, the mark on that run, and the walk caught up.
+    ///
+    /// `caught_up: true` and a `watermark_at` are not decoration. A pass with
+    /// neither — which is what `..default()` alone produces — is the outage's
+    /// own shape, so a helper called `clean_outcome` that omitted them would
+    /// have been quietly describing the wedge.
     fn clean_outcome() -> ReconcileOutcome {
         ReconcileOutcome {
             scanned: 1,
             backfilled: 1,
+            result_rows_written: 4,
+            watermark_at: Some(OffsetDateTime::UNIX_EPOCH + Duration::hours(1)),
+            caught_up: true,
             ..ReconcileOutcome::default()
+        }
+    }
+
+    /// The outage, as one pass reported it: a full page scanned, runs
+    /// "backfilled" that wrote nothing, **no gap**, the walk not caught up, and
+    /// the mark on the instant it had been frozen at since 2026-09-18.
+    ///
+    /// The numbers are the stand's: `scanned=200 backfilled=116
+    /// stopped_at_gap=false`, repeated every five minutes for three days while
+    /// `qa_test_results` held at 182 rows.
+    fn stalled_outcome() -> ReconcileOutcome {
+        ReconcileOutcome {
+            scanned: 200,
+            backfilled: 116,
+            result_rows_written: 0,
+            watermark_at: Some(OffsetDateTime::UNIX_EPOCH + Duration::hours(3)),
+            caught_up: false,
+            // A sweep never sets it: the mark is its resume point. See
+            // `ReconcileOutcome::resume_from`.
+            resume_from: None,
+            stopped_at_gap: false,
+            stopped_at_run: None,
         }
     }
 
@@ -1635,18 +1888,133 @@ mod tests {
     /// services graph and the ladder is what the obligation is about.
     #[test]
     fn consecutive_wedged_passes_count_up_and_a_clean_pass_clears_them() {
-        let mut wedged: HashMap<Uuid, u32> = HashMap::new();
+        let mut wedged = ProgressByTenant::new();
 
         for expected in 1..=WEDGED_PASSES_BEFORE_ERROR {
             report_reconcile_outcome(bound(TENANT_A), &wedged_outcome(), &mut wedged);
-            assert_eq!(wedged.get(&TENANT_A), Some(&expected));
+            assert_eq!(passes(&wedged, TENANT_A), Some(expected));
         }
 
         report_reconcile_outcome(bound(TENANT_A), &clean_outcome(), &mut wedged);
         assert_eq!(
-            wedged.get(&TENANT_A),
-            None,
+            passes(&wedged, TENANT_A),
+            Some(0),
             "a clean pass clears the history, so the ERROR means `consecutive` and not `ever`"
+        );
+    }
+
+    /// **The outage's own shape, and the test that would have caught it.**
+    ///
+    /// Three days, 864 passes, every one of them reporting `scanned=200
+    /// backfilled=116 stopped_at_gap=false` while the watermark sat on one
+    /// instant and `qa_test_results` sat on 182 rows. Nothing escalated,
+    /// because the only condition the ticker branched on was `stopped_at_gap` —
+    /// so every pass took the clean branch and **reset the counter that was
+    /// supposed to be filling**.
+    ///
+    /// The assertion is the ladder, not the log: three consecutive passes
+    /// reporting the same `watermark_at` while not caught up must reach
+    /// [`WEDGED_PASSES_BEFORE_ERROR`], which is the threshold the `ERROR` arm
+    /// fires on. Under the shipped code this reached zero, forever.
+    ///
+    /// The first pass deliberately does **not** count: one observation of an
+    /// instant is not two, so there is nothing yet to call consecutive. That
+    /// costs one tick after a restart, and is why four passes are driven here
+    /// for a threshold of three.
+    #[test]
+    fn a_watermark_that_never_moves_escalates_even_though_no_pass_reports_a_gap() {
+        let mut progress = ProgressByTenant::new();
+
+        report_reconcile_outcome(bound(TENANT_A), &stalled_outcome(), &mut progress);
+        assert_eq!(
+            passes(&progress, TENANT_A),
+            Some(0),
+            "the first pass records the mark; it has nothing to compare it against yet"
+        );
+
+        for expected in 1..=WEDGED_PASSES_BEFORE_ERROR {
+            report_reconcile_outcome(bound(TENANT_A), &stalled_outcome(), &mut progress);
+            assert_eq!(
+                passes(&progress, TENANT_A),
+                Some(expected),
+                "a pass that reports the same watermark while the sweep has not caught up is \
+                 a pass that did not move this tenant's projection, gap or no gap"
+            );
+        }
+
+        assert_eq!(
+            passes(&progress, TENANT_A),
+            Some(WEDGED_PASSES_BEFORE_ERROR),
+            "and it must reach the ERROR threshold: this is the alarm that stayed silent for \
+             three days"
+        );
+    }
+
+    /// The other side of the same predicate: a watermark that **moves** is not
+    /// a stall, however little else the pass did.
+    ///
+    /// Without this, "escalate when the mark is the same" would be satisfied by
+    /// a detector that escalates unconditionally.
+    #[test]
+    fn a_watermark_that_moves_is_not_a_stall() {
+        let mut progress = ProgressByTenant::new();
+
+        for hour in 1..=4 {
+            let outcome = ReconcileOutcome {
+                watermark_at: Some(OffsetDateTime::UNIX_EPOCH + Duration::hours(hour)),
+                ..stalled_outcome()
+            };
+            report_reconcile_outcome(bound(TENANT_A), &outcome, &mut progress);
+        }
+
+        assert_eq!(
+            passes(&progress, TENANT_A),
+            Some(0),
+            "each pass left the mark further forward than it found it, which is the sweep \
+             working, not stalling"
+        );
+    }
+
+    /// **A quiet tenant must not trip the alarm**, and this is the test that
+    /// says why the predicate is not "the same instant while `scanned > 0`".
+    ///
+    /// `ReconcileService::sweep` computes its floor as `mark - lookback`, from
+    /// the *mark* and not from the clock, so a tenant whose last run finished
+    /// inside the lookback window re-lists exactly those runs on every tick,
+    /// forever: `scanned > 0`, `backfilled = 0`, the same `watermark_at` every
+    /// pass, and nothing whatsoever wrong. On the default 300-second cadence a
+    /// `scanned > 0` predicate would `ERROR` on such a tenant every fifteen
+    /// minutes.
+    ///
+    /// That matters more than a tidier predicate: an alarm that cries wolf on
+    /// every idle stand is an alarm nobody reads, which is the same outcome as
+    /// the one this whole change exists to prevent.
+    /// [`ReconcileOutcome::caught_up`] is the field that tells the two apart.
+    #[test]
+    fn an_idle_tenant_re_scanning_its_lookback_window_is_not_a_stall() {
+        let mut progress = ProgressByTenant::new();
+        let idle = ReconcileOutcome {
+            // The lookback window still holds one finished run, so the sweep
+            // sees it on every pass and the mark stays on it.
+            scanned: 1,
+            backfilled: 0,
+            result_rows_written: 0,
+            watermark_at: Some(OffsetDateTime::UNIX_EPOCH + Duration::hours(2)),
+            // The page came back short: there is nothing past the cursor.
+            caught_up: true,
+            resume_from: None,
+            stopped_at_gap: false,
+            stopped_at_run: None,
+        };
+
+        for _ in 0..(WEDGED_PASSES_BEFORE_ERROR * 4) {
+            report_reconcile_outcome(bound(TENANT_A), &idle, &mut progress);
+        }
+
+        assert_eq!(
+            passes(&progress, TENANT_A),
+            Some(0),
+            "a caught-up sweep whose mark has nothing to move to is idle, not wedged"
         );
     }
 
@@ -1667,29 +2035,29 @@ mod tests {
     /// `None` pass emptied the map and the third pass started again at 1.
     #[test]
     fn a_refused_enumeration_does_not_clear_a_standing_wedge_count() {
-        let mut wedged: HashMap<Uuid, u32> = HashMap::new();
+        let mut wedged = ProgressByTenant::new();
         let listed = [bound(TENANT_A)];
 
         prune_wedged(&mut wedged, Some(&listed));
         report_reconcile_outcome(bound(TENANT_A), &wedged_outcome(), &mut wedged);
         prune_wedged(&mut wedged, Some(&listed));
         report_reconcile_outcome(bound(TENANT_A), &wedged_outcome(), &mut wedged);
-        assert_eq!(wedged.get(&TENANT_A), Some(&2), "two wedged passes");
+        assert_eq!(passes(&wedged, TENANT_A), Some(2), "two wedged passes");
 
         // The pass whose enumeration was refused. It prunes nothing and reports
         // nothing.
         prune_wedged(&mut wedged, None);
         assert_eq!(
-            wedged.get(&TENANT_A),
-            Some(&2),
+            passes(&wedged, TENANT_A),
+            Some(2),
             "a refused enumeration is not evidence that the tenant recovered or departed"
         );
 
         prune_wedged(&mut wedged, Some(&listed));
         report_reconcile_outcome(bound(TENANT_A), &wedged_outcome(), &mut wedged);
         assert_eq!(
-            wedged.get(&TENANT_A),
-            Some(&WEDGED_PASSES_BEFORE_ERROR),
+            passes(&wedged, TENANT_A),
+            Some(WEDGED_PASSES_BEFORE_ERROR),
             "the third genuinely-wedged pass must reach the ERROR threshold"
         );
     }
@@ -1699,14 +2067,18 @@ mod tests {
     /// one it still lists is kept.
     #[test]
     fn a_tenant_the_directory_no_longer_lists_is_pruned() {
-        let mut wedged: HashMap<Uuid, u32> = HashMap::new();
+        let mut wedged = ProgressByTenant::new();
         report_reconcile_outcome(bound(TENANT_A), &wedged_outcome(), &mut wedged);
         report_reconcile_outcome(bound(TENANT_B), &wedged_outcome(), &mut wedged);
 
         prune_wedged(&mut wedged, Some(&[bound(TENANT_B)]));
 
-        assert_eq!(wedged.get(&TENANT_A), None, "no longer listed, so dropped");
-        assert_eq!(wedged.get(&TENANT_B), Some(&1), "still listed, so kept");
+        assert_eq!(
+            passes(&wedged, TENANT_A),
+            None,
+            "no longer listed, so dropped: entry and remembered mark together"
+        );
+        assert_eq!(passes(&wedged, TENANT_B), Some(1), "still listed, so kept");
     }
 
     /// The cadence `serve` receives for the collect cycle is the **floored** one.

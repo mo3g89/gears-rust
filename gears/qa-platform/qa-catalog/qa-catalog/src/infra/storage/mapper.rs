@@ -31,6 +31,7 @@ pub fn repo_to_sdk(m: test_repository::Model) -> TestRepository {
         content_root: m.content_root,
         credential_ref: m.credential_ref,
         last_synced_at: m.last_synced_at,
+        head_commit: m.head_commit,
         sync_error: m.sync_error,
         created_at: m.created_at,
         updated_at: m.updated_at,
@@ -108,6 +109,12 @@ pub fn bundle_to_sdk(m: test_bundle::Model) -> Result<TestBundle, DomainError> {
         size_bytes,
         expires_at: m.expires_at,
         created_at: m.created_at,
+        // Empty, always: there is no `download_sig` column and there is not
+        // meant to be one. The tag is a pure function of
+        // `(id, tenant_id, secret)`, recomputed on every verification, and
+        // `BundlesService::create_bundle` is the one place that attaches it to
+        // a value leaving this gear. See `TestBundle::download_sig`.
+        download_sig: String::new(),
     })
 }
 

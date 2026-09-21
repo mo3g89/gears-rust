@@ -15,9 +15,10 @@
 //! # There are no foreign keys, in either direction
 //!
 //! `run_id`, `repo_id` and `environment_id` all name rows in *other gears'*
-//! schemas, and DESIGN §3.7 forbids cross-schema foreign keys — so unlike
-//! qa-runs' repositories, nothing here can lean on the database to reject a
-//! write against a parent that does not exist.
+//! schemas, and DESIGN §3.8 says each gear owns its own schema and no gear
+//! reads another's tables directly — so unlike qa-runs' repositories, nothing
+//! here can lean on the database to reject a write against a parent that
+//! does not exist.
 //!
 //! What replaces it is obligation #1 of the schema, and it lands on the
 //! **service** layer rather than on these traits: *resolve every
@@ -64,12 +65,12 @@
 //!   column (option A, 2026-08-20), and then briefly regressed when `45dafe9b`
 //!   dropped `created_at` and claimed equivalence anyway. Do not reduce it to
 //!   three keys.
-//! * [`ResultsRepository::latest_per_test`] and
-//!   [`ResultsRepository::ingested_run_ids_between`] — both reduce in SQL through
-//!   `SecureSelect::project_all`. Task 12 first shipped them as in-memory folds
-//!   and wrote, *as corrections to these traits*, that `SecureSelect` could not
+//! * [`ResultsRepository::ingested_run_ids_between`] — reduces in SQL through
+//!   `SecureSelect::project_all`. Task 12 first shipped it (and `latest_per_test`,
+//!   deleted since — it never had a production caller) as in-memory folds and
+//!   wrote, *as corrections to these traits*, that `SecureSelect` could not
 //!   project, group or de-duplicate. It can. Those sentences are gone; the
-//!   methods' docs record how they came to be written, because "the wrapper
+//!   method's doc records how they came to be written, because "the wrapper
 //!   cannot do X" is the shape of claim this layer keeps getting wrong.
 //!
 //! # The two JIRA configuration singletons, placed by Task 32

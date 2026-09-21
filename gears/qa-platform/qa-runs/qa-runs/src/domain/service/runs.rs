@@ -89,8 +89,8 @@ use std::sync::Arc;
 use authz_resolver_sdk::PolicyEnforcer;
 use qa_environments_sdk::{AcquireOutcome, LeaseMode, QaEnvironmentsClientV1};
 use qa_runs_sdk::{
-    Exclusivity, LaunchOutcome, LaunchRequest, QueueEntry, QueueState, Run, RunResult, RunSource,
-    RunState,
+    Exclusivity, FinishedRunCursor, LaunchOutcome, LaunchRequest, QueueEntry, QueueState, Run,
+    RunResult, RunSource, RunState,
 };
 use time::OffsetDateTime;
 use toolkit_odata::{ODataQuery, Page};
@@ -390,13 +390,13 @@ where
     pub async fn list_runs_finished_since(
         &self,
         ctx: &SecurityContext,
-        since: OffsetDateTime,
+        cursor: FinishedRunCursor,
         limit: u32,
     ) -> Result<Vec<Run>, DomainError> {
         let scope = self.run_scope(ctx, actions::LIST, None).await?;
         let conn = self.db.conn()?;
         self.runs
-            .list_finished_since(&conn, &scope, since, limit)
+            .list_finished_since(&conn, &scope, cursor, limit)
             .await
     }
 
@@ -1323,7 +1323,12 @@ where
             .acquire_lease(ctx, environment_id, claim.run_id, mode)
             .await
         {
-            Ok(AcquireOutcome::Acquired) => {}
+            // The free instant this acquisition may carry is dropped on
+            // purpose: force-start is not a queued dispatch, so it is not a
+            // sample of `cpt-cf-qa-nfr-dispatch-latency`. See
+            // `service::dispatch`'s `record_free_to_start` for the
+            // population that is.
+            Ok(AcquireOutcome::Acquired { .. }) => {}
             Ok(AcquireOutcome::Busy { current }) => warn!(
                 run_id = %claim.run_id,
                 %environment_id,

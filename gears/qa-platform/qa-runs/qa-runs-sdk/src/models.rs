@@ -371,10 +371,13 @@ impl ExclusiveTier {
 ///
 /// Counts only — **not** the run record.
 /// [`QaRunsClientV1::get_run_result`](crate::QaRunsClientV1::get_run_result)
-/// returns these five numbers; `get_run` returns the [`Run`].
+/// returns these seven numbers; `get_run` returns the [`Run`].
 ///
-/// **There is no `error` counter, and adding one as a sixth field would be a
-/// silent regression.** `failed` is the *failed-or-errored* count: `FAILED` and
+/// **There is no `error` counter, and adding one would be a silent
+/// regression.** This rule is about `error` specifically — it is *not* a rule
+/// against further counters, and [`Self::xfail`]/[`Self::xpass`] are two that
+/// were added on the owner's decision without touching the fold below.
+/// `failed` is the *failed-or-errored* count: `FAILED` and
 /// `ERROR` are distinct per-test statuses but are folded together in every
 /// aggregate that produces these numbers —
 /// `COUNT(*) FILTER (WHERE tr.status IN ('FAILED', 'ERROR')) AS failed`. That
@@ -390,12 +393,40 @@ impl ExclusiveTier {
 /// run with only errored tests would report `succeeded`. If errored results
 /// ever need their own number, add it *in addition to* the fold — `failed`
 /// must keep counting them.
+///
+/// **[`Self::xfail`] and [`Self::xpass`] deliberately do not vote on the
+/// verdict either**, and for the opposite reason: an expected failure that
+/// failed is the outcome the suite author asked for, so folding it into
+/// `failed` would fail a run that behaved exactly as written; an expected
+/// failure that passed is a suite whose marker is now stale, which is worth
+/// seeing and is not a test failure. Both moved from *no* counter to their
+/// own, and `derive_terminal_state` reads neither — so no run's terminal state
+/// changed when they were added.
+///
+/// # The counters account for every row
+///
+/// `passed + failed + skipped + in_progress + xfail + xpass == total` for a
+/// run whose every result carries one of the eight statuses those counters
+/// recognise. It is the arithmetic a report, a run card or any derived
+/// percentage assumes, and until `xpass` landed it did not hold on any suite
+/// containing an unexpected pass. A status the runner invents is still counted
+/// in `total` alone — the open-set rule — so a consumer reads the identity as
+/// "the counters account for every *recognised* row", not as a guarantee it
+/// may divide by.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RunResult {
     pub passed: usize,
     pub failed: usize,
     pub skipped: usize,
     pub in_progress: usize,
+    /// Results the runner reported as `XFAIL` — an expected failure that
+    /// failed.
+    pub xfail: usize,
+    /// Results the runner reported as `XPASS` — an expected failure that
+    /// unexpectedly passed. The symmetric counter to [`Self::xfail`], and the
+    /// one that makes the sum above close unconditionally for a suite whose
+    /// statuses are all known.
+    pub xpass: usize,
     pub total: usize,
 }
 
@@ -503,9 +534,12 @@ impl LaunchOutcome {
 ///   [`run_id`](Self::run_id) resolves to a [`Run`] that already carries the
 ///   target;
 /// * `workflow_name` is likewise absent — `run_id` is the run handle, and the
-///   executor's opaque reference lives on [`Run::execution_ref`]. DESIGN §3.8
-///   does list `execution_ref` on `run_queue`, but duplicating it on the queue
-///   row would give one execution two homes that can disagree.
+///   executor's opaque reference lives on [`Run::execution_ref`]. DESIGN §3.8's
+///   `qa_run_queue` column list does **not** carry `execution_ref` (DESIGN.md
+///   lines 888-890) — it was removed from the table list in the same change
+///   as `m20260813_000003_initial.rs`, which records the removal — and
+///   duplicating it on the queue row here would give one execution two homes
+///   that can disagree.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueueEntry {
     pub id: Uuid,
@@ -606,9 +640,29 @@ pub struct Schedule {
     pub updated_at: OffsetDateTime,
 }
 
+/// One entry of a schedule's fire history, as
+/// [`QaRunsClientV1::list_schedule_ticks`] returns it: what a fixed claim
+/// produced (`run_id`) or why it did not (`error`).
+///
+/// [`QaRunsClientV1::list_schedule_ticks`]: crate::QaRunsClientV1::list_schedule_ticks
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduleTick {
+    pub id: Uuid,
+    pub schedule_id: Uuid,
+    pub due_at: OffsetDateTime,
+    pub claimed_by: String,
+    pub claimed_at: OffsetDateTime,
+    /// `None` until the launch it triggered completes, or forever for an
+    /// orphaned claim — see `domain::repos::schedules_repo`'s module header in
+    /// `qa-runs` for why that second case is possible and is not itself a
+    /// stuck schedule.
+    pub run_id: Option<Uuid>,
+    pub error: Option<String>,
+}
+
 /// The scheduled-run event vocabulary, **as serialized**.
 ///
-/// Six values, and these exact spellings. The snake_case spellings are what
+/// Six values, and these exact spellings. The `snake_case` spellings are what
 /// crosses a wire and lands in a column — never a CamelCase variant name.
 ///
 /// The distinction is load-bearing rather than pedantic: `InProgress`
@@ -679,4 +733,79 @@ pub struct NewSchedule {
     pub include_tags: Vec<String>,
     pub exclude_tags: Vec<String>,
     pub parameters: Vec<RunParameter>,
+}
+
+/// Where a walk of [`QaRunsClientV1::list_runs_finished_since`] resumes: a
+/// point in the `(finished_at, id)` order that listing is sorted by.
+///
+/// [`QaRunsClientV1::list_runs_finished_since`]: crate::QaRunsClientV1::list_runs_finished_since
+///
+/// # One value, because the two halves of a cursor cannot be threaded
+/// # separately without one of them being droppable
+///
+/// This shipped as two positional parameters — `since: OffsetDateTime` and
+/// `after_id: Option<Uuid>` — and the risk that was flagged against that shape
+/// is not a transposition. The three parameter types were already distinct, so
+/// a swap was a compile error. The risk is a **delegation that keeps the
+/// instant and drops the id**: this method is passed through four layers
+/// between the reconciler and the SQL, and at every one of them
+/// `list_runs_finished_since(ctx, since, None, limit)` compiles, reads exactly
+/// like the first page of a walk — which is the spelling every first page
+/// legitimately uses — and silently restores the instant-only bound that
+/// stranded three days of results on 2026-09-18. No test double catches it:
+/// each of them reproduces the bound it is *given*.
+///
+/// As one opaque value the drop is not an omission any more. A hop that wants
+/// to lose the id has to name [`Self::starting_at`] and pull the instant back
+/// out through [`Self::at`], which is three deliberate tokens in a diff rather
+/// than a `None` that looks like every other `None`.
+///
+/// The fields are private for the same reason: the two constructors are the
+/// only two positions a walk can legitimately be at, and `FinishedRunCursor {
+/// at, after_id: None }` would be the omission all over again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FinishedRunCursor {
+    at: OffsetDateTime,
+    after_id: Option<Uuid>,
+}
+
+impl FinishedRunCursor {
+    /// The first page of a walk: every finished run at or after `at`.
+    ///
+    /// The bound is **inclusive**, which is what the caller of a watermark
+    /// wants: the mark names a run already consumed once, and re-reading it is
+    /// how a run written after an earlier pass' cutoff is still picked up.
+    /// Re-delivering one run is the cheap failure; an exclusive bound dropping a
+    /// run that finished in the same tick as the mark is the expensive one.
+    #[must_use]
+    pub const fn starting_at(at: OffsetDateTime) -> Self {
+        Self { at, after_id: None }
+    }
+
+    /// A resume: everything **strictly after** this run, in `(finished_at, id)`.
+    ///
+    /// `at` is `run_id`'s own `finished_at`. Any other instant makes the bound
+    /// mean something the caller did not intend — the order this cursor rides
+    /// on is the listing's, not the caller's.
+    #[must_use]
+    pub const fn after(at: OffsetDateTime, run_id: Uuid) -> Self {
+        Self {
+            at,
+            after_id: Some(run_id),
+        }
+    }
+
+    /// The instant half. Where the page starts for [`Self::starting_at`]; the
+    /// instant already consumed for [`Self::after`].
+    #[must_use]
+    pub const fn at(self) -> OffsetDateTime {
+        self.at
+    }
+
+    /// The run already consumed at [`Self::at`], if any. `None` is a first page
+    /// and takes the inclusive bound.
+    #[must_use]
+    pub const fn after_id(self) -> Option<Uuid> {
+        self.after_id
+    }
 }

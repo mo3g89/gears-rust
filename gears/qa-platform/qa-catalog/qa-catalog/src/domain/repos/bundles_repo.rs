@@ -50,6 +50,38 @@ pub trait BundlesRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<TestBundle>, DomainError>;
 
+    /// The tenant that owns bundle `id`, or `None` when no such descriptor
+    /// exists — a **one-column** read, and the only cross-tenant read on a
+    /// request path in this gear.
+    ///
+    /// # Why the download path needs this and `get` cannot serve it
+    ///
+    /// `GET /qa/v1/test-bundles/{id}?sig=...` is anonymous: there is no caller
+    /// tenant to build a scope from, and the tag it presents is verified under
+    /// the *owning tenant's* derived key, so the tenant has to be known before
+    /// anything can be verified. [`Self::get`] is scoped, which is exactly
+    /// right for the read that follows and exactly wrong for this one.
+    ///
+    /// **It projects `tenant_id` and nothing else, deliberately.** A caller
+    /// that could see the descriptor here — `storage_ref`, `expires_at`,
+    /// `checksum_sha256` — would have a cross-tenant read of bundle metadata
+    /// reachable without a signature, since this call necessarily happens
+    /// *before* verification. One opaque UUID that the caller never sees (it is
+    /// consumed inside `BundlesService::get_bundle_content_signed` and never
+    /// returned, not even in an error) is the whole of what the verification
+    /// step needs.
+    ///
+    /// Pass `domain::elevated::enumeration_scope()`; the tenant-scoped read of
+    /// the same row still happens afterwards, under
+    /// `system_actor::for_bundle_download`, and that read is what actually
+    /// authorises serving the bytes.
+    async fn tenant_of<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<Uuid>, DomainError>;
+
     /// Every tenant with at least one bundle descriptor expired at or before
     /// `now`, ascending, `DISTINCT`.
     ///

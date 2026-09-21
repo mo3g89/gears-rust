@@ -381,10 +381,13 @@ async fn a_live_run(h: &Harness, name: &str, environment_id: Option<Uuid>) -> Uu
         .executor
         .start(RunSpec {
             run_id: run.id,
+            tenant_id: OWNER_TENANT,
             run_name: run.name.clone(),
             nodes: vec![ExecutionNode {
                 name: "repo-a".to_owned(),
                 bundle_ref: "bundle://a".to_owned(),
+                bundle_id: Uuid::new_v4(),
+                bundle_token: String::new(),
                 test_files: vec!["tests/a.py".to_owned()],
             }],
             env: RunEnv::default(),
@@ -856,14 +859,17 @@ fn unfinished_log_script() -> Vec<ExecutionEvent> {
         ExecutionEvent::Log {
             node: "repo-a".to_owned(),
             line: "one".to_owned(),
+            emitted_at: None,
         },
         ExecutionEvent::Log {
             node: "repo-a".to_owned(),
             line: "two".to_owned(),
+            emitted_at: None,
         },
         ExecutionEvent::Log {
             node: "repo-a".to_owned(),
             line: "three".to_owned(),
+            emitted_at: None,
         },
     ]
 }
@@ -890,10 +896,13 @@ impl ResumeHarness {
             .executor
             .start(RunSpec {
                 run_id: run.id,
+                tenant_id: OWNER_TENANT,
                 run_name: run.name.clone(),
                 nodes: vec![ExecutionNode {
                     name: "repo-a".to_owned(),
                     bundle_ref: "bundle://a".to_owned(),
+                    bundle_id: Uuid::new_v4(),
+                    bundle_token: String::new(),
                     test_files: vec!["tests/a.py".to_owned()],
                 }],
                 env: RunEnv::default(),

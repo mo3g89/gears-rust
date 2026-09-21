@@ -31,6 +31,7 @@ use time::Duration;
 use time::OffsetDateTime;
 use time::macros::{date, datetime};
 use toolkit_db::DBProvider;
+use toolkit_gts::GTS_ID_PREFIX;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -472,7 +473,10 @@ async fn the_overview_authorizes_under_test_result_list() {
 
     assert_eq!(
         authz.asked(),
-        vec![("qa.test_result".to_owned(), "list".to_owned())],
+        vec![(
+            format!("{GTS_ID_PREFIX}cf.qa.insights.test_result.v1~"),
+            "list".to_owned()
+        )],
     );
 }
 

@@ -23,7 +23,8 @@ use async_trait::async_trait;
 use qa_catalog_sdk::TestFileMeta;
 use qa_environments_sdk::{LeaseMode, LeaseState, QaEnvironmentsClientV1};
 use qa_runs_sdk::{
-    ExclusiveTier, Exclusivity, QueueState, RunKind, RunParameter, RunSource, RunState, RunTarget,
+    ExclusiveTier, Exclusivity, FinishedRunCursor, QueueState, RunKind, RunParameter, RunSource,
+    RunState, RunTarget,
 };
 use time::OffsetDateTime;
 use time::macros::datetime;
@@ -893,10 +894,13 @@ async fn force_start_does_not_override_the_concurrency_limit() {
         .inner
         .start(crate::domain::ports::run_executor::RunSpec {
             run_id: Uuid::from_u128(0xBEEF),
+            tenant_id: Uuid::new_v4(),
             run_name: "occupant-1".to_owned(),
             nodes: vec![crate::domain::ports::run_executor::ExecutionNode {
                 name: "repo-a".to_owned(),
                 bundle_ref: "bundle://x".to_owned(),
+                bundle_id: Uuid::new_v4(),
+                bundle_token: String::new(),
                 test_files: vec!["tests/a.py".to_owned()],
             }],
             env: crate::domain::ports::run_executor::RunEnv::default(),
@@ -1024,7 +1028,11 @@ async fn the_sweep_hands_the_repository_its_watermark_and_returns_the_page_unalt
 
     let found = h
         .service
-        .list_runs_finished_since(&owner(), datetime!(2026-08-18 09:00:00 UTC), 10)
+        .list_runs_finished_since(
+            &owner(),
+            FinishedRunCursor::starting_at(datetime!(2026-08-18 09:00:00 UTC)),
+            10,
+        )
         .await
         .expect("sweep succeeds");
 
@@ -1063,7 +1071,11 @@ async fn the_sweep_hands_the_repository_the_limit_it_was_given() {
 
     let found = h
         .service
-        .list_runs_finished_since(&owner(), datetime!(2026-08-18 09:00:00 UTC), 1)
+        .list_runs_finished_since(
+            &owner(),
+            FinishedRunCursor::starting_at(datetime!(2026-08-18 09:00:00 UTC)),
+            1,
+        )
         .await
         .unwrap();
 
@@ -1110,7 +1122,7 @@ async fn the_sweep_reads_under_a_qa_run_scope_compiled_for_the_caller() {
     let watermark = datetime!(2026-08-18 09:00:00 UTC);
     let mine_sees = h
         .service
-        .list_runs_finished_since(&owner(), watermark, 10)
+        .list_runs_finished_since(&owner(), FinishedRunCursor::starting_at(watermark), 10)
         .await
         .unwrap();
     assert_eq!(
@@ -1122,7 +1134,11 @@ async fn the_sweep_reads_under_a_qa_run_scope_compiled_for_the_caller() {
 
     let theirs_sees = h
         .service
-        .list_runs_finished_since(&ctx(OTHER_TENANT), watermark, 10)
+        .list_runs_finished_since(
+            &ctx(OTHER_TENANT),
+            FinishedRunCursor::starting_at(watermark),
+            10,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1281,6 +1297,7 @@ async fn the_container_wires_ingest_and_the_operator_actions_to_the_same_halves(
             crate::domain::ports::run_executor::ExecutionEvent::Log {
                 node: "repo-a".to_owned(),
                 line: "wired".to_owned(),
+                emitted_at: None,
             },
         )
         .await

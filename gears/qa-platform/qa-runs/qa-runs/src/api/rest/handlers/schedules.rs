@@ -18,7 +18,9 @@ use toolkit::api::canonical_prelude::*;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use crate::api::rest::dto::{NewScheduleReq, ScheduleDto, UpdateScheduleNotificationsReq};
+use crate::api::rest::dto::{
+    NewScheduleReq, ScheduleDto, ScheduleTickDto, UpdateScheduleNotificationsReq,
+};
 use crate::api::rest::error::as_schedule_error;
 use crate::gear::ConcreteAppServices;
 
@@ -62,6 +64,25 @@ pub async fn get_schedule(
         .await
         .map_err(as_schedule_error)?;
     Ok(Json(ScheduleDto::from(schedule)))
+}
+
+/// `GET /qa/v1/schedules/{id}/ticks`
+///
+/// One schedule's fire history, most recent `due_at` first. Absent and
+/// another tenant's are the same 404, matching [`get_schedule`] - the service
+/// checks visibility with its own `get` before reading the ticks.
+#[tracing::instrument(skip(svc, ctx), fields(schedule.id = %id))]
+pub async fn list_schedule_ticks(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Extension<Arc<ConcreteAppServices>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Vec<ScheduleTickDto>>> {
+    let ticks = svc
+        .schedules
+        .list_ticks(&ctx, id)
+        .await
+        .map_err(as_schedule_error)?;
+    Ok(Json(ticks.into_iter().map(ScheduleTickDto::from).collect()))
 }
 
 /// Decode a schedule payload, attributing any refusal to the **schedule**.

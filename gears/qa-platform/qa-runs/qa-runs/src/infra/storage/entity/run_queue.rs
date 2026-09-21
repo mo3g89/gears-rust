@@ -33,7 +33,7 @@ pub struct Model {
     pub run_kind: String,
     pub source: String,
     /// The run's resolved exclusivity. Named `exclusive` here and
-    /// `resolved_exclusive` on the run: DESIGN §3.7's qa-runs table list spells the two columns
+    /// `resolved_exclusive` on the run: DESIGN §3.8's qa-runs table list spells the two columns
     /// differently and they are different tables.
     pub exclusive: bool,
     /// `qa_runs_sdk::QueueState::as_str`, seven values. `cancelled` with two

@@ -97,6 +97,8 @@ export const DEFAULT_FORM: NotificationsConfig = {
   scheduled_run_slack_templates: DEFAULT_SCHEDULED_TEMPLATES,
   email_smtp_host: '',
   email_smtp_port: 587,
+  email_smtp_username: '',
+  email_smtp_credstore_ref: '',
   email_from: '',
   email_recipients: '',
   email_enabled: false,

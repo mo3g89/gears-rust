@@ -30,14 +30,15 @@ pub(super) fn register_admin_routes(router: Router, openapi: &dyn OpenApiRegistr
         .description(
             "Re-read every run that finished in [from, to) from qa-runs and rewrite this \
              gear's projection of it, run by run. For a window whose results are known to be \
-             wrong or missing. Requires the qa.test_result/rebuild grant. The window is \
+             wrong or missing. Requires the gts.cf.qa.insights.test_result.v1~/rebuild grant. The window is \
              half-open, so adjoining windows neither skip a run nor replay one, and `to` must \
              be strictly after `from`. It does not move the reconciler's watermark, in either \
              direction: this is a repair for a known window, not a reset. It deletes nothing \
              it does not immediately rewrite, so rows for runs qa-runs no longer has are left \
-             standing. The window is capped by the configured reconcile page size; a window \
-             holding more runs than that replays the oldest page and logs a warning, so \
-             narrow it and repeat.",
+             standing. The window is walked in pages under a fixed budget, so a window wider \
+             than one page is replayed in full rather than truncated: check `complete` on the \
+             response, and when it is false post `resume_from` back as `from` with the same \
+             `to` until it is true.",
         )
         .tag(API_TAG)
         .authenticated()

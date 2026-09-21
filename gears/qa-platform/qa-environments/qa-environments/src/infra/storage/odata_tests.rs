@@ -316,14 +316,16 @@ fn every_field_variant_is_advertised() {
     assert_eq!(names.len(), VARIABLE_FILTER_FIELD_VARIANTS, "{names:?}");
 }
 
-/// **The physical column is `environment_id`; no wire name is.**
+/// **The physical column is `environment_id`, matching the Rust field name
+/// exactly; no wire name or `SeaORM` pin is involved.**
 ///
-/// `entity/environment_variable.rs`'s `#[sea_orm(column_name = "platform_id")]`
-/// is what keeps the two apart, and `qa-runs`' `RunFilterField::EnvironmentId`
-/// records the same trap on its own table. Neither enum here advertises either
-/// spelling — see [`VariableFilterField`]'s doc for why `environment_id` is a
-/// plain query parameter on `/qa/v1/variables` rather than an `OData` field —
-/// so this pins the absence, which is the half a reader cannot see.
+/// `qa-runs`' `RunFilterField::EnvironmentId` is the same, by its own module
+/// doc's account: wire name, `Column` variant and physical column all agree
+/// there too, so there is no wire-name/column-name divergence on either
+/// table to guard against. Neither enum here advertises either spelling — see
+/// [`VariableFilterField`]'s doc for why `environment_id` is a plain query
+/// parameter on `/qa/v1/variables` rather than an `OData` field — so this
+/// pins the absence, which is the half a reader cannot see.
 #[test]
 fn neither_enum_advertises_platform_id_or_environment_id() {
     for name in EnvironmentFilterField::FIELDS

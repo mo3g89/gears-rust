@@ -20,11 +20,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use aws_lc_rs::digest::{SHA256, digest};
+use aws_lc_rs::{hkdf, hmac};
 use authz_resolver_sdk::PolicyEnforcer;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use qa_catalog_sdk::{BundleRequest, TestBundle};
-use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use toolkit_macros::domain_model;
 use toolkit_security::SecurityContext;
@@ -35,6 +36,7 @@ use super::plans::{content_root_dir, require_synced, resolve_under_root, validat
 use super::{DbProvider, actions, resources};
 use crate::domain::error::DomainError;
 use crate::domain::ports::bundle_store::BundleStore;
+use crate::domain::ports::metrics::{BundleDownloadMetrics, BundleDownloadOutcome};
 use crate::domain::repos::{BundlesRepository, TestReposRepository};
 
 /// Ephemeral bundle service.
@@ -48,10 +50,24 @@ pub struct BundlesService<B: BundlesRepository, R: TestReposRepository> {
     /// `QaCatalogConfig::bundle_ttl_seconds` — every created bundle expires
     /// this long after creation.
     bundle_ttl: time::Duration,
+    /// `QaCatalogConfig::bundle_download_signing_secret` — the HMAC root every
+    /// per-bundle download tag is derived from. See
+    /// [`BundleDownloadSigningSecret`].
+    download_signing_secret: BundleDownloadSigningSecret,
+    /// The anonymous download route's access-control telemetry. See
+    /// [`BundleDownloadMetrics`] — emission cannot fail and must not change
+    /// this path's behaviour.
+    metrics: Arc<dyn BundleDownloadMetrics>,
     policy_enforcer: PolicyEnforcer,
 }
 
 impl<B: BundlesRepository, R: TestReposRepository> BundlesService<B, R> {
+    /// Nine constructor arguments, not a `Deps` struct: the one caller is
+    /// `AppServices::new`, which already takes a `ServiceDeps` and unpacks it
+    /// here, so a second struct would be one wrapper unpacked into another at
+    /// the same call site. `super::repos::ReposService::new` carries the same
+    /// allowance for the same reason.
+    #[allow(clippy::too_many_arguments, reason = "see the doc above")]
     pub fn new(
         db: Arc<DbProvider>,
         repo: Arc<B>,
@@ -59,6 +75,8 @@ impl<B: BundlesRepository, R: TestReposRepository> BundlesService<B, R> {
         store: Arc<dyn BundleStore>,
         repos_dir: PathBuf,
         bundle_ttl: time::Duration,
+        download_signing_secret: BundleDownloadSigningSecret,
+        metrics: Arc<dyn BundleDownloadMetrics>,
         policy_enforcer: PolicyEnforcer,
     ) -> Self {
         Self {
@@ -68,6 +86,8 @@ impl<B: BundlesRepository, R: TestReposRepository> BundlesService<B, R> {
             store,
             repos_dir,
             bundle_ttl,
+            download_signing_secret,
+            metrics,
             policy_enforcer,
         }
     }
@@ -126,13 +146,23 @@ impl<B: BundlesRepository + 'static, R: TestReposRepository> BundlesService<B, R
             size_bytes,
             expires_at: now + self.bundle_ttl,
             created_at: now,
+            // Empty on the way IN to the repository -- there is no column for
+            // it. The tag is attached to the value that comes back out, below,
+            // once the row (and therefore the identity it authorises) exists.
+            download_sig: String::new(),
         };
 
         let conn = self.db.conn()?;
         let tenant_id = ctx.subject_tenant_id();
 
         match self.repo.create(&conn, &scope, tenant_id, descriptor).await {
-            Ok(created) => {
+            Ok(mut created) => {
+                // The tag is minted HERE, and only here: `id`, `tenant_id` and
+                // the signing secret are all in hand at this one point, and
+                // nothing downstream of this method can recompute it without
+                // the secret. It is attached to the returned value and never
+                // written to the row -- see `TestBundle::download_sig`.
+                created.download_sig = self.sign_download(created.id, tenant_id);
                 // The size is logged because it is now a function of the whole
                 // content root rather than of a file list, and this is the only
                 // place a deployment can see it grow.
@@ -176,6 +206,170 @@ impl<B: BundlesRepository + 'static, R: TestReposRepository> BundlesService<B, R
         }
 
         self.store.get(&descriptor.storage_ref).await
+    }
+
+    /// Serve one bundle's bytes to a caller that presented a **signature**
+    /// rather than a session — the whole of `GET
+    /// /qa/v1/test-bundles/{id}?sig=...`.
+    ///
+    /// # Why a workflow pod has no bearer token, and what replaced it
+    ///
+    /// The runner pod's job is to execute tenant-authored pytest. It used to
+    /// carry a confidential OIDC client secret so it could mint a token and
+    /// call this route `.authenticated()`; that credential was
+    /// deployment-wide, unexpiring, `fullScopeAllowed`, hardcoded to one
+    /// tenant, and sat in an environment variable of a process tree running
+    /// tenant-written code. It is gone. What the pod carries now is a tag over
+    /// `(bundle_id, tenant_id)` that authorises **exactly this one bundle**
+    /// and nothing else — a `tar.gz` the pod is about to unpack anyway, whose
+    /// contents belong to the tenant that owns it. That is the property that
+    /// makes a leaked tag uninteresting, and therefore the property that makes
+    /// a revocation list unnecessary.
+    ///
+    /// # The order of the four steps is the security argument
+    ///
+    /// 1. **Recover the tenant from the row.** [`BundlesRepository::tenant_of`]
+    ///    under the elevated, read-only enumeration scope. The tenant is never
+    ///    a second query parameter: qa-insights' collect route must accept one
+    ///    because its row may not exist yet, but a bundle descriptor always
+    ///    exists before a tag over it can be presented, so the weaker shape
+    ///    would buy nothing.
+    /// 2. **Verify.** [`Self::verify_download_signature`], constant-time,
+    ///    fail-closed. All three refusal paths answer one
+    ///    [`DomainError::Forbidden`]; the classification goes to the metric
+    ///    only, so the response is not an oracle for which guess was closer.
+    /// 3. **Mint the context**: `system_actor::for_bundle_download` bound to
+    ///    the tenant *the row named*, not to anything the caller said.
+    /// 4. **Delegate, unchanged**, to [`Self::get_bundle_content`] — which
+    ///    still asks the PDP, still scopes the descriptor read to that tenant,
+    ///    and still refuses an expired bundle as a 404. Step 4 is what keeps
+    ///    the tag unable to reach past the bundle it names even if step 2 were
+    ///    wrong.
+    ///
+    /// # A missing bundle is a 404 before a signature is ever checked
+    ///
+    /// Deliberate, and not a leak: an id that names no row cannot be
+    /// distinguished from an expired one (the GC deletes both descriptor and
+    /// blob), `get_bundle_content` already answers 404 for both, and bundle
+    /// ids are v4 UUIDs — enumerating them is not an attack this ordering
+    /// enables. The alternative, refusing an unknown id with 403, would make
+    /// *this* route the oracle for "is this id real" that the merged refusal
+    /// above exists to avoid.
+    ///
+    /// # No expiry of its own
+    ///
+    /// The tag carries none. It is valid exactly as long as the row it names,
+    /// because step 4 already refuses an expired bundle before reading a byte
+    /// and the GC already deletes the blob. One number to tune
+    /// (`bundle_ttl_seconds`), one expiry semantics, one error message —
+    /// instead of a tag that can expire while its bundle is live, or outlive a
+    /// bundle that has gone.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::Forbidden`] for every signature refusal, merged;
+    /// [`DomainError::NotFound`] for an unknown, expired or purged bundle.
+    #[instrument(skip(self, signature), fields(bundle_id = %id))]
+    pub async fn get_bundle_content_signed(
+        &self,
+        id: Uuid,
+        signature: &str,
+    ) -> Result<Vec<u8>, DomainError> {
+        debug!("Fetching bundle content under a download signature");
+
+        let conn = self.db.conn()?;
+        // Elevated, cross-tenant, and one column wide. See
+        // `BundlesRepository::tenant_of` for why the download path cannot use
+        // the scoped `get` for this step and why it may not read more.
+        let scope = crate::domain::elevated::enumeration_scope();
+        let Some(tenant_id) = self.repo.tenant_of(&conn, &scope, id).await? else {
+            return Err(DomainError::NotFound { id });
+        };
+
+        if let Err(refusal) = self.verify_download_signature(id, tenant_id, signature) {
+            // The operator's copy of the distinction, and the only one: a
+            // deployment with no secret configured and a deployment under a
+            // guessing attack are opposite incidents with opposite fixes.
+            self.metrics.bundle_download(refusal.into());
+            warn!(
+                refusal = refusal.as_str(),
+                "refusing a bundle download: the sig query parameter did not verify"
+            );
+            return Err(DomainError::Forbidden);
+        }
+
+        let ctx = crate::domain::system_actor::for_bundle_download(tenant_id);
+        let bytes = self.get_bundle_content(&ctx, id).await?;
+        self.metrics
+            .bundle_download(BundleDownloadOutcome::Served);
+        Ok(bytes)
+    }
+
+    /// The hex-encoded HMAC-SHA256 tag over `(bundle_id, tenant_id)` —
+    /// `TEST_BUNDLE_URL`'s `sig` query parameter, and the value
+    /// [`Self::create_bundle`] returns on `TestBundle::download_sig`.
+    ///
+    /// `aws_lc_rs::hmac` rather than `sha2`/`hmac` directly: Dylint `DE0708`
+    /// bans a new non-allow-listed `sha2` import, and `aws-lc-rs` is this
+    /// workspace's mandated FIPS-validated primitive — the same call this
+    /// module already makes for `sha256_hex`, and the same one qa-insights'
+    /// `CollectService::sign` makes.
+    ///
+    /// **This signs unconditionally, including under an unconfigured secret.**
+    /// Verification is where fail-closed lives
+    /// ([`Self::verify_download_signature`]), for the same reason qa-insights
+    /// puts it there: a signer that refused would fail a *bundle build*, which
+    /// is a launch-path failure with a misleading message, where the refusal
+    /// belongs on the download with a diagnostic that names the secret.
+    fn sign_download(&self, bundle_id: Uuid, tenant_id: Uuid) -> String {
+        let key = derive_signing_key(&self.download_signing_secret.0, tenant_id);
+        let tag = hmac::sign(&key, &signing_payload(bundle_id, tenant_id));
+        hex::encode(tag.as_ref())
+    }
+
+    /// Verify [`Self::sign_download`]'s tag.
+    ///
+    /// Fails closed (never verifies) when `bundle_download_signing_secret` is
+    /// empty or shorter than [`MIN_SIGNING_SECRET_LEN`] once trimmed, and on
+    /// any signature that does not decode as hex or does not match.
+    /// `aws_lc_rs::hmac::verify` is constant-time, so neither matching arm
+    /// leaks which byte first differed.
+    ///
+    /// # What the tag covers, stated so the implementation cannot drift
+    ///
+    /// Exactly `(bundle_id, tenant_id)`, and therefore exactly one row. Not a
+    /// repository's bundles, not a tenant's, not a run's: a run has N nodes and
+    /// N bundles, so a run-scoped tag would have to be presented against a
+    /// bundle id it does not name — which means a stored row or a second
+    /// identifier in the tag, and per-bundle is strictly narrower and needs
+    /// neither.
+    ///
+    /// It authorises **no write of any kind, no other bundle, no other route,
+    /// no other gear.** It is not a `SecurityContext` and must never become
+    /// convertible into one beyond
+    /// `system_actor::for_bundle_download(tenant_id)`.
+    ///
+    /// # Errors
+    ///
+    /// [`SignatureRefusal`], naming which of the three paths refused. **The
+    /// caller cannot distinguish them**: [`Self::get_bundle_content_signed`]
+    /// answers all three with one [`DomainError::Forbidden`] and carries the
+    /// classification on the metric alone.
+    fn verify_download_signature(
+        &self,
+        bundle_id: Uuid,
+        tenant_id: Uuid,
+        signature: &str,
+    ) -> Result<(), SignatureRefusal> {
+        if !signing_secret_is_configured(&self.download_signing_secret.0) {
+            return Err(SignatureRefusal::SecretUnconfigured);
+        }
+        let Ok(tag) = hex::decode(signature) else {
+            return Err(SignatureRefusal::Malformed);
+        };
+        let key = derive_signing_key(&self.download_signing_secret.0, tenant_id);
+        hmac::verify(&key, &signing_payload(bundle_id, tenant_id), &tag)
+            .map_err(|_| SignatureRefusal::Mismatch)
     }
 
     /// Every tenant with at least one bundle descriptor expired at or before
@@ -320,13 +514,233 @@ impl<B: BundlesRepository + 'static, R: TestReposRepository> BundlesService<B, R
     }
 }
 
+/// `QaCatalogConfig::bundle_download_signing_secret` — the HMAC root
+/// [`BundlesService::sign_download`] and
+/// [`BundlesService::verify_download_signature`] share.
+///
+/// A type rather than a bare `String` so it cannot be transposed with any
+/// other string argument at the one construction site, and so `Debug` can be
+/// written by hand: an accidental `{:?}` anywhere in this gear's own code — a
+/// panic message, a stray `tracing::debug!` — cannot print the secret. That is
+/// narrower than, and no substitute for, whatever a config dump does with the
+/// `QaCatalogConfig` field itself, which never passes through this impl.
+#[derive(Clone)]
+pub struct BundleDownloadSigningSecret(pub String);
+
+impl std::fmt::Debug for BundleDownloadSigningSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("BundleDownloadSigningSecret")
+            .field(&"<redacted>")
+            .finish()
+    }
+}
+
+/// The minimum accepted length (bytes, trimmed) of
+/// `QaCatalogConfig::bundle_download_signing_secret` before
+/// [`BundlesService::verify_download_signature`] treats it as configured at
+/// all.
+///
+/// 16 bytes (128 bits) is not a proof of entropy — a 16-byte run of one
+/// repeated character is exactly as weak as it looks — only a floor on
+/// *length*, which is the one property this code can check; generating the
+/// value randomly stays the deployment's job. The same floor, for the same
+/// reason, as qa-insights' `collect::MIN_SIGNING_SECRET_LEN`: this is a
+/// per-deployment operational secret an operator types into configuration, so
+/// the shorter of the two common floors (128 bits) is the right one rather
+/// than the hash's own 64-byte block size.
+pub const MIN_SIGNING_SECRET_LEN: usize = 16;
+
+/// Whether `secret` clears [`MIN_SIGNING_SECRET_LEN`] once trimmed.
+///
+/// **One predicate, two call sites, deliberately shared**:
+/// [`BundlesService::verify_download_signature`] refuses on it at request
+/// time, and `crate::gear`'s `init` warns on it at boot. qa-insights shipped
+/// this same pair as two independent `is_empty()` checks, then raised one of
+/// them and not the other, and the result was a real gap — a 1–15 character
+/// secret passed the boot check silently and failed every request. There is
+/// one definition here so the two cannot drift.
+pub fn signing_secret_is_configured(secret: &str) -> bool {
+    secret.trim().len() >= MIN_SIGNING_SECRET_LEN
+}
+
+/// The domain-separation label for [`derive_signing_key`]'s HKDF salt.
+///
+/// Public/non-secret by construction — RFC 5869 §3.1 never requires a secret
+/// salt — and fixed rather than random because there is no per-deployment
+/// random value available here that the signing secret does not already
+/// provide; a fixed, versioned label is the standard fallback when none
+/// exists. The secret supplies the extract step's entropy; this constant's
+/// only job is binding the derivation to *this* call site, so that a future
+/// second HKDF use in this crate over the same root secret cannot collide with
+/// this one's output. The trailing `v1` is deliberate: changing this constant
+/// changes every derived key at once, which invalidates every tag in flight.
+const BUNDLE_DOWNLOAD_HKDF_SALT: &[u8] = b"qa-catalog/bundle-download/v1";
+
+/// HKDF-derive tenant `tenant_id`'s own HMAC-SHA256 key from the one root
+/// secret a deployment configures.
+///
+/// `PRK = HKDF-Extract(salt = `[`BUNDLE_DOWNLOAD_HKDF_SALT`]`, ikm =
+/// root_secret)`, then `OKM = HKDF-Expand(PRK, info = tenant_id's 16 raw
+/// bytes, len = HMAC-SHA256's key length)`, both HMAC-SHA256-based, so this
+/// adds a key-derivation step and no new hash algorithm.
+///
+/// # What it buys, stated precisely
+///
+/// Whoever holds the root secret can still derive any tenant's key on demand —
+/// unavoidable for any scheme that derives every tenant's key from one
+/// configured value without an out-of-band per-tenant secret store, which this
+/// design does not ask for. What the derivation buys is that a *derived* key,
+/// leaked alone, verifies for the one tenant it was derived for and not for
+/// every tenant at once — and, more concretely here, that the tag on a given
+/// bundle's URL is bound to that bundle's owning tenant without the caller
+/// having to assert a tenant at all.
+///
+/// `tenant_id.as_bytes()` is `Uuid`'s fixed 16-byte representation, so unlike
+/// a delimited string it needs no delimiter-safety argument: `expand`'s own
+/// doc warns about concatenated *variable-length* `info` fields colliding,
+/// which cannot apply to a single fixed-length one.
+///
+/// # Why `aws_lc_rs::hkdf`, not `hkdf`/`ring`
+///
+/// Dylint `DE0708` bans a new non-allow-listed `sha2` import, and `aws-lc-rs`
+/// is this workspace's mandated FIPS-validated primitive. Reaching for `hkdf`
+/// or `ring` would reintroduce a non-FIPS-validated implementation and add a
+/// dependency this workspace has already declined for this exact problem.
+///
+/// # Fail-closed is unaffected
+///
+/// This function never decides whether a download is served:
+/// [`BundlesService::verify_download_signature`] checks
+/// [`signing_secret_is_configured`] and returns
+/// [`SignatureRefusal::SecretUnconfigured`] before this function is reached.
+///
+/// # Panics
+///
+/// Never for this call site — see the allowance.
+#[allow(
+    clippy::expect_used,
+    reason = "the requested OKM length is HMAC-SHA256's own fixed digest length (32 bytes), \
+              never more than the 255x-digest-length cap `Prk::expand` enforces, so this can \
+              never fail here; a panic that cannot trigger beats a silent fallback key"
+)]
+fn derive_signing_key(root_secret: &str, tenant_id: Uuid) -> hmac::Key {
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, BUNDLE_DOWNLOAD_HKDF_SALT);
+    let prk = salt.extract(root_secret.as_bytes());
+    // A named binding, not an inline literal: `Okm` borrows this slice for its
+    // own lifetime, and an unnamed temporary would be dropped at the end of the
+    // `let okm = ...` statement, before `hmac::Key::from(okm)` uses it (E0716).
+    let info: [&[u8]; 1] = [tenant_id.as_bytes().as_slice()];
+    let okm = prk
+        .expand(&info, hkdf::HKDF_SHA256.hmac_algorithm())
+        .expect(
+            "HKDF-Expand's requested length is HMAC-SHA256's own fixed digest \
+             length (32 bytes), never more than the 255x-digest-length cap \
+             `expand` enforces, so this can never fail for this call site",
+        );
+    hmac::Key::from(okm)
+}
+
+/// The 32 bytes [`BundlesService::sign_download`] and
+/// [`BundlesService::verify_download_signature`] both MAC: the bundle id's 16
+/// raw bytes followed by the tenant id's 16.
+///
+/// **Both operands are fixed-width, so there is no delimiter to argue about.**
+/// qa-insights' `signing_payload` joins variable-length fields with `|` and
+/// has to carry a paragraph explaining why one `branch` value cannot stand in
+/// for a different triple. Two UUIDs concatenated at known offsets admit no
+/// such ambiguity: the split point is a constant, not a scan for a separator.
+///
+/// `tenant_id` is inside the payload even though [`derive_signing_key`]
+/// already binds the key to it — defense in depth that costs nothing. A
+/// hypothetical derivation regression that produced the same key for two
+/// tenants would still produce different tags for them, because the MAC input
+/// would differ under the shared key.
+fn signing_payload(bundle_id: Uuid, tenant_id: Uuid) -> [u8; 32] {
+    let mut payload = [0_u8; 32];
+    payload[..16].copy_from_slice(bundle_id.as_bytes());
+    payload[16..].copy_from_slice(tenant_id.as_bytes());
+    payload
+}
+
+/// Which of [`BundlesService::verify_download_signature`]'s three refusal
+/// paths a download took.
+///
+/// # This exists because the response deliberately cannot say
+///
+/// All three become one [`DomainError::Forbidden`] at
+/// [`BundlesService::get_bundle_content_signed`], which is that method's whole
+/// point: a response that distinguished them would hand an attacker a free
+/// oracle for which guess was closer. The distinction is real and an operator
+/// needs it — a deployment with no secret configured and a deployment under a
+/// guessing attack are opposite incidents with opposite fixes — so it is
+/// carried in this type, out of the request path and into the metric, and
+/// nowhere else.
+///
+/// **Effectively crate-private.** `crate::domain` is `pub(crate)` in this gear,
+/// so nothing outside the crate can name this type whatever its own visibility
+/// says — `pub` here rather than `pub(crate)` only because clippy's
+/// `redundant_pub_crate` is denied and the enclosing module already bounds it.
+/// Its whole reason for existing is that this information must not leave the
+/// process through the response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureRefusal {
+    /// `bundle_download_signing_secret` is absent, or shorter than
+    /// [`MIN_SIGNING_SECRET_LEN`] once trimmed. Fail-closed: this refuses every
+    /// download, including a correctly computed one.
+    SecretUnconfigured,
+    /// The `sig` parameter is not hex, so there is no tag to compare.
+    Malformed,
+    /// The tag decoded and does not match this deployment's secret over the
+    /// `(bundle_id, tenant_id)` pair the descriptor row named.
+    Mismatch,
+}
+
+impl SignatureRefusal {
+    /// The `tracing` field value. Not the metric label — that is
+    /// [`BundleDownloadOutcome::as_str`], reached through the `From` impl
+    /// below, so the series' label set stays owned by the metrics port.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SecretUnconfigured => "secret_unconfigured",
+            Self::Malformed => "signature_malformed",
+            Self::Mismatch => "signature_invalid",
+        }
+    }
+}
+
+/// The metric label for one refusal.
+///
+/// **Here rather than in `domain::ports::metrics`** — beside the enum it
+/// projects, following the placement qa-insights settled on for the same
+/// shape. [`SignatureRefusal`] is crate-private, so an impl written in the
+/// ports module would attach a crate-private type to a public one; and the
+/// "a fourth refusal path is a compile error here" guarantee only helps if it
+/// is where the author adding one is already looking.
+impl From<SignatureRefusal> for BundleDownloadOutcome {
+    fn from(refusal: SignatureRefusal) -> Self {
+        match refusal {
+            SignatureRefusal::SecretUnconfigured => Self::SecretUnconfigured,
+            SignatureRefusal::Malformed => Self::SignatureMalformed,
+            SignatureRefusal::Mismatch => Self::SignatureInvalid,
+        }
+    }
+}
+
 /// Lower-hex SHA-256 digest of `bytes`. Shared with `super::ssh_keys` (the
 /// fingerprint) and the unit tests.
+///
+/// The hasher is `aws-lc-rs` — the FIPS-validated provider the platform already
+/// installs at bootstrap — and not `sha2`, which Dylint's `DE0708` bans outside
+/// `dylint.toml`'s `hasher_allowed_paths`. Same algorithm, byte-identical
+/// output: this is a provider swap, not a digest change, so every
+/// `storage_ref`/checksum already in a database still matches. Precedent:
+/// `types-registry`'s `domain::admission::fingerprint`, `bss/ledger`'s
+/// `payload_hash`.
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    let digest = digest(&SHA256, bytes);
+    let mut hex = String::with_capacity(digest.as_ref().len() * 2);
+    for &byte in digest.as_ref() {
         hex.push(char::from(HEX[usize::from(byte >> 4)]));
         hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }

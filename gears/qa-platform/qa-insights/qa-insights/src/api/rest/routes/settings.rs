@@ -80,7 +80,7 @@ pub(super) fn register_settings_routes(
              credential material, because the material is never stored here or held by this \
              service. A tenant that has never configured JIRA gets a document with empty \
              strings, issue_type Bug and enabled false, rather than a 404. Requires the \
-             qa.jira_config/get grant.",
+             gts.cf.qa.insights.jira_config.v1~/get grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -115,7 +115,7 @@ pub(super) fn register_settings_routes(
              turning enabled off is how a tenant stops using JIRA. A config with enabled true \
              must name a reference. The url may carry a context path (https://host/jira, the \
              usual shape for JIRA Data Center) and it is preserved. Every other field is \
-             taken from the body as sent. Requires the qa.jira_config/update grant.",
+             taken from the body as sent. Requires the gts.cf.qa.insights.jira_config.v1~/update grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -155,7 +155,7 @@ pub(super) fn register_settings_routes(
              gets the defaults: 300 seconds and auto-rerun on. poll_interval_seconds is \
              clamped to at least one on this read - a value the tenant saved as zero, which \
              would otherwise be a hot loop against the poller's own cadence, is never returned \
-             as zero. Requires the qa.jira_config/get grant.",
+             as zero. Requires the gts.cf.qa.insights.jira_config.v1~/get grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -181,7 +181,7 @@ pub(super) fn register_settings_routes(
              not here, so the settings screen never shows a value the tenant did not save. \
              auto_rerun_on_resolve gates only the automatic re-run: turning it off does not \
              stop a resolved bug from being marked resolved on the next poll. Requires the \
-             qa.jira_config/update grant.",
+             gts.cf.qa.insights.jira_config.v1~/update grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -225,7 +225,7 @@ fn register_notification_routes(mut router: Router, openapi: &dyn OpenApiRegistr
              possession of a Slack incoming-webhook URL is itself the authorization to post, \
              so it is treated the same as a JIRA API token, and the PUT enforces the same \
              syntax: letters, digits, underscores and dashes only, optionally prefixed with \
-             cred://. Requires the qa.notification_config/get grant.",
+             cred://. Requires the gts.cf.qa.insights.notification_config.v1~/get grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -257,7 +257,7 @@ fn register_notification_routes(mut router: Router, openapi: &dyn OpenApiRegistr
              keep-stored-value convention, so an empty slack_webhook_credstore_ref clears the \
              reference rather than preserving it; that is a difference in how absence is \
              treated, not a claim that the field is less sensitive. Every other field is \
-             stored exactly as sent. Requires the qa.notification_config/update grant.",
+             stored exactly as sent. Requires the gts.cf.qa.insights.notification_config.v1~/update grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -282,17 +282,20 @@ fn register_notification_routes(mut router: Router, openapi: &dyn OpenApiRegistr
         .description(
             "Sends a real notification right now, over whichever channel(s) are enabled. With \
              no request body, sends the settings page's generic test message using the \
-             tenant's stored settings. With a body, tests one scheduled-run Slack template \
-             against the given config override and event token (one of pending, in_progress, \
-             succeeded, failed, error, skipped) rather than the stored settings - the config \
-             override must have Slack enabled with a non-empty webhook reference, or this is \
-             refused with a 400 before anything is sent. Neither shape claims a dedupe slot or \
-             writes the audit log; both are pinned by qa_insights_sdk::SLACK_NOTIFICATION_EVENTS. \
-             Unlike the automatic completion path, a send failure here is returned rather than \
-             swallowed - an operator testing a channel deserves to know it does not work, \
-             including a 501 when the channel this deployment ships has no adapter at all (D10). \
-             This endpoint's OpenAPI schema shows the body as required; posting no body at all \
-             is also accepted. Requires the qa.notification_config/test grant.",
+             tenant's stored settings - refused with a 400 before anything is sent if neither \
+             stored channel is both enabled and configured to send, so a test never reports \
+             success for a send that was never attempted. With a body, tests one scheduled-run \
+             Slack template against the given config override and event token (one of pending, \
+             in_progress, succeeded, failed, error, skipped) rather than the stored settings - \
+             the config override must have Slack enabled with a non-empty webhook reference, or \
+             this is likewise refused with a 400 before anything is sent. Neither shape claims a \
+             dedupe slot or writes the audit log; both are pinned by \
+             qa_insights_sdk::SLACK_NOTIFICATION_EVENTS. Unlike the automatic completion path, a \
+             send failure here is returned rather than swallowed - an operator testing a channel \
+             deserves to know it does not work, including a 501 when the channel this deployment \
+             ships has no adapter at all (D10). This endpoint's OpenAPI schema shows the body as \
+             required; posting no body at all is also accepted. Requires the \
+             gts.cf.qa.insights.notification_config.v1~/test grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -309,12 +312,15 @@ fn register_notification_routes(mut router: Router, openapi: &dyn OpenApiRegistr
             "{\"status\": \"sent\"}",
         )
         // 400 covers a body that does not deserialize, an unrecognized event
-        // token, and the scheduled-run override's own two preconditions
-        // (Slack enabled, webhook reference present) - see
-        // `NotifyService::send_test`'s `# Errors`. There is no declared 501
-        // here: `OperationBuilder` has no `error_501` (only the seven fixed
-        // codes above and `error_500`), so `DomainError::UnsupportedEgress`'s
-        // mapping is documented in prose above rather than in the schema.
+        // token, the scheduled-run override's own two preconditions (Slack
+        // enabled, webhook reference present), and - the no-body, stored-
+        // settings shape - no channel being both enabled and configured to
+        // send at all (`NO_CHANNEL_ENABLED_FIELD`, WS2 data-correctness
+        // remediation Task 4); see `NotifyService::send_test`'s `# Errors`.
+        // There is no declared 501 here: `OperationBuilder` has no
+        // `error_501` (only the seven fixed codes above and `error_500`), so
+        // `DomainError::UnsupportedEgress`'s mapping is documented in prose
+        // above rather than in the schema.
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
@@ -329,7 +335,7 @@ fn register_notification_routes(mut router: Router, openapi: &dyn OpenApiRegistr
             "Renders one scheduled-run Slack template against the given config override and a \
              fixed sample run, without sending anything or touching the stored settings. event \
              must be one of pending, in_progress, succeeded, failed, error, skipped. Requires \
-             the qa.notification_config/get grant.",
+             the gts.cf.qa.insights.notification_config.v1~/get grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -361,7 +367,7 @@ fn register_notification_routes(mut router: Router, openapi: &dyn OpenApiRegistr
              channel and every kind: automatic completion alerts, tests, and every skip and \
              failure. limit defaults to 100 and is clamped to at most 500. run_id is null for \
              an entry that belongs to no run, such as a settings-page test send. Requires the \
-             qa.notification_config/get grant.",
+             gts.cf.qa.insights.notification_config.v1~/get grant.",
         )
         .tag(API_TAG)
         .authenticated()

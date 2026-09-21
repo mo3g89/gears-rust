@@ -1,20 +1,28 @@
-"""The metrics config must reach the gears Deployment, in both of its states.
+"""The metrics config must reach the gears Deployment, in all of its states.
 
-# What this guards, and why it is NOT a port
+# What this guards
 
-The four qa-platform gears declare 22 metric families. Every one of them is
-PUSHED over OTLP by a periodic reader that libs/toolkit's
-`init_metrics_provider` builds; nothing in this repository serves a `/metrics`
-route, no chart in it carries a `prometheus.io/scrape` annotation, and no chart
-sets an `OTEL_EXPORTER_OTLP_*` variable. So the thing that decides whether a
-single series ever leaves this stack is one block of YAML in the gears' config
-file -- the same shape mini-chat's own configmap established -- and the failure
-this test exists to catch is that block not arriving.
+The four qa-platform gears declare 22 metric families -- what a live scrape
+carries is whichever of them have recorded a measurement, which is fewer; see
+docs/DESIGN.md 3.11, "How to reach these numbers". There are now TWO ways for
+one of them to leave the process:
 
-A guard on a container port would assert something no code reads. It would also
-be worse than useless: it would establish a second convention beside the config
-block, and the first person to believe it would go looking for an endpoint that
-does not exist.
+  * PUSH -- an OTLP periodic reader, built by libs/toolkit's
+    `init_metrics_provider`, aimed at a collector the operator names. Off by
+    default; `check_default` / `check_enabled` / `check_refusal` below.
+  * PULL -- a Prometheus text endpoint served by libs/toolkit's
+    `telemetry::scrape` on its own listener. On by default; `check_scrape`
+    below.
+
+Both are switched from one block of YAML in the gears' config file, and the
+first failure this module exists to catch is that block not arriving.
+
+The pull half DOES have a container port, and that is a reversal of what this
+file used to say. It said a guard on a container port "would assert something no
+code reads" and that a reader would "go looking for an endpoint that does not
+exist" -- true when written, and the reason the endpoint did not exist for as
+long as it did. It exists now, so the port is load-bearing and the second
+failure this module catches is the four copies of its number drifting apart.
 
 # What "arriving" means here, in three links
 
@@ -79,7 +87,7 @@ one combination that looks instrumented and is not -- a pod's 127.0.0.1 is the
 pod, so every export fails forever into a dashboard nobody is watching.
 
 Standalone script (a `main()` under `if __name__ == "__main__"`), like
-test_pins.py and test_chart_file_sync.py beside it, and invoked directly by the
+check_pins.py and check_chart_file_sync.py beside it, and invoked directly by the
 Makefile's `helm-tests` target -- `python3 -m pytest tests/` would collect zero
 items from it.
 """
@@ -105,6 +113,11 @@ CONFIG_KEY = "qa-platform-stack.yaml"
 # /var/lib/cf-gears; see this module's docstring, link 2.)
 CONFIG_MOUNT = "/etc/cf-gears"
 COLLECTOR = "http://otel-collector.observability.svc.cluster.local:4317"
+# values.yaml's `gears.metricsPort`. Restated rather than parsed so that
+# CHANGING the default is a deliberate two-file edit: this number is also the
+# one deploy/remote/verify-k8s.sh reaches for on the stand and the one the
+# committed config's `bind_addr` carries.
+DEFAULT_METRICS_PORT = 9464
 
 # --- the catalog's three copies -------------------------------------------
 # CHART is <subsystem>/deploy/helm/qa-platform, so three parents up is the
@@ -116,10 +129,10 @@ VERIFY = SUBSYSTEM / "deploy" / "remote" / "verify-k8s.sh"
 # parse that quietly stopped matching fails LOUDLY here instead of comparing
 # three empty sets and passing. Update deliberately when a family is added.
 GEAR_FAMILY_COUNTS = {
-    "qa-runs": 7,
+    "qa-runs": 9,
     "qa-insights": 7,
     "qa-environments": 6,
-    "qa-catalog": 2,
+    "qa-catalog": 3,
 }
 # The full literal series names, as they appear in the constants. Anchored on
 # the opening quote so a name mentioned in a doc comment is not picked up.
@@ -134,7 +147,16 @@ def render(*extra):
     """Return (docs, stderr, returncode). Never asserts -- one caller wants a failure."""
     out = subprocess.run(
         ["helm", "template", "qa-platform", str(CHART),
-         "--namespace", "qa-platform", "--set", f"publicOrigin={ORIGIN}", *extra],
+         "--namespace", "qa-platform", "--set", f"publicOrigin={ORIGIN}",
+         # keycloak.adminPassword has no default (WS3 Task 3) -- any value
+         # that is not the literal "admin" satisfies the render.
+         "--set", "keycloak.adminPassword=guard-fixture-not-a-real-password",
+         # Both signing secrets have no default either (2026-09-21): the
+         # per-render `randAlphaNum` fallback became a pod roll on every
+         # upgrade once the gears Deployment started hashing the ConfigMap.
+         "--set", "bundleDownloadSigningSecret=guard-fixture-not-a-real-bundle-key",
+         "--set", "collectReportSigningSecret=guard-fixture-not-a-real-collect-key",
+         *extra],
         capture_output=True, text=True)
     if out.returncode != 0:
         return [], out.stderr, out.returncode
@@ -378,12 +400,196 @@ def check_catalog(failures):
               "gears' constants, DESIGN 3.11's table and verify-k8s.sh's heredoc")
 
 
+def scrape_invariants(docs, port):
+    """Every place the scrape port and switch appear, as one dict.
+
+    Returns `None` for a key whose object is absent, so a caller can tell
+    "rendered with the wrong value" from "not rendered at all" -- the two have
+    different causes and only one of them is a drift.
+    """
+    found = {}
+
+    cm = [d for d in docs
+          if d["kind"] == "ConfigMap" and d["metadata"]["name"] == CONFIGMAP]
+    scrape = None
+    if cm:
+        body = cm[0].get("data", {}).get(CONFIG_KEY)
+        if body:
+            metrics = (yaml.safe_load(body).get("opentelemetry") or {}).get("metrics") or {}
+            scrape = metrics.get("scrape")
+    found["config"] = scrape
+
+    deploys = [d for d in docs if d["kind"] == "Deployment"
+               and d["metadata"]["name"] == "qa-platform-gears"]
+    if deploys:
+        tmpl = deploys[0]["spec"]["template"]
+        container = tmpl["spec"]["containers"][0]
+        found["container_port"] = next(
+            (p for p in container.get("ports", []) if p.get("name") == "metrics"), None)
+        found["annotations"] = {
+            k: v for k, v in (tmpl["metadata"].get("annotations") or {}).items()
+            if k.startswith("prometheus.io/")}
+    else:
+        found["container_port"] = None
+        found["annotations"] = None
+
+    svcs = [d for d in docs if d["kind"] == "Service"
+            and d["metadata"]["name"] == "qa-platform-gears"]
+    if svcs:
+        found["service_port"] = next(
+            (p for p in svcs[0]["spec"]["ports"] if p.get("name") == "metrics"), None)
+    else:
+        found["service_port"] = None
+
+    found["expected_port"] = port
+    return found
+
+
+def check_scrape(failures):
+    """The scrape endpoint is reachable by default, and its port never drifts.
+
+    THE DEFECT THIS EXISTS FOR, stated plainly so a future reader does not
+    weaken it by accident: for the whole life of this chart before the guard
+    below, every one of the 22 families was reachable by nothing.
+    Push was off (correctly -- it needs a collector), and no route served them.
+    A load test had to stand up a throwaway OTel collector to read the stack's
+    own numbers. `check_default` passed the entire time, because "push is off"
+    was exactly what it asserted.
+
+    So the first assertion here is the one that matters: a DEFAULT render makes
+    metrics reachable. The rest guard the ways that can be true on paper and
+    false in a cluster.
+
+    Appends to `failures`; prints its PASS only if IT added nothing -- see
+    `check_default` for why the accumulator is local.
+    """
+    mine = []
+
+    docs, _, rc = render()
+    if rc != 0:
+        failures.append("FAIL: a default render must succeed")
+        return
+    got = scrape_invariants(docs, DEFAULT_METRICS_PORT)
+
+    if (got["config"] or {}).get("enabled") is not True:
+        mine.append(
+            "FAIL (default render): opentelemetry.metrics.scrape.enabled is "
+            f"{(got['config'] or {}).get('enabled')!r}, expected True. A default "
+            "install would then serve none of the 22 metric families it declares, "
+            "with push off as well -- which is the exact state this guard "
+            "was added to end. If you are turning this off deliberately, the "
+            "owner decision to reverse is #18.")
+    if (got["config"] or {}).get("path") != "/metrics":
+        mine.append(
+            "FAIL (default render): the scrape path is "
+            f"{(got['config'] or {}).get('path')!r}, expected '/metrics'. The pod "
+            "annotation below hard-codes that path; a config that serves another "
+            "one leaves every scraper on a 404.")
+    if got["container_port"] is None:
+        mine.append(
+            "FAIL (default render): the gears container declares no port named "
+            "'metrics'. gears-service.yaml resolves `targetPort: metrics` BY "
+            "NAME, so without it the Service port has no backend and the "
+            "endpoint never becomes ready -- silently.")
+    if got["service_port"] is None:
+        mine.append(
+            "FAIL (default render): the gears Service publishes no port named "
+            "'metrics'. The process would listen inside the pod and nothing in "
+            "the cluster could reach it, which is the same unreachability one "
+            "layer along.")
+    elif got["service_port"].get("targetPort") != "metrics":
+        mine.append(
+            "FAIL (default render): the Service's metrics targetPort is "
+            f"{got['service_port'].get('targetPort')!r}, expected the NAME "
+            "'metrics'. A numeric targetPort is a fourth copy of the port number "
+            "that nothing checks against the other three.")
+    if (got["annotations"] or {}).get("prometheus.io/scrape") != "true":
+        mine.append(
+            "FAIL (default render): the gears pod carries no "
+            "prometheus.io/scrape annotation. This cluster has no Prometheus "
+            "Operator (no monitoring.coreos.com CRDs), so the annotations are "
+            "the only discovery convention available; without them a scraper "
+            "installed later finds nothing.")
+
+    # THE DRIFT CASE. The port is one number in four places -- config bind_addr,
+    # containerPort, Service targetPort's backing port, and the annotation.
+    # Three of them read .Values.gears.metricsPort directly; the fourth is a
+    # string replacement in gears-config-configmap.yaml, which is the one that
+    # can silently no-op. A pod that advertises 9999 and listens on 9464 is a
+    # scrape target that answers `connection refused` forever, with no error on
+    # this side of it.
+    moved = 9999
+    docs, _, rc = render("--set", f"gears.metricsPort={moved}")
+    if rc != 0:
+        mine.append(f"FAIL: --set gears.metricsPort={moved} must render")
+    else:
+        got = scrape_invariants(docs, moved)
+        want_bind = f"0.0.0.0:{moved}"
+        if (got["config"] or {}).get("bind_addr") != want_bind:
+            mine.append(
+                "FAIL (moved-port render): the gears' config binds "
+                f"{(got['config'] or {}).get('bind_addr')!r}, expected "
+                f"{want_bind!r}. The fifth transform in "
+                "gears-config-configmap.yaml silently did not fire, so the "
+                "process listens on the committed port while the Deployment, "
+                "the Service and the annotation all advertise the one the "
+                "operator asked for.")
+        if (got["container_port"] or {}).get("containerPort") != moved:
+            mine.append(
+                "FAIL (moved-port render): the container port is "
+                f"{(got['container_port'] or {}).get('containerPort')!r}, "
+                f"expected {moved}.")
+        if (got["service_port"] or {}).get("port") != moved:
+            mine.append(
+                "FAIL (moved-port render): the Service port is "
+                f"{(got['service_port'] or {}).get('port')!r}, expected {moved}.")
+        if (got["annotations"] or {}).get("prometheus.io/port") != str(moved):
+            mine.append(
+                "FAIL (moved-port render): prometheus.io/port is "
+                f"{(got['annotations'] or {}).get('prometheus.io/port')!r}, "
+                f"expected {str(moved)!r}.")
+
+    # THE OFF CASE. Turning the endpoint off must take the advertisement with
+    # it. An annotation or a Service port left behind on a pod that is not
+    # listening is a permanent `connection refused` for whatever scrapes it.
+    docs, _, rc = render("--set", "opentelemetry.metrics.scrape.enabled=false")
+    if rc != 0:
+        mine.append("FAIL: --set opentelemetry.metrics.scrape.enabled=false must render")
+    else:
+        got = scrape_invariants(docs, DEFAULT_METRICS_PORT)
+        if (got["config"] or {}).get("enabled") is not False:
+            mine.append(
+                "FAIL (scrape-off render): the gears' config still says "
+                f"scrape.enabled={(got['config'] or {}).get('enabled')!r}. The "
+                "sixth transform did not fire and the escape hatch is a value "
+                "nothing reads.")
+        for key, what in (("container_port", "container port"),
+                          ("service_port", "Service port")):
+            if got[key] is not None:
+                mine.append(
+                    f"FAIL (scrape-off render): the metrics {what} is still "
+                    f"declared ({got[key]!r}) while nothing is listening.")
+        if got["annotations"]:
+            mine.append(
+                "FAIL (scrape-off render): the pod still carries "
+                f"{got['annotations']!r} while nothing is listening.")
+
+    failures.extend(mine)
+    if not mine:
+        print("PASS: a default render serves /metrics on "
+              f"{DEFAULT_METRICS_PORT} -- config, containerPort, Service port "
+              "and prometheus.io annotations agree, move together on --set "
+              "gears.metricsPort, and all disappear together when scrape is "
+              "turned off")
+
+
 def main():
     failures = []
     check_default(failures)
     check_enabled(failures)
     check_refusal(failures)
     check_mount(failures)
+    check_scrape(failures)
     check_catalog(failures)
     if failures:
         print("\n".join(failures))

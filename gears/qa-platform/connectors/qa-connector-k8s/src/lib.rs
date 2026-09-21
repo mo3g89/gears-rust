@@ -8,10 +8,19 @@
 //!
 //! # Why this crate exists
 //!
-//! ADR-0001 forbids `kube`/`k8s-openapi` in any qa-platform crate.
-//! `PRODUCT-PLUGINS-DESIGN.md` §4.1 amends it, and ADR-0001's 2026-09-04
-//! amendment records exactly what that bought and what it cost. The claim
-//! this crate makes good on, stated precisely because the looser version of
+//! `DESIGN.md` §2.2's `cpt-cf-qa-constraint-no-kube` is the current record of
+//! the rule ADR-0001's default-build-is-infrastructure-free decision exists
+//! to keep: "`kube` and `k8s-openapi` may appear in the dependency tree only
+//! under the `argo` cargo feature of `qa-runs` and in `qa-connector-k8s`,
+//! which is linked only by the VHP plugin" — this crate is named in that
+//! sentence by design, not as an oversight. (`PRODUCT-PLUGINS-DESIGN.md`
+//! §4.1 and an "ADR-0001 2026-09-04 amendment" were cited here previously;
+//! neither ever existed — `PRODUCT-PLUGINS-DESIGN.md` is not in the
+//! repository, and before 2026-09-18 ADR-0001 had exactly one revision, its
+//! 2026-08-12 original, with no amendment section. ADR-0001's `## Amendments`
+//! section, added that day, is the real place these two facts belong now.)
+//! The claim this crate makes good on, stated precisely
+//! because the looser version of
 //! it was wrong and shipped: **this is the only qa-platform crate that names
 //! those types unconditionally**, and only the product plugins that actually
 //! target clusters link it. It is *not* the only crate in the workspace that
@@ -24,8 +33,9 @@
 //! Containment here stops being a convention a reviewer has to remember and
 //! becomes a fact about the dependency graph — which is why there is no cargo
 //! feature here to turn Kubernetes off. A build that does not want it does not
-//! depend on this crate. The cost of having no gate is recorded in that ADR
-//! amendment and is real: there is no longer any build of the `qa-platform`
+//! depend on this crate. The cost of having no gate is real, and DESIGN.md
+//! §2.2 is what records this crate as one of the three gates `kube` is
+//! allowed to live behind: there is no longer any build of the `qa-platform`
 //! feature without `kube`. (There *is* one feature here, `test-support`. It
 //! gates the test doubles in the `test_support` module and nothing else;
 //! Kubernetes is unconditional either way. Not an intra-doc link on purpose:

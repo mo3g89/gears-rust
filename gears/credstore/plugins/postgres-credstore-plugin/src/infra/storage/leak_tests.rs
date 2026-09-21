@@ -35,7 +35,7 @@ use uuid::Uuid;
 
 use crate::config::{PostgresCredStorePluginConfig, SecretConfig};
 use crate::domain::Service;
-use crate::test_support::{connect_migrated, memory_dsn, repo_over};
+use crate::test_support::{connect_migrated, memory_dsn, store_over};
 
 /// A distinctive value that cannot occur in a log line by accident.
 const SENTINEL: &str = "SENTINEL-SECRET-9d41c7f2e8b6a350-DO-NOT-LOG";
@@ -158,8 +158,8 @@ async fn exercise_every_path(tenant: &TenantId, owner: &OwnerId, key: &SecretRef
         }],
         ..Default::default()
     };
-    let svc =
-        Service::from_config(repo_over(connect_migrated(&dsn).await), &cfg).expect("config builds");
+    let svc = Service::from_config(store_over(connect_migrated(&dsn).await), &cfg)
+        .expect("config builds");
     svc.seed().await.expect("seed");
 
     svc.put_value(tenant, key, SecretValue::from(SENTINEL), None)
@@ -184,7 +184,7 @@ async fn exercise_every_path(tenant: &TenantId, owner: &OwnerId, key: &SecretRef
     // ORM/driver error message quoting a bound parameter would show up, and it
     // goes through `map_store_err`, which logs at `warn`.
     let broken = Service::from_config(
-        repo_over(
+        store_over(
             toolkit_db::connect_db(
                 &memory_dsn(),
                 toolkit_db::ConnectOpts {

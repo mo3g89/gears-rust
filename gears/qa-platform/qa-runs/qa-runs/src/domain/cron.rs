@@ -159,7 +159,9 @@ const FIELD_COUNT: usize = 5;
 ///
 /// **Tied to the column, not chosen for parsing.** `qa_schedules.cron` is
 /// `VARCHAR(255)` on Postgres and `MySQL`
-/// (`infra::storage::migrations::m20260813_000004_schedules`), so a longer
+/// (`infra::storage::migrations::m20260813_000003_initial`; declared under
+/// `m20260813_000004_schedules` before that migration was folded into this
+/// one by the docs squash), so a longer
 /// expression cannot be stored whatever this function thinks of it. Without the
 /// check, a 607-byte expression parses, validates, and fails at the `INSERT`
 /// with a driver error — a 500 where the caller deserves a 400. **The `SQLite`

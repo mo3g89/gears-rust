@@ -4,7 +4,7 @@
 //! timeout enforcement, SSE logs, and cron schedules.
 //!
 //! Part of the qa-platform subsystem (see `gears/qa-platform/docs/DESIGN.md`
-//! §3.2 `cpt-cf-qa-component-runs`).
+//! §3.4 `cpt-cf-qa-component-runs`).
 
 pub mod api;
 pub mod config;

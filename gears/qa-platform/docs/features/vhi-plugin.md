@@ -29,22 +29,29 @@ live in credstore; the environment row keeps references.
 
 ## Credential handling
 
-The SSH transport forces two rules, and the connector owns them:
+The SSH transport forces two rules on the **observation path** (`qa-connector-ssh`), and the
+connector owns them there. The **run path** does not follow either rule: `prepare_run_access`
+(below) mounts both credentials into the run's pod as files, because the runner is a generic image
+driving `ssh`/`vinfra` itself, not `qa-connector-ssh`'s in-process agent.
 
-* **The private key never becomes a file.** It travels credstore → memory → a pipe → a short-lived
-  `ssh-agent`. Never a file, never `argv`, never an environment variable.
-* **A secret reaches a remote command on stdin.** `sshd`'s `AcceptEnv` discards the environment
-  channel, and `argv` is world-readable through `/proc`, so the `vinfra` password is written to the
-  command's standard input and nowhere else.
+* **On the observation path, the private key never becomes a file.** It travels credstore → memory
+  → a pipe → a short-lived `ssh-agent`. Never a file, never `argv`, never an environment variable.
+  On the run path, the key is mounted at `SSH_KEY_PATH`, read-only.
+* **On the observation path, a secret reaches a remote command on stdin, and nowhere else.**
+  `sshd`'s `AcceptEnv` discards the environment channel, and `argv` is world-readable through
+  `/proc`, so the `vinfra` password is written to the command's standard input. On the run path,
+  the password is mounted at `VINFRA_PASSWORD_PATH`, also read-only, and the runner reads it from
+  that file.
 
 Host-key verification is disabled, which for this plugin means an on-path attacker who completes
-the handshake is handed the `vinfra` administrator password. The private key is not disclosed,
-because it never leaves the agent. This is recorded in full in
+the handshake is handed the `vinfra` administrator password. On the observation path, the private
+key is not disclosed, because it never leaves the agent; on the run path, it is mounted into the
+pod at `SSH_KEY_PATH`, mode `0o400`. This is recorded in full in
 [ADR-0005](../ADR/0005-cpt-cf-qa-adr-git-egress.md).
 
 ## Run access
 
-`prepare_access` returns the mounts and environment bindings a run needs to reach the node, built
+`prepare_run_access` returns the mounts and environment bindings a run needs to reach the node, built
 from credstore references only.
 
 ## Verification

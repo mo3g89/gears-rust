@@ -64,7 +64,7 @@ pub(super) fn register_collect_routes(mut router: Router, openapi: &dyn OpenApiR
              qa-runs accepted, not repositories confirmed to be collecting - branch existence is \
              validated by qa-runs asynchronously, after this endpoint has already answered, so a \
              repository lacking the requested branch can still be counted here and separately \
-             fail to ever report back. Requires the qa.test_result/collect grant, and that \
+             fail to ever report back. Requires the gts.cf.qa.insights.test_result.v1~/collect grant, and that \
              grant's compiled scope must constrain owner_tenant_id only - the same constraint \
              POST /qa/v1/insights/rebuild requires and for the identical reason: this operation \
              addresses no single row a narrower scope could express.",
@@ -143,8 +143,14 @@ pub(super) fn register_collect_routes(mut router: Router, openapi: &dyn OpenApiR
         // no foreign key to check against; `domain::repos`' header states
         // why this schema has none).
         .error_400(openapi)
-        // 403: an unverified/missing signature, or an unconfigured signing
-        // secret (fail-closed) - fix round 1, Critical 1.
+        // 403: a signature that does not verify, or an unconfigured signing
+        // secret (fail-closed) - fix round 1, Critical 1. An ABSENT `sig` is
+        // NOT among them and this comment used to say it was: the field is a
+        // required `String` on `dto::CollectReportQuery`, so a request
+        // carrying no `sig` is refused by the extractor as a 400 before the
+        // handler is entered - the same thing the bundle-download route
+        // turned out to do (see qa-catalog's routes/bundles.rs). `.error_400`
+        // above already declares that status; only the prose was wrong.
         .error_403(openapi)
         .error_500(openapi)
         .register(router, openapi)

@@ -6,10 +6,10 @@
 //! that `idx_qa_leader_claims_role` really admits one holder per role and
 //! really scopes that to the tenant.
 //!
-//! Carried over from `m20260907_000003_leader_claims`, which the chain was
+//! Carried over from `m20260907_000003_leader_claims` (folded into `migrations::m20260818_000001_initial` by the docs squash), which the chain was
 //! collapsed into `m20260818_000001_initial`. What was dropped with that file
-//! was the delta mechanics — its `down`, its MySQL refusal, its dialect column
-//! parity — which describe a step that no longer exists.
+//! was the delta mechanics — its `down`, its `MySQL` refusal, its dialect
+//! column parity — which describe a step that no longer exists.
 
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Statement};
 use sea_orm_migration::MigratorTrait as _;

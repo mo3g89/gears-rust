@@ -57,7 +57,7 @@ use qa_runs_sdk::ScheduleNotificationSettings;
 use toolkit_db::DBProvider;
 use uuid::Uuid;
 
-use super::{NotifyService, TestSend, outcome_str};
+use super::{NotifyService, TestSend, failure_outcome_str, outcome_str};
 use crate::domain::error::DomainError;
 use crate::domain::ports::{
     MailClient, MailMessage, RunsReader, SendOutcome, SlackClient, SlackMessage,
@@ -169,10 +169,14 @@ impl SlackClient for FakeSlack {
 /// `NeverWiredMailClient` moved out of `notify` in fix round 1 (R103) and a
 /// domain-layer test importing it back from the composition root would
 /// invert this crate's dependency direction. Same behaviour as
-/// `infra::notify::UnsupportedMailClient`: always
-/// [`SendOutcome::UnsupportedEgress`], never an error — but it records the
-/// identity it was called as, which is what review finding #37 added to this
-/// port and [`send_test_sends_email_as_the_calling_tenant`] reads.
+/// `infra::notify::UnsupportedMailClient`: every send fails with
+/// [`DomainError::UnsupportedEgress`] — but it records the identity it was
+/// called as, which is what review finding #37 added to this port and
+/// [`send_test_sends_email_as_the_calling_tenant`] reads.
+///
+/// **It used to answer `Ok(SendOutcome::UnsupportedEgress)`**, which is what
+/// the real adapter did until the SMTP follow-up; the rename from "inert" would
+/// be cosmetic, and the name is what the tests below still call it.
 #[derive(Default)]
 struct InertMail {
     sent_as: Mutex<Vec<Uuid>>,
@@ -192,7 +196,9 @@ impl MailClient for InertMail {
         _message: &MailMessage,
     ) -> Result<SendOutcome, DomainError> {
         self.sent_as.lock().unwrap().push(ctx.subject_tenant_id());
-        Ok(SendOutcome::UnsupportedEgress)
+        Err(DomainError::UnsupportedEgress {
+            channel: "email".to_owned(),
+        })
     }
 }
 
@@ -835,18 +841,31 @@ async fn an_unresolvable_schedule_is_treated_as_unscheduled() {
 // The R102 seam: the variant-to-string mapping, tested directly
 // ---------------------------------------------------------------------------
 
-/// **This is the seam between Task 38 and Task 39.** Task 39's own test pins
-/// `UnsupportedMailClient.send(&message).await == Ok(SendOutcome::UnsupportedEgress)`
-/// — the variant. This crate's test above
-/// (`an_email_send_is_recorded_as_unsupported_egress`) pins the string, but
-/// only through the full `notify_run_completed` path. Neither proves the
-/// *mapping* on its own; this does, directly, with no send and no database.
+/// **This is the R102 seam**, and it has two halves since the SMTP follow-up:
+/// a successful send's outcome comes from the [`SendOutcome`] variant, and a
+/// failed one's comes from the [`DomainError`] variant. The test above
+/// (`an_email_send_is_recorded_as_unsupported_egress`) pins the strings through
+/// the full `notify_run_completed` path; this pins the mappings directly, with
+/// no send and no database.
+///
+/// The `unsupported_egress` half moved here from the enum when the inert mail
+/// adapter started failing instead of reporting: keeping the string but
+/// choosing it from the error is what stopped "this deployment cannot send
+/// email" from collapsing into the same audit row as "the relay refused this
+/// message".
 #[test]
 fn send_outcome_maps_to_the_log_outcome_string_verbatim() {
     assert_eq!(outcome_str(SendOutcome::Sent), "sent");
     assert_eq!(
-        outcome_str(SendOutcome::UnsupportedEgress),
+        failure_outcome_str(&DomainError::UnsupportedEgress {
+            channel: "email".to_owned()
+        }),
         "unsupported_egress"
+    );
+    assert_eq!(
+        failure_outcome_str(&DomainError::Internal("the relay refused it".to_owned())),
+        "failed",
+        "an ordinary transport failure must not be recorded as a missing adapter"
     );
 }
 
@@ -1005,6 +1024,63 @@ async fn a_generic_test_send_over_email_reports_unsupported_egress() {
     assert!(matches!(err, DomainError::UnsupportedEgress { channel } if channel == "email"));
 }
 
+/// **The bug this task fixes.** A fresh tenant's default config has both
+/// `slack_enabled` and `email_enabled` `false` — [`NotificationConfig::default`]
+/// — so a generic test send used to fall through both `if`s straight to
+/// `Ok(())`, telling an operator testing a channel that it worked when
+/// nothing was sent at all. `send_test`'s own doc contradicts exactly that:
+/// "an operator explicitly testing a channel deserves to be told it does not
+/// work, not a silent success."
+#[tokio::test]
+async fn a_generic_test_send_with_no_channel_enabled_is_a_validation_error() {
+    let slack = Arc::new(FakeSlack::default());
+    let f = build(Arc::new(TenantScopedAuthZ), Arc::clone(&slack)).await;
+
+    let err = f
+        .service
+        .send_test(&f.ctx, TestSend::Generic)
+        .await
+        .expect_err("a fresh tenant with no channel enabled must not report success");
+    assert!(
+        matches!(err, DomainError::Validation { ref field, .. } if field == "notification_channels"),
+        "{err:?}"
+    );
+    assert_eq!(
+        slack.sends(),
+        0,
+        "nothing must be attempted, not just nothing sent"
+    );
+}
+
+/// The same fall-through, reached a different way: `slack_enabled` is `true`
+/// but the webhook reference is empty (`slack_capable` is `false`), and email
+/// is left disabled — so, exactly as the all-disabled case above, neither
+/// channel is ever attempted. `send_test`'s contract does not distinguish
+/// "disabled" from "enabled but not configured": both mean nothing was sent.
+#[tokio::test]
+async fn a_generic_test_send_with_slack_enabled_but_no_webhook_is_a_validation_error() {
+    let slack = Arc::new(FakeSlack::default());
+    let f = fixture_with(
+        Arc::clone(&slack),
+        NotificationConfig {
+            slack_enabled: true,
+            ..NotificationConfig::default()
+        },
+    )
+    .await;
+
+    let err = f
+        .service
+        .send_test(&f.ctx, TestSend::Generic)
+        .await
+        .expect_err("an enabled but unconfigured channel must not report success either");
+    assert!(
+        matches!(err, DomainError::Validation { ref field, .. } if field == "notification_channels"),
+        "{err:?}"
+    );
+    assert_eq!(slack.sends(), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Phase C's final review, Important 1: the webhook reference is a reference
 // ---------------------------------------------------------------------------
@@ -1018,7 +1094,7 @@ const WEBHOOK_URL: &str = "hooks.slack.com/services/T00000/B00000/XXXXXXXXXXXX";
 /// **Important 1, the write path.** `PUT /qa/v1/settings/notifications` must
 /// refuse a reference the credential store could not resolve, naming the field,
 /// rather than storing it for `GET` to hand back to any holder of
-/// `qa.notification_config/get`.
+/// `gts.cf.qa.insights.notification_config.v1~/get`.
 ///
 /// Four shapes, one per way the check can be reached: the webhook URL itself
 /// (slashes and a colon-free host, so the charset is what rejects it), the
@@ -1066,6 +1142,133 @@ async fn saving_a_webhook_url_as_the_credential_reference_is_refused() {
         slack_only_config().slack_webhook_credstore_ref,
         "no refused candidate may have reached the stored document",
     );
+}
+
+/// The SMTP credential pair is all-or-nothing on the write path.
+///
+/// Either half alone is a configuration an operator meant to finish, and
+/// `mail_credentials` reads a half-filled pair as "no credential" — so without
+/// this check the mail would go out unauthenticated and nothing would say so.
+/// Both directions are exercised, because a check written as one `if` on the
+/// username would pass the first case and miss the second.
+#[tokio::test]
+async fn a_half_filled_smtp_credential_is_refused() {
+    let f = fixture().await;
+
+    for (username, reference) in [("qa@example.com", ""), ("", "qa-smtp-password")] {
+        let err = f
+            .service
+            .save_config(
+                &f.ctx,
+                NotificationConfig {
+                    email_smtp_username: username.to_owned(),
+                    email_smtp_credstore_ref: reference.to_owned(),
+                    ..slack_only_config()
+                },
+            )
+            .await
+            .expect_err("half a credential must not be stored");
+        assert!(
+            matches!(&err, DomainError::Validation { field, .. }
+                if field == "email_smtp_credstore_ref"),
+            "({username:?}, {reference:?}) must be refused naming the reference field, got {err:?}",
+        );
+    }
+}
+
+/// The SMTP reference gets the same syntax rule as the Slack one, at the same
+/// place: a value `SecretRef::new` would reject can never resolve, and refusing
+/// it at the `PUT` is the difference between an operator seeing it on the
+/// settings page and seeing a failed notification hours later.
+///
+/// A *password-shaped* candidate is among them on purpose — an operator who
+/// pastes the password itself into the reference box is the mistake this field
+/// name exists to prevent, and `p@ssw0rd!` is refused by the charset.
+#[tokio::test]
+async fn an_unresolvable_smtp_reference_is_refused() {
+    let f = fixture().await;
+
+    for candidate in ["smtp/password", "cred://smtp/password", "p@ssw0rd!"] {
+        let err = f
+            .service
+            .save_config(
+                &f.ctx,
+                NotificationConfig {
+                    email_smtp_username: "qa@example.com".to_owned(),
+                    email_smtp_credstore_ref: candidate.to_owned(),
+                    ..slack_only_config()
+                },
+            )
+            .await
+            .expect_err("a reference the credential store cannot resolve must not be stored");
+        assert!(
+            matches!(&err, DomainError::Validation { field, .. }
+                if field == "email_smtp_credstore_ref"),
+            "{candidate:?} must be refused naming its own field, got {err:?}",
+        );
+    }
+
+    assert!(
+        f.service
+            .get_config(&f.ctx)
+            .await
+            .unwrap()
+            .email_smtp_credstore_ref
+            .is_empty(),
+        "no refused candidate may have reached the stored document",
+    );
+}
+
+/// Both halves empty is the normal shape for an unauthenticated relay — and the
+/// state of every row written before the credential columns existed — so it
+/// must round-trip rather than be caught by the all-or-nothing rule above.
+#[tokio::test]
+async fn an_empty_smtp_credential_pair_round_trips() {
+    let f = fixture().await;
+    let unauthenticated = NotificationConfig {
+        email_enabled: true,
+        email_smtp_host: "smtp.example.com".to_owned(),
+        email_from: "qa@example.com".to_owned(),
+        email_recipients: "ops@example.com".to_owned(),
+        ..slack_only_config()
+    };
+
+    assert_eq!(
+        f.service
+            .save_config(&f.ctx, unauthenticated.clone())
+            .await
+            .expect("an unauthenticated relay is a legal configuration"),
+        unauthenticated,
+    );
+    let stored = f.service.get_config(&f.ctx).await.unwrap();
+    assert!(stored.email_smtp_username.is_empty());
+    assert!(stored.email_smtp_credstore_ref.is_empty());
+}
+
+/// The reference survives a settings round-trip, and the surface never grows a
+/// password field to leak one through: `GET` answers with the reference it was
+/// given, exactly as it does for the Slack webhook.
+#[tokio::test]
+async fn a_stored_smtp_reference_is_returned_by_the_get_surface() {
+    let f = fixture().await;
+    let authenticated = NotificationConfig {
+        email_enabled: true,
+        email_smtp_host: "smtp.example.com".to_owned(),
+        email_smtp_username: "qa@example.com".to_owned(),
+        email_smtp_credstore_ref: "qa-smtp-password".to_owned(),
+        email_from: "qa@example.com".to_owned(),
+        email_recipients: "ops@example.com".to_owned(),
+        ..slack_only_config()
+    };
+
+    f.service
+        .save_config(&f.ctx, authenticated)
+        .await
+        .expect("a complete credential is a legal configuration");
+
+    let stored = f.service.get_config(&f.ctx).await.unwrap();
+    assert_eq!(stored.email_smtp_username, "qa@example.com");
+    assert_eq!(stored.email_smtp_credstore_ref, "qa-smtp-password");
 }
 
 /// **Important 1, the write path's other half.** An *empty* reference is still

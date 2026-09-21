@@ -422,6 +422,18 @@ where
     /// auto-rerun switch being off, is [`Self::poll_one_bug`]'s and never
     /// reaches this function.) Only the plan-version read can fail here, and
     /// that one did drop a rerun.
+    ///
+    /// # `bug.repo_id`, task 2's fix
+    ///
+    /// The plan-version read below passes `bug.repo_id` — the same value
+    /// [`Self::rerun`] passes to [`Self::find_plan_test_file`] two calls
+    /// later. An earlier revision passed only `bug.plan_path`, which is
+    /// repository-relative: two repositories of one tenant that both declare
+    /// `plans/smoke.yaml` shared one "latest version" answer, so another
+    /// repository's newer build could trigger this rerun, or another
+    /// repository's version could suppress a genuine one — see
+    /// [`crate::domain::repos::ResultsRepository::latest_version_for_plan`]'s
+    /// doc for the whole argument.
     async fn maybe_rerun(&self, ctx: &SecurityContext, bug: &JiraBug) -> JiraBugOutcome {
         // Legacy's own early return (`jira_poller.rs:226-229`): a bug with no
         // recorded version can never have "a new one" by comparison.
@@ -429,7 +441,11 @@ where
             return JiraBugOutcome::Resolved;
         };
 
-        let latest_version = match self.jira.latest_version_for_plan(ctx, &bug.plan_path).await {
+        let latest_version = match self
+            .jira
+            .latest_version_for_plan(ctx, bug.repo_id, &bug.plan_path)
+            .await
+        {
             Ok(version) => version,
             Err(error) => {
                 tracing::warn!(

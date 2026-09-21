@@ -116,7 +116,8 @@ use authz_resolver_sdk::models::{
 use qa_catalog_sdk::{QaCatalogClientV1, SOURCE_REPO, UniverseTest};
 use qa_environments_sdk::{Environment, QaEnvironmentsClientV1};
 use qa_runs_sdk::{
-    ExclusiveTier, QaRunsClientV1, Run, RunSource, RunState, RunTarget, RunTestResult,
+    ExclusiveTier, FinishedRunCursor, QaRunsClientV1, Run, RunSource, RunState, RunTarget,
+    RunTestResult,
 };
 use toolkit::api::{OpenApiInfo, OpenApiRegistryImpl};
 use toolkit::config::ConfigProvider;
@@ -290,10 +291,25 @@ impl QaRunsClientV1 for FakeQaRuns {
     async fn list_runs_finished_since(
         &self,
         _ctx: &SecurityContext,
-        _since: OffsetDateTime,
+        cursor: FinishedRunCursor,
         _limit: u32,
     ) -> Result<Vec<Run>, qa_runs_sdk::QaRunsError> {
-        Ok(vec![self.run.clone()])
+        // The two-part lower bound, honoured rather than ignored. One run can
+        // never saturate this gear's page, so the sweep's walk ends after the
+        // first page either way - but a double that answered the same run to
+        // every cursor would be modelling the defect this bound exists to fix.
+        let admitted = self
+            .run
+            .finished_at
+            .is_some_and(|at| match cursor.after_id() {
+                None => at >= cursor.at(),
+                Some(id) => (at, self.run.id) > (cursor.at(), id),
+            });
+        Ok(if admitted {
+            vec![self.run.clone()]
+        } else {
+            Vec::new()
+        })
     }
 
     async fn list_run_test_results(
@@ -392,6 +408,14 @@ impl QaRunsClientV1 for FakeQaRuns {
         _id: Uuid,
         _settings: qa_runs_sdk::ScheduleNotificationSettings,
     ) -> Result<qa_runs_sdk::Schedule, qa_runs_sdk::QaRunsError> {
+        unimplemented!("not on the ingest path")
+    }
+
+    async fn list_schedule_ticks(
+        &self,
+        _ctx: &SecurityContext,
+        _schedule_id: Uuid,
+    ) -> Result<Vec<qa_runs_sdk::ScheduleTick>, qa_runs_sdk::QaRunsError> {
         unimplemented!("not on the ingest path")
     }
 }
@@ -1025,10 +1049,16 @@ async fn boot(results: &[(&str, &str, &str)], enable_tickers: bool) -> BootedGea
     hub.register::<dyn QaEnvironmentsClientV1>(Arc::new(FakeQaEnvironments {
         platform: fixture_platform(),
     }));
-    // The fifth and last registration. `gear.rs`'s `deps` doc lists all five as
-    // mandatory now that the sixth, optional `event_broker` token is gone —
-    // `init` no longer tolerates a miss on any of them.
     hub.register::<dyn oagw_sdk::api::ServiceGatewayClientV1>(Arc::new(FakeGateway));
+    // The sixth and last registration, added by the SMTP follow-up together
+    // with the `credstore` `deps` token. `gear.rs`'s `deps` doc lists all six
+    // as mandatory now that the seventh, optional `event_broker` token is gone
+    // — `init` no longer tolerates a miss on any of them, and it resolves this
+    // one whether or not the deployment has any SMTP host allow-listed, so an
+    // empty store is enough here.
+    hub.register::<dyn credstore_sdk::CredStoreClientV1>(Arc::new(
+        credstore_sdk::test_util::MockCredStoreClient::empty(),
+    ));
 
     let cancel = CancellationToken::new();
     let ctx = GearCtx::new(

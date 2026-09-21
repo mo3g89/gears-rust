@@ -9,7 +9,7 @@
     "test": "vitest run",
     "preview": "vite preview",
     "lint": "eslint . --max-warnings 0",
-    "gen:api": "openapi-typescript http://localhost:8087/openapi.json -o src/api/generated/openapi.d.ts"
+    "gen:api": "openapi-typescript ../docs/openapi.json -o src/api/generated/openapi.d.ts"
   },
   "dependencies": {
     "@radix-ui/react-checkbox": "^1.1.2",

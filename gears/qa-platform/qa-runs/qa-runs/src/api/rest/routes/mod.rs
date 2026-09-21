@@ -110,7 +110,12 @@ pub fn register_routes(
 /// `OpenAPI` schema-name collision is a **startup panic**, and a startup panic
 /// that only happens under `cargo run` is one `cargo test` cannot see. See
 /// `routes::tests`.
-pub(super) fn register_operations(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
+///
+/// Public because the `qa-platform-openapi` generator renders
+/// `docs/openapi.json` from this crate rather than from a running gateway; it
+/// is re-exported from `api::rest` because `routes` itself stays
+/// `pub(crate)`.
+pub fn register_operations(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = runs::register_run_routes(router, openapi);
     router = queue::register_queue_routes(router, openapi);
     schedules::register_schedule_routes(router, openapi)
@@ -178,6 +183,7 @@ mod tests {
             "/qa/v1/queue/{id}/force-start",
             "/qa/v1/schedules",
             "/qa/v1/schedules/{id}",
+            "/qa/v1/schedules/{id}/ticks",
             "/qa/v1/schedules/{id}/notifications",
         ] {
             assert!(
@@ -273,6 +279,11 @@ mod tests {
             ("/qa/v1/schedules", "get", "qa_runs.list_schedules"),
             ("/qa/v1/schedules", "post", "qa_runs.create_schedule"),
             ("/qa/v1/schedules/{id}", "get", "qa_runs.get_schedule"),
+            (
+                "/qa/v1/schedules/{id}/ticks",
+                "get",
+                "qa_runs.list_schedule_ticks",
+            ),
             ("/qa/v1/schedules/{id}", "put", "qa_runs.replace_schedule"),
             ("/qa/v1/schedules/{id}", "delete", "qa_runs.delete_schedule"),
             // The notification sub-resource is a **PUT**, where the source
@@ -390,6 +401,29 @@ mod tests {
                 .expect("the item schema must serialize")
                 .contains("ScheduleDto"),
             "the array's items must be schedules: {schema}"
+        );
+    }
+
+    /// Same shape, for the tick-history read: `json_array_response_with_schema`
+    /// again, so `ScheduleTickDto` gets its own component rather than
+    /// colliding with `ScheduleDto`'s `Vec` registration above.
+    #[test]
+    fn the_tick_history_is_published_as_an_array_of_ticks() {
+        let openapi = OpenApiRegistryImpl::new();
+        let _router = register_operations(Router::new(), &openapi);
+        let doc = openapi
+            .build_openapi(&OpenApiInfo::default())
+            .expect("the OpenAPI document must build");
+        let rendered = serde_json::to_value(&doc).expect("the document must serialize");
+
+        let schema = &rendered["paths"]["/qa/v1/schedules/{id}/ticks"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"];
+        assert_eq!(schema["type"], "array", "{schema}");
+        assert!(
+            serde_json::to_string(&schema["items"])
+                .expect("the item schema must serialize")
+                .contains("ScheduleTickDto"),
+            "the array's items must be ticks: {schema}"
         );
     }
 

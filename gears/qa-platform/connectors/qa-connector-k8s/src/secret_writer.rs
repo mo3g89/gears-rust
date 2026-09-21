@@ -37,6 +37,7 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
 use qa_product_sdk::observation::{FailureClass, PluginFailure};
+use uuid::Uuid;
 
 use crate::errors::{CLIENT_BUILD_FAILURE, INFER_FAILURE, classify, classify_kubeconfig};
 
@@ -101,14 +102,59 @@ fn truncate(value: &str, limit: usize) -> String {
         .to_owned()
 }
 
-/// A `Secret` name derived from a credstore reference — `secret_name` in
-/// `qa-runs`' `naming.rs`, reimplemented here (see [`MAX_SECRET_NAME_LEN`]'s
-/// doc comment for why it is not shared).
-fn secret_name(prefix: &str, reference: &str) -> String {
-    truncate(
-        &sanitize(&format!("{prefix}{reference}")),
-        MAX_SECRET_NAME_LEN,
-    )
+/// FNV-1a 64-bit offset basis / prime — deterministic, non-cryptographic
+/// fingerprint (DE0708: no non-FIPS hashers; `sha2` was tried first and is
+/// what `DE0708` exists to catch, per `qa-runs`' `naming.rs`'s own doc on
+/// this same function). Mirrors `qa-runs`' own `naming::FNV1A_BASIS`/
+/// `FNV1A_PRIME` -- both must agree, or the two writers derive different
+/// names for the same tuple. Same constants as `keycloak-idp-plugin`'s
+/// `user_facade::FNV1A_BASIS`/`FNV1A_PRIME`, the precedent this follows.
+const FNV1A_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV1A_PRIME: u64 = 0x0000_0100_0000_01B3;
+
+/// Mix `bytes` into an in-progress FNV-1a 64-bit state.
+fn fnv1a_update(state: &mut u64, bytes: impl AsRef<[u8]>) {
+    for &b in bytes.as_ref() {
+        *state ^= u64::from(b);
+        *state = state.wrapping_mul(FNV1A_PRIME);
+    }
+}
+
+/// Hex characters of the digest suffix -- the algorithm's full 64-bit width.
+/// Mirrors `qa-runs`' own `naming::DIGEST_HEX_LEN` (see
+/// [`MAX_SECRET_NAME_LEN`]'s doc comment for why it is not shared) -- both
+/// must agree, or the two writers derive different names for the same
+/// tuple.
+const DIGEST_HEX_LEN: usize = 16;
+
+/// A `Secret` name derived from a tenant and a credstore reference —
+/// `secret_name` in `qa-runs`' `naming.rs`, reimplemented here (see
+/// [`MAX_SECRET_NAME_LEN`]'s doc comment for why it is not shared).
+///
+/// **The defect this replaced**, and the construction that replaced it, are
+/// documented on `qa-runs`' `naming::secret_name` rather than repeated here
+/// verbatim. In short: the name is `{readable}-{digest}`, where `digest` is
+/// the FNV-1a 64-bit fingerprint of `prefix + tenant_id + "-" + reference`,
+/// hex-encoded — collision-resistant regardless of how much of `readable`
+/// truncation ends up eating — and `readable` is `sanitize`d and
+/// `truncate`d to whatever budget remains after reserving `digest` and its
+/// separating dash. This has no failure mode: unlike the version it
+/// replaced, no input can exhaust the budget before a name is derivable.
+fn secret_name(prefix: &str, tenant_id: Uuid, reference: &str) -> String {
+    let full = format!("{prefix}{tenant_id}-{reference}");
+    let mut state = FNV1A_BASIS;
+    fnv1a_update(&mut state, full.as_bytes());
+    let digest = format!("{state:016x}");
+    let suffix = &digest[..DIGEST_HEX_LEN];
+
+    let readable_budget = MAX_SECRET_NAME_LEN - DIGEST_HEX_LEN - 1;
+    let readable = truncate(&sanitize(&full), readable_budget);
+
+    if readable.is_empty() {
+        suffix.to_owned()
+    } else {
+        format!("{readable}-{suffix}")
+    }
 }
 
 /// Fixed explanation for the known 409 interaction, and the one thing an
@@ -176,6 +222,7 @@ impl SecretWriter {
     /// kubeconfig bytes themselves. See this module's `ensure_kubeconfig_secret`.
     pub async fn ensure_secret(
         &self,
+        tenant_id: Uuid,
         credstore_ref: &str,
         kubeconfig: &SecretValue,
     ) -> Result<(), PluginFailure> {
@@ -184,6 +231,7 @@ impl SecretWriter {
             &self.namespace,
             &self.name_prefix,
             &self.key,
+            tenant_id,
             credstore_ref,
             kubeconfig,
         )
@@ -257,19 +305,21 @@ async fn argo_client(argo_kubeconfig_path: Option<&str>) -> Result<Client, Plugi
 /// # Errors
 /// Every error names what failed (bad path, unreachable API server, RBAC,
 /// non-existent namespace) and never the kubeconfig bytes themselves — the
-/// only runtime value any of these paths carries is the message the API
-/// server itself sent back. Every library error is classified rather than
-/// formatted; see [`crate::errors`].
+/// only runtime value any of these paths carries is the configured *path*,
+/// the `Secret`'s own name/namespace, and (for a rejected request) the
+/// message the API server itself sent back. Every library error is
+/// classified rather than formatted; see [`crate::errors`].
 pub(crate) async fn ensure_kubeconfig_secret(
     argo_kubeconfig_path: Option<&str>,
     argo_namespace: &str,
     secret_prefix: &str,
     secret_key: &str,
+    tenant_id: Uuid,
     credstore_ref: &str,
     kubeconfig: &SecretValue,
 ) -> Result<(), PluginFailure> {
+    let name = secret_name(secret_prefix, tenant_id, credstore_ref);
     let client = argo_client(argo_kubeconfig_path).await?;
-    let name = secret_name(secret_prefix, credstore_ref);
 
     let mut data = BTreeMap::new();
     data.insert(
@@ -347,26 +397,45 @@ mod tests {
     use super::*;
     use crate::test_support::RawBuffer;
 
+    /// The tenant every test in this module uses — its 36-character form is
+    /// what actually consumes most of the 63-character budget.
+    const TENANT: Uuid = uuid::uuid!("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+
     /// The name must equal what `qa-runs`' executor mounts and what the
     /// operator script writes. Each right-hand side is duplicated, not
     /// derived, from `qa-runs/src/infra/executor/argo/naming.rs`'s own
-    /// parity-oracle test (`secret_names_agree_with_the_provisioning_scripts_shell_derivation`),
-    /// which in turn was checked against
-    /// `deploy/argo/provision-platform-kubeconfig-secret.sh`'s `derive_name`.
+    /// parity-oracle test
+    /// (`secret_name_matches_a_manual_transcription_of_the_shell_scripts_output`).
     /// Three implementations of one rule, pinned in three places, so drift
     /// between any two fails a test rather than a pod mount.
+    ///
+    /// **The shell is the fourth implementation, and it is checked here
+    /// too** -- by `deploy/helm/tests/check_secret_name_parity.sh` under
+    /// `make helm-tests`, which extracts
+    /// `provision-platform-kubeconfig-secret.sh`'s `derive_name` and runs it
+    /// against this very table. Until that guard existed, this doc named a
+    /// test called
+    /// `secret_names_agree_with_the_provisioning_scripts_shell_derivation`
+    /// as its authority for the shell side; no such test has ever existed in
+    /// this workspace, so the chain of trust ended in a name.
     #[test]
     fn the_writer_the_executor_and_the_script_agree_on_every_name() {
         for (reference, expected) in [
-            ("argo-proof-kubeconfig", "qa-platform-argo-proof-kubeconfig"),
+            (
+                "argo-proof-kubeconfig",
+                "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-838ca89b7ac87ce3",
+            ),
             (
                 "environment/9f2c.../kubeconfig",
-                "qa-platform-environment-9f2c----kubeconfig",
+                "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-913cb319519012e1",
             ),
-            ("UPPER_Case", "qa-platform-upper-case"),
+            (
+                "UPPER_Case",
+                "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-860e9a9caad412aa",
+            ),
         ] {
             assert_eq!(
-                secret_name("qa-platform-", reference),
+                secret_name("qa-platform-", TENANT, reference),
                 expected,
                 "reference {reference:?} must derive the same Secret name here, in \
                  qa-runs' naming.rs, and in the shell script"
@@ -376,7 +445,21 @@ mod tests {
 
     #[test]
     fn a_reference_with_no_prefix_still_sanitises() {
-        assert_eq!(secret_name("", "already-clean"), "already-clean");
+        assert_eq!(
+            secret_name("", TENANT, "already-clean"),
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-already-c-372d8ce57bc70bd4"
+        );
+    }
+
+    /// There is no longer a degenerate case to refuse: the digest is
+    /// fixed-width and always fits, and the readable head is allowed to
+    /// truncate to nothing rather than this function having any
+    /// precondition left to violate.
+    #[test]
+    fn a_prefix_that_alone_would_have_exhausted_the_old_budget_still_derives_a_name() {
+        let huge_prefix = "p".repeat(MAX_SECRET_NAME_LEN);
+        let name = secret_name(&huge_prefix, TENANT, "any-reference");
+        assert_eq!(name.len(), MAX_SECRET_NAME_LEN);
     }
 
     /// Constructing this needs no live cluster: `kube::Error::Api` wraps a
@@ -474,6 +557,7 @@ mod tests {
             "argo",
             "qa-platform-",
             "value",
+            TENANT,
             "environment/does-not-matter/kubeconfig",
             &SecretValue::from("irrelevant".to_owned()),
         ))
@@ -505,6 +589,7 @@ mod tests {
             "argo",
             "qa-platform-",
             "value",
+            TENANT,
             "environment/does-not-matter/kubeconfig",
             &SecretValue::from(material),
         ))
@@ -554,6 +639,7 @@ mod tests {
             "argo",
             "qa-platform-",
             "value",
+            TENANT,
             "environment/does-not-matter/kubeconfig",
             &SecretValue::from("irrelevant".to_owned()),
         ))

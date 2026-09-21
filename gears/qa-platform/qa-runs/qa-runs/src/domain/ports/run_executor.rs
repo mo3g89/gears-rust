@@ -137,6 +137,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use toolkit_macros::domain_model;
 use uuid::Uuid;
@@ -396,7 +397,57 @@ pub struct ExecutionNode {
     ///
     /// Not optional — see the module docs on the source system's bundle-less
     /// local group, which has no counterpart here.
+    ///
+    /// **Not the download address, and no longer parseable into one.** An
+    /// adapter builds the URL from [`Self::bundle_id`]; this value is carried
+    /// to the runner as `TEST_BUNDLE_REF` for log correlation only.
     pub bundle_ref: String,
+    /// `TestBundle::id` — the identity qa-catalog's download route takes.
+    ///
+    /// **Carried explicitly because the alternative was a hidden coupling.**
+    /// The Argo adapter used to recover this by parsing the basename of
+    /// [`Self::bundle_ref`], which assumed the local-filesystem bundle store's
+    /// `<uuid>.tar.gz` naming; a deployment that swapped the `BundleStore`
+    /// would have broken every download with no error anywhere. That
+    /// function's own doc said the right fix was for the spec to carry the id,
+    /// and named the reason it had not: a change to `domain/` is not an
+    /// adapter's to make. This is that change.
+    pub bundle_id: Uuid,
+    /// `TestBundle::download_sig` — the HMAC tag that authorises `GET
+    /// /qa/v1/test-bundles/{bundle_id}` and nothing else.
+    ///
+    /// qa-catalog minted it over `(bundle_id, tenant_id)` at
+    /// `create_bundle`, under a key HKDF-derived from that deployment's
+    /// `bundle_download_signing_secret`. It carries no expiry of its own: it
+    /// is valid exactly as long as the bundle row it names, because the
+    /// serving side refuses an expired bundle before reading a byte.
+    ///
+    /// # Why this is on the node and not in `RunSpec::env`
+    ///
+    /// Two independent reasons, and either alone would settle it:
+    ///
+    /// * **`spec.env` is readable back.** Plan-author run parameters merge
+    ///   into it (`domain::runvars`) and a run's parameters are served over the
+    ///   runs API. A token there would be published.
+    /// * **The node-derived push wins anyway.** An adapter appends node
+    ///   variables *after* `spec.env`, and Kubernetes takes the last duplicate,
+    ///   so a collision would lose even if `TEST_BUNDLE_URL` were not already
+    ///   on both reserved-name lists (`domain::params::RESERVED_NAMES` and its
+    ///   executor-side twin) that stop a plan author declaring it at all.
+    ///
+    /// **Do not log it.** It rides `TEST_BUNDLE_URL`'s query string, and that
+    /// variable is echoed into the pod log and rendered in the run view — so
+    /// `deploy/runner/entrypoint.sh` and `fetch_bundle.py` both strip the query
+    /// string before printing the URL.
+    ///
+    /// # What a leak of this would be worth
+    ///
+    /// One `tar.gz` that the holder has already downloaded and unpacked,
+    /// containing the tenant's own test files at a branch the tenant chose.
+    /// That is why there is no revocation list and no `revoked_at`: the only
+    /// party positioned to leak it is the party that already has the contents,
+    /// and the GC deletes the bundle on a one-hour timer regardless.
+    pub bundle_token: String,
     /// Test files this node runs, in discovery order.
     ///
     /// **May be empty, and an empty list is not an error.** The source system
@@ -433,6 +484,29 @@ pub struct RunSpec {
     /// the executor performs no scoped access and would only be laundering the
     /// token's meaning.
     pub run_id: Uuid,
+    /// The run's owning tenant, carried **only** so an adapter can fold it
+    /// into a derived name — the Kubernetes `Secret` name this executor and
+    /// `qa-environments`' writer must independently compute to the same
+    /// string (`infra::executor::argo::naming::secret_name`). It is a plain
+    /// `Uuid`, not [`OwnedRunId`](crate::domain::repos::OwnedRunId).
+    ///
+    /// This looks like it contradicts [`RunExecutor::list_active`]'s own
+    /// doc, which says the execution plane "has no notion of a tenant" and
+    /// that the executor "performs no scoped access". It does not, and the
+    /// distinction is worth stating once here rather than leaving the next
+    /// reader to rediscover it and "fix" the field away. That doc objects to
+    /// two things: the executor performing a tenant-*scoped access* (a read
+    /// or write gated on "does this tenant own this row"), and laundering
+    /// [`OwnedRunId`](crate::domain::repos::OwnedRunId)'s meaning — that
+    /// token proves a tenant-scoped *read already happened* in the
+    /// repository, and handing it to the executor would let the executor
+    /// present that proof for something it never checked. A tenant id used
+    /// only to derive a name, and to mint a run-scoped credential `Secret`
+    /// under it, is neither: it proves nothing (it is not evidence of
+    /// authorization) and it grants nothing (it opens no scoped read or
+    /// write). [`RunExecutor::list_active`]'s own claim — that it answers
+    /// across every tenant — stays true and is untouched by this field.
+    pub tenant_id: Uuid,
     /// The run's human-facing name (`{slug}-{n}`), for the execution's own
     /// labelling. Carried in addition to [`Self::run_id`] because the source
     /// system's executions are identified to operators by exactly this string
@@ -560,7 +634,7 @@ pub struct TestObservation {
     /// of a row from which table it came out of, for free and unfalsifiably.
     ///
     /// `qa_run_test_results` is one table holding both
-    /// (`m20260818_000005_case_fidelity`, and decision D1 behind it), so the
+    /// (`m20260818_000005_case_fidelity` (folded into `migrations::m20260813_000003_initial` by the docs squash), and decision D1 behind it), so the
     /// granularity has to be read off a *value*. The convention is:
     ///
     /// * `nodeid` empty or absent → the row describes a whole test **file**.
@@ -648,7 +722,24 @@ pub enum ExecutionEvent {
     /// A test reported a result.
     TestResult(TestObservation),
     /// A chunk of log output, for the SSE fan-out.
-    Log { node: String, line: String },
+    Log {
+        node: String,
+        line: String,
+        /// Kubelet's own emission instant for this line
+        /// (`LogParams { timestamps: true, .. }`, parsed by
+        /// [`crate::domain::repos::split_kubelet_timestamp`]), or `None`
+        /// when the executor has no such clock — a non-Argo executor (the
+        /// mock has no kubelet), or a line that reached here through a
+        /// stream this adapter did not open with `timestamps: true`.
+        ///
+        /// Task 2 (WS5): this is what replaces the per-node suppression
+        /// counter `infra::executor::argo::watch` used to carry — a resumed
+        /// read seeds `LogParams::since_time` from the most recent `Some`
+        /// value recorded per node, instead of re-reading a node's whole log
+        /// from byte 0 and suppressing a client-side count of what was
+        /// already archived.
+        emitted_at: Option<OffsetDateTime>,
+    },
     /// The execution reached a terminal state. Always last: see
     /// [`RunExecutor::watch`].
     Finished {
@@ -821,11 +912,12 @@ pub trait RunExecutor: Send + Sync {
     /// there, not a design choice: `append_log` is a `CONCAT` with no
     /// truncate, replace or offset anywhere in `RunLogsRepository`, so a full
     /// replay through it duplicated the whole archived log on every
-    /// re-attach. (The adapter still opens a pod log the same plain way
-    /// today — `infra::executor::argo::watch`'s `LineSkip` suppresses the
-    /// re-sent lines afterward instead of asking Kubernetes to filter them;
-    /// that is a deliberate choice, argued for on `LineSkip`'s own doc, not
-    /// the absence this paragraph describes.) `resume` is per-node
+    /// re-attach. (Since Task 2, WS5, the adapter instead asks Kubernetes
+    /// itself to filter what it opens a pod log to --
+    /// `infra::executor::argo::watch`'s `Watcher::open_log` sets
+    /// `LogParams::since_time`; that is a deliberate choice, argued for on
+    /// this module's own header, not the absence this paragraph
+    /// describes.) `resume` is per-node
     /// (`domain::repos::LogResume`) because the Argo adapter's pods are: each
     /// is a separate log with its own read position. An executor with no
     /// resumable notion of position — the mock's only alternative to

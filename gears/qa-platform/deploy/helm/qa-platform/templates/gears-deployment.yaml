@@ -33,6 +33,9 @@ metadata:
     app.kubernetes.io/name: qa-platform
     app.kubernetes.io/component: gears
 spec:
+  {{- if gt (int .Values.gears.replicaCount) 1 }}
+  {{- fail "gears.replicaCount must be 1: the gears PVC is ReadWriteOnce, so a second replica would fail to mount, and qa-runs' dispatcher boot-recovery pass assumes only one process can be mid-submit -- a second replica under NoopLeaderElector would break that premise. This is permanent by design, not pending a fix -- see DESIGN §3.4 (qa-runs -- Leader election)." }}
+  {{- end }}
   replicas: {{ .Values.gears.replicaCount }}
   # THE DEFAULT 600s IS MEASURED FROM THE WRONG INSTANT FOR THIS POD, which is
   # why it is raised here and nowhere else in the chart.
@@ -68,15 +71,115 @@ spec:
   # measured from its own creation. Raising their deadlines would only delay
   # a genuine failure being reported.
   progressDeadlineSeconds: 1800
+  # RECREATE, NOT RollingUpdate, AND THE TRADE IS A SHORT OUTAGE ON EVERY
+  # UPGRADE IN EXCHANGE FOR NEVER RUNNING TWO GEARS PODS AT ONCE.
+  #
+  # The bundle is single-instance BY DESIGN -- `gears.replicaCount` above 1 is
+  # refused outright a few lines above, because the PVC is ReadWriteOnce and
+  # qa-runs ships `NoopLeaderElector`, under which every replica believes it is
+  # the leader (DESIGN §3.4). `replicas: 1` does NOT deliver that on its own:
+  # Kubernetes' default RollingUpdate at one replica is maxSurge 1 /
+  # maxUnavailable 0, so the NEW pod must be Ready BEFORE the old one is
+  # deleted. For that window -- which here is not brief, since this pod waits
+  # on hooks and a database -- two gears processes run side by side, both
+  # believing they are the leader, both running the dispatcher, scheduler and
+  # referential-check tickers.
+  #
+  # OBSERVED on the dev stand as duplicate log lines during an upgrade. The
+  # duplication is bounded (the tickers' own database-side guards -- the unique
+  # index on `qa_schedule_ticks`, the queue lease -- stop a doubled tick from
+  # becoming a doubled RUN), which is why it showed up as noise rather than as
+  # a second execution. Bounded is not the same as absent, and the guard above
+  # says two pods are unsafe; a strategy that runs two anyway contradicts it.
+  #
+  # WHAT THIS COSTS, stated plainly because it is a real cost and not a
+  # rounding error. Recreate deletes the old pod first, so the gears are DOWN
+  # from that delete until the new pod is Ready -- the API, and every open SSE
+  # log stream with it. A client following a run's logs sees the stream end and
+  # must reconnect; the stream does not resume itself. On a single-node dev
+  # stack with one replica there is no highly-available path to protect and
+  # nothing to fail over to, so this buys correctness with downtime that a
+  # rolling update was only ever pretending to avoid: with maxUnavailable 0 and
+  # a pod that cannot go Ready until its hooks finish, the "rolling" window was
+  # an overlap, not a continuity.
+  #
+  # DO NOT substitute maxUnavailable: 1 on a RollingUpdate. It produces the
+  # same delete-then-create ordering with more moving parts, and it leaves the
+  # overlap reachable again the moment anyone raises replicaCount -- which the
+  # guard above already refuses, but defence in depth is the point.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: qa-platform
-      app.kubernetes.io/component: gears
+      {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "gears") | nindent 6 }}
   template:
     metadata:
+      annotations:
+{{/* THE CONFIG CHECKSUMS, and the defect they close.
+
+     A ConfigMap is not part of a Deployment's pod template, so changing one
+     changes nothing Kubernetes can see: `helm upgrade` writes the new
+     ConfigMap, reports success, and the running pod keeps serving the OLD
+     values out of memory until something unrelated restarts it. MEASURED on
+     the dev stand 2026-09-21: `helm upgrade --reuse-values --set
+     bundleDownloadSigningSecret=...` produced revision 29 with the new value
+     in `qa-platform-gears-config`, and the gears pod was still 38 minutes old
+     afterwards, still signing bundles with the previous key. The operator has
+     no signal at all -- helm said OK and the manifest says the new value.
+     That is true of EVERY value this chart renders into these objects, not
+     just that one; the signing secret is only where it was noticed, because
+     there the stale value produces a 403 rather than merely stale behaviour.
+
+     Hashing the rendered template into a pod annotation is what makes the
+     change visible: the annotation is part of the pod template, so a changed
+     ConfigMap is a changed PodSpec and Kubernetes rolls the Deployment
+     itself. `include` re-renders the template with this same root context, so
+     the hash is over exactly what the ConfigMap object will contain.
+
+     WHAT IT COSTS, said here so nobody is surprised by it. This Deployment is
+     `strategy: Recreate` (see the comment on it above), so a config-triggered
+     roll deletes the pod before creating the new one: the API is DOWN for the
+     restart, and every open SSE log stream ends. That is the accepted
+     trade-off -- the alternative is not "no outage", it is "the new config
+     does not apply and nothing says so", which is how this defect was found.
+
+     THE RENDERED TEMPLATE MUST BE DETERMINISTIC FOR THIS TO BE USEFUL, and
+     that is why `gears-config-configmap.yaml`'s two signing secrets are
+     `required` rather than defaulting to `randAlphaNum 32`. With a per-render
+     random in there, this hash would differ on every render, and every `helm
+     upgrade` -- including one that changes nothing -- would roll the pod and
+     take the Recreate outage for no reason. `check_config_rollout.py` asserts
+     both halves: that two identical renders agree, and that changing a value
+     changes the hash.
+
+     `qa-platform-tls` IS DELIBERATELY NOT HERE. It is not a template: the
+     certs Job (certs-job.yaml) creates and refreshes that Secret inside the
+     cluster, so there is nothing for `include` to render and its contents are
+     not knowable at render time. The gears mount only `ca.crt` from it and
+     read it at start-up; rotating it is that Job's business, not this
+     annotation's. */}}
+        checksum/gears-config: {{ include (print $.Template.BasePath "/gears-config-configmap.yaml") . | sha256sum }}
+        checksum/gears-argo-config: {{ include (print $.Template.BasePath "/gears-argo-configmaps.yaml") . | sha256sum }}
+        checksum/postgres-secret: {{ include (print $.Template.BasePath "/postgres-secret.yaml") . | sha256sum }}
+{{/* The annotation-based scrape convention, and the only reason it is
+     annotations rather than a ServiceMonitor: this cluster has no Prometheus
+     Operator, so `monitoring.coreos.com/v1` is not a kind that can be created
+     here (measured on the dev stand 2026-09-18 -- 12 CRDs, none of them
+     monitoring's). Nothing in this cluster reads these today either; they are
+     three inert lines that start working the day a scraper is installed,
+     against an endpoint that is already answering.
+
+     GATED ON THE SAME VALUE AS THE ENDPOINT ITSELF. An annotation promising a
+     scrape target on a pod that is not listening is worse than no annotation:
+     it is a scraper's permanent `connection refused` with no error on this
+     side. */}}
+{{- if .Values.opentelemetry.metrics.scrape.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.gears.metricsPort | quote }}
+        prometheus.io/path: "/metrics"
+{{- end }}
       labels:
-        app.kubernetes.io/name: qa-platform
-        app.kubernetes.io/component: gears
+        {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "gears") | nindent 8 }}
     spec:
       serviceAccountName: qa-platform-gears
       securityContext:
@@ -107,6 +210,15 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.gears.port }}
+{{/* The scrape listener (libs/toolkit's telemetry::scrape), NOT a second way
+     into the API. It serves one route, `/metrics`, on its own socket; the
+     api-gateway's router and its auth middleware are on `http` above and are
+     not involved. Declared only when the gears are actually listening, so
+     `kubectl get pod -o wide` never advertises a port nothing bound. */}}
+{{- if .Values.opentelemetry.metrics.scrape.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.gears.metricsPort }}
+{{- end }}
           env:
             - name: POSTGRES_HOST
               value: qa-platform-postgres

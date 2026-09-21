@@ -1,4 +1,7 @@
-//! The contract every QA Platform product plugin implements (spec §5).
+//! The contract every QA Platform product plugin implements. See
+//! `gears/qa-platform/docs/features/product-plugins.md`'s "The contract"
+//! section (`PRODUCT-PLUGINS-DESIGN.md` §5, cited here before the docs
+//! squash, no longer exists).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -10,9 +13,7 @@ use credstore_sdk::SecretValue;
 
 use crate::access::{RunAccess, RunVarContract, RunnerSpec};
 use crate::descriptor::{FieldDesc, FieldRole, SchemaError, validate_schemas};
-use crate::observation::{
-    HealthState, ObservedAttrs, PluginFailure, PluginObservation, project_roles,
-};
+use crate::observation::{ObservedAttrs, PluginFailure, PluginObservation, project_roles};
 
 /// Raw fields a submitted credential form contains, keyed by
 /// [`FieldDesc::key`].
@@ -309,16 +310,6 @@ pub trait QaProductPluginV1: Send + Sync {
     /// [`Self::prepare_run_access`] actually returns in
     /// [`RunAccess::env`](crate::access::RunAccess::env).
     fn env_contract(&self) -> RunVarContract;
-
-    /// A cheap liveness check, independent of any environment. Plugins with
-    /// nothing to check may accept the default.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PluginFailure`] when the plugin itself cannot answer.
-    async fn health_check(&self) -> Result<HealthState, PluginFailure> {
-        Ok(HealthState::Ok)
-    }
 }
 
 /// A plugin that has passed [`validate_schemas`] — the only door through

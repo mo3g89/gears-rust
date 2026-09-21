@@ -116,10 +116,13 @@ fn config(command: Vec<String>) -> ArgoExecutorConfig {
 fn spec(run_name: &str) -> RunSpec {
     RunSpec {
         run_id: Uuid::new_v4(),
+        tenant_id: Uuid::new_v4(),
         run_name: run_name.to_owned(),
         nodes: vec![ExecutionNode {
             name: "repo-canary".to_owned(),
             bundle_ref: "/var/lib/qa-catalog/bundles/canary.tar.gz".to_owned(),
+            bundle_id: Uuid::new_v4(),
+            bundle_token: String::new(),
             test_files: vec!["tests/canary.py".to_owned()],
         }],
         env: RunEnv::default(),
@@ -237,7 +240,7 @@ async fn a_real_workflow_runs_and_reports_a_real_test_result() {
     let log_text: String = events
         .iter()
         .filter_map(|event| match event {
-            ExecutionEvent::Log { node, line } => {
+            ExecutionEvent::Log { node, line, .. } => {
                 assert_eq!(node, "repo-canary", "logs are attributed per node");
                 Some(line.clone())
             }

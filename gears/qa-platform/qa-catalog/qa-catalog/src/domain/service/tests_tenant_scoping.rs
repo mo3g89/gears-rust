@@ -1399,13 +1399,15 @@ async fn an_update_that_names_no_plugin_leaves_the_products_binding_alone() {
     let tenant = Uuid::new_v4();
     let caller = ctx(tenant);
 
-    // The id `m20260903_000003_product_plugin_instance`'s backfill binds every
-    // existing product to. Written out rather than recomposed from
-    // `QaProductPluginSpecV1::TYPE_ID`, because this test is about the update
-    // path, not about the id's construction — that migration's own
-    // `the_backfilled_id_is_the_spec_type_id_plus_the_vhp_segment` is what
-    // holds the composition, and duplicating it here would give a type-id
-    // change two places to break instead of one.
+    // The id the `m20260903_000003_product_plugin_instance` migration's
+    // backfill used to bind every existing product to, back when this
+    // gear's schema still had a backfill step. Written out rather than
+    // recomposed from `QaProductPluginSpecV1::TYPE_ID`, because this test is
+    // about the update path, not about the id's construction. (That
+    // migration, and the test that verified the id's composition, were
+    // both folded into `migrations::m20260812_000002_initial` by the docs
+    // squash; the fold replaced the backfill with a straight `NOT NULL`
+    // column, so nothing here still needs to stay in sync with it.)
     let bound =
         "gts.cf.toolkit.plugins.plugin.v1~cf.core.qa_product.plugin.v1~cf.core._.vhp_product.v1"
             .to_owned();

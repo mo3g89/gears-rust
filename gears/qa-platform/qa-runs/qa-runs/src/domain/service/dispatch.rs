@@ -142,6 +142,7 @@ use qa_catalog_sdk::QaCatalogClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
 use qa_runs_sdk::{Run, RunState};
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use toolkit_macros::domain_model;
 use toolkit_security::{AccessScope, SecurityContext};
 use tracing::{error, info, warn};
@@ -152,7 +153,7 @@ use super::launch::InlineDispatcher;
 use super::watch::{RunWatcher, WatchTarget};
 use super::{DbProvider, QueueLimits, actions, emit, resources};
 use crate::domain::error::DomainError;
-use crate::domain::ports::metrics::{DispatchMetrics, DispatchOutcome};
+use crate::domain::ports::metrics::{DispatchMetrics, DispatchOutcome, UnanchoredReason};
 use crate::domain::ports::product_plugin::ProductPluginPort;
 use crate::domain::ports::run_executor::{ExecutionRef, RunExecutor};
 use crate::domain::queue::{
@@ -187,7 +188,39 @@ const ORPHAN_REASON: &str = "Dispatch was interrupted before an execution was cr
 /// `activeDeadlineSeconds` alone (`manager/src/services/argo.rs:539`), and
 /// `cpt-cf-qa-fr-runs-timeout` requires control-plane enforcement because
 /// "enforcement cannot rely on the execution backend alone" (PRD §5.4, `cpt-cf-qa-fr-runs-exclusivity`).
-const TIMEOUT_REASON: &str = "The run exceeded its timeout and was cancelled by the control plane";
+///
+/// # Why it names the deadline and the knob
+///
+/// It is a sentence, not a constant, because the bare sentence it replaced —
+/// *"The run exceeded its timeout and was cancelled by the control plane"* —
+/// told the one person who has to act on it neither what the limit was nor
+/// where to change it. A suite that legitimately needs longer than its deadline
+/// then reads as a platform fault, which is how the collect-timeout question
+/// reached the owner in the first place — `docs/DESIGN.md` §3.13, "The collect
+/// deadline diverges from the source system", which this sentence is the other
+/// half of.
+///
+/// The chain named here is `domain::timeout::resolve_timeout_seconds`'s; keep
+/// the two in step if a source is added or removed there.
+///
+/// The deadline is rendered from the run's own `timeout_at`. `None` is
+/// unreachable from the sweep — `list_timeout_candidates` excludes a NULL
+/// `timeout_at` by construction — so that arm is defensive, and it degrades to
+/// the unqualified wording rather than printing a placeholder.
+fn timeout_reason(timeout_at: Option<OffsetDateTime>) -> String {
+    let limit = timeout_at
+        .and_then(|at| at.format(&Rfc3339).ok())
+        .map_or_else(
+            || "its timeout".to_owned(),
+            |at| format!("its deadline of {at}"),
+        );
+    format!(
+        "The run exceeded {limit} and was cancelled by the control plane. That limit is \
+         fixed at launch from the launch request's `timeout_seconds`, else the plan's own \
+         `timeout_seconds`, else the `default_timeout_seconds` knob in the `qa-runs` \
+         configuration section; raise it there if the run needs longer."
+    )
+}
 
 /// Named passes, so [`TickReport::denied_passes`] holds stable strings a test
 /// and a log line can both name.
@@ -444,6 +477,35 @@ struct ClaimedRow {
     /// observation. Silently dropping the sample is right here — a fabricated
     /// one would be indistinguishable from a real wait in the histogram.
     enqueued_at: Option<OffsetDateTime>,
+    /// When this row's environment transitioned **to free**, as reported by
+    /// the acquisition that took it out of `LeaseState::Free` — the start
+    /// endpoint of `cpt-cf-qa-nfr-dispatch-latency`, and the one
+    /// [`DispatchService::record_free_to_start`] measures from.
+    ///
+    /// `None` when this claim did not consume a free transition: it joined an
+    /// existing parallel hold, or the environment has no recorded free instant
+    /// at all. Those runs are counted, not dropped — see
+    /// [`crate::domain::ports::metrics::UnanchoredReason`].
+    ///
+    /// Distinct from `enqueued_at` in the way that matters: `enqueued_at` is
+    /// when *this run* started waiting, and this is when *the environment*
+    /// stopped being busy. Measuring the NFR from the former is what the
+    /// 2026-09-18 measurement did and had to retract — `docs/DESIGN.md`
+    /// §3.11, "The dispatch-latency window, and the measurement that was
+    /// retracted".
+    became_free_at: Option<OffsetDateTime>,
+}
+
+/// What a successful lease acquisition tells the drain, beyond "you may
+/// dispatch".
+///
+/// A named struct rather than an `Option<Option<OffsetDateTime>>`, which is
+/// what the two nested absences would otherwise read as at the call site: the
+/// outer one is "the lease refused" and the inner is "no free transition
+/// admitted this run", and nothing but a name distinguishes them.
+struct LeaseTaken {
+    /// See [`ClaimedRow::became_free_at`].
+    became_free_at: Option<OffsetDateTime>,
 }
 
 /// What a successful submit produced.
@@ -1071,6 +1133,16 @@ where
     /// (`run_dispatcher.rs:313`, `interval_seconds.max(5)`), giving p95 ≈ 4.75 s;
     /// `DESIGN.md`'s NFR row now records it.
     ///
+    /// Both the 10 s NFR and this design argument are still exactly what they
+    /// were before the retracted 2026-09-18 load test — it measured a
+    /// different quantity (queue residency under a synthetic permanent
+    /// backlog, not this post-free dispatch window) and so does not confirm,
+    /// refute or otherwise bear on either number. The post-free window was
+    /// measured on 2026-09-21 with this 5 s interval in place, at p95 4.21 s /
+    /// 4.51 s: `docs/DESIGN.md` §3.11, "The dispatch-latency window, and the
+    /// measurement that was retracted", and
+    /// `infra::metrics::DURATION_BUCKETS`'s doc.
+    ///
     /// The release-notification wake DESIGN originally prescribed is **not built**,
     /// and that is a tracked follow-up rather than an omission
     /// (DECOMPOSITION 2.3's follow-up register): the ticker is leader-elected and
@@ -1686,6 +1758,7 @@ where
             return false;
         }
 
+        let reason = timeout_reason(run.timeout_at);
         if let Err(error) = self
             .transition(
                 ctx,
@@ -1694,7 +1767,7 @@ where
                 RunStatePatch {
                     started_at: None,
                     finished_at: Some(now),
-                    error: Some(TIMEOUT_REASON.to_owned()),
+                    error: Some(reason.clone()),
                 },
             )
             .await
@@ -1703,7 +1776,7 @@ where
             return false;
         }
 
-        self.release_claim_for_run(ctx, &run, TIMEOUT_REASON, PASS_TIMEOUT, report)
+        self.release_claim_for_run(ctx, &run, &reason, PASS_TIMEOUT, report)
             .await;
         warn!(
             run_id = %run.id,
@@ -1904,14 +1977,15 @@ where
     /// the control plane's write clock against each line's own kubelet
     /// emission time, two different events, and can *lose* a line queued
     /// behind a database round trip when the observer ends before it
-    /// flushes, which is worse than the bug this task fixes. The shipped
-    /// mechanism (`infra::executor::argo::watch`'s `LineSkip`) has no clock
-    /// in it: it re-reads a node's log from byte 0, exactly as before this
-    /// task, and suppresses the same count the mock does — see
-    /// `domain::repos::LogPosition`'s doc for why a count can only
-    /// under-suppress (re-duplicating a little, the tolerated direction)
-    /// and never over-suppress relative to what actually reached the pod's
-    /// log.
+    /// flushes, which is worse than the bug this task fixes. **Fix-round 2**
+    /// (the shipped mechanism at the time) had no clock in it: a per-node
+    /// suppression count, re-reading a node's log from byte 0 on every
+    /// re-attach, which the mock mirrored. **Task 2 (WS5) replaced fix-round
+    /// 2 in turn**, with the fix `since_time` should have been all along, now
+    /// that the two-clocks trap fix-round 1 fell into is closed correctly:
+    /// `qa_run_log_positions` stores each node's own kubelet-reported
+    /// emission instant, not a control-plane write time, so the `since_time`
+    /// this now sends is compared against the same clock on both ends.
     async fn list_watch_candidates(
         &self,
         // Kept, unused, so the caller's audit-logging `system_actor::for_watch_scan`
@@ -2437,6 +2511,7 @@ where
                     "a claimed row failed to dispatch",
                 );
             } else {
+                self.record_free_to_start(&row);
                 self.record_queue_wait(row);
             }
         }
@@ -2475,6 +2550,78 @@ where
     /// can only inflate. What the measurement is, and where it diverges from
     /// `cpt-cf-qa-nfr-dispatch-latency` in both directions, is in
     /// [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`]'s own doc.
+    /// Report `cpt-cf-qa-nfr-dispatch-latency` itself: how long this queued run
+    /// waited **after its environment became free** before reaching an accepted
+    /// execution request.
+    ///
+    /// # The two instants
+    ///
+    /// * **Start** — `row.became_free_at`, the value
+    ///   `qa-environments` stamped on `qa_environment_leases.freed_at` inside
+    ///   the compare-and-swap that wrote `LeaseState::Free`, and handed back to
+    ///   the acquisition that took the environment out of `Free`. It is the
+    ///   transition, not the `release` call: a parallel holder letting go while
+    ///   others remain writes a still-held state and stamps nothing.
+    /// * **End** — the clock read here, the same instant
+    ///   [`Self::record_queue_wait`] ends at, so the two series differ only in
+    ///   where they begin.
+    ///
+    /// # Why the population is filtered, and why the filter is not a thumb on
+    /// the scale
+    ///
+    /// A sample is taken only when the row was **already queued at the free
+    /// instant** (`enqueued_at <= became_free_at`). That is not a
+    /// convenience: a run enqueued *after* its environment was free was never
+    /// waiting for it to free, so the window this NFR names does not exist for
+    /// that run — its wait started later and for a different reason
+    /// (`evaluate_cap` stopping a tick, a failed executor listing, or the gap
+    /// between sweeps, which is the list
+    /// [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`] already keeps).
+    ///
+    /// The filter cannot hide a slow dispatcher, and this is the direction
+    /// worth checking. A run that *was* waiting when its environment freed and
+    /// then sat through five capped ticks is **kept**, and reads as thirty
+    /// seconds. What is excluded is only the case where the anchor predates
+    /// the run's own arrival in the queue, where any number computed from it
+    /// would be measuring the environment's idle time rather than the
+    /// dispatcher.
+    ///
+    /// Every exclusion is counted by reason through
+    /// [`crate::domain::ports::metrics::UnanchoredReason`], so the histogram's
+    /// coverage of the drain is a readable quantity rather than an assumption.
+    /// Exactly one of the two emissions happens per drained row.
+    fn record_free_to_start(&self, row: &ClaimedRow) {
+        let unanchored = |reason| {
+            emit(&self.metrics_silenced, || {
+                self.metrics.free_to_start_unanchored(reason);
+            });
+        };
+
+        let Some(became_free_at) = row.became_free_at else {
+            unanchored(UnanchoredReason::NoFreeInstant);
+            return;
+        };
+        let Some(enqueued_at) = row.enqueued_at else {
+            unanchored(UnanchoredReason::NoEnqueueInstant);
+            return;
+        };
+        if enqueued_at > became_free_at {
+            unanchored(UnanchoredReason::NotWaitingAtFree);
+            return;
+        }
+        // Negative means the stored instant is ahead of this process's clock —
+        // skew, or a fixture. Dropped rather than clamped, for the reason
+        // `record_queue_wait` gives.
+        let Ok(waited) = std::time::Duration::try_from(OffsetDateTime::now_utc() - became_free_at)
+        else {
+            unanchored(UnanchoredReason::NegativeSpan);
+            return;
+        };
+        emit(&self.metrics_silenced, || {
+            self.metrics.free_to_start(waited);
+        });
+    }
+
     fn record_queue_wait(&self, row: ClaimedRow) {
         let Some(enqueued_at) = row.enqueued_at else {
             return;
@@ -2548,6 +2695,21 @@ where
         };
 
         let mut claimed = Vec::with_capacity(marked.len());
+        // **The batch's shared anchor.** When this drain found the platform
+        // free, every row the planner admitted was admitted by that one
+        // transition to free — but only the first acquisition takes it out of
+        // `LeaseState::Free`, so only that one is handed the instant back. The
+        // rest join a parallel hold and are told `None`, correctly, because
+        // from the lease's point of view they did not consume a free
+        // transition.
+        //
+        // Here, inside the platform lock and within one tick, they did: the
+        // whole batch was planned against the same occupancy read. Carrying
+        // the instant across the batch is what keeps a parallel-tier run from
+        // being unmeasurable purely for arriving second, and it cannot
+        // over-attribute — if the platform was *not* free, the first
+        // acquisition reports `None` too and nothing propagates.
+        let mut batch_anchor: Option<OffsetDateTime> = None;
         for queue_id in marked {
             let Some(&run_id) = run_ids.get(&queue_id) else {
                 // The row was claimed but its run id could not be recovered. Left
@@ -2569,15 +2731,19 @@ where
             let planned_row = fifo.iter().find(|row| row.id == queue_id);
             let exclusive = planned_row.is_none_or(|row| row.exclusive);
             let enqueued_at = planned_row.map(|row| row.enqueued_at);
-            if self
+            if let Some(taken) = self
                 .take_lease_for_claim(ctx, environment_id, run_id, exclusive, report)
                 .await
             {
+                if taken.became_free_at.is_some() {
+                    batch_anchor = taken.became_free_at;
+                }
                 claimed.push(ClaimedRow {
                     queue_id,
                     run_id,
                     exclusive,
                     enqueued_at,
+                    became_free_at: taken.became_free_at.or(batch_anchor),
                 });
             } else {
                 self.requeue_claim(ctx, queue_id, report).await;
@@ -2619,7 +2785,7 @@ where
         run_id: Uuid,
         exclusive: bool,
         report: &mut TickReport,
-    ) -> bool {
+    ) -> Option<LeaseTaken> {
         let mode = if exclusive {
             qa_environments_sdk::LeaseMode::Exclusive
         } else {
@@ -2630,7 +2796,9 @@ where
             .acquire_lease(ctx, environment_id, run_id, mode)
             .await
         {
-            Ok(qa_environments_sdk::AcquireOutcome::Acquired) => true,
+            Ok(qa_environments_sdk::AcquireOutcome::Acquired { became_free_at }) => {
+                Some(LeaseTaken { became_free_at })
+            }
             Ok(qa_environments_sdk::AcquireOutcome::Busy { current }) => {
                 warn!(
                     %run_id,
@@ -2639,7 +2807,7 @@ where
                     "the platform lease refused a row this tick claimed; failing the row \
                      rather than starting a run against a platform it does not hold",
                 );
-                false
+                None
             }
             Err(error) => {
                 report.note_failure(PASS_DRAIN, &environments_error(&error));
@@ -2653,7 +2821,7 @@ where
                 // genuinely never landed. Same reasoning as
                 // `admission::AdmissionService::take_lease`'s `Err` arm.
                 self.release_lease(ctx, environment_id, run_id).await;
-                false
+                None
             }
         }
     }

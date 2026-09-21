@@ -144,7 +144,8 @@ into the historical model, correlates failures with JIRA, and sends notification
 The system MUST resolve every product-specific behaviour through `QaProductPluginV1`, resolved per
 product from `ClientHub` by `qa_products.plugin_instance_id`. No gear may branch on a product. A
 plugin MUST declare the credential fields an operator supplies and the fields an observation can
-yield, and MUST provide credential validation, observation and run-access preparation.
+yield, and MUST provide credential validation, observation, run-access preparation, and the
+runner contract (`runner`, `env_contract`) dispatch uses to launch and address a run.
 
 - **Rationale**: Onboarding a product must be additive.
 - **Actors**: `cpt-cf-qa-actor-admin`, `cpt-cf-qa-actor-plugin`
@@ -446,14 +447,14 @@ execution backend requires.
 |----|-------------|
 | `cpt-cf-qa-nfr-run-duration` | A run of up to 8 hours MUST survive a control-plane restart: state is recovered and the live execution re-attached |
 | `cpt-cf-qa-nfr-result-latency` | A reported result MUST be visible within 5 s at p95 |
-| `cpt-cf-qa-nfr-dispatch-latency` | A queued run MUST start within 10 s at p95 of its environment becoming free |
+| `cpt-cf-qa-nfr-dispatch-latency` | A queued run MUST start within 10 s at p95 of its environment becoming free. **Measured 2026-09-21** over the window this NFR actually names, once `qa_environment_leases.freed_at` gave the post-free instant an earlier, retracted measurement lacked: two 600 s windows, n = 214 and 239, every sample ≤ 10 s, p95 4.21 s and 4.51 s. `DESIGN.md` §3.11, "The dispatch-latency window, and the measurement that was retracted", has the two instants, the method, the coverage and what the measurement does not settle |
 | `cpt-cf-qa-nfr-log-latency` | A log line MUST reach a connected viewer within 2 s at p95 |
 | `cpt-cf-qa-nfr-ingest-recovery` | Historical ingestion MUST resume within 60 s of a control-plane restart, with no duplicate rows |
 | `cpt-cf-qa-nfr-tenant-isolation` | No row MUST ever be readable across a tenant boundary |
 | `cpt-cf-qa-nfr-credential-containment` | No value derived from credential material MUST reach any published surface |
 | `cpt-cf-qa-nfr-infra-agnostic` | A default build MUST have no Kubernetes dependency in its tree |
 | `cpt-cf-qa-nfr-observability` | Every background loop and every external call MUST be measured |
-| `cpt-cf-qa-nfr-scheduler-exactly-once` | A schedule MUST launch exactly one run per due instant, however many replicas are running |
+| `cpt-cf-qa-nfr-scheduler-exactly-once` | A schedule MUST launch **at most** one run per due instant, however many replicas are running, and never a second one for the same instant. It is **not** a MUST that every due instant produces a run: a nil-tenant schedule, an unparseable stored cron expression, a claim whose launch failed, a claim whose launch was refused for a full queue, and an occurrence missed during an outage (cron does not back-fill) each produce zero runs for that instant, by design, and none is retried. Verified by `qa-runs/src/domain/service/schedules_tests.rs`'s multi-instance tests, which drive two service instances against one store with no leader elector in place and assert exactly one run comes out. |
 | `cpt-cf-qa-nfr-scale` | A deployment MUST support 100 environments, 100 test repositories and 10,000 retained runs per tenant. **It states no latency bound**: it is a sizing requirement, and no metric measures it |
 
 ## 7. Public Interfaces
@@ -483,9 +484,17 @@ interface. See [ADR-0006](./ADR/0006-cpt-cf-qa-adr-product-plugins.md) and
 
 All outbound HTTP MUST go through the platform's Outbound API Gateway, which injects credentials and
 controls egress. The contract permits **exactly one** direct-HTTP exception, and it belongs to
-qa-catalog's git transport ([ADR-0005](./ADR/0005-cpt-cf-qa-adr-git-egress.md)). JIRA, Slack and SMTP
-all go through the gateway; a `reqwest` dependency in qa-insights would be a violation of this
-contract.
+qa-catalog's git transport ([ADR-0005](./ADR/0005-cpt-cf-qa-adr-git-egress.md)). JIRA and Slack go
+through the gateway; a `reqwest` dependency in qa-insights would be a violation of this contract.
+
+**SMTP does not, and is the contract's one non-HTTP exception**
+([ADR-0011](./ADR/0011-cpt-cf-qa-adr-smtp-egress.md)). The gateway speaks HTTP; SMTP is a stateful,
+server-greets-first protocol that upgrades to TLS mid-stream, so qa-insights opens the connection
+itself and resolves the relay password from credstore in-process. TLS is mandatory, and the set of
+relays a deployment may reach is named in its own configuration rather than by a network rule — the
+ADR records why no expressible `NetworkPolicy` covers it. The requirement that credentials come
+from credstore is unchanged by this and is not weakened: the password is never configuration, only
+a reference.
 
 ### 7.5 Execution events
 
@@ -526,7 +535,7 @@ The typed events a runner reports are the contract between a runner and the cont
 | ClientHub | Plugin and SDK client resolution |
 | types-registry / GTS | Plugin instance identity |
 | AuthZ resolver | Authorization decisions |
-| OAGW | JIRA and SMTP egress |
+| OAGW | JIRA and Slack egress. **Not SMTP** — ADR-0011; qa-insights dials the relay directly |
 | Postgres | Per-gear storage |
 | Keycloak | Identity in the shipped deployment |
 | Argo Workflows | The shipped execution backend, behind the `argo` feature |
@@ -538,7 +547,8 @@ The typed events a runner reports are the contract between a runner and the cont
   control plane itself never needs that reachability.
 * A single designated tenant is acceptable per deployment; multi-team tenancy is configuration, not
   new code.
-* JIRA and SMTP endpoints and credentials are provisioned by the operating organisation.
+* JIRA and SMTP endpoints and credentials are provisioned by the operating organisation, and the
+  set of SMTP relays a deployment may reach is named in its own configuration (ADR-0011).
 * The platform's event bus has no durable backend in this deployment, so nothing may rely on an
   event delivered while a consumer is down.
 

@@ -76,6 +76,20 @@ pub const MIN_DISPATCHER_INTERVAL_SECONDS: u64 = 5;
 /// `0` still disables the ticker outright.
 pub const MIN_SCHEDULE_INTERVAL_SECONDS: u64 = 10;
 
+/// Floor for [`QaRunsConfig::schedule_target_check_interval_seconds`] when the
+/// referential-check ticker is enabled.
+///
+/// The same cost shape as the scheduler's own floor: every pass enumerates
+/// every enabled schedule in the fleet
+/// (`SchedulesRepository::list_enabled`, uncapped by design) plus one
+/// cross-gear probe per schedule. A dangling reference is not time-sensitive
+/// the way a due cron tick is — nothing about it changes minute to minute —
+/// so this floor is the scheduler's own rather than the dispatcher's tighter
+/// one: there is no latency requirement pulling it lower, only the same cost
+/// pulling it no lower than necessary. `0` still disables the ticker
+/// outright.
+pub const MIN_SCHEDULE_TARGET_CHECK_INTERVAL_SECONDS: u64 = MIN_SCHEDULE_INTERVAL_SECONDS;
+
 /// Floor for [`QaRunsConfig::orphan_timeout_seconds`].
 ///
 /// A claim sits in `dispatching` with no execution reference for the whole
@@ -128,6 +142,14 @@ pub struct QaRunsConfig {
     /// (`manager/src/services/run_dispatcher.rs:306-311`). The NFR measures
     /// exactly that queued case.
     ///
+    /// **Still current after the retracted 2026-09-18 measurement.** That
+    /// measurement bears on neither the 10 s NFR nor the 5 s interval above
+    /// it: it measured queue residency under a synthetic permanent backlog,
+    /// not the post-free dispatch window this setting is tuned against. The
+    /// window itself was measured on 2026-09-21 at p95 4.21 s / 4.51 s, inside
+    /// the requirement, with this interval in place — `docs/DESIGN.md` §3.11,
+    /// "The dispatch-latency window, and the measurement that was retracted".
+    ///
     /// Clamped by [`Self::effective_dispatcher_interval_seconds`], never read
     /// raw by the ticker.
     pub dispatcher_interval_seconds: u64,
@@ -160,6 +182,27 @@ pub struct QaRunsConfig {
     /// expression cannot name anything finer than a minute, so a schedule due at
     /// 03:00 fires within a tick of it.
     pub schedule_interval_seconds: u64,
+
+    /// Referential-check ticker interval, seconds. `0` disables it — the same
+    /// convention [`Self::dispatcher_interval_seconds`] and
+    /// [`Self::schedule_interval_seconds`] use, and, unlike those two, the
+    /// only knob this ticker has: nothing about "is a schedule's target still
+    /// there" is the kind of thing an operator wants disabled independently
+    /// of its cadence, the way freezing new fires ([`Self::scheduler_enabled`])
+    /// is.
+    ///
+    /// Re-checks every enabled schedule's `plan_path`/`repo_id`/
+    /// `environment_id` against qa-catalog and qa-environments in the
+    /// background, and records a synthetic `qa_schedule_ticks` row —
+    /// distinguishable from a real fire by `claimed_by` — for one that has
+    /// gone dangling since it was written. `create`/`update` already refuse a
+    /// dangling target on write (`crate::domain::service::launch::LaunchService::resolve_target_exists`);
+    /// this is what catches one that goes dangling **afterwards**, which a
+    /// write-time check cannot.
+    ///
+    /// Clamped by [`Self::effective_schedule_target_check_interval_seconds`],
+    /// never read raw by the ticker.
+    pub schedule_target_check_interval_seconds: u64,
 
     /// Seconds a queue row may sit in `dispatching` with no execution
     /// reference before a tick fails it.
@@ -203,7 +246,7 @@ pub struct QaRunsConfig {
     /// be set. `gears/qa-platform/config/qa-platform-stack.yaml` had no such
     /// key; the Helm chart embeds that file **verbatim** (`.Files.Get` in
     /// `gears-config-configmap.yaml`, byte-pinned by
-    /// `deploy/helm/tests/test_chart_file_sync.py`), and the file's own comment
+    /// `deploy/helm/tests/check_chart_file_sync.py`), and the file's own comment
     /// says it is baked into the image and cannot be edited per deployment. It
     /// is now `--set qaRuns.maxConcurrentRuns=0` on the chart, rendered into
     /// the fragment `entrypoint.sh` inserts at `QA_RUNS_ARGO_ANCHOR`, which the
@@ -294,9 +337,10 @@ pub struct QaRunsConfig {
     /// Which [`RunExecutor`](crate::domain::ports::run_executor::RunExecutor)
     /// adapter the gear wires. Default [`ExecutorKind::Mock`].
     ///
-    /// **The default must stay `Mock`**, per ADR-0001's 2026-08-27 waiver: "the
-    /// mock stays the default executor, so no deployment gains a Kubernetes
-    /// dependency by upgrading". Selecting [`ExecutorKind::Argo`] in a binary
+    /// **The default must stay `Mock`**, per ADR-0001's Decision Outcome, which
+    /// chose the `RunExecutor` port precisely because it "keeps a Kubernetes
+    /// dependency out of a default build while still shipping a backend that
+    /// really runs tests". Selecting [`ExecutorKind::Argo`] in a binary
     /// built without the `argo` cargo feature is a hard boot failure rather than
     /// a silent fall back to the mock — a deployment that asked for real tests
     /// and got `test_mock_default` would report fabricated passes, which is the
@@ -422,39 +466,40 @@ pub struct ArgoExecutorConfig {
     pub bundle_base_url: Option<String>,
 
     /// `spec.serviceAccountName` for the submitted workflow — the identity the
-    /// **runner pod** runs as. `None` leaves it unset, so the namespace's
-    /// `default` service account is used.
+    /// **runner pod** runs as.
     ///
-    /// # Unset is usually wrong, and the failure is confusing
+    /// # `None` is refused, not defaulted
+    ///
+    /// This stays an `Option` at the config-parsing layer — `deny_unknown_fields`
+    /// plus a struct-wide `Default` already means a deployment can omit the
+    /// whole `argo` section, and this one field should not force it to spell
+    /// out an account before it can even boot the mock executor — but
+    /// [`crate::infra::executor::argo::ArgoRunExecutor::connect`] rejects
+    /// `None` (and a blank string) before it opens a client. The failure
+    /// therefore names the executor, not the config parser, and it happens at
+    /// construction, before any workflow is ever built.
+    ///
+    /// # Why unset is wrong enough to refuse outright
     ///
     /// Argo's executor writes a `workflowtaskresults` object per step, so the
     /// pod's own service account needs `create` on
-    /// `workflowtaskresults.argoproj.io`. The `default` account does not have
-    /// it, and the run fails **after** producing all of its output, with
-    /// `exit code 64` and `workflowtaskresults.argoproj.io is forbidden` in
-    /// `status.message` — measured on the dev cluster, 2026-08-27, which is why
-    /// this knob exists. The source system never met it because
+    /// `workflowtaskresults.argoproj.io`. The namespace `default` account does
+    /// not have it, and the run fails **after** producing all of its output,
+    /// with `exit code 64` and `workflowtaskresults.argoproj.io is forbidden`
+    /// in `status.message` — measured on the dev cluster, 2026-08-27, which is
+    /// why this knob exists. The source system never met it because
     /// `quick-start-minimal.yaml` patches the default account; the
     /// `argo-workflows` Helm chart instead creates a named one
-    /// (`argo-workflow`, with `workflow.serviceAccount.create=true`).
+    /// (`argo-workflow`, with `workflow.serviceAccount.create=true`). Letting
+    /// `None` through here would leave the runner pod's identity to be
+    /// whatever `default` happens to be in the deployment's namespace — an
+    /// identity nobody in this subsystem declared or reviewed. The pod's
+    /// `ServiceAccount` token is always mounted (Argo's own executor needs it
+    /// to authenticate as this account — see `workflow.rs`'s pod-builder
+    /// comment), so what actually bounds what a run can reach is the RBAC
+    /// granted to whichever account this field names, not whether the token
+    /// is reachable at all.
     pub workflow_service_account: Option<String>,
-
-    /// How a **workflow pod** obtains a bearer token for
-    /// [`Self::bundle_base_url`]. `None` submits no credential variables, and a
-    /// pod fetching the bundle URL then gets a 401.
-    ///
-    /// # Why this is config and not part of `RunSpec`
-    ///
-    /// The credential is a property of the *deployment's* identity provider,
-    /// not of a run: every run in a deployment presents the same service
-    /// account. `RunSpec` carries what qa-catalog and qa-environments know
-    /// about a run, and an `IdP` client id is neither.
-    ///
-    /// **The adapter never resolves the client secret.** It emits a
-    /// `secretKeyRef` naming a Kubernetes `Secret` that somebody else
-    /// pre-provisioned, and the kubelet resolves it — the same mechanism, and
-    /// the same reason, as [`Self::secret_name_prefix`] below.
-    pub bundle_auth: Option<BundleAuthConfig>,
 
     /// Kubernetes `Secret` name prefix used when a
     /// [`SecretRef`](crate::domain::ports::run_executor::SecretRef) has to be
@@ -468,6 +513,70 @@ pub struct ArgoExecutorConfig {
     /// literally true of this adapter. Materialising those Secrets is somebody
     /// else's job and is not done today; see the adapter's module docs (D4).
     pub secret_name_prefix: String,
+
+    /// `spec.securityContext.runAsUser` (and the container's own) for the
+    /// runner pod. Default `65534`, which is `nobody` on the runner image's
+    /// Debian base.
+    ///
+    /// The runner image ships `kubectl`, `helm` and `istioctl` because the
+    /// product's own suites shell out to them (`runner.Dockerfile:61-72`). A
+    /// pod that runs those tools as root, with no explicit non-zero uid,
+    /// asks nothing of a plugin author to get a privileged container: this
+    /// field is what stops that being the default.
+    pub run_as_user: u64,
+
+    /// `spec.securityContext.fsGroup` for the runner pod. Default `65534`,
+    /// matching [`Self::run_as_user`] — `nobody`'s group on the
+    /// runner image's Debian base, same as its uid.
+    ///
+    /// # Why this exists at all: fix round 8, a design field the code dropped
+    ///
+    /// A product plugin's `MountSpec::Secret` (`qa-vhi-product-plugin`'s SSH
+    /// key and vinfra password, `qa-vhp-product-plugin`'s kubeconfig) lands
+    /// as a Secret-volume file. Kubernetes owns that file `root:root` unless
+    /// the pod declares `fsGroup`, and `run_as_user` alone does not change
+    /// that ownership — measured live, without this field, as
+    /// `PermissionError: [Errno 13] Permission denied` reading the mounted
+    /// SSH key, after every earlier hardening fix in this task had already
+    /// landed and worked (the token, `/work`, `HOME`/`PATH`). The design for
+    /// this whole task specified `runAsNonRoot`, an explicit `runAsUser`,
+    /// `fsGroup` **and** `seccompProfile` as the pod's four-field posture;
+    /// this field was the one of the four that never made it from the design
+    /// into the code, and no test caught the gap because a test that asserts
+    /// what a JSON object contains cannot, by construction, notice what it
+    /// does not.
+    ///
+    /// # Why the file's declared `mode` does not also need to change
+    ///
+    /// Checked directly against a live cluster rather than deduced from
+    /// kubelet semantics (kubelet's actual behaviour here is a known,
+    /// easy-to-get-wrong corner — see
+    /// <https://github.com/kubernetes/kubernetes/issues/57923>): a Secret
+    /// volume item declared `mode: 0o400`, mounted into a pod whose
+    /// `fsGroup` is set, rendered as `-r--r-----` (`0o440`) — root-owned,
+    /// **group**-owned by the `fsGroup`, group-**readable** — not the literal
+    /// `0o400` (owner-only) the declared value alone would suggest. A
+    /// process running as that group could read it; `cat` as uid `65534`
+    /// (whose group is this same `fsGroup`) succeeded. So `MOUNT_MODE`
+    /// (`qa-vhi-product-plugin/src/run.rs:83`) needs **no** change: it
+    /// already resolves to group-readable once `fsGroup` is set, which is
+    /// exactly this field.
+    pub fs_group: u64,
+
+    /// `spec.containers[].resources` for the runner container.
+    ///
+    /// **Deployment-level only.** [`RunnerSpec`](crate::domain::ports::run_executor::RunnerSpec)
+    /// — the product override that already wins for `image`, `command` and
+    /// `image_pull_policy` (`infra::executor::argo::workflow::template`) —
+    /// carries no field for this, and none is added here: a field no plugin
+    /// populates "invites a plugin author to fill it in and be silently
+    /// dropped", which is why `VolumeSpec` was deleted from that same
+    /// interface (`workflow.rs`, `reject_unrenderable_mounts`'s own doc).
+    ///
+    /// [`QaRunsConfig::max_concurrent_runs`] bounds how many runs are
+    /// *admitted*, not what one consumes; without this, one tenant's heavy
+    /// suite can evict its neighbours off the node.
+    pub runner_resources: RunnerResources,
 
     /// Key inside the derived `Secret` that carries the material. Default
     /// `value`.
@@ -496,7 +605,7 @@ pub struct ArgoExecutorConfig {
     /// cut that off mid-run and lose every line after it — trading the hang
     /// this field fixes for a log-loss bug wearing its clothes, which is
     /// exactly what the preceding three tasks on this file spent six fix
-    /// rounds preventing (see `LineSkip`'s own doc). So this resets on every
+    /// rounds preventing (see the Argo watch module's own header). So this resets on every
     /// line: a fresh line resets the clock, and only a stretch of true
     /// silence this long trips it.
     ///
@@ -584,12 +693,11 @@ pub struct ArgoExecutorConfig {
     /// own doc for the trace, for why end-of-file is the only exit that still
     /// reports one, and for the two costs summarised below. The run stays in
     /// `active_states`, `reattach_watchers` re-attaches on its next 5 s tick,
-    /// and `LogResume` suppresses whatever was already archived, so a pod that
-    /// was merely quiet resumes rather than duplicating its log — **unless that
-    /// node's log has rotated**, in which case `LineSkip`'s first-line guard
-    /// mismatches and that node's archive grows unbounded on every further
-    /// re-attach. Pre-existing, but reachable more often now that every reset
-    /// produces a re-attach where it used to produce none.
+    /// and `LogResume`'s `since_time` skips whatever was already archived, so
+    /// a pod that was merely quiet resumes rather than duplicating its log —
+    /// including across a rotated log, which Task 2 (WS5) closed: there is no
+    /// per-node suppression state left to get permanently disabled by a moved
+    /// window any more.
     ///
     /// **The cost this field now buys is a loop, not a truncation** — with two
     /// qualifications that "bounded" and "loud" would otherwise paper over:
@@ -661,76 +769,60 @@ impl Default for ArgoExecutorConfig {
             status_poll_seconds: 3,
             bundle_base_url: None,
             workflow_service_account: None,
-            bundle_auth: None,
             secret_name_prefix: "qa-platform-".to_owned(),
+            run_as_user: 65534,
+            fs_group: 65534,
+            runner_resources: RunnerResources::default(),
             secret_key: "value".to_owned(),
             log_follow_idle_seconds: 600,
         }
     }
 }
 
-/// Client-credentials settings a **workflow pod** uses to authenticate its
-/// bundle download.
+/// `spec.containers[].resources.{requests,limits}` for the runner container.
 ///
-/// # The problem this solves, and why it needed a human decision
-///
-/// `GET /qa/v1/test-bundles/{id}` is `.authenticated()`
-/// (`qa-catalog/.../api/rest/routes/bundles.rs:31`) where the source system's
-/// equivalent had no auth middleware at all, so a workflow pod fetching
-/// [`ArgoExecutorConfig::bundle_base_url`] gets a 401 and no test *content*
-/// ever reaches it. The product owner's decision on 2026-08-27 was a
-/// dedicated `IdP` service-account client whose secret lives in a
-/// pre-provisioned Kubernetes `Secret`.
-///
-/// # Everything here is a reference or a public identifier
-///
-/// [`Self::token_url`] and [`Self::client_id`] are public by construction — a
-/// client id is not a credential. The secret is named by
-/// [`Self::client_secret_secret`] / [`Self::client_secret_key`] and read by
-/// the **kubelet**, never by this process: nothing in qa-runs opens that
-/// `Secret`, which is what keeps `run_executor.rs:85-86` true of the bundle
-/// path as well as of `EnvSource::Secret`.
-///
-/// # The token's tenant
-///
-/// The token's `tenant_id` claim decides which tenant's bundles the pod can
-/// read, so the `IdP` client must be configured to mint the tenant that owns
-/// them (a hardcoded claim mapper, in the dev realm). Getting that wrong is a
-/// 403/404 on download, not a 401 — worth knowing, because it looks like a
-/// missing bundle.
+/// Kubernetes quantities, kept as `String` rather than parsed: the API
+/// server is the thing that validates `"250m"` / `"256Mi"` syntax, and
+/// duplicating that parsing here buys nothing but a second place for it to
+/// disagree with the cluster's own.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BundleAuthConfig {
-    /// The `IdP`'s token endpoint, as a **workflow pod** can reach it.
-    ///
-    /// Not necessarily the issuer a browser uses: on the dev deployment the
-    /// pod reaches Keycloak's http listener while the token it mints still
-    /// carries the https *frontend* issuer as `iss` (that is what `KC_HOSTNAME`
-    /// pins), so the token validates against the gears' `issuer_pattern`
-    /// regardless of which listener minted it. Measured on the dev cluster,
-    /// 2026-08-27.
-    pub token_url: String,
+#[serde(default, deny_unknown_fields)]
+pub struct RunnerResources {
+    /// `resources.requests.cpu`. Default `"100m"`.
+    pub cpu_request: String,
 
-    /// `client_id` for the `client_credentials` grant. A public identifier.
-    pub client_id: String,
+    /// `resources.requests.memory`. Default `"256Mi"`.
+    pub memory_request: String,
 
-    /// Name of the pre-provisioned Kubernetes `Secret` holding the client
-    /// secret, in [`ArgoExecutorConfig::namespace`].
-    ///
-    /// **Not created by this adapter.** A run whose pod cannot resolve this
-    /// `Secret` fails to start, loudly, rather than running without a
-    /// credential and reporting an empty test suite as a pass — which is why
-    /// the emitted `secretKeyRef` is *not* `optional`.
-    pub client_secret_secret: String,
+    /// `resources.limits.cpu`. Default `"1"`.
+    pub cpu_limit: String,
 
-    /// Key inside [`Self::client_secret_secret`]. Default `client_secret`.
-    #[serde(default = "default_client_secret_key")]
-    pub client_secret_key: String,
+    /// `resources.limits.memory`. Default `"1Gi"`.
+    pub memory_limit: String,
 }
 
-/// [`BundleAuthConfig::client_secret_key`]'s default.
-fn default_client_secret_key() -> String {
-    "client_secret".to_owned()
+impl Default for RunnerResources {
+    /// **Modest on purpose: a single-node dev stand must still schedule a
+    /// run.** The request pair (`100m` CPU, `256Mi` memory) is sized to fit
+    /// beside the rest of the platform's own gears on one small node rather
+    /// than to fit any one product's suite — it is a scheduling floor, not a
+    /// performance target, and a product whose suite genuinely needs more can
+    /// still run slower than it would with a bigger request.
+    ///
+    /// The limit pair (`1` CPU, `1Gi` memory) is the number this default
+    /// actually exists for: high enough that pytest plus a `kubectl`/`helm`
+    /// invocation is not routinely OOM-killed or throttled into failing on
+    /// its own, low enough that one tenant's heavy suite cannot take a whole
+    /// small node's worth of either resource away from its neighbours — the
+    /// eviction [`ArgoExecutorConfig::runner_resources`]'s own doc names.
+    fn default() -> Self {
+        Self {
+            cpu_request: "100m".to_owned(),
+            memory_request: "256Mi".to_owned(),
+            cpu_limit: "1".to_owned(),
+            memory_limit: "1Gi".to_owned(),
+        }
+    }
 }
 
 impl Default for QaRunsConfig {
@@ -742,6 +834,11 @@ impl Default for QaRunsConfig {
             dispatcher_interval_seconds: 5,
             scheduler_enabled: true,
             schedule_interval_seconds: 60,
+            // An hour: a dangling reference is not time-sensitive the way a
+            // due cron tick is, so this can run far less often than the
+            // scheduler and still catch drift long before a nightly
+            // schedule's own period would have.
+            schedule_target_check_interval_seconds: 3600,
             orphan_timeout_seconds: 600,
             queue_ttl_seconds: 7200,
             queue_max_depth: 20,
@@ -815,6 +912,33 @@ impl QaRunsConfig {
             "schedule_interval_seconds",
             "a five-field cron expression resolves to the minute, so a faster tick \
              re-enumerates every schedule in the fleet for nothing",
+        )
+    }
+
+    /// Whether the referential-check ticker should be started at all.
+    ///
+    /// A single knob, unlike [`Self::dispatcher_runs`]/[`Self::scheduler_runs`]:
+    /// see [`Self::schedule_target_check_interval_seconds`]'s own doc for why
+    /// this ticker has no separate `_enabled` flag to combine with it.
+    #[must_use]
+    pub fn schedule_target_check_runs(&self) -> bool {
+        self.effective_schedule_target_check_interval_seconds() != 0
+    }
+
+    /// The referential-check interval the ticker must actually use.
+    ///
+    /// `0` disables the ticker and is returned unchanged; anything else is
+    /// raised to [`MIN_SCHEDULE_TARGET_CHECK_INTERVAL_SECONDS`]. Warns on
+    /// every call, with the same caller obligation as
+    /// [`Self::effective_dispatcher_interval_seconds`].
+    #[must_use]
+    pub fn effective_schedule_target_check_interval_seconds(&self) -> u64 {
+        clamp_up(
+            self.schedule_target_check_interval_seconds,
+            MIN_SCHEDULE_TARGET_CHECK_INTERVAL_SECONDS,
+            "schedule_target_check_interval_seconds",
+            "each pass enumerates every enabled schedule in the fleet plus one cross-gear \
+             probe per schedule",
         )
     }
 
@@ -950,10 +1074,10 @@ mod tests {
         );
     }
 
-    /// The waiver in ADR-0001 turns this from a preference into a constraint:
-    /// "the mock stays the default executor, so no deployment gains a
-    /// Kubernetes dependency by upgrading". A default that drifted to `Argo`
-    /// would make every existing deployment try to reach an API server.
+    /// ADR-0001's Decision Outcome turns this from a preference into a constraint: it chose the
+    /// `RunExecutor` port precisely because it "keeps a Kubernetes dependency out of a default
+    /// build". A default that drifted to `Argo` would make every existing deployment try to
+    /// reach an API server.
     #[test]
     fn the_default_executor_is_the_mock_and_the_argo_block_is_inert() {
         let config = QaRunsConfig::default();
@@ -968,6 +1092,19 @@ mod tests {
             vec!["/entrypoint.sh".to_owned()]
         );
         assert_eq!(config.argo.workflow_ttl_seconds, 3600);
+        assert_eq!(
+            config.argo.run_as_user, 65534,
+            "nobody on the runner image's Debian base"
+        );
+        assert_eq!(
+            config.argo.fs_group, 65534,
+            "same group as run_as_user's uid -- fix round 8, dropped between \
+             design and code the first time"
+        );
+        assert_eq!(config.argo.runner_resources.cpu_request, "100m");
+        assert_eq!(config.argo.runner_resources.memory_request, "256Mi");
+        assert_eq!(config.argo.runner_resources.cpu_limit, "1");
+        assert_eq!(config.argo.runner_resources.memory_limit, "1Gi");
     }
 
     /// One configuration file has to be valid against both builds — with and

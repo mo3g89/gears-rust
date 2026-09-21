@@ -115,6 +115,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{CanonicalError, DomainError};
+    use crate::domain::service::resources;
 
     #[test]
     fn a_run_with_no_projection_is_404_not_found() {
@@ -192,7 +193,7 @@ mod tests {
     #[test]
     fn an_unexecutable_scope_is_400_failed_precondition_and_not_a_denial() {
         let ce: CanonicalError = DomainError::UnsupportedScope {
-            resource: "qa.test_result",
+            resource: resources::TEST_RESULT_NAME,
         }
         .into();
         assert_eq!(ce.status_code(), 400);

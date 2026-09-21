@@ -77,7 +77,7 @@ function runDetailDto(overrides: Record<string, unknown> = {}) {
     error: null,
     created_at: '2026-08-28T09:59:00Z',
     updated_at: '2026-08-28T10:02:00Z',
-    result: { passed: 10, failed: 0, skipped: 68, in_progress: 0, total: 78 },
+    result: { passed: 10, failed: 0, skipped: 68, in_progress: 0, xfail: 0, xpass: 0, total: 78 },
     test_results: [],
     ...overrides,
   };
@@ -146,7 +146,7 @@ describe('RunDetailPage — the succeeded-with-skips marker', () => {
   });
 
   it('shows neither for a succeeded run with no skips', async () => {
-    mockApiFor(runDetailDto({ result: { passed: 10, failed: 0, skipped: 0, in_progress: 0, total: 10 } }));
+    mockApiFor(runDetailDto({ result: { passed: 10, failed: 0, skipped: 0, in_progress: 0, xfail: 0, xpass: 0, total: 10 } }));
     renderPage();
 
     await waitFor(() => expect(screen.queryByText('smoke-1')).not.toBeNull());

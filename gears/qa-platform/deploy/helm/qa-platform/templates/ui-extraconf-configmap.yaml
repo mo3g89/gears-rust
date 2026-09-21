@@ -23,23 +23,32 @@
 
      What the prefix DID do is publish Keycloak's admin console and full
      admin REST API on the SAME public origin as the application, reachable
-     by anyone who can reach the UI, behind the committed dev credentials
-     admin/admin (values.yaml's keycloak.adminUser/adminPassword, and the
-     realm fixture). That is a whole-cluster credential -- the master realm's
-     admin can rewrite every client, every redirect URI and every user in
-     every realm -- exposed for a caller that does not exist. Removing the
-     prefix does not disable the console; it un-publishes it. Anything that
-     genuinely needs it can still reach it in-cluster at
-     http://qa-platform-keycloak:8080/admin/, or through
+     by anyone who can reach the UI. AT THE TIME this was written that sat
+     behind the committed dev credential admin/admin -- values.yaml shipped
+     keycloak.adminPassword defaulted to "admin", and the realm fixture's own
+     application admin used the same pair. Neither default exists any more
+     (values.yaml's keycloak.adminPassword has no default at all now, and
+     keycloak-deployment.yaml refuses the literal "admin" outside
+     devMode=true; the realm fixture's admin/viewer users moved to
+     AdminPass1!/ViewerPass1! and only seed at all under devMode=true). That
+     does not weaken the reasoning below, it strengthens it: whatever
+     password is configured, /admin/ would still publish a whole-cluster
+     credential -- the master realm's admin can rewrite every client, every
+     redirect URI and every user in every realm -- for a caller that does not
+     exist. Removing the prefix does not disable the console; it
+     un-publishes it. Anything that genuinely needs it can still reach it
+     in-cluster at http://qa-platform-keycloak:8080/admin/, or through
      `kubectl -n <ns> port-forward svc/qa-platform-keycloak 8080:8080`.
 
      verify-k8s.sh's check 16 was the ONLY consumer of the proxied /admin/
      path (it authenticated as master-realm admin over the public origin to
      read back the qa-platform-ui client's redirectUris). It now reads the
-     same fact out of the qa-platform-realm ConfigMap -- the exact document
-     Keycloak imports -- so it asserts more directly and needs no admin
-     credential over the wire. If you re-add /admin/ here, you are re-opening
-     that surface; do not do it to make a check convenient.
+     same fact out of the qa-platform-realm Secret (a ConfigMap until WS3
+     Task 3 moved it, because it carries the workflow client's confidential
+     secret) -- the exact document Keycloak imports -- so it asserts more
+     directly and needs no admin credential over the wire. If you re-add
+     /admin/ here, you are re-opening that surface; do not do it to make a
+     check convenient.
 
      NOT `/auth/`. The SPA already routes /auth/callback as its own OIDC
      redirect target (src/auth -- see qa-platform-ui/default.conf.template's

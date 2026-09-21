@@ -44,14 +44,30 @@ async fn collect_fleet(secret: &str) -> Fleet {
     Fleet::new(secret).await
 }
 
-/// `hex(HMAC_SHA256(secret, "{repo_id}|{branch}|{tenant_id}"))` —
-/// independently reproducing `domain::service::collect::signing_payload` and
-/// `CollectService::sign`'s hex encoding (`collect.rs:1005-1007`,
-/// `:915-921`), **not calling either**. A test that signed with the code it
-/// verifies would prove only that the two agree with each other, and would
-/// pass exactly as happily if both computed the HMAC over an empty string.
+/// `hex(HMAC_SHA256(derive(secret, tenant_id), "{repo_id}|{branch}|{tenant_id}"))`
+/// — independently reproducing `domain::service::collect::signing_payload`,
+/// `derive_signing_key` (Task 7: the tenant-specific key HKDF-derives from
+/// the root `collect_report_signing_secret`), and `CollectService::sign`'s
+/// hex encoding, **not calling any of them**. A test that signed with the
+/// code it verifies would prove only that the two agree with each other, and
+/// would pass exactly as happily if both computed the HMAC over an empty
+/// string, or under a key that ignored `secret`/`tenant_id` entirely.
+///
+/// The salt matches `collect.rs`'s `COLLECT_SIGNING_HKDF_SALT` literally
+/// rather than importing it, for the same reason the HMAC construction below
+/// is spelled out rather than calling `derive_signing_key`: importing the
+/// constant would make a change to the real salt invisible to this test.
 fn sign(repo_id: Uuid, branch: &str, tenant_id: Uuid, secret: &str) -> String {
-    let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, secret.as_bytes());
+    let salt = aws_lc_rs::hkdf::Salt::new(
+        aws_lc_rs::hkdf::HKDF_SHA256,
+        b"qa-insights/collect-report-signing/v1",
+    );
+    let prk = salt.extract(secret.as_bytes());
+    let info: [&[u8]; 1] = [tenant_id.as_bytes().as_slice()];
+    let okm = prk
+        .expand(&info, aws_lc_rs::hkdf::HKDF_SHA256.hmac_algorithm())
+        .unwrap();
+    let key = aws_lc_rs::hmac::Key::from(okm);
     let tag = aws_lc_rs::hmac::sign(&key, format!("{repo_id}|{branch}|{tenant_id}").as_bytes());
     hex::encode(tag.as_ref())
 }

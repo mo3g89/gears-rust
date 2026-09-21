@@ -578,6 +578,8 @@ async fn the_completions_counter_repair_survives_a_producer_committing_beside_it
                         failed: 0,
                         skipped: 0,
                         in_progress: 0,
+                        xfail: 0,
+                        xpass: 0,
                         total: 2,
                     },
                 )
@@ -728,6 +730,7 @@ async fn an_ingested_log_round_trips_through_qa_run_logs() {
                 ExecutionEvent::Log {
                     node: "repo-smoke".to_owned(),
                     line: line.to_owned(),
+                    emitted_at: None,
                 },
             )
             .await
@@ -805,6 +808,7 @@ async fn a_foreign_tenant_can_neither_read_nor_create_a_log_row() {
             ExecutionEvent::Log {
                 node: "repo-smoke".to_owned(),
                 line: "secret".to_owned(),
+                emitted_at: None,
             },
         )
         .await

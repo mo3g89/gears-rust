@@ -8,23 +8,20 @@
 //!
 //! # The aggregate is an `Environment`, and the tables say so
 //!
-//! The word "platform" names a *product* — a product may be an IaaS, a PaaS, an
-//! OS or an appliance — not the thing tested against. The aggregate is
-//! therefore `Environment` and its tables are `qa_environments`,
+//! The word "platform" names a *product* — a product may be an `IaaS`, a
+//! `PaaS`, an OS or an appliance — not the thing tested against. The
+//! aggregate is therefore `Environment` and its tables are `qa_environments`,
 //! `qa_environment_variables` and `qa_environment_leases`.
 //!
-//! The foreign-key column those last two carry is still spelled `environment_id`.
-//! That is the one piece of the old vocabulary still in the schema, and it is
-//! deliberate rather than forgotten: the entities rename the Rust *field* to
-//! `environment_id` and pin the physical name with
-//! `#[sea_orm(column_name = "environment_id")]`, and the column rename is its own
-//! change with its own blast radius across four gears.
+//! The foreign-key column on both tables is `environment_id`, matching the
+//! Rust field name exactly; no `#[sea_orm(column_name)]` pin exists or is
+//! needed on either entity.
 //!
-//! # No MySQL
+//! # No `MySQL`
 //!
-//! qa-insights' indexes exceed InnoDB's 3072-byte key limit and the
+//! qa-insights' indexes exceed `InnoDB`'s 3072-byte key limit and the
 //! `qa-platform` feature deploys all four gears together, so no deployment can
-//! reach a MySQL arm in any of them.
+//! reach a `MySQL` arm in any of them.
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::ConnectionTrait;

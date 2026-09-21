@@ -448,8 +448,14 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
         match outcome {
             Ok(result) => {
                 self.sync_cache.mark_synced(id, &branch).await;
-                self.record_sync_success(&sync_scope, tenant_id, id, result.branches)
-                    .await
+                self.record_sync_success(
+                    &sync_scope,
+                    tenant_id,
+                    id,
+                    result.branches,
+                    result.head_commit,
+                )
+                .await
             }
             Err(engine_err) => {
                 let sanitized = sanitize_sync_error(&engine_err.to_string(), credential.as_deref());
@@ -724,6 +730,7 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
         tenant_id: Uuid,
         id: Uuid,
         branches: Vec<String>,
+        head_commit: String,
     ) -> Result<TestRepository, DomainError> {
         let now = OffsetDateTime::now_utc();
         let repo = Arc::clone(&self.repo);
@@ -737,7 +744,7 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
                 Box::pin(async move {
                     repo.replace_branches(tx, &scope, tenant_id, id, branches)
                         .await?;
-                    repo.update_sync_state(tx, &scope, id, Some(now), None)
+                    repo.update_sync_state(tx, &scope, id, Some(now), Some(head_commit), None)
                         .await?
                         .ok_or(DomainError::NotFound { id })
                 })
@@ -748,8 +755,14 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
         Ok(updated)
     }
 
-    /// Record a failed sync attempt: keep the previous `last_synced_at`,
-    /// write the (already sanitized) error string. Single statement — no
+    /// Record a failed sync attempt: keep the previous `last_synced_at` **and
+    /// `head_commit`**, write the (already sanitized) error string.
+    ///
+    /// The revision is carried over for the same reason the timestamp is: a
+    /// failed fetch did not change the working copy, so the revision it is at
+    /// is still the one the last good sync left. Clearing it would make the
+    /// discovery cache (`domain::service::plans`) miss on every read after a
+    /// transient network failure, for content that never moved. Single statement — no
     /// transaction needed.
     async fn record_sync_failure(
         &self,
@@ -761,7 +774,14 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
 
         let conn = self.db.conn()?;
         self.repo
-            .update_sync_state(&conn, scope, repo.id, repo.last_synced_at, Some(message))
+            .update_sync_state(
+                &conn,
+                scope,
+                repo.id,
+                repo.last_synced_at,
+                repo.head_commit.clone(),
+                Some(message),
+            )
             .await?
             .ok_or(DomainError::NotFound { id: repo.id })
     }

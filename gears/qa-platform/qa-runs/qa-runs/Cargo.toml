@@ -105,7 +105,15 @@ integration = ["dep:testcontainers", "dep:testcontainers-modules"]
 # — true, but the wrong conclusion: that rule only bites a dependency that
 # *needs* to be optional, and a dev-dependency's whole point is that it never
 # ships, so there was nothing to make optional in the first place.
-argo = ["dep:kube", "dep:k8s-openapi", "dep:regex", "dep:base64"]
+#
+# * `jiff` — `kube-core`'s `LogParams::since_time` is typed `Option<jiff::
+#   Timestamp>`, not this crate's usual `time::OffsetDateTime` (confirmed by
+#   reading `kube-core`'s vendored source, not assumed from the task's own
+#   brief, which did not anticipate this and stated "no new crate
+#   dependency"). `infra::executor::argo::watch::since_time_of` is the one
+#   call site that constructs one, from `(unix_timestamp, nanosecond)` —
+#   no string round-trip needed.
+argo = ["dep:kube", "dep:k8s-openapi", "dep:regex", "dep:base64", "dep:jiff"]
 
 [dependencies]
 qa-runs-sdk = { path = "../qa-runs-sdk" }
@@ -192,14 +200,19 @@ toolkit-macros = { workspace = true }
 # (`infra::storage::odata`). `with-utoipa` is what gives `Page<T>` a schema, so
 # a paginated response can be registered with `json_response_with_schema`.
 toolkit-odata = { workspace = true, features = ["with-utoipa"] }
-# Link-time GTS permission catalog (`src/gts/permissions.rs`): declares
-# AuthzPermissionV1 instances into the toolkit-gts inventory the
-# types-registry aggregates at boot.
+# Link-time GTS content: the permission catalog (`src/gts/permissions.rs`)
+# declares AuthzPermissionV1 instances, and `src/gts/authz_types.rs` declares
+# the stub `#[gts_type_schema]` types for this gear's authz labels, into the
+# toolkit-gts inventory the types-registry aggregates at boot.
 toolkit-gts = { workspace = true }
 # `gts_id!`'s upstream validation (`GtsIdPattern`) and `GTS_ID_PREFIX`, which
 # `toolkit-gts`'s macros delegate to. Same pairing qa-catalog's,
 # qa-environments' and qa-insights' Cargo.toml carry.
 gts = { workspace = true }
+# The runtime JSON-Schema reflection backend `#[gts_type_schema]` generates
+# code against (`src/gts/authz_types.rs`). Same pairing account-management-sdk
+# and qa-product-sdk's Cargo.toml carry alongside `toolkit-gts`.
+schemars = { workspace = true }
 
 # The real-Postgres integration tier's container bring-up
 # (`infra::storage::test_db::pg_db`).
@@ -237,6 +250,7 @@ kube = { workspace = true, features = [
 k8s-openapi = { workspace = true, features = ["latest"], optional = true }
 regex = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+jiff = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `Problem::from_error_debug` moved behind this feature in the new
@@ -305,9 +319,9 @@ tracing-test = { workspace = true, features = ["no-env-filter"] }
 #   cargo tree -p qa-runs -i kube -e normal                 -> nothing to print
 #   cargo tree -p qa-runs -i kube -e normal --features argo -> kube -> qa-runs
 #
-# The second is the pre-existing `argo` adapter, which ADR-0001's 2026-08-27
-# waiver covers and this plan does not remove (design §4.1's Correction states
-# the same). No Kubernetes type reaches a shipped `qa-runs` binary because of
+# The second is the pre-existing `argo` adapter, which ADR-0001's own Decision
+# Outcome covers directly and this plan does not remove. No Kubernetes type
+# reaches a shipped `qa-runs` binary because of
 # this line; add `-e normal` when checking containment here.
 qa-vhp-product-plugin = { path = "../../plugins/qa-vhp-product-plugin" }
 # `SecretValue`, for the one test that builds a `MountSpec::ConfigValue` — the

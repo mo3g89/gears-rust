@@ -1,5 +1,5 @@
-//! qa-catalog observability port — the typed metric-emission trait for product
-//! plugin resolution.
+//! qa-catalog observability port — the typed metric-emission traits for
+//! product plugin resolution and for the anonymous bundle-download route.
 //!
 //! [`PluginResolutionMetrics`] owns the whole catalog declared in
 //! [`crate::domain::metrics`]. One infra adapter
@@ -243,6 +243,87 @@ impl From<&DomainError> for PluginResolutionOutcome {
     }
 }
 
+/// `outcome` label on [`crate::domain::metrics::QA_CATALOG_BUNDLE_DOWNLOAD`] —
+/// **how one signed bundle download ended**.
+///
+/// # Why this family exists at all
+///
+/// `GET /qa/v1/test-bundles/{id}?sig=...` is registered
+/// `.anonymous().exposed()`, and the `sig` query parameter is the entire
+/// access control. Its three refusal paths mean three different things to an
+/// operator and, deliberately, the *same* thing to the caller: all three
+/// answer one 403, because a response that told them apart would be a free
+/// oracle for which guess was closer
+/// (`domain::service::bundles::SignatureRefusal`). This counter is where the
+/// distinction is allowed to exist.
+///
+/// Four values, not three: [`Self::Served`] is here so the refusal rate is a
+/// ratio over one partition rather than a count with no denominator. A
+/// deployment that has never configured its secret and a deployment nobody is
+/// fetching from are otherwise the same flat line.
+///
+/// # What is not a label
+///
+/// No bundle id, no tenant id — the ordinary cardinality rule, and both are
+/// caller-influenced here in a way a background task's labels are not.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleDownloadOutcome {
+    /// The tag verified and the bytes were served. A 404 for an expired or
+    /// purged bundle **after** a valid tag does not count here: it takes the
+    /// error path, and the bundle GC family is where bundle lifetime is
+    /// visible.
+    Served,
+    /// `bundle_download_signing_secret` is absent or below its length floor.
+    /// **Fail-closed: every download is refused, including a correctly
+    /// computed one.** A deployment in this state runs no tests at all, and
+    /// this is the series that says so — the alternative reading of the same
+    /// symptom ("nobody is launching runs") looks identical from every other
+    /// angle.
+    SecretUnconfigured,
+    /// The `sig` parameter is not hex. Nothing was compared.
+    ///
+    /// Its own value rather than folded into [`Self::SignatureInvalid`]
+    /// because the two are fixed by different people: a malformed tag is
+    /// almost always a caller that is not the runner at all (a probe, a
+    /// truncated copy-paste), where an invalid one is a real tag under the
+    /// wrong key — usually a secret rotated while runs were queued.
+    SignatureMalformed,
+    /// The tag decoded and did not match. **This is the series an alert fires
+    /// on**: a sustained rate here is either a rotation that did not drain the
+    /// dispatch queue or someone guessing.
+    SignatureInvalid,
+}
+
+impl BundleDownloadOutcome {
+    /// Every value, for the exhaustiveness the naming and closedness tests
+    /// sweep. Declared rather than derived; see
+    /// [`crate::domain::metrics::COUNTERS`] for the same caveat.
+    #[allow(
+        dead_code,
+        reason = "swept by the catalog and adapter tests; `domain` is pub(crate) in this \
+                  gear, so the compiler sees a test-only constant as dead. See \
+                  crate::domain::metrics::COUNTERS for the same allowance."
+    )]
+    pub const ALL: [Self; 4] = [
+        Self::Served,
+        Self::SecretUnconfigured,
+        Self::SignatureMalformed,
+        Self::SignatureInvalid,
+    ];
+
+    /// The label value, as it appears in the series.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Served => "served",
+            Self::SecretUnconfigured => "secret_unconfigured",
+            Self::SignatureMalformed => "signature_malformed",
+            Self::SignatureInvalid => "signature_invalid",
+        }
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════
 //  Port trait
 // ════════════════════════════════════════════════════════════════════
@@ -273,6 +354,29 @@ pub trait PluginResolutionMetrics: Send + Sync + 'static {
     fn plugin_resolution(&self, outcome: PluginResolutionOutcome, duration: Duration);
 }
 
+/// The anonymous bundle-download route's telemetry.
+///
+/// A second trait rather than a method on [`PluginResolutionMetrics`]: that
+/// trait is named for, and documented as, one subject, and its holder is the
+/// product-plugin registry. This one's holder is
+/// `domain::service::bundles::BundlesService`. One infra adapter implements
+/// both, so a deployment still builds exactly one meter.
+///
+/// # Implementations must not fail a caller
+///
+/// Same contract as [`PluginResolutionMetrics`]: `()` return, `&self`, no
+/// panic, no block, no error to propagate. It is called from the one path in
+/// this gear whose behaviour a metric must not change — the access-control
+/// decision on an anonymously reachable route.
+pub trait BundleDownloadMetrics: Send + Sync + 'static {
+    /// One `GET /qa/v1/test-bundles/{id}?sig=...`, counted by how it ended.
+    /// Counts into [`crate::domain::metrics::QA_CATALOG_BUNDLE_DOWNLOAD`].
+    ///
+    /// **Once per node per run**, bounded by a closed four-value label — not a
+    /// per-chunk or per-byte emission.
+    fn bundle_download(&self, outcome: BundleDownloadOutcome);
+}
+
 // ════════════════════════════════════════════════════════════════════
 //  No-op implementation
 // ════════════════════════════════════════════════════════════════════
@@ -294,4 +398,8 @@ pub struct NoopMetrics;
 
 impl PluginResolutionMetrics for NoopMetrics {
     fn plugin_resolution(&self, _outcome: PluginResolutionOutcome, _duration: Duration) {}
+}
+
+impl BundleDownloadMetrics for NoopMetrics {
+    fn bundle_download(&self, _outcome: BundleDownloadOutcome) {}
 }

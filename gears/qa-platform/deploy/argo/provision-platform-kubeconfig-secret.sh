@@ -31,8 +31,16 @@
 # carries.
 #
 # Usage:
-#   provision-platform-kubeconfig-secret.sh <credstore-ref> [kubeconfig-file]
+#   provision-platform-kubeconfig-secret.sh <tenant-id> <credstore-ref> [kubeconfig-file]
 #
+#   <tenant-id>        The platform's owning tenant (a UUID). The Secret NAME
+#                      is derived from a digest of the tenant AND the
+#                      reference together, so two tenants registering the
+#                      same reference text no longer derive one Secret --
+#                      see `derive_name`'s own comment below for why a digest
+#                      and not a truncated concatenation. Get the tenant
+#                      wrong and the script still succeeds, but at a name
+#                      `qa-runs` never asks the kubelet to resolve.
 #   <credstore-ref>    The platform's `kubeconfig_credstore_ref`, verbatim as it
 #                      was given to POST /qa/v1/environments. The Secret NAME is
 #                      derived from it, so it has to match exactly.
@@ -59,8 +67,9 @@
 #   SECRET_KEY         Default `value`, matching `qa-runs.argo.secret_key`.
 set -euo pipefail
 
-REF="${1:-}"
-KUBECONFIG_FILE="${2:-/etc/rancher/k3s/k3s.yaml}"
+TENANT_ID="${1:-}"
+REF="${2:-}"
+KUBECONFIG_FILE="${3:-/etc/rancher/k3s/k3s.yaml}"
 NAMESPACE="${NAMESPACE:-argo}"
 SECRET_PREFIX="${SECRET_PREFIX:-qa-platform-}"
 SECRET_KEY="${SECRET_KEY:-value}"
@@ -68,30 +77,98 @@ SERVER_ADDRESS="${SERVER_ADDRESS:-}"
 
 die() { echo "provision-platform-kubeconfig-secret: $*" >&2; exit 1; }
 
-[[ -n "$REF" ]] || die "no credstore reference given. Usage: $0 <credstore-ref> [kubeconfig-file]. The reference is the platform's kubeconfig_credstore_ref as POSTed; the Secret name is derived from it, so a different spelling produces a Secret the pod will not find."
+UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+[[ -n "$TENANT_ID" ]] || die "no tenant id given. Usage: $0 <tenant-id> <credstore-ref> [kubeconfig-file]. The tenant is folded into the Secret name ahead of the reference so two tenants registering the same reference text do not collide."
+[[ "$TENANT_ID" =~ $UUID_RE ]] || die "tenant id '$TENANT_ID' is not a UUID; a Secret name derived from a malformed tenant is a Secret name qa-runs will never independently reconstruct"
+[[ -n "$REF" ]] || die "no credstore reference given. Usage: $0 <tenant-id> <credstore-ref> [kubeconfig-file]. The reference is the platform's kubeconfig_credstore_ref as POSTed; the Secret name is derived from it, so a different spelling produces a Secret the pod will not find."
 [[ -r "$KUBECONFIG_FILE" ]] || die "kubeconfig '$KUBECONFIG_FILE' is not readable"
 command -v kubectl >/dev/null 2>&1 || die "kubectl not found"
 
-# `naming::secret_name` reimplemented, and the duplication is the point of this
-# comment: it is `truncate(sanitize(prefix + reference), 63)`, where sanitize is
-# lowercase, every character outside [a-z0-9-] to '-', then trim leading and
-# trailing '-'; truncate cuts to 63 bytes and trims a trailing '-' again. Two
-# implementations of one rule is a drift risk with a silent symptom (a pod that
-# cannot mount), which is why this script PRINTS the derived name -- compare it
-# with `kubectl describe pod`'s FailedMount event if a run sits Pending.
-derive_name() {
-    local raw="$1" out
+# `naming::secret_name` reimplemented, and the duplication is the point of
+# this comment. Two implementations of one rule is a drift risk with a
+# silent symptom (a pod that cannot mount), which is why this script PRINTS
+# the derived name -- compare it with `kubectl describe pod`'s FailedMount
+# event if a run sits Pending.
+#
+# WHY A HASH SUFFIX. An earlier version of this rule put the tenant ahead of
+# the reference and truncated the concatenation to 63 bytes, reasoning that
+# truncating from the right always eats the reference and never the tenant.
+# Measured in production: with the default prefix and a full tenant, only 14
+# bytes of reference survive, and two real references sharing that many
+# leading characters (`qa-environments-credential-ssh-private-key` and
+# `...-vinfra-password`) both truncated to `qa-environment` and derived ONE
+# Secret -- every credential of one tenant collapsed into it. A bounded-length
+# name derived from unbounded input has to protect distinctness of the WHOLE
+# input, not a prefix of it, so the name is now `{readable}-{digest}`: a
+# human-readable head (sanitised and truncated, exactly as before, but now
+# only a hint -- see naming.rs's own doc), and a fixed-width digest of the
+# entire `prefix + tenant + "-" + reference` string that survives no matter
+# what the head truncates away.
+#
+# WHY FNV-1a, NOT `sha2`/`sha256sum`. `naming::secret_name`'s own doc has the
+# full reasoning; in short, this workspace's Dylint `DE0708` bans a direct
+# `sha2`/`sha1`/`md5` import outside one allow-listed file (`dylint.toml`'s
+# `hasher_allowed_paths`) -- this repository already tore out direct `sha2`
+# usage once (`CHANGELOG.md`: "replace all direct sha2 usage with FNV-1a")
+# and does not want it back, in a shell reimplementation any more than in the
+# Rust it mirrors. This is a naming collision guard, not a security boundary,
+# so a cryptographic hash was never required -- `keycloak-idp-plugin`'s
+# `user_facade::legacy_filter_hash` is this workspace's standing precedent
+# for exactly this shape of problem, and the constants below are copied from
+# it verbatim (public FNV spec, fixed constants, so the output is identical
+# across Rust versions and platforms -- which matters doubly here, since the
+# shell and the Rust must agree).
+#
+# WHY IN `python3`. FNV-1a is not in `hashlib`, but this script already
+# requires `python3` (the loopback-server rewrite below uses it), so
+# computing the handful of XOR-and-multiply steps there costs no new tool
+# and stays exact 64-bit arithmetic without depending on bash's own integer
+# width (which is 64-bit on every mainstream build, but not a documented
+# guarantee the way Python's arbitrary-precision integers, explicitly masked
+# to 64 bits below, are).
+DIGEST_HEX_LEN=16
+
+sanitize_and_truncate() {
+    local raw="$1" limit="$2" out
     out="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')"
     out="$(printf '%s' "$out" | sed -E 's/^-+//; s/-+$//')"
-    if [[ "${#out}" -gt 63 ]]; then
-        out="${out:0:63}"
+    if [[ "${#out}" -gt "$limit" ]]; then
+        out="${out:0:$limit}"
         out="$(printf '%s' "$out" | sed -E 's/-+$//')"
     fi
     printf '%s' "$out"
 }
 
-SECRET_NAME="$(derive_name "${SECRET_PREFIX}${REF}")"
-[[ -n "$SECRET_NAME" ]] || die "the reference '$REF' with prefix '$SECRET_PREFIX' sanitises to an empty Secret name"
+fnv1a_hex() {
+    python3 -c '
+import sys
+FNV1A_BASIS = 0xcbf29ce484222325
+FNV1A_PRIME = 0x100000001B3
+MASK = 0xFFFFFFFFFFFFFFFF
+h = FNV1A_BASIS
+for byte in sys.argv[1].encode():
+    h ^= byte
+    h = (h * FNV1A_PRIME) & MASK
+sys.stdout.write(f"{h:016x}")
+' "$1"
+}
+
+derive_name() {
+    local prefix="$1" tenant="$2" reference="$3" full digest suffix readable_budget readable
+    full="${prefix}${tenant}-${reference}"
+    digest="$(fnv1a_hex "$full")"
+    suffix="${digest:0:$DIGEST_HEX_LEN}"
+    readable_budget=$((63 - DIGEST_HEX_LEN - 1))
+    readable="$(sanitize_and_truncate "$full" "$readable_budget")"
+    if [[ -z "$readable" ]]; then
+        printf '%s' "$suffix"
+    else
+        printf '%s-%s' "$readable" "$suffix"
+    fi
+}
+
+SECRET_NAME="$(derive_name "$SECRET_PREFIX" "$TENANT_ID" "$REF")"
+[[ -n "$SECRET_NAME" ]] || die "the reference '$REF' with prefix '$SECRET_PREFIX' and tenant '$TENANT_ID' derived an empty Secret name, which should be impossible -- the digest suffix alone is never empty"
 
 kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || die "namespace '$NAMESPACE' does not exist"
 
@@ -157,5 +234,5 @@ fi
 got="$(kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" -o "jsonpath={.data.$SECRET_KEY}" 2>/dev/null | wc -c)"
 [[ "${got:-0}" -gt 0 ]] || die "read-back of secret/$SECRET_NAME key '$SECRET_KEY' found nothing. Keys present: $(kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" -o jsonpath='{.data}' 2>/dev/null)"
 echo "PASS: secret/$SECRET_NAME key '$SECRET_KEY' in namespace $NAMESPACE holds $got base64 bytes"
-echo "provision-platform-kubeconfig-secret: derived from reference '$REF' with prefix '$SECRET_PREFIX'."
+echo "provision-platform-kubeconfig-secret: derived from tenant '$TENANT_ID' and reference '$REF' with prefix '$SECRET_PREFIX'."
 echo "provision-platform-kubeconfig-secret: if a run still sits Pending, compare this name with the FailedMount event in 'kubectl describe pod'."

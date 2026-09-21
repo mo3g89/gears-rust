@@ -64,6 +64,39 @@ export function NotificationsEmailPage() {
             />
           </div>
           <div className="space-y-2">
+            <Label htmlFor="notif-smtp-username">SMTP Username</Label>
+            <Input
+              id="notif-smtp-username"
+              value={form.email_smtp_username}
+              onChange={(e) =>
+                setForm((current) => ({ ...current, email_smtp_username: e.target.value }))
+              }
+              placeholder="qa-tests@company.com"
+            />
+            <p className="text-xs text-muted-foreground">
+              Leave both this and the credential reference empty for a relay that accepts
+              unauthenticated submission.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="notif-smtp-credstore-ref">SMTP Password Reference</Label>
+            <Input
+              id="notif-smtp-credstore-ref"
+              value={form.email_smtp_credstore_ref}
+              onChange={(e) =>
+                setForm((current) => ({
+                  ...current,
+                  email_smtp_credstore_ref: e.target.value,
+                }))
+              }
+              placeholder="qa-smtp-password"
+            />
+            <p className="text-xs text-muted-foreground">
+              The name of a credential-store secret holding the password — never the password
+              itself. Letters, digits, underscores and dashes only.
+            </p>
+          </div>
+          <div className="space-y-2">
             <Label htmlFor="notif-email-from">From</Label>
             <Input
               id="notif-email-from"

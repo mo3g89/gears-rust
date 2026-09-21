@@ -198,6 +198,12 @@ COPY gears/qa-platform/deploy/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 8087
+# The Prometheus scrape listener (libs/toolkit's telemetry::scrape, bound from
+# the `opentelemetry.metrics.scrape.bind_addr` in the config this image carries).
+# EXPOSE is documentation in every runtime that matters here -- Kubernetes reads
+# the Deployment's containerPort, not this -- but a reader of the Dockerfile
+# should not have to discover a second listening port from the chart.
+EXPOSE 9464
 
 # `-m` matters: without it, no /home/appuser is ever created, yet Docker
 # still sets HOME=/home/appuser from the /etc/passwd entry useradd writes

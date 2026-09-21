@@ -12,13 +12,13 @@
 //! authorizes nothing, which is worse than absent, because it reads as
 //! coverage. Review finding #1.
 
-use toolkit_gts::{InventoryInstance, gts_id};
+use toolkit_gts::{GTS_ID_PREFIX, InventoryInstance, gts_id};
 
 const PERMISSION_TYPE_ID: &str = gts_id!("cf.toolkit.authz.permission.v1~");
 const INSTANCE_SUFFIX_PREFIX: &str = "cf.qa.runs.";
 
 /// Every qa-runs permission instance id -- one per enforced
-/// `(resource_type, action)` pair. 18 pairs over 3 resource types: this
+/// `(resource_type, action)` pair. 19 pairs over 3 resource types: this
 /// gear's largest action set of the four qa-platform catalogs.
 ///
 /// Hand-written on purpose: it is the second copy, and the point of a second
@@ -40,6 +40,7 @@ const EXPECTED_PERMISSION_IDS: &[&str] = &[
     gts_id!("cf.toolkit.authz.permission.v1~cf.qa.runs.run_get.v1"),
     gts_id!("cf.toolkit.authz.permission.v1~cf.qa.runs.run_list.v1"),
     gts_id!("cf.toolkit.authz.permission.v1~cf.qa.runs.run_rerun.v1"),
+    gts_id!("cf.toolkit.authz.permission.v1~cf.qa.runs.schedule_check.v1"),
     gts_id!("cf.toolkit.authz.permission.v1~cf.qa.runs.schedule_create.v1"),
     gts_id!("cf.toolkit.authz.permission.v1~cf.qa.runs.schedule_delete.v1"),
     gts_id!("cf.toolkit.authz.permission.v1~cf.qa.runs.schedule_fire.v1"),
@@ -73,11 +74,28 @@ fn payload_pair(entry: &InventoryInstance) -> (String, String) {
 }
 
 /// The id the naming rule in `permissions.rs`'s header derives from a
-/// `(resource_type, action)` pair: `pep_entity` is `resource_type` with its
-/// `qa.` prefix stripped, joined to `action` with `_`.
+/// `(resource_type, action)` pair: `pep_entity` is the entity token of the
+/// resource type's GTS id — `cf.qa.runs.queue_entry.v1~` → `queue_entry`.
+///
+/// Was a `qa.` prefix strip until the labels became GTS type ids (WS0). The
+/// rule's **output is unchanged** — the permission instance ids registered
+/// before that change are the ids this still derives — which is what this
+/// test file's `EXPECTED_PERMISSION_IDS` pins.
+///
+/// `resource_type` itself is `gts_id!`-derived (via `resources::*_NAME`), so
+/// it carries the registry's own [`GTS_ID_PREFIX`] ahead of
+/// [`INSTANCE_SUFFIX_PREFIX`] -- stripped here first, and not re-added in the
+/// `format!` below, because [`PERMISSION_TYPE_ID`] already carries its own
+/// single copy of it.
 fn derive_instance_id(resource_type: &str, action: &str) -> String {
-    let pep_entity = resource_type.strip_prefix("qa.").unwrap_or(resource_type);
-    format!("{PERMISSION_TYPE_ID}cf.qa.runs.{pep_entity}_{action}.v1")
+    let pep_entity = resource_type
+        .strip_prefix(GTS_ID_PREFIX)
+        .and_then(|rest| rest.strip_prefix(INSTANCE_SUFFIX_PREFIX))
+        .and_then(|rest| rest.strip_suffix(".v1~"))
+        .unwrap_or_else(|| {
+            panic!("resource type {resource_type} is not a cf.qa.runs.<entity>.v1~ id")
+        });
+    format!("{PERMISSION_TYPE_ID}{INSTANCE_SUFFIX_PREFIX}{pep_entity}_{action}.v1")
 }
 
 #[test]
@@ -127,7 +145,7 @@ fn the_inventory_covers_every_expected_id() {
 /// silently), which means it can drift from `permissions.rs` in a way that
 /// still agrees on the *set* of ids — e.g. a copy-pasted id paired with the
 /// wrong action. This test recomputes the id from what is actually
-/// registered and catches that. With 18 pairs over 10 distinct actions, a
+/// registered and catches that. With 19 pairs over 11 distinct actions, a
 /// swapped action is exactly the kind of typo the id *set* alone would not
 /// catch.
 #[test]
@@ -144,6 +162,56 @@ fn expected_ids_match_the_derivation_rule() {
             expected, derived,
             "expected id {expected} does not match the id derived from its own \
              (resource_type, action) = ({resource_type}, {action}) pair"
+        );
+    }
+}
+
+/// Every authz label must be a structurally valid, concrete GTS **type** id
+/// (type ids end `~`). This is what the RBAC role-definition validator
+/// resolves a rule's `target_type` through: a label it cannot resolve is a
+/// permission no role definition can name (review finding 1).
+#[test]
+fn every_authz_label_is_a_concrete_gts_type_id() {
+    use crate::domain::service::resources;
+
+    for label in [
+        resources::RUN_NAME,
+        resources::QUEUE_ENTRY_NAME,
+        resources::SCHEDULE_NAME,
+    ] {
+        assert!(
+            ::gts::GtsId::try_new(label).is_ok(),
+            "label {label} is not a structurally valid GTS id"
+        );
+        assert!(
+            label.ends_with('~'),
+            "label {label} must be a concrete type id, not a bare string"
+        );
+    }
+}
+
+/// Every authz label has a stub type-schema in the `inventory` collection
+/// that `types-registry::init()` registers at boot. Without it the id is
+/// valid but unknown to the registry, and RBAC still cannot target it.
+#[test]
+fn every_authz_label_has_a_registered_type_schema() {
+    use crate::domain::service::resources;
+
+    let registered: Vec<String> = toolkit_gts::all_inventory_type_schemas()
+        .expect("inventory type schemas are well-formed JSON")
+        .iter()
+        .filter_map(|schema| schema["$id"].as_str().map(str::to_owned))
+        .collect();
+
+    for label in [
+        resources::RUN_NAME,
+        resources::QUEUE_ENTRY_NAME,
+        resources::SCHEDULE_NAME,
+    ] {
+        let wanted = format!("gts://{label}");
+        assert!(
+            registered.iter().any(|id| id == &wanted),
+            "label {label} has no registered type schema; registered: {registered:?}"
         );
     }
 }

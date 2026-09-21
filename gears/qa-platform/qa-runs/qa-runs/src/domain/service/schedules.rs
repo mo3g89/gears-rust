@@ -39,8 +39,10 @@
 //! run, ever.** Not at the next tick, not at the next occurrence of the same
 //! minute. The operator's recourse is to launch manually, and the record they
 //! have is the tick row's `error` column plus the WARN this module writes.
-//! There is no read path onto that column — see `domain::repos::schedules_repo`,
-//! which records the absence as a tracked deferral rather than an oversight.
+//! [`Self::list_ticks`] is the read path onto that column — one schedule's
+//! fire history, `run_id`/`error` intact, newest `due_at` first — see
+//! `domain::repos::schedules_repo`, which closes the same gap on the
+//! repository side.
 //!
 //! # A pass can be stalled by a launch that is not its own
 //!
@@ -99,7 +101,7 @@
 //! fired. Nothing here records them, no event marks them, and no query can
 //! recover them.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use authz_resolver_sdk::PolicyEnforcer;
 use qa_runs_sdk::{
@@ -115,7 +117,9 @@ use super::launch::LaunchService;
 use super::{DbProvider, actions, resources};
 use crate::domain::cron;
 use crate::domain::error::DomainError;
-use crate::domain::repos::{OwnedScheduleId, RunsRepository, SchedulesRepository};
+use crate::domain::repos::{
+    OwnedScheduleId, RunsRepository, ScheduleTickRow, SchedulesRepository, Windowed,
+};
 use crate::domain::system_actor::{self, TenantBound};
 
 /// How many schedules one pass will actually fire.
@@ -167,16 +171,30 @@ use crate::domain::system_actor::{self, TenantBound};
 /// level rather than solved here, because the fix is a retry policy and a retry
 /// after a committed claim is the thing exactly-once forbids.
 ///
-/// # The starvation this does have
+/// # The starvation this does have, and where the fix actually lives
 ///
-/// `list_enabled` orders by `id`, so a pass always fires the lowest ids first.
-/// A fleet with more than this many schedules due *every* pass — an
+/// `list_enabled` orders by `id`, so a pass always evaluates the lowest ids
+/// first. A fleet with more than this many schedules due *every* pass — an
 /// `* * * * *` expression on more than twenty schedules against a 60 s tick —
 /// drains the low ids and never reaches the tail. Ordinary alignment drains in
 /// a few passes, because a fired schedule stops being due; a permanently
-/// over-subscribed fleet does not. Stated rather than fixed: the remedy is a
-/// rotating cursor like `MAX_CLAIM_SCAN`'s, and it needs a `list_enabled` that
-/// takes one.
+/// over-subscribed fleet does not.
+///
+/// The remedy is a rotating cursor like `MAX_CLAIM_SCAN`'s, but **not** at
+/// `SchedulesRepository::list_enabled`'s own cap alone — that cap
+/// (`MAX_SCHEDULE_SCAN`, 1,000) exists to bound a pathological fleet size, and
+/// a fleet under it, which is every fleet this bug was filed against, never
+/// truncates that read, so a cursor advanced only on *that* truncation would
+/// sit at `None` forever and fire the same twenty every pass — the starvation,
+/// unfixed. What actually has to rotate is *this constant's own* cap: `Self`
+/// tracks, inside the loop below, the id of the schedule at which `fires`
+/// reached [`MAX_FIRES_PER_TICK`] (`fire_scan_cursor`, advanced by
+/// [`Self::advance_fire_scan_cursor`]), and resumes there next pass — regardless
+/// of whether `list_enabled`'s own window was truncated. Only a pass that
+/// evaluates its *entire* window without exhausting the fire budget, on a
+/// `list_enabled` read that was not itself truncated, wraps back to `None`
+/// (see [`Self::advance_fire_scan_cursor`]): that is the one case where
+/// nothing was left unvisited.
 const MAX_FIRES_PER_TICK: u32 = 20;
 
 /// Everything [`ScheduleService`] needs.
@@ -226,6 +244,27 @@ pub struct ScheduleTickReport {
     pub deferred: u32,
 }
 
+/// What one pass of [`ScheduleService::check_schedule_targets`] found.
+///
+/// Infallible by construction, for the same reason [`ScheduleTickReport`]
+/// gives: a pass that propagated would take the ticker with it, and a check
+/// that has silently stopped running is indistinguishable from a fleet with
+/// nothing wrong.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReferentialCheckReport {
+    /// Enabled schedules this pass looked at.
+    pub evaluated: u32,
+    /// Schedules whose target no longer resolves, each recorded as a new
+    /// `qa_schedule_ticks` row via
+    /// [`crate::domain::repos::SchedulesRepository::record_referential_check`].
+    pub dangling: u32,
+    /// Work this pass could not carry through: a nil-tenant row, a refused
+    /// enumeration, a refused per-schedule resolve, or a repository error
+    /// while writing a finding. An enumeration that never ran counts once
+    /// here.
+    pub failed: u32,
+}
+
 /// One schedule the tick has decided to act on, with the tenant every read and
 /// write about it must be bound to.
 ///
@@ -258,6 +297,16 @@ pub struct ScheduleService<S, R: RunsRepository> {
     /// the pass, which is what makes it useful when two replicas' claims are
     /// interleaved in one table.
     claimed_by: String,
+    /// Where the *next* pass should resume `list_enabled` from — see this
+    /// module's doc on `MAX_FIRES_PER_TICK` for why this is not simply
+    /// threaded from `list_enabled`'s own `Windowed::truncated`. `None`
+    /// starts from the beginning of the id-ordered fleet.
+    ///
+    /// Per-process and never persisted, matching `DispatchService`'s scan
+    /// cursors: losing it on a restart costs one pass reverting to the head
+    /// of the fleet, not correctness — the exactly-once claim is what
+    /// prevents a double fire, not this cursor.
+    fire_scan_cursor: Mutex<Option<Uuid>>,
 }
 
 impl<S, R> ScheduleService<S, R>
@@ -272,6 +321,7 @@ where
             launch: deps.launch,
             policy_enforcer: deps.policy_enforcer,
             claimed_by: format!("qa-runs/{}", Uuid::new_v4()),
+            fire_scan_cursor: Mutex::new(None),
         }
     }
 
@@ -385,7 +435,7 @@ where
 
     /// The width of `qa_schedules.slack_channel`, in bytes.
     ///
-    /// `VARCHAR(255)`, per `m20260818_000007_schedule_notifications`. Repeated
+    /// `VARCHAR(255)`, per `m20260818_000007_schedule_notifications` (folded into `migrations::m20260813_000003_initial` by the docs squash). Repeated
     /// here for the reason `api::rest::dto`'s own width constants are repeated:
     /// on Postgres an over-long value raises `22001`, which surfaces as an
     /// opaque 500 naming no field, and `SQLite` does not enforce `VARCHAR`
@@ -472,11 +522,24 @@ where
 {
     /// Store a new schedule under the caller's tenant.
     ///
+    /// # The target is resolved before it is persisted
+    ///
+    /// A cron expression that cannot be parsed is refused here rather than
+    /// left to fail forever in the firing tick's own background pass
+    /// (`Self::validate`'s own doc). A `plan_path`/`repo_id`/`environment_id`
+    /// that does not resolve is exactly the same shape of mistake, and until
+    /// this check existed nothing caught it either — see
+    /// [`LaunchService::resolve_target_exists`], which this calls with the
+    /// caller's own `ctx` so the check runs under the same tenant the write
+    /// will.
+    ///
     /// # Errors
     ///
-    /// As [`Self::validate`]; [`DomainError::ScheduleNameExists`] when the name
-    /// is taken within the tenant; [`DomainError::Forbidden`] when the policy
-    /// denies; [`DomainError::Database`] on a persistence failure.
+    /// As [`Self::validate`]; [`DomainError::Validation`] naming the field
+    /// when the target does not resolve; [`DomainError::ScheduleNameExists`]
+    /// when the name is taken within the tenant; [`DomainError::Forbidden`]
+    /// when the policy denies; [`DomainError::Database`] on a persistence
+    /// failure.
     pub async fn create(
         &self,
         ctx: &SecurityContext,
@@ -484,6 +547,9 @@ where
     ) -> Result<Schedule, DomainError> {
         Self::normalize(&mut new);
         Self::validate(&new)?;
+        self.launch
+            .resolve_target_exists(ctx, &new.target, new.environment_id, new.branch.as_deref())
+            .await?;
         let scope = self.scope(ctx, actions::CREATE, None).await?;
         let conn = self.db.conn()?;
         self.schedules
@@ -520,6 +586,35 @@ where
         self.schedules.list(&conn, &scope).await
     }
 
+    /// One schedule's fire history — see [`SchedulesRepository::list_ticks`].
+    /// Not every row returned is a fire: a
+    /// `claimed_by == REFERENTIAL_CHECK_CLAIMED_BY` row is a referential
+    /// check, not a claim — see that trait method's own doc.
+    ///
+    /// Two repository calls under one scope, deliberately, matching
+    /// `RunsService::test_results`'s own `resolve_owned` + read shape: the
+    /// `get` is what turns "no ticks" and "no such schedule" into distinct
+    /// answers, since [`SchedulesRepository::list_ticks`] alone would answer
+    /// an empty `Vec` for both.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::ScheduleNotFound`] when the schedule does not exist or
+    /// is not visible in the caller's scope.
+    pub async fn list_ticks(
+        &self,
+        ctx: &SecurityContext,
+        schedule_id: Uuid,
+    ) -> Result<Vec<ScheduleTickRow>, DomainError> {
+        let scope = self.scope(ctx, actions::GET, Some(schedule_id)).await?;
+        let conn = self.db.conn()?;
+        self.schedules
+            .get(&conn, &scope, schedule_id)
+            .await?
+            .ok_or(DomainError::ScheduleNotFound { id: schedule_id })?;
+        self.schedules.list_ticks(&conn, &scope, schedule_id).await
+    }
+
     /// Replace every caller-decidable field of a schedule.
     ///
     /// # `enabled` survives an edit by construction
@@ -549,6 +644,9 @@ where
     ) -> Result<Schedule, DomainError> {
         Self::normalize(&mut new);
         Self::validate(&new)?;
+        self.launch
+            .resolve_target_exists(ctx, &new.target, new.environment_id, new.branch.as_deref())
+            .await?;
         let scope = self.scope(ctx, actions::UPDATE, Some(id)).await?;
         let conn = self.db.conn()?;
         self.schedules
@@ -663,7 +761,11 @@ where
         // Nil tenant, cross-tenant, and reads only. Every write below is issued
         // under a *different* context, bound to the row's own tenant.
         let enumeration = system_actor::for_schedule_tick();
-        let candidates = match self.enabled_schedules(&enumeration).await {
+        let cursor = *self
+            .fire_scan_cursor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let candidates = match self.enabled_schedules(&enumeration, cursor).await {
             Ok(candidates) => candidates,
             Err(error) => {
                 warn!(
@@ -678,9 +780,15 @@ where
         };
 
         let mut fires = 0u32;
-        for (schedule, tenant_id) in candidates {
+        // The id at which this pass's fire budget ran out — set exactly once,
+        // the moment `fires` reaches `MAX_FIRES_PER_TICK`. See
+        // `Self::advance_fire_scan_cursor` for why this, and not
+        // `candidates.truncated`, is what the next pass resumes from.
+        let mut budget_exhausted_at = None;
+        for (schedule, tenant_id) in &candidates.rows {
             report.evaluated += 1;
-            let Some((tenant, due_at)) = outstanding(&schedule, tenant_id, now, &mut report) else {
+            let Some((tenant, due_at)) = outstanding(schedule, *tenant_id, now, &mut report)
+            else {
                 continue;
             };
 
@@ -693,10 +801,13 @@ where
                 continue;
             }
             fires += 1;
+            if fires == MAX_FIRES_PER_TICK {
+                budget_exhausted_at = Some(schedule.id);
+            }
 
             self.fire(
                 &Fire {
-                    schedule: &schedule,
+                    schedule,
                     tenant,
                     due_at,
                 },
@@ -705,8 +816,39 @@ where
             .await;
         }
 
+        self.advance_fire_scan_cursor(&candidates, budget_exhausted_at);
         report_deferrals(&report);
         report
+    }
+
+    /// Where the *next* pass's [`SchedulesRepository::list_enabled`] should
+    /// resume from — see this module's doc on `MAX_FIRES_PER_TICK`.
+    ///
+    /// `budget_exhausted_at` — the id at which this pass's fire budget ran
+    /// out — takes priority whenever it is `Some`: that is a stronger signal
+    /// than [`Windowed::truncated`], because a fleet under `MAX_SCHEDULE_SCAN`
+    /// never truncates that read, yet can still exhaust `MAX_FIRES_PER_TICK`
+    /// every single pass. Only when the budget was never exhausted does
+    /// `truncated` matter: it means `list_enabled`'s own cap cut the read
+    /// short, so the pass must resume past what it saw even though it had
+    /// fire budget to spare. Neither holds: the pass visited every enabled
+    /// schedule with room left over, so the next one starts over at the head
+    /// of the fleet.
+    fn advance_fire_scan_cursor(
+        &self,
+        candidates: &Windowed<(Schedule, Uuid)>,
+        budget_exhausted_at: Option<Uuid>,
+    ) {
+        let next = budget_exhausted_at.or_else(|| {
+            candidates
+                .truncated
+                .then(|| candidates.rows.last().map(|(schedule, _)| schedule.id))
+                .flatten()
+        });
+        *self
+            .fire_scan_cursor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = next;
     }
 
     /// The enumeration step, split out so the tick body has one failure arm
@@ -716,13 +858,201 @@ where
         // Kept, unused, so the caller's audit-logging `system_actor::for_schedule_tick`
         // construction still reads as feeding this read.
         _ctx: &SecurityContext,
-    ) -> Result<Vec<(Schedule, Uuid)>, DomainError> {
+        after: Option<Uuid>,
+    ) -> Result<Windowed<(Schedule, Uuid)>, DomainError> {
         // Nil-tenant enumeration: elevated here rather than authorized. See
         // `domain::elevated` for why, and for why every write below is issued
         // under a *different*, tenant-bound context.
         let scope = crate::domain::elevated::enumeration_scope();
         let conn = self.db.conn()?;
-        self.schedules.list_enabled(&conn, &scope).await
+        self.schedules.list_enabled(&conn, &scope, after).await
+    }
+
+    /// One background pass: re-check every enabled schedule's target against
+    /// qa-catalog and qa-environments, and record a synthetic
+    /// `qa_schedule_ticks` row for every one that has gone dangling since it
+    /// was written or last edited — see
+    /// [`crate::domain::repos::SchedulesRepository::record_referential_check`].
+    ///
+    /// # Why this exists beside write-time validation
+    ///
+    /// `create`/`update` reject a dangling target before it is ever
+    /// persisted (`Self::create`'s own doc). That cannot catch a reference
+    /// that goes dangling **afterwards** — a plan, repository or environment
+    /// deleted out from under an already-stored schedule — and until this
+    /// pass existed nothing did: the schedule would simply fail, silently,
+    /// the next time it actually fired, which for a nightly schedule can be a
+    /// full day away.
+    ///
+    /// Unlike [`Self::fire_due_schedules`] this drains every page
+    /// [`crate::domain::repos::SchedulesRepository::list_enabled`] has to
+    /// offer in one call, rather than resuming from a persistent cursor: a
+    /// referential check costs one scoped read and one cross-gear probe per
+    /// schedule, not a whole admission-and-launch, so there is no
+    /// `MAX_FIRES_PER_TICK`-shaped budget to protect.
+    pub async fn check_schedule_targets(&self) -> ReferentialCheckReport {
+        let mut report = ReferentialCheckReport::default();
+        let enumeration = system_actor::for_schedule_tick();
+        let mut after = None;
+        loop {
+            let candidates = match self.enabled_schedules(&enumeration, after).await {
+                Ok(candidates) => candidates,
+                Err(error) => {
+                    warn!(
+                        %error,
+                        "the referential check could not enumerate schedules; nothing is \
+                         checked this pass",
+                    );
+                    report.failed += 1;
+                    return report;
+                }
+            };
+            let truncated = candidates.truncated;
+            let mut last_id = None;
+            for (schedule, tenant_id) in &candidates.rows {
+                report.evaluated += 1;
+                last_id = Some(schedule.id);
+                self.check_one_target(schedule, *tenant_id, &mut report)
+                    .await;
+            }
+            if !truncated {
+                break;
+            }
+            // An empty page that still claims truncation cannot be resumed —
+            // stop rather than loop on nothing.
+            let Some(next) = last_id else { break };
+            after = Some(next);
+        }
+        report
+    }
+
+    /// One schedule's referential check, folded into `report`.
+    ///
+    /// Split into [`Self::dangling_target`] (the read) and
+    /// [`Self::record_dangling`] (the write) rather than one long body: a
+    /// single function covering the nil-tenant skip, the resolve, and every
+    /// failure arm of a four-step write reads as one undifferentiated block
+    /// and trips `clippy::cognitive_complexity`, which is the metric's own
+    /// way of saying a reader cannot hold it in one pass either.
+    async fn check_one_target(
+        &self,
+        schedule: &Schedule,
+        tenant_id: Uuid,
+        report: &mut ReferentialCheckReport,
+    ) {
+        let Some((tenant, error)) = self.dangling_target(schedule, tenant_id, report).await else {
+            return;
+        };
+        report.dangling += 1;
+        self.record_dangling(tenant, schedule, &error, report)
+            .await;
+    }
+
+    /// Step 1: does `schedule`'s target still resolve? `None` covers three
+    /// cases folded into one return so the caller has a single branch: a nil
+    /// tenant (skipped, and counted as failed), a target that still
+    /// resolves (nothing to do), and — implicitly, by not being reached —
+    /// the dangling case, which alone returns `Some`.
+    async fn dangling_target(
+        &self,
+        schedule: &Schedule,
+        tenant_id: Uuid,
+        report: &mut ReferentialCheckReport,
+    ) -> Option<(TenantBound, DomainError)> {
+        // Same refusal as `outstanding`'s, and for the same reason: nil is
+        // the platform-root sentinel, not a tenant, so a corrupt row is
+        // skipped rather than checked under the platform-root identity.
+        let Some(tenant) = TenantBound::new(tenant_id) else {
+            warn!(
+                schedule_id = %schedule.id,
+                schedule_name = %schedule.name,
+                "a schedule carries a nil tenant id; its target cannot be checked under the \
+                 platform-root identity",
+            );
+            report.failed += 1;
+            return None;
+        };
+        let ctx = system_actor::for_schedule_fire(tenant);
+
+        let error = match self
+            .launch
+            .resolve_target_exists(
+                &ctx,
+                &schedule.target,
+                schedule.environment_id,
+                schedule.branch.as_deref(),
+            )
+            .await
+        {
+            Ok(()) => return None,
+            Err(error) => error,
+        };
+
+        warn!(
+            schedule_id = %schedule.id,
+            schedule_name = %schedule.name,
+            %error,
+            "a schedule's target no longer resolves; recording a referential-check tick",
+        );
+        Some((tenant, error))
+    }
+
+    /// Step 2, past the point [`Self::dangling_target`] already found a
+    /// problem: resolve the schedule under its own tenant again — the
+    /// enumeration scope cannot mint the write token — and write the
+    /// finding.
+    async fn record_dangling(
+        &self,
+        tenant: TenantBound,
+        schedule: &Schedule,
+        error: &DomainError,
+        report: &mut ReferentialCheckReport,
+    ) {
+        let ctx = system_actor::for_schedule_fire(tenant);
+        if let Err(write_error) = self
+            .write_referential_check(&ctx, tenant, schedule.id, error)
+            .await
+        {
+            warn!(
+                schedule_id = %schedule.id,
+                %write_error,
+                "a schedule's target does not resolve, but the finding could not be written \
+                 (resolving the schedule under its own tenant, compiling a scope, acquiring a \
+                 connection, and the insert itself can each be the cause); it will be \
+                 re-detected on the next pass",
+            );
+            report.failed += 1;
+        }
+    }
+
+    /// The write half of [`Self::record_dangling`], collapsed to one `?`
+    /// chain: resolve the schedule under its own tenant again (the
+    /// enumeration scope cannot mint the write token), compile a scope, and
+    /// insert the finding.
+    async fn write_referential_check(
+        &self,
+        ctx: &SecurityContext,
+        tenant: TenantBound,
+        schedule_id: Uuid,
+        error: &DomainError,
+    ) -> Result<(), DomainError> {
+        let owned = self.resolve_owned(ctx, schedule_id).await?;
+        let scope = self.scope(ctx, actions::CHECK, Some(schedule_id)).await?;
+        let conn = self.db.conn()?;
+        self.schedules
+            .record_referential_check(
+                &conn,
+                &scope,
+                tenant.get(),
+                owned,
+                OffsetDateTime::now_utc(),
+                // The disclosable half of the error — the same rule
+                // `record_outcome` applies to a failed launch's text — so a
+                // `Database`/`Environments` cause never lands another
+                // system's raw text in this column.
+                &error.recorded_text(),
+            )
+            .await
     }
 
     /// Claim one due time and, if this instance won it, launch.

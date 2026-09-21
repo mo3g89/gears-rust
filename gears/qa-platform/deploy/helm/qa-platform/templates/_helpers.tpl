@@ -17,3 +17,31 @@
 {{- define "qa-platform.issuer" -}}
 {{- printf "%s/realms/qa-platform" (required "publicOrigin is required -- set it with --set publicOrigin=https://host" .Values.publicOrigin) -}}
 {{- end -}}
+
+{{/* Selector / pod-template labels shared by all four stateful workloads
+     (gears, ui, keycloak, postgres): name + component + instance. Call as
+     `include "qa-platform.selectorLabels" (dict "root" $ "component" "gears")`.
+
+     `instance` is what makes two releases of this chart, installed side by
+     side, select only their own pods -- the whole point of this chart major
+     version. It belongs in BOTH the Deployment's/StatefulSet's
+     spec.selector.matchLabels AND the pod template's metadata.labels: the
+     latter must be a superset of the former or Kubernetes rejects the
+     object (a selector that never matches its own pod template).
+
+     A Deployment's/StatefulSet's spec.selector is IMMUTABLE. This helper is
+     therefore not a safe drop-in for an existing release -- see
+     UPGRADING.md for the hand-run migration `helm upgrade` cannot do by
+     itself.
+
+     ALSO used, unmodified, for the four Services' (gears, ui, keycloak,
+     postgres) `spec.selector` -- a flat map, the same shape this helper
+     already emits, so no `matchLabels` wrapper is needed there the way it
+     is for a Deployment/StatefulSet. Unlike spec.selector on a workload, a
+     Service's selector is MUTABLE, so adding `instance` to it needed no
+     migration and no chart version bump beyond this one's. */}}
+{{- define "qa-platform.selectorLabels" -}}
+app.kubernetes.io/name: qa-platform
+app.kubernetes.io/component: {{ .component }}
+app.kubernetes.io/instance: {{ .root.Release.Name }}
+{{- end -}}

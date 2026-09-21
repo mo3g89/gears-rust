@@ -5,11 +5,15 @@
 
 pub mod config;
 pub mod init;
+/// Pull-based metrics delivery — see the module docs for why it is a separate
+/// listener and why it is independent of `metrics.enabled`.
+#[cfg(feature = "otel")]
+pub mod scrape;
 pub mod throttled_log;
 
 pub use config::{
-    Exporter, HttpOpts, LogsCorrelation, MetricsConfig, OpenTelemetryConfig, OpenTelemetryResource,
-    Propagation, Sampler, TracingConfig,
+    Exporter, HttpOpts, LogsCorrelation, MetricsConfig, MetricsScrapeConfig, OpenTelemetryConfig,
+    OpenTelemetryResource, Propagation, Sampler, TracingConfig,
 };
 #[cfg(feature = "otel")]
 pub use init::init_tracing;

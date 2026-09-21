@@ -51,7 +51,7 @@ pub(super) fn register_saved_view_routes(
              those endpoints do not need to and this one does. A view is visible only \
              to the caller who created it - two callers may hold a view of the same name at the \
              same scope, and neither can see the other's. Ordered by most-recently-updated \
-             first. Requires the qa.saved_view/list grant.",
+             first. Requires the gts.cf.qa.insights.saved_view.v1~/list grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -103,7 +103,7 @@ pub(super) fn register_saved_view_routes(
              rejection, matching the system being replaced's own permissiveness on this \
              combination. query_json is an opaque JSON document this gear never inspects. \
              409 means a view of this name already exists at this owner, scope and plan. \
-             Requires the qa.saved_view/create grant.",
+             Requires the gts.cf.qa.insights.saved_view.v1~/create grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -139,7 +139,7 @@ pub(super) fn register_saved_view_routes(
              other than the caller making the request - the two are deliberately \
              indistinguishable, so this endpoint cannot be used to learn whether an id exists \
              for someone else. 409 means the new name collides with another view this caller \
-             already holds at the new scope and plan. Requires the qa.saved_view/update grant.",
+             already holds at the new scope and plan. Requires the gts.cf.qa.insights.saved_view.v1~/update grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -170,7 +170,7 @@ pub(super) fn register_saved_view_routes(
              same plan_path/plan_id an analytics endpoint would take, and is unrelated to which \
              view is deleted here. Not idempotent: a second delete of the same id answers 404. \
              404 covers both an id nobody owns and one owned by another caller, for the same \
-             reason the replace endpoint's 404 does. Requires the qa.saved_view/delete grant.",
+             reason the replace endpoint's 404 does. Requires the gts.cf.qa.insights.saved_view.v1~/delete grant.",
         )
         .tag(API_TAG)
         .authenticated()

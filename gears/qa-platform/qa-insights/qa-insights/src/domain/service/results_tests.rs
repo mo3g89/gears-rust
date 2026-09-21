@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use toolkit_db::DBProvider;
+use toolkit_gts::GTS_ID_PREFIX;
 use toolkit_odata::ODataQuery;
 use uuid::Uuid;
 
@@ -180,13 +181,14 @@ async fn both_collections_authorize_under_test_result_list() {
         .await
         .unwrap();
 
+    let test_result = format!("{GTS_ID_PREFIX}cf.qa.insights.test_result.v1~");
     assert_eq!(
         authz.asked(),
         vec![
-            ("qa.test_result".to_owned(), "list".to_owned()),
-            ("qa.test_result".to_owned(), "list".to_owned()),
+            (test_result.clone(), "list".to_owned()),
+            (test_result, "list".to_owned()),
         ],
-        "a read must ask for qa.test_result/list, once per call",
+        "a read must ask for cf.qa.insights.test_result.v1~/list, once per call",
     );
 }
 

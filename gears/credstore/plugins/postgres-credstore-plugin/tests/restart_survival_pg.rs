@@ -37,6 +37,7 @@ use postgres_credstore_plugin::domain::Service;
 use postgres_credstore_plugin::infra::storage::error::StoreError;
 use postgres_credstore_plugin::infra::storage::migrations::Migrator;
 use postgres_credstore_plugin::infra::storage::repo::ValueRepo;
+use postgres_credstore_plugin::infra::storage::store::PgValueStore;
 use sea_orm_migration::MigratorTrait;
 use toolkit_db::migration_runner::run_migrations_for_gear;
 use toolkit_db::{ConnectOpts, DBProvider, connect_db};
@@ -65,8 +66,9 @@ async fn boot(dsn: &str) -> Service {
         .await
         .expect("run migrations");
 
+    let repo = ValueRepo::new(Arc::new(DBProvider::<StoreError>::new(db)));
     Service::from_config(
-        ValueRepo::new(Arc::new(DBProvider::<StoreError>::new(db))),
+        Arc::new(PgValueStore::new(repo)),
         &PostgresCredStorePluginConfig::default(),
     )
     .expect("config builds")

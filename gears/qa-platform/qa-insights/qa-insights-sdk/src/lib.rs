@@ -3,7 +3,7 @@
 //! `qa-insights` ingests finished run and test results from `qa-runs`, keeps the
 //! per-test history behind the dashboard, coverage and analytics surfaces, and
 //! owns the JIRA bug loop and the notification egress. It is the fourth and last
-//! domain gear of the subsystem (see `gears/qa-platform/docs/DESIGN.md` §3.2
+//! domain gear of the subsystem (see `gears/qa-platform/docs/DESIGN.md` §3.5
 //! `cpt-cf-qa-component-insights`).
 //!
 //! Public contract: client trait, transport-agnostic models, canonical errors.
@@ -41,8 +41,9 @@ pub use client::QaInsightsClientV1;
 pub use errors::QaInsightsError;
 pub use models::{
     CollectCount, CoverageBuild, CoverageSummary, DailyStatusPoint, DashboardRun, DashboardStats,
-    FailedTestCard, FlakyTestCard, JiraBug, JiraConfig, JiraPollerConfig, NewJiraBug, NewSavedView,
-    NotificationConfig, NotificationLogEntry, EnvironmentBrief, EnvironmentsSummary,
-    QualityVectorPassRate, RunTestTrendPoint, SavedView, SavedViewScope, ScheduledRunSlackTemplate,
-    ScheduledRunSlackTemplates, SkipListEntry, TestCaseResultRecord, TestResultRecord,
+    EnvironmentBrief, EnvironmentsSummary, FailedTestCard, FlakyTestCard, JIRA_SUMMARY_MAX_CHARS,
+    JiraBug, JiraConfig, JiraPollerConfig, NewJiraBug, NewSavedView, NotificationConfig,
+    NotificationLogEntry, QualityVectorPassRate, RunTestTrendPoint, SavedView, SavedViewScope,
+    ScheduledRunSlackTemplate, ScheduledRunSlackTemplates, SkipListEntry, TestCaseResultRecord,
+    TestResultRecord,
 };

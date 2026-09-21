@@ -66,6 +66,7 @@ impl KubeRunnerSecretWriter {
 impl crate::domain::ports::RunnerSecretWriter for KubeRunnerSecretWriter {
     async fn ensure_runner_secret(
         &self,
+        tenant_id: uuid::Uuid,
         credstore_ref: &str,
         material: &credstore_sdk::SecretValue,
     ) -> Result<(), String> {
@@ -74,6 +75,7 @@ impl crate::domain::ports::RunnerSecretWriter for KubeRunnerSecretWriter {
             &self.argo_namespace,
             &self.secret_prefix,
             &self.secret_key,
+            tenant_id,
             credstore_ref,
             material,
         )
@@ -82,14 +84,17 @@ impl crate::domain::ports::RunnerSecretWriter for KubeRunnerSecretWriter {
 
     /// **This writer transforms the reference, so it must say so.**
     ///
-    /// [`secret_name`] sanitises and truncates to
-    /// [`MAX_SECRET_NAME_LEN`], which with the default `qa-platform-` prefix
-    /// leaves 51 characters of the reference -- so two references agreeing on
-    /// their first 51 sanitised characters derive one name. The port's caller
-    /// uses this to refuse the second of them rather than let it overwrite
-    /// the first; see [`crate::domain::ports::RunnerSecretWriter::derived_secret_name`].
-    fn derived_secret_name(&self, credstore_ref: &str) -> String {
-        secret_name(&self.secret_prefix, credstore_ref)
+    /// [`secret_name`] sanitises and truncates a human-readable head, then
+    /// ends the name in a fixed-width digest of the whole
+    /// `(prefix, tenant_id, reference)` tuple -- see that function's own doc
+    /// for why a digest, and not truncation-only, is what keeps two distinct
+    /// tuples from ever landing on the same name in practice. The port's
+    /// caller still asks this before writing anything and still refuses a
+    /// second claimant of a name, because a hash collision remains
+    /// theoretically possible even if practically negligible; see
+    /// [`crate::domain::ports::RunnerSecretWriter::derived_secret_name`].
+    fn derived_secret_name(&self, tenant_id: uuid::Uuid, credstore_ref: &str) -> String {
+        secret_name(&self.secret_prefix, tenant_id, credstore_ref)
     }
 }
 
@@ -148,14 +153,61 @@ fn truncate(value: &str, limit: usize) -> String {
         .to_owned()
 }
 
-/// A `Secret` name derived from a credstore reference — `secret_name` in
-/// `qa-runs`' `naming.rs`, reimplemented here (see [`MAX_SECRET_NAME_LEN`]'s
-/// doc comment for why it is not shared).
-fn secret_name(prefix: &str, reference: &str) -> String {
-    truncate(
-        &sanitize(&format!("{prefix}{reference}")),
-        MAX_SECRET_NAME_LEN,
-    )
+/// FNV-1a 64-bit offset basis / prime — deterministic, non-cryptographic
+/// fingerprint (DE0708: no non-FIPS hashers; `sha2` was tried first and is
+/// what `DE0708` exists to catch, per `qa-runs`' `naming.rs`'s own doc on
+/// this same function). Mirrors `qa-runs`' own `naming::FNV1A_BASIS`/
+/// `FNV1A_PRIME` -- both must agree, or the two writers derive different
+/// names for the same tuple. Same constants as `keycloak-idp-plugin`'s
+/// `user_facade::FNV1A_BASIS`/`FNV1A_PRIME`, the precedent this follows.
+const FNV1A_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV1A_PRIME: u64 = 0x0000_0100_0000_01B3;
+
+/// Mix `bytes` into an in-progress FNV-1a 64-bit state.
+fn fnv1a_update(state: &mut u64, bytes: impl AsRef<[u8]>) {
+    for &b in bytes.as_ref() {
+        *state ^= u64::from(b);
+        *state = state.wrapping_mul(FNV1A_PRIME);
+    }
+}
+
+/// Hex characters of the digest suffix -- the algorithm's full 64-bit width.
+/// Mirrors `qa-runs`' own `naming::DIGEST_HEX_LEN` (see
+/// [`MAX_SECRET_NAME_LEN`]'s doc comment for why it is not shared) -- both
+/// must agree, or the two writers derive different names for the same
+/// tuple.
+const DIGEST_HEX_LEN: usize = 16;
+
+/// A `Secret` name derived from a tenant and a credstore reference —
+/// `secret_name` in `qa-runs`' `naming.rs`, reimplemented here (see
+/// [`MAX_SECRET_NAME_LEN`]'s doc comment for why it is not shared).
+///
+/// **The defect this replaced**, and the construction that replaced it, are
+/// both documented on `qa-runs`' `naming::secret_name` rather than repeated
+/// here verbatim: in short, truncating a tenant-then-reference concatenation
+/// protects the wrong thing (distinctness of the whole input, not of the
+/// tenant specifically), which is what let two real credentials of one
+/// tenant collapse onto one Secret in production. The name is now
+/// `{readable}-{digest}`, where `digest` is the FNV-1a 64-bit fingerprint of
+/// `prefix + tenant_id + "-" + reference`, hex-encoded — collision-resistant
+/// regardless of how much of `readable` truncation ends up eating — and
+/// `readable` is `sanitize`d and `truncate`d to whatever budget remains
+/// after reserving `digest` and its separating dash.
+fn secret_name(prefix: &str, tenant_id: uuid::Uuid, reference: &str) -> String {
+    let full = format!("{prefix}{tenant_id}-{reference}");
+    let mut state = FNV1A_BASIS;
+    fnv1a_update(&mut state, full.as_bytes());
+    let digest = format!("{state:016x}");
+    let suffix = &digest[..DIGEST_HEX_LEN];
+
+    let readable_budget = MAX_SECRET_NAME_LEN - DIGEST_HEX_LEN - 1;
+    let readable = truncate(&sanitize(&full), readable_budget);
+
+    if readable.is_empty() {
+        suffix.to_owned()
+    } else {
+        format!("{readable}-{suffix}")
+    }
 }
 
 /// Build a client aimed at the Argo cluster.
@@ -227,11 +279,12 @@ pub(super) async fn ensure_runner_secret(
     argo_namespace: &str,
     secret_prefix: &str,
     secret_key: &str,
+    tenant_id: uuid::Uuid,
     credstore_ref: &str,
     material: &SecretValue,
 ) -> Result<(), String> {
+    let name = secret_name(secret_prefix, tenant_id, credstore_ref);
     let client = argo_client(argo_kubeconfig_path).await?;
-    let name = secret_name(secret_prefix, credstore_ref);
 
     let mut data = BTreeMap::new();
     data.insert(
@@ -304,26 +357,45 @@ fn describe_apply_failure(name: &str, namespace: &str, error: &kube::Error) -> S
 mod tests {
     use super::*;
 
+    /// The tenant every test in this module uses — its 36-character form is
+    /// what actually consumes most of the 63-character budget.
+    const TENANT: uuid::Uuid = uuid::uuid!("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+
     /// The name must equal what `qa-runs`' executor mounts and what the
     /// operator script writes. Each right-hand side is duplicated, not
     /// derived, from `qa-runs/src/infra/executor/argo/naming.rs`'s own
-    /// parity-oracle test (`secret_names_agree_with_the_provisioning_scripts_shell_derivation`),
-    /// which in turn was checked against
-    /// `deploy/argo/provision-platform-kubeconfig-secret.sh`'s `derive_name`.
+    /// parity-oracle test
+    /// (`secret_name_matches_a_manual_transcription_of_the_shell_scripts_output`).
     /// Three implementations of one rule, pinned in three places, so drift
     /// between any two fails a test rather than a pod mount.
+    ///
+    /// **The shell is the fourth implementation, and it is checked here
+    /// too** -- by `deploy/helm/tests/check_secret_name_parity.sh` under
+    /// `make helm-tests`, which extracts
+    /// `provision-platform-kubeconfig-secret.sh`'s `derive_name` and runs it
+    /// against this very table. Until that guard existed, this doc named a
+    /// test called
+    /// `secret_names_agree_with_the_provisioning_scripts_shell_derivation`
+    /// as its authority for the shell side; no such test has ever existed in
+    /// this workspace, so the chain of trust ended in a name.
     #[test]
     fn the_writer_the_executor_and_the_script_agree_on_every_name() {
         for (reference, expected) in [
-            ("argo-proof-kubeconfig", "qa-platform-argo-proof-kubeconfig"),
+            (
+                "argo-proof-kubeconfig",
+                "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-838ca89b7ac87ce3",
+            ),
             (
                 "environment/9f2c.../kubeconfig",
-                "qa-platform-environment-9f2c----kubeconfig",
+                "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-913cb319519012e1",
             ),
-            ("UPPER_Case", "qa-platform-upper-case"),
+            (
+                "UPPER_Case",
+                "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-860e9a9caad412aa",
+            ),
         ] {
             assert_eq!(
-                secret_name("qa-platform-", reference),
+                secret_name("qa-platform-", TENANT, reference),
                 expected,
                 "reference {reference:?} must derive the same Secret name here, in \
                  qa-runs' naming.rs, and in the shell script"
@@ -333,34 +405,59 @@ mod tests {
 
     #[test]
     fn a_reference_with_no_prefix_still_sanitises() {
-        assert_eq!(secret_name("", "already-clean"), "already-clean");
+        assert_eq!(
+            secret_name("", TENANT, "already-clean"),
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-already-c-372d8ce57bc70bd4"
+        );
     }
 
-    /// **The collision this derivation can produce, stated in a test.**
-    ///
-    /// Two distinct, caller-supplied, path-style references agreeing on their
-    /// first 51 sanitised characters derive ONE `Secret` name under the
-    /// default prefix. That is not a defect in this function -- 63 characters
-    /// is the API server's limit and the name has to fit -- it is the reason
-    /// `materialise_runner_secret` asks
-    /// `RunnerSecretWriter::derived_secret_name` for each credential's name
-    /// and refuses the second claimant. Without that check the second apply
-    /// would overwrite the first's material and `qa-runs` would mount one
-    /// object at both mount paths, silently.
-    ///
-    /// Gear-minted references are UUIDs and cannot reach this; a submitted
-    /// `CredentialSubmission::Reference` is a first-class path and can.
+    /// **The collision this derivation used to be able to produce, now
+    /// closed.** Two distinct, caller-supplied, path-style references
+    /// agreeing on their first 14 sanitised characters used to derive ONE
+    /// `Secret` name under the default prefix and a full-length tenant --
+    /// exactly the shape of the collision measured in production
+    /// (`qa-runs`' `naming.rs` has the live pair). The digest suffix this
+    /// function now ends every name with is a function of the *whole*
+    /// input, not of the truncated head, so these two -- sharing far more
+    /// than 14 leading characters -- now derive distinct names. The
+    /// two-credentials-collide check in `materialise_runner_secret` stays as
+    /// defense in depth (a hash collision remains theoretically possible),
+    /// but it is no longer the only thing standing between these two
+    /// references and one Secret.
     #[test]
-    fn two_long_path_style_references_can_derive_one_secret_name() {
+    fn two_long_path_style_references_now_derive_distinct_names() {
         let first = "environments/team-alpha/production-cluster-eu-west/ssh-private-key";
         let second = "environments/team-alpha/production-cluster-eu-west/vinfra-password";
 
         assert_ne!(first, second, "the references themselves differ");
-        assert_eq!(
-            secret_name("qa-platform-", first),
-            secret_name("qa-platform-", second),
-            "51 characters of the reference survive, and these two agree on all of them --              which is exactly the situation the caller's duplicate check exists for"
+        assert_ne!(
+            secret_name("qa-platform-", TENANT, first),
+            secret_name("qa-platform-", TENANT, second),
+            "the digest suffix must distinguish these even though their readable heads \
+             collapse to the same truncated prefix"
         );
+    }
+
+    /// However long the reference, the name never exceeds the limit, and
+    /// distinctness lives in the fixed-width digest suffix regardless of
+    /// what the readable head truncated away.
+    #[test]
+    fn an_arbitrarily_long_reference_still_derives_a_valid_bounded_name() {
+        let long_reference = "a".repeat(200);
+        let name = secret_name("qa-platform-", TENANT, &long_reference);
+        assert_eq!(name.len(), MAX_SECRET_NAME_LEN);
+        assert!(!name.ends_with('-'));
+    }
+
+    /// There is no longer a degenerate case to refuse: the digest is
+    /// fixed-width and always fits, and the readable head is allowed to
+    /// truncate to nothing rather than this function having any
+    /// precondition left to violate.
+    #[test]
+    fn a_prefix_that_alone_would_have_exhausted_the_old_budget_still_derives_a_name() {
+        let huge_prefix = "p".repeat(MAX_SECRET_NAME_LEN);
+        let name = secret_name(&huge_prefix, TENANT, "any-reference");
+        assert_eq!(name.len(), MAX_SECRET_NAME_LEN);
     }
 
     /// Constructing this needs no live cluster: `kube::Error::Api` wraps a
@@ -421,6 +518,7 @@ mod tests {
             "argo",
             "qa-platform-",
             "value",
+            TENANT,
             "environment/does-not-matter/kubeconfig",
             &SecretValue::from("irrelevant".to_owned()),
         )
@@ -450,6 +548,7 @@ mod tests {
             "argo",
             "qa-platform-",
             "value",
+            TENANT,
             "environment/does-not-matter/kubeconfig",
             &SecretValue::from(material),
         )
@@ -493,6 +592,7 @@ mod tests {
             "argo",
             "qa-platform-",
             "value",
+            TENANT,
             "environment/does-not-matter/kubeconfig",
             &SecretValue::from("irrelevant".to_owned()),
         )

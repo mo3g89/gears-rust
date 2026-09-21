@@ -19,7 +19,7 @@
 //! `toolkit_gts::inventory` -- their suffixes are `cf.qa.catalog.` and
 //! `cf.qa.environments.` respectively, neither of which this prefix matches.
 
-use toolkit_gts::{InventoryInstance, gts_id};
+use toolkit_gts::{GTS_ID_PREFIX, InventoryInstance, gts_id};
 
 const PERMISSION_TYPE_ID: &str = gts_id!("cf.toolkit.authz.permission.v1~");
 const INSTANCE_SUFFIX_PREFIX: &str = "cf.qa.insights.";
@@ -76,11 +76,26 @@ fn payload_pair(entry: &InventoryInstance) -> (String, String) {
 }
 
 /// The id the naming rule in `permissions.rs`'s header derives from a
-/// `(resource_type, action)` pair: `pep_entity` is `resource_type` with its
-/// `qa.` prefix stripped, joined to `action` with `_`.
+/// `(resource_type, action)` pair: `pep_entity` is the entity token of the
+/// resource type's GTS id — `cf.qa.insights.saved_view.v1~` → `saved_view`.
+///
+/// Two strips, not one: `gts_id!` prepends `GTS_ID_PREFIX` (`"gts."`) at
+/// compile time, so the constant holds `gts.cf.qa.insights.<entity>.v1~`. It is
+/// stripped first and **not** re-added in the `format!`, because
+/// `PERMISSION_TYPE_ID` already carries its own single copy of it.
+///
+/// Was a bare `qa.` prefix strip until the labels became GTS type ids (WS0). The
+/// rule's **output is unchanged** — the permission instance ids registered
+/// before that change are the ids this still derives.
 fn derive_instance_id(resource_type: &str, action: &str) -> String {
-    let pep_entity = resource_type.strip_prefix("qa.").unwrap_or(resource_type);
-    format!("{PERMISSION_TYPE_ID}cf.qa.insights.{pep_entity}_{action}.v1")
+    let pep_entity = resource_type
+        .strip_prefix(GTS_ID_PREFIX)
+        .and_then(|rest| rest.strip_prefix(INSTANCE_SUFFIX_PREFIX))
+        .and_then(|rest| rest.strip_suffix(".v1~"))
+        .unwrap_or_else(|| {
+            panic!("resource type {resource_type} is not a cf.qa.insights.<entity>.v1~ id")
+        });
+    format!("{PERMISSION_TYPE_ID}{INSTANCE_SUFFIX_PREFIX}{pep_entity}_{action}.v1")
 }
 
 #[test]
@@ -179,4 +194,41 @@ fn the_catalog_matches_the_enforced_surface() {
         "these pairs are in the catalog but enforced nowhere, so granting them \
          authorizes nothing: {unenforced:#?}"
     );
+}
+
+/// Every authz label must be a structurally valid, concrete GTS **type** id
+/// (type ids end `~`) and must have a stub type-schema in the inventory
+/// `types-registry::init()` registers at boot. A label that is neither is a
+/// permission no role definition can name (review finding 1).
+#[test]
+fn every_authz_label_is_a_registrable_gts_type() {
+    use crate::domain::service::resources;
+
+    let registered: Vec<String> = toolkit_gts::all_inventory_type_schemas()
+        .expect("inventory type schemas are well-formed JSON")
+        .iter()
+        .filter_map(|schema| schema["$id"].as_str().map(str::to_owned))
+        .collect();
+
+    for label in [
+        resources::TEST_RESULT_NAME,
+        resources::SAVED_VIEW_NAME,
+        resources::JIRA_CONFIG_NAME,
+        resources::JIRA_BUG_NAME,
+        resources::NOTIFICATION_CONFIG_NAME,
+    ] {
+        assert!(
+            ::gts::GtsId::try_new(label).is_ok(),
+            "label {label} is not a structurally valid GTS id"
+        );
+        assert!(
+            label.ends_with('~'),
+            "label {label} must be a concrete type id, not a bare string"
+        );
+        let wanted = format!("gts://{label}");
+        assert!(
+            registered.iter().any(|id| id == &wanted),
+            "label {label} has no registered type schema; registered: {registered:?}"
+        );
+    }
 }

@@ -18,18 +18,10 @@ pub struct Model {
     /// primary key rather than a surrogate `id` (see
     /// `m20260812_000001_initial`'s comment on the table).
     ///
-    /// **The physical column is still `environment_id`, and this attribute is what
-    /// keeps it that way — do not delete it as redundant.** The aggregate was
-    /// renamed `TargetPlatform` → `Environment` (spec D5) and this field
-    /// follows, but `m20260903_000010_rename_platform_tables` renames only the
-    /// three *tables*: renaming a column is a behaviour change, three further
-    /// gears own `environment_id` columns with no migration scheduled for them,
-    /// and the plan defers column rewrites to the later expand/contract
-    /// migrations that already touch these columns. Without `column_name` here
-    /// `SeaORM` would derive the column from the field and emit
-    /// `SELECT environment_id FROM qa_environment_leases` against a column that
-    /// does not exist — and this one is the primary key, so every read and
-    /// every optimistic-concurrency write would fail.
+    /// Field and physical column are both `environment_id`; no
+    /// `#[sea_orm(column_name)]` pin is needed or present —
+    /// `m20260903_000010_rename_platform_tables` (folded into `migrations::m20260812_000001_initial` by the docs squash), once cited here as the
+    /// reason one was, was removed by the migration squash.
     ///
     /// `resource_col` above names the *`SeaORM` column variant*
     /// (`Column::EnvironmentId`), not the physical column, so it renames with
@@ -44,6 +36,20 @@ pub struct Model {
     /// Optimistic-concurrency version; every write does WHERE version = `read_version`.
     pub version: i64,
     pub updated_at: OffsetDateTime,
+    /// The instant this environment last transitioned **to free**, or `None`
+    /// when no such transition has been recorded (never held, or last freed
+    /// before `m20260921_000002_lease_freed_at` ran).
+    ///
+    /// Written only by a compare-and-swap whose new state is
+    /// [`qa_environments_sdk::LeaseState::Free`], and **never cleared by an
+    /// acquisition** — so on a held row it still names the free transition the
+    /// current holder consumed, and on a free row it names when it became free.
+    /// `updated_at` cannot substitute: it is the last write of any kind.
+    ///
+    /// This is the start endpoint of `cpt-cf-qa-nfr-dispatch-latency`; the
+    /// migration that adds it carries the full argument for why the anchor is
+    /// a column rather than an event or a metric.
+    pub freed_at: Option<OffsetDateTime>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

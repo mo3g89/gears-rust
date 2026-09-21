@@ -327,6 +327,8 @@ impl NotifyRepository for OrmNotifyRepository {
             run_queue_queued_slack_enabled: ActiveValue::Set(config.run_queue_queued_slack_enabled),
             email_smtp_host: ActiveValue::Set(config.email_smtp_host),
             email_smtp_port: ActiveValue::Set(i32::from(config.email_smtp_port)),
+            email_smtp_username: ActiveValue::Set(config.email_smtp_username),
+            email_smtp_credstore_ref: ActiveValue::Set(config.email_smtp_credstore_ref),
             email_from: ActiveValue::Set(config.email_from),
             email_recipients: ActiveValue::Set(config.email_recipients),
             email_enabled: ActiveValue::Set(config.email_enabled),
@@ -348,6 +350,8 @@ impl NotifyRepository for OrmNotifyRepository {
                 ConfigColumn::RunQueueQueuedSlackEnabled,
                 ConfigColumn::EmailSmtpHost,
                 ConfigColumn::EmailSmtpPort,
+                ConfigColumn::EmailSmtpUsername,
+                ConfigColumn::EmailSmtpCredstoreRef,
                 ConfigColumn::EmailFrom,
                 ConfigColumn::EmailRecipients,
                 ConfigColumn::EmailEnabled,
@@ -979,11 +983,27 @@ mod tests {
             run_queue_queued_slack_enabled: true,
             email_smtp_host: "smtp.example".to_owned(),
             email_smtp_port: 2525,
+            email_smtp_username: "qa@example".to_owned(),
+            email_smtp_credstore_ref: "qa-smtp-password".to_owned(),
             email_from: "qa@example".to_owned(),
             email_recipients: "a@example, b@example".to_owned(),
             email_enabled: true,
         };
 
+        // **Saved twice, and the first save is load-bearing.** `save_config` is
+        // an upsert whose update list is written out by hand, and a column
+        // missing from that list keeps its old value on a replacement while
+        // storing correctly on an insert. This test used to save once, so it
+        // only ever exercised the insert path and could not catch the omission
+        // its own doc comment above promises to catch — which is exactly how
+        // `email_smtp_username`/`email_smtp_credstore_ref` were first written
+        // with a complete `ActiveModel` and an incomplete `update_columns`.
+        // The first save plants a *different* document, so every field below
+        // has to be overwritten by the second.
+        OrmNotifyRepository
+            .save_config(&conn, &ctx, tenant, NotificationConfig::default())
+            .await
+            .unwrap();
         OrmNotifyRepository
             .save_config(&conn, &ctx, tenant, config.clone())
             .await
@@ -995,8 +1015,8 @@ mod tests {
                 .await
                 .unwrap(),
             Some(config),
-            "every one of the fifteen fields must survive, and the templates \
-             document is the half nothing else checks"
+            "every one of the seventeen fields must survive a replacement, and \
+             the templates document is the half nothing else checks"
         );
     }
 

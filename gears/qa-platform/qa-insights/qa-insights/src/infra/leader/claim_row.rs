@@ -231,8 +231,10 @@ use entity::{Column as ClaimColumn, Entity as ClaimEntity};
 /// [`Dialect::of`], so the per-expression matches stay exhaustive over two
 /// variants without a `panic!` this workspace's lints would refuse. This gear
 /// refuses `MySQL` at the migration too
-/// (`m20260907_000003_leader_claims::up_ddl`), so the arm is unreachable in
-/// practice and is an error rather than an assumption.
+/// (`migrations::m20260818_000001_initial::up_ddl`; `m20260907_000003_leader_claims`,
+/// where this refusal was first added, was folded into that migration by
+/// the docs squash), so the arm is unreachable in practice and is an error
+/// rather than an assumption.
 #[derive(Clone, Copy, Debug)]
 enum Dialect {
     Postgres,

@@ -6,7 +6,7 @@ Public host:   {{ include "qa-platform.publicHost" . }}
 Issuer:        {{ include "qa-platform.issuer" . }}
 {{- if .Values.keycloakRealmJson }}
 
-NOTE: keycloakRealmJson is set, so the qa-platform-realm ConfigMap carries the
+NOTE: keycloakRealmJson is set, so the qa-platform-realm Secret carries the
 realm you supplied rather than the one this chart renders. It must already list
 {{ .Values.publicOrigin }} in the qa-platform-ui client's redirectUris and
 webOrigins, and must pin the qa-platform-workflow client's secret to

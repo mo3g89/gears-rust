@@ -64,16 +64,29 @@ toolkit-db-macros = { workspace = true }
 toolkit-security = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
 toolkit-macros = { workspace = true }
-# Link-time GTS permission catalog (`src/gts/permissions.rs`): declares
-# AuthzPermissionV1 instances into the toolkit-gts inventory the
-# types-registry aggregates at boot.
+# Link-time GTS content: the permission catalog (`src/gts/permissions.rs`)
+# declares AuthzPermissionV1 instances, and `src/gts/authz_types.rs` declares
+# the stub `#[gts_type_schema]` types for this gear's authz labels, into the
+# toolkit-gts inventory the types-registry aggregates at boot.
 toolkit-gts = { workspace = true }
+# The runtime JSON-Schema reflection backend `#[gts_type_schema]` generates
+# code against (`src/gts/authz_types.rs`). Same pairing account-management-sdk
+# and qa-product-sdk's Cargo.toml carry alongside `toolkit-gts`.
+schemars = { workspace = true }
 
 serde-saphyr = { workspace = true }
 regex = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
-sha2 = { workspace = true }
+# SHA-256, HMAC-SHA256 and HKDF through the FIPS-validated provider the
+# platform installs at bootstrap, rather than the `sha2` crate Dylint's DE0708
+# bans -- see `domain::service::bundles::sha256_hex` (the bundle checksum),
+# `derive_signing_key`/`sign_download` (the anonymous download route's access
+# control) and `infra::git::layout`.
+aws-lc-rs = { workspace = true }
+# The wire encoding of the bundle-download HMAC tag: `hex::encode` /
+# `hex::decode` over the `sig` query parameter.
+hex = { workspace = true }
 credstore-sdk = { workspace = true }
 gix = { workspace = true }
 # Runtime (not dev-only) use: `list_remote_branches` builds its scratch

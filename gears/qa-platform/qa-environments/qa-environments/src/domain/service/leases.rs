@@ -58,6 +58,16 @@ impl<L: LeasesRepository, P: EnvironmentsRepository> LeasesService<L, P> {
 impl<L: LeasesRepository, P: EnvironmentsRepository> LeasesService<L, P> {
     /// Attempt to acquire a lease on `environment_id` for `run_id` in `mode`.
     ///
+    /// On success the outcome carries `became_free_at` — the instant the
+    /// environment transitioned to free, when this acquisition is the one that
+    /// took it out of `Free`. That is the start endpoint of
+    /// `cpt-cf-qa-nfr-dispatch-latency`, and handing it back here is what makes
+    /// the requirement measurable at all: the free transition happens in this
+    /// gear and the run starts in qa-runs, so the pairing has to cross the
+    /// boundary with the acquisition that joins the two. It survives a
+    /// control-plane restart because it is read from the lease row, not from
+    /// anything this process remembers.
+    ///
     /// Unavailability (`Environment::available == false`) blocks only
     /// *new* acquisitions — it never evicts existing holders. An environment can
     /// be flipped unavailable while runs are actively holding it; those runs
@@ -109,7 +119,12 @@ impl<L: LeasesRepository, P: EnvironmentsRepository> LeasesService<L, P> {
 
         for _ in 0..CAS_MAX_RETRIES {
             let current = self.repo.get(&conn, &scope, environment_id).await?;
-            let (outcome, new_state) = decide_acquire(&current.state, run_id, mode);
+            // `current.freed_at` is the stored instant this environment last
+            // became free. It is handed to the decision rather than to the
+            // caller because only the decision knows whether *this*
+            // acquisition is the one that consumed it — see `decide_acquire`.
+            let (outcome, new_state) =
+                decide_acquire(&current.state, current.freed_at, run_id, mode);
 
             if matches!(outcome, AcquireOutcome::Busy { .. }) {
                 // No write needed: the environment is occupied in a conflicting mode.

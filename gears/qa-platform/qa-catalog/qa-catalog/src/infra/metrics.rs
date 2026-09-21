@@ -66,8 +66,12 @@ use std::time::Duration;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 
-use crate::domain::metrics::{QA_CATALOG_PLUGIN_RESOLUTION, QA_CATALOG_PLUGIN_RESOLUTION_DURATION};
-use crate::domain::ports::metrics::{PluginResolutionMetrics, PluginResolutionOutcome};
+use crate::domain::metrics::{
+    QA_CATALOG_BUNDLE_DOWNLOAD, QA_CATALOG_PLUGIN_RESOLUTION, QA_CATALOG_PLUGIN_RESOLUTION_DURATION,
+};
+use crate::domain::ports::metrics::{
+    BundleDownloadMetrics, BundleDownloadOutcome, PluginResolutionMetrics, PluginResolutionOutcome,
+};
 
 /// The `outcome` label key, carried by both families so that a rate and a
 /// quantile are two queries over one partition.
@@ -121,6 +125,7 @@ const SCOPE: &str = "qa-catalog";
 pub struct QaCatalogMetricsMeter {
     resolution: Counter<u64>,
     resolution_duration: Histogram<f64>,
+    bundle_download: Counter<u64>,
 }
 
 impl QaCatalogMetricsMeter {
@@ -146,6 +151,13 @@ impl QaCatalogMetricsMeter {
                 )
                 .with_boundaries(DURATION_BUCKETS.to_vec())
                 .build(),
+            bundle_download: meter
+                .u64_counter(QA_CATALOG_BUNDLE_DOWNLOAD)
+                .with_description(
+                    "Signed bundle downloads, by how the request ended \
+                     (served / secret_unconfigured / signature_malformed / signature_invalid)",
+                )
+                .build(),
         }
     }
 }
@@ -156,6 +168,13 @@ impl PluginResolutionMetrics for QaCatalogMetricsMeter {
         self.resolution.add(1, &labels);
         self.resolution_duration
             .record(duration.as_secs_f64(), &labels);
+    }
+}
+
+impl BundleDownloadMetrics for QaCatalogMetricsMeter {
+    fn bundle_download(&self, outcome: BundleDownloadOutcome) {
+        self.bundle_download
+            .add(1, &[KeyValue::new(OUTCOME, outcome.as_str())]);
     }
 }
 

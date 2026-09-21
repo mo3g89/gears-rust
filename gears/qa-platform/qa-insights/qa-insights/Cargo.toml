@@ -89,6 +89,12 @@ integration = ["dep:testcontainers", "dep:testcontainers-modules"]
 # one path").
 authz-resolver = { workspace = true }
 cluster = { workspace = true }
+# The SMTP follow-up: `infra::notify::mail_smtp` resolves the relay password
+# through `credstore_sdk::CredStoreClientV1`, which `gear::init` gets from
+# `ClientHub` -- so credstore has to be initialised before this gear, exactly
+# like the five tokens around it. qa-catalog carries the identical pair
+# (`deps = [authz_resolver, credstore]` plus this entry) for the same reason.
+credstore = { workspace = true }
 oagw = { workspace = true }
 # Intra-subsystem siblings go by relative path, matching qa-runs' own
 # `qa-catalog-sdk = { path = "../../qa-catalog/qa-catalog-sdk" }` — neither has
@@ -126,6 +132,14 @@ cluster-sdk = { workspace = true }
 # in `domain::error`.
 authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", path = "../../../system/authz-resolver/authz-resolver-sdk" }
 
+# The SMTP follow-up: `CredStoreClientV1`, `SecretRef` and `SecretValue`, behind
+# the `MailClient` adapter that dials a relay. `slack_oagw`'s "Finding B" named
+# the absence of this dependency as one of the two things that would have to
+# change before a notification credential could be resolved in this gear at all;
+# SMTP is the case where the other candidate (an oagw capability) cannot apply,
+# because oagw speaks HTTP and SMTP is not HTTP.
+credstore-sdk = { workspace = true }
+
 # ---------------------------------------------------------------------------
 # Everything else, and nothing else
 # ---------------------------------------------------------------------------
@@ -140,6 +154,11 @@ axum = { workspace = true }
 # Task 16: `StatusCode` in the `OperationBuilder` response declarations, which
 # every sibling gear also imports directly rather than through the prelude.
 http = { workspace = true }
+# The SMTP follow-up: `infra::notify::mail_smtp`'s transport, message builder and
+# `Credentials`. The workspace entry carries the whole feature argument --
+# read it there before changing this line, because the difference between
+# `tokio1-rustls` and `tokio1-rustls-tls` is one `ring` in the FIPS graph.
+lettre = { workspace = true }
 # Task 30's fix round: `hmac::sign`/`hmac::verify` over the collect-callback's
 # `(repo_id, branch, tenant_id)` triple, so a caller cannot forge which tenant
 # an exact-case-count report is written under (the cross-tenant write Critical
@@ -204,10 +223,15 @@ time = { workspace = true }
 # C's final review, since Cargo unifies features across dependency kinds when
 # building tests and a second line bought nothing but a second place to edit.
 tokio = { workspace = true }
-# Link-time GTS permission catalog (`src/gts/permissions.rs`): declares
-# AuthzPermissionV1 instances into the toolkit-gts inventory the
-# types-registry aggregates at boot.
+# Link-time GTS content: the permission catalog (`src/gts/permissions.rs`)
+# declares AuthzPermissionV1 instances, and `src/gts/authz_types.rs` declares
+# the stub `#[gts_type_schema]` types for this gear's authz labels, into the
+# toolkit-gts inventory the types-registry aggregates at boot.
 toolkit-gts = { workspace = true }
+# The runtime JSON-Schema reflection backend `#[gts_type_schema]` generates
+# code against (`src/gts/authz_types.rs`). Same pairing account-management-sdk
+# and qa-product-sdk's Cargo.toml carry alongside `toolkit-gts`.
+schemars = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
@@ -421,6 +445,16 @@ testcontainers-modules = { workspace = true, optional = true }
 # `tower` — and the same crate `axum` already builds on, so it adds no new
 # dependency tree.
 tower = { workspace = true }
+# The SMTP follow-up's mock relay (`infra::notify::mail_smtp_tests`): the
+# `test-util` feature is what makes `credstore_sdk::test_util::MockCredStoreClient`
+# exist, and it is declared here rather than relied on from qa-catalog's
+# identical entry -- Cargo unifies features across a workspace build, but
+# `cargo hack --each-feature` builds this package alone, where it would not.
+credstore-sdk = { workspace = true, features = ["test-util"] }
+# The mock relay's shared transcript. `parking_lot` rather than `std::sync`, per
+# `guidelines/DEPENDENCIES.md`; the critical section is a `Vec::push` with no
+# `.await` in it, which is that guideline's own case for the synchronous lock.
+parking_lot = { workspace = true }
 # Task 38 of the observability plan: `InMemoryMetricExporter` and
 # `SdkMeterProvider`, which `infra::metrics::probe` builds a private pipeline
 # out of so an adapter test can read back the series a dashboard would query.

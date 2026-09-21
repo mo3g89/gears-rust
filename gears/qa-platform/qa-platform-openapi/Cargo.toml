@@ -1,0 +1,24 @@
+[package]
+name = "qa-platform-openapi"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# The four gears whose routes make up the `/qa/v1` surface. Nothing else is
+# needed: the generator registers route *definitions*, never services, so it
+# links no database driver, no Argo adapter and no plugin.
+[dependencies]
+qa-catalog = { path = "../qa-catalog/qa-catalog" }
+qa-environments = { path = "../qa-environments/qa-environments" }
+qa-insights = { path = "../qa-insights/qa-insights" }
+qa-runs = { path = "../qa-runs/qa-runs" }
+
+toolkit = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+serde_json = { workspace = true }

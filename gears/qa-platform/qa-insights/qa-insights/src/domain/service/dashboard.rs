@@ -1439,7 +1439,15 @@ fn flaky_card(group: FlakyGroup) -> FlakyTestCard {
 /// counters and a reader needs their order — `passed`, `failed`, `total`, exactly
 /// as legacy's `agg` tuple orders them (`manager/src/routes/dashboard.rs:509`,
 /// `:521-523`).
-type VectorAccumulator<'a> = (u64, u64, u64, BTreeSet<&'a str>);
+type VectorAccumulator<'a> = (u64, u64, u64, BTreeSet<(Uuid, &'a str)>);
+
+/// `repo_id -> normalized file -> folded vector -> display spelling`, the join
+/// table [`quality_vector_pass_rates`] builds over the universe.
+///
+/// A named alias for the same reason [`VectorAccumulator`] is one:
+/// `clippy::type_complexity` denies the three-deep map inline. Nested rather
+/// than a `(Uuid, &str)` tuple key — see the comment where it is built.
+type FilesByRepo<'a> = BTreeMap<Uuid, BTreeMap<&'a str, BTreeMap<String, &'a str>>>;
 
 /// Legacy's quality-vector pass rate — the **join** half of
 /// `DashboardStats::quality_vectors_pass_rate`.
@@ -1514,15 +1522,34 @@ fn quality_vector_pass_rates(
     counts: &[FileStatusCount],
     universe: &[UniverseTest],
 ) -> Vec<QualityVectorPassRate> {
-    // `normalized file -> folded vector -> display spelling`, which is legacy's
-    // `build_quality_vectors_by_file` (`analytics.rs:2016-2068`) over the
-    // catalog's projection instead of over the disk. Re-keyed on the file rather
-    // than iterating `universe`, because a file listed by two plans is two
-    // universe entries and one vector test —
+    // `repo_id -> normalized file -> folded vector -> display spelling`, which
+    // is legacy's `build_quality_vectors_by_file` (`analytics.rs:2016-2068`)
+    // over the catalog's projection instead of over the disk. Re-keyed on the
+    // file rather than iterating `universe`, because a file listed by two
+    // plans **within one repo** is two universe entries and one vector test —
     // `a_file_in_two_universe_entries_is_one_vector_test`.
-    let mut by_file: BTreeMap<&str, BTreeMap<String, &str>> = BTreeMap::new();
+    //
+    // `repo_id` is the outer key — a fix-round-2 correction. Two repositories
+    // can share a `test_file`, and a bare-path key merged their buckets, so
+    // one repo's untagged file inherited the other's `quality_vectors` and the
+    // counted rows below folded both repositories' outcomes into the same
+    // vector — `a_cross_repo_path_collision_does_not_mix_vector_pass_rates`.
+    // It is a separate map level rather than a `(repo_id, &str)` tuple key:
+    // the join below constructs its lookup key from a normalized `String`
+    // local, and a tuple key would force that local's borrow to outlive the
+    // function, which does not typecheck; nesting keeps the inner map's
+    // key exactly `&str`, matched by the same `Borrow<str>` lookup the
+    // pre-existing code already relied on.
+    // `plan_path` is deliberately still absent: it plays no part in the
+    // cross-repository collision, and adding it would split the same-repo,
+    // two-plan case the comment above exists to keep collapsed.
+    let mut by_file: FilesByRepo<'_> = BTreeMap::new();
     for test in universe {
-        let bucket = by_file.entry(test.test_file.as_str()).or_default();
+        let bucket = by_file
+            .entry(test.repo_id)
+            .or_default()
+            .entry(test.test_file.as_str())
+            .or_default();
         for vector in &test.quality_vectors {
             let trimmed = vector.trim();
             if trimmed.is_empty() {
@@ -1539,12 +1566,35 @@ fn quality_vector_pass_rates(
     // oversight: legacy's `agg.entry(vector.clone())` (`:520`).
     let mut agg: BTreeMap<&str, VectorAccumulator<'_>> = BTreeMap::new();
     for count in counts {
+        // Skips every row with no `repo_id` — fix-round-3's second correction,
+        // and a rendered-number change, not a tautology. `count.repo_id` is
+        // `None` iff the run's target was `RunTarget::CustomPlan`
+        // (`plan_identity`, `ingest.rs:597-604`, returns `(None, None)`
+        // together), so before this a `CustomPlan` run's rows *did* join here:
+        // `normalize_test_path(&count.test_file)` still matches a universe
+        // path, and whichever repository happened to declare that path
+        // absorbed the run's counters into its vectors, joined by bare path
+        // alone. That is exactly the collision
+        // `a_cross_repo_path_collision_does_not_mix_vector_pass_rates` exists
+        // to rule out elsewhere in this fold, so it is closed here too rather
+        // than left as this one join's exception. It also brings this fold in
+        // line with the overview's: [`ResultsRepository::file_status_counts`]'s
+        // `universe_condition` filters on `(repo_id, plan_path)` pairs
+        // (`results_sea_repo.rs:397-411`), which a `CustomPlan` run likewise
+        // never has one of. A row without a `repo_id` now contributes to
+        // nothing, the same as a row whose file the universe does not know.
+        let Some(repo_id) = count.repo_id else {
+            continue;
+        };
+        let Some(by_repo) = by_file.get(&repo_id) else {
+            continue;
+        };
         let normalized = normalize_test_path(&count.test_file);
         // `get_key_value` rather than `get`: both the vector spellings and the
         // file inserted into the distinct-file set have to outlive `normalized`,
         // which is a local. Same string either way — the lookup succeeded on
         // equality — so this is a lifetime move and not a semantic one.
-        let Some((file, vectors)) = by_file.get_key_value(normalized.as_str()) else {
+        let Some((file, vectors)) = by_repo.get_key_value(normalized.as_str()) else {
             continue;
         };
         for display in vectors.values() {
@@ -1554,7 +1604,15 @@ fn quality_vector_pass_rates(
             entry.2 += count.total;
             // The *file*, not the row: two stored spellings of one path are one
             // `tests` — `the_stored_path_is_normalized_before_it_is_matched`.
-            entry.3.insert(*file);
+            // Keyed on `(repo_id, file)`, not just `file`: two repositories can
+            // share a path, and each is its own distinct file. A bare-path key
+            // here would re-collapse the two repositories that `by_file`'s own
+            // `(repo_id, file)` nesting above keeps apart, undoing that fix for
+            // this one field while `passed`/`failed`/`total` stayed correct —
+            // `two_repositories_sharing_a_test_file_and_vector_are_two_tests`,
+            // which the analytics overview's `build_quality_vector_summary`
+            // agrees with over the same universe (`aggregates.rs:1721`).
+            entry.3.insert((repo_id, *file));
         }
     }
 

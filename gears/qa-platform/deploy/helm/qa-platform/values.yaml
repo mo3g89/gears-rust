@@ -1,7 +1,7 @@
 # THE ONE KNOB THAT RE-POINTS THE WHOLE LOGIN CHAIN. Keycloak's KC_HOSTNAME, the
 # gears' issuer_pattern, the realm's redirectUris/webOrigins, the UI bundle's
 # baked-in VITE_OIDC_ISSUER and the certificate's SAN all derive from this, and
-# deploy/helm/tests/test_pins.py fails if any of them stops doing so.
+# deploy/helm/tests/check_pins.py fails if any of them stops doing so.
 #
 # REQUIRED, AND DELIBERATELY EMPTY. This carried one particular development
 # cluster's address as its default, which made `helm install` against any other
@@ -39,7 +39,101 @@ clusterDns: ""
 
 argo:
   namespace: argo
-  workflowServiceAccount: argo-workflow
+  # THE KUBERNETES API SERVER'S IN-CLUSTER ADDRESS -- what
+  #   kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'
+  # prints ON THIS CLUSTER, not a value any chart can know generically (same
+  # shape of problem as `clusterDns` above, and the same reason: it is
+  # conventionally the first address in the cluster's Service CIDR, and that
+  # CIDR is chosen per cluster -- k3s defaults to 10.43.0.0/16, kubeadm to
+  # 10.96.0.0/12, and a managed cluster (EKS/GKE/AKS) picks its own).
+  #
+  # runner-networkpolicy.yaml's default-deny egress needs this address
+  # explicitly: it is a ClusterIP, not a pod, so it cannot be reached the way
+  # the DNS and gears rules are (a podSelector/namespaceSelector matches
+  # pods; the "kubernetes" Service's endpoints are the control plane's own
+  # address, which is never a labelled pod) -- only a literal ipBlock does,
+  # and this is that literal.
+  #
+  # WHY THIS MATTERS MORE THAN A TYPICAL MISCONFIGURED DEFAULT: Argo's own
+  # executor (the workflow pod's `wait` container, not `main`) authenticates
+  # to exactly this address to write the pod's `workflowtaskresults` object
+  # -- see `workflow_service_account`'s own doc in qa-runs' config.rs
+  # (config.rs:440-449) for the measurement this echoes. If this value is
+  # wrong for the cluster it is deployed to -- left at the default below on
+  # a cluster whose service CIDR differs, or simply mistyped -- the packet
+  # never leaves the pod, and the failure is the least debuggable shape
+  # there is: the run executes to completion, produces all of its output
+  # exactly as if nothing were wrong, and only THEN fails at the very last
+  # step with exit code 64, `workflowtaskresults.argoproj.io is forbidden`
+  # -- a message that names an RBAC symptom, not the network policy that is
+  # the actual cause. Two earlier tasks in this workstream already broke
+  # this same reporting path once each (an unmounted ServiceAccount token,
+  # then an account with no RBAC); a wrong address here breaks it a third
+  # way, through the one layer underneath both of those.
+  #
+  # DEFAULTS TO 10.43.0.1 -- k3s' conventional first address in its default
+  # 10.43.0.0/16 service CIDR, the same convention `clusterDns` above quotes
+  # (10.43.0.10, that CIDR's kube-dns address) and this comment's own second
+  # paragraph names again. A default kubeadm cluster's equivalent is
+  # 10.96.0.1 (10.96.0.0/12), the same pairing `clusterDns` gives for its
+  # own address (10.96.0.10). Any cluster that is not running k3s with its
+  # default service CIDR -- a kubeadm cluster, a reconfigured k3s cluster, a
+  # managed cluster (EKS/GKE/AKS) with its own CIDR -- MUST override this:
+  #
+  #   --set argo.apiServerClusterIP="$(kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}')"
+  apiServerClusterIP: "10.43.0.1"
+  # THE CLUSTER'S OWN POD AND SERVICE CIDRS -- fix round 6. Not a
+  # deployment-specific address the way `apiServerClusterIP` is a single IP;
+  # these are the two RANGES `runner-networkpolicy.yaml`'s egress superset
+  # (rule 3) excludes, so that reaching a PRIVATE target environment -- VHI
+  # and VHP are on-premises products, and a QA platform that cannot reach a
+  # private-network target cannot test them -- does not also reopen the
+  # cluster's own pods and Services, which is the actual finding this task
+  # closes (the gears' API, Postgres, Keycloak, another tenant's pod).
+  # Excluding ALL of RFC1918 (this task's first cut) was wrong: those four
+  # things live in two specific CIDRs, not in every private range that
+  # exists, and the wider exclusion silently made every on-prem target
+  # environment unreachable too -- a pod carrying the isolation label could
+  # reach an arbitrary public address but not a private one this platform
+  # exists to test against, measured directly rather than assumed.
+  #
+  # DEFAULT TO k3s' OWN DEFAULT RANGES -- `10.42.0.0/16` (pods) and
+  # `10.43.0.0/16` (Services, the same CIDR `apiServerClusterIP` and
+  # `clusterDns` above already name), because this chart is developed and
+  # measured against k3s. A default kubeadm cluster's equivalents are
+  # `10.244.0.0/16` (pods, via its default CNI) and `10.96.0.0/12`
+  # (Services, the same pairing `apiServerClusterIP` gives). Any cluster
+  # that is not running k3s with its default ranges -- a kubeadm cluster, a
+  # reconfigured k3s cluster, a managed cluster (EKS/GKE/AKS) with its own
+  # CIDRs -- MUST override both:
+  #
+  #   --set argo.podCidr="$(kubectl cluster-info dump | grep -m1 -- '--cluster-cidr' | sed -E 's/.*--cluster-cidr=([^\"]+).*/\1/')" \
+  #   --set argo.serviceCidr="$(kubectl cluster-info dump | grep -m1 -- '--service-cluster-ip-range' | sed -E 's/.*--service-cluster-ip-range=([^\"]+).*/\1/')"
+  #
+  # Left wrong for the cluster it deploys to, the failure is silent in the
+  # SAFE direction for the cluster (an overly narrow exclusion still blocks
+  # too much of the cluster's own network, not too little) but WRONG in the
+  # direction that matters for this fix: a target environment inside the
+  # cluster's real ranges but outside these two defaults stays unreachable,
+  # which looks identical to the failure this round exists to close.
+  podCidr: "10.42.0.0/16"
+  serviceCidr: "10.43.0.0/16"
+  # The runner pod's declared identity -- argo-runner-serviceaccount.yaml
+  # provisions this account itself, in `namespace` above, and
+  # rbac-argo-runner.yaml binds it to a Role carrying exactly `create` and
+  # `patch` on `workflowtaskresults.argoproj.io` -- the two verbs a live
+  # cluster's own argo-workflows-installed executor Role carries for the
+  # identical resource, and the minimum Argo's `wait` container needs to
+  # report a run's result at all. It used to name `argo-workflow`, an account
+  # this chart never created and merely assumed some separate
+  # `argo-workflows` Helm release had (`workflow.serviceAccount.create=true`)
+  # -- a deployment without that second release got a runner pod running as
+  # the namespace `default` account instead, silently. qa-runs' own executor
+  # now refuses to construct at all against an unset or blank name here (see
+  # `ArgoExecutorConfig::workflow_service_account`'s doc), so changing this
+  # away from what argo-runner-serviceaccount.yaml actually creates is a boot
+  # failure, not a quiet privilege change.
+  workflowServiceAccount: qa-platform-runner
   # qa-runs' ArgoExecutorConfig fields the Argo fragment ConfigMap renders,
   # restated here so the chart has one source for them rather than a second
   # copy baked into the template. kubeconfig_path is deliberately NOT one of
@@ -55,24 +149,48 @@ argo:
   # no operator override -- a deployment whose pods legitimately go quieter
   # than 600s needs to raise this, not just live with the shipped number.
   logFollowIdleSeconds: 600
-  # Must equal the Secret `workflow-oidc-secret.yaml` creates in `namespace`
-  # above, which is what carries the workflow pod's bundle-download credential
-  # -- the adapter only ever emits a secretKeyRef naming these, it never reads
-  # the value.
-  workflowSecretName: qa-platform-workflow-oidc
-  workflowSecretKey: client_secret
-  workflowClientId: qa-platform-workflow
-  # The confidential client secret a workflow pod authenticates with. Written
-  # into the realm AND into the Secret in `namespace` above, from this one
-  # value, so the two cannot drift. A dev literal by default -- override it on
-  # any deployment a stranger can reach:
+  # NO RUNNER-POD CREDENTIAL HERE ANY MORE. `workflowSecretName`,
+  # `workflowSecretKey`, `workflowClientId` and `createWorkflowSecret` are
+  # deleted, together with the `workflow-oidc-secret.yaml` template that turned
+  # them into a Kubernetes Secret in Argo's namespace and the `bundle_auth`
+  # block in gears-argo-configmaps.yaml that pointed the adapter at it.
+  #
+  # WHY. That Secret carried the confidential secret of the
+  # `qa-platform-workflow` client -- fullScopeAllowed, with a tenant_id claim
+  # hardcoded to seedTenantId -- into the environment of every runner pod, and a
+  # runner pod's whole job is to execute TENANT-AUTHORED pytest. That code could
+  # read the variable, mint a token and call every authenticated route in all
+  # four gears; the runner NetworkPolicy could not prevent it, because it had to
+  # allow-list both Keycloak and the gears API for the exchange to work at all.
+  # The hardcoded claim was also a live bug: every tenant but the seeded one got
+  # a 404 on its own bundles.
+  #
+  # WHAT REPLACES IT. qa-catalog's download route is anonymous and authorised by
+  # a per-bundle HMAC tag it mints at build time and qa-runs renders into
+  # TEST_BUNDLE_URL's `?sig=`. The root secret is
+  # `qa-catalog.bundle_download_signing_secret` -- see `bundleDownloadSigningSecret`
+  # near `collectReportSigningSecret` below, which is the same category of value
+  # for the same reason. Egress rule 5 (Keycloak) is gone from
+  # runner-networkpolicy.yaml with it.
+  #
+  # `workflowClientSecret` BELOW SURVIVES, and only the realm reads it. See its
+  # own comment.
+  # The `qa-platform-workflow` client's secret in the realm fixture.
+  #
+  # NO LONGER REACHES A RUNNER POD. The Secret in Argo's namespace is gone (see
+  # above) and nothing in qa-runs emits a reference to it. What still uses this
+  # client is `deploy/remote/verify-k8s.sh` check 16, which needs SOME
+  # non-browser token to prove the product-plugin catalogue is non-empty on a
+  # stand, and the realm's only other client (qa-platform-ui) has
+  # directAccessGrantsEnabled off on purpose. It is therefore a
+  # deployment-verification credential that lives in the realm and in this
+  # chart, not a credential handed to code the platform does not own.
+  #
+  # A dev literal by default -- override it on any deployment a stranger can
+  # reach:
   #
   #   --set argo.workflowClientSecret="$(openssl rand -hex 24)"
   workflowClientSecret: qa-platform-workflow-dev-secret
-  # Whether to create that Secret in Argo's namespace. Turn it off when that
-  # namespace does not exist yet or is managed elsewhere: the gears still
-  # start, and only run submission needs it.
-  createWorkflowSecret: true
 
 # qa-runs' own gear config -- `QaRunsConfig`, not `ArgoExecutorConfig`. Rendered
 # into the SAME fragment as the `argo:` block above (see
@@ -80,7 +198,7 @@ argo:
 # this chart has into `gears.qa-runs.config` and this chart always inserts it:
 # gears/qa-platform/config/qa-platform-stack.yaml is embedded VERBATIM by
 # gears-config-configmap.yaml (`.Files.Get`, one transform, byte-pinned by
-# tests/test_chart_file_sync.py), so a key that is not in that committed file
+# tests/check_chart_file_sync.py), so a key that is not in that committed file
 # cannot be templated into it.
 #
 # `${VAR:-default}` in the committed file is NOT an alternative here, and this
@@ -157,6 +275,15 @@ postgres:
 gears:
   replicaCount: 1
   port: 8087
+  # The Prometheus scrape port, and NOT a second way in: `port` above is the
+  # api-gateway's, ingress-routed and auth-guarded; this one serves exactly one
+  # route (`/metrics`), answers no tenant data, and is published only on the
+  # ClusterIP Service. 9464 is the OpenTelemetry project's conventional
+  # Prometheus exporter port. Changing it here changes the containerPort, the
+  # Service port, the pod's `prometheus.io/port` annotation AND the `bind_addr`
+  # inside the gears' own config -- gears-config-configmap.yaml rewrites the
+  # last of those from this value, so the four cannot drift apart.
+  metricsPort: 9464
   logLevel: info
   persistence:
     size: 20Gi
@@ -171,16 +298,31 @@ ui:
     http: 80
     https: 443
 
+# THROWAWAY-STAND ESCAPE HATCH, and nothing else. Default false. Setting it
+# true is what lets keycloak.adminPassword stay at the fixture value "admin"
+# (keycloak-deployment.yaml otherwise refuses to render, citing this value) --
+# it does not relax any other guard in this chart. Set it only on a stand you
+# are prepared to lose, never on anything with a real user in it.
+devMode: false
+
 keycloak:
   # Keycloak runs at its DEFAULT root path. Do not add KC_HTTP_RELATIVE_PATH:
   # entrypoint.sh:137 refuses to start on a PUBLIC_ISSUER_ORIGIN carrying a path,
   # and the SPA already owns /auth/callback. See ui.keycloakPrefixes.
   adminUser: admin
-  adminPassword: admin
+  # REQUIRED, AND DELIBERATELY EMPTY -- see publicOrigin's comment above for
+  # why a chart ships with no default rather than a fixture value: "admin" as
+  # a committed default meant every install nobody thought to override got the
+  # master realm's admin console behind a password that is also its username.
+  # keycloak-deployment.yaml's `required` now refuses to render without this
+  # set, and separately refuses the literal value "admin" unless devMode=true.
+  #
+  #   --set keycloak.adminPassword="$(openssl rand -base64 24)"
+  adminPassword: ""
 
 # AN OVERRIDE, NOT AN INPUT. Empty means "use the realm this chart carries"
 # (`files/keycloak/realm-qa-platform.json`), rendered by
-# `keycloak-realm-configmap.yaml` for this release's publicOrigin, seedTenantId
+# `keycloak-realm-secret.yaml` for this release's publicOrigin, seedTenantId
 # and argo.workflowClientSecret. Set it -- `--set-file keycloakRealmJson=...` --
 # only to import a realm this chart did not build.
 #
@@ -198,33 +340,153 @@ keycloakRealmJson: ""
 # than 16 characters -- which is the state every deployment was in until
 # 2026-09-03, and half the reason `qa_test_case_collect` was empty.
 #
-# EMPTY IS SAFE HERE, unlike publicOrigin. gears-config-configmap.yaml
-# substitutes a per-render `randAlphaNum 32` for the committed dev literal, and
-# a rotating value cannot break a signature: the URL is signed and the report
-# verified by the same running gears process. Set it to keep the key stable
-# across upgrades (auditable, and identical in `helm template` output):
+# REQUIRED, AND DELIBERATELY EMPTY, exactly like keycloak.adminPassword above.
+# gears-config-configmap.yaml's `required` refuses to render without it.
+#
+# EMPTY USED TO BE "SAFE", and that sentence stood here until 2026-09-21. The
+# template substituted a per-render `randAlphaNum 32` for the committed dev
+# literal, argued safe because the URL is signed and the report verified by the
+# same running gears process. Two things changed. gears-deployment.yaml now
+# hashes the ConfigMap into a pod annotation, so a re-render rolls the pod --
+# which means a random in there would give every `helm upgrade`, even a no-op
+# one, a fresh key and a Recreate outage. And a random is not auditable: the
+# operator cannot answer "what key is this stand signing with" from anything
+# they typed.
 #
 #   --set collectReportSigningSecret="$(openssl rand -hex 24)"
+#
+# ON AN EXISTING RELEASE THAT NEVER SET IT -- which is every release installed
+# before this change -- the next `helm upgrade` FAILS, naming this value, and
+# changes nothing in the cluster. That is the intended outcome: the alternative
+# is rotating a live signing key silently. Generate one, pass it, and the
+# upgrade proceeds; any collect job already in flight with the old key fails
+# loudly on its report (403), which it would have done under the random
+# fallback too, just without anyone having chosen it.
 collectReportSigningSecret: ""
+
+# THE ONLY ACCESS CONTROL ON THE TEST-BUNDLE DOWNLOAD ROUTE, and so a real
+# secret. `GET /qa/v1/test-bundles/{id}` is registered `.anonymous().exposed()`
+# because its caller is an Argo runner pod with no user to borrow a session
+# from; the `sig` query parameter qa-catalog signs with this key is what stops
+# anything else on the pod network reading a tenant's test bundles.
+#
+# THIS REPLACED A CREDENTIAL, it did not join one. Before it, the pod carried
+# `argo.workflowClientSecret` and exchanged it for a bearer token -- see the
+# `argo:` block above for what that credential could reach from inside a process
+# tree running tenant-authored pytest, and why removing it was the point.
+#
+# qa-catalog refuses EVERY download, fail-closed, when this is empty or shorter
+# than 16 characters, so a deployment in that state runs no tests at all. The
+# gears log one WARN at boot naming this setting.
+#
+# REQUIRED, AND DELIBERATELY EMPTY, for the reason collectReportSigningSecret
+# above gives at length -- plus the one that is specific to this value and is
+# how the whole thing was found. A bundle is built with the key the gears hold
+# and fetched, up to `bundle_ttl_seconds` later, against whatever key they hold
+# then. Under the old per-render `randAlphaNum 32` fallback, every `helm
+# upgrade` on a stand that had never set this rotated it, and an in-flight
+# workflow's fetch_bundle.py exited 1 with a 403 before running a single test.
+#
+#   --set bundleDownloadSigningSecret="$(openssl rand -hex 24)"
+#
+# ON AN EXISTING RELEASE THAT NEVER SET IT the next `helm upgrade` fails and
+# changes nothing -- see collectReportSigningSecret above for why that is the
+# outcome to want rather than a regression.
+bundleDownloadSigningSecret: ""
+
+# qa-insights' notification settings that belong to the DEPLOYMENT rather than
+# to a tenant.
+qaInsights:
+  # WHETHER THIS DEPLOYMENT MAY SEND EMAIL AT ALL, and to which relays.
+  #
+  # Empty (the default) means no SMTP egress: every email notification fails
+  # with `unsupported_egress`, is audited as such, and the settings page's test
+  # button answers 501 naming the channel. That is deliberate -- before
+  # 2026-09-21 the same situation was reported to the operator as a success and
+  # no mail was ever sent.
+  #
+  # A NON-EMPTY LIST TURNS MAIL ON and is, by itself, the whole egress control.
+  # It is the complete set of hosts the gears pod will open an outbound TCP
+  # connection to on a tenant's behalf; a relay a tenant configures on the
+  # settings page and that is not named here is refused before anything is
+  # dialled.
+  #
+  # THERE IS NO NETWORKPOLICY BEHIND THIS, and that is a decision rather than
+  # an omission. This chart's one NetworkPolicy isolates the RUNNER pod. A
+  # second one selecting the GEARS pod would flip it from "unrestricted" to
+  # "only what this policy lists" -- Kubernetes has no additive-allow for a pod
+  # nothing selects -- and that list would have to include Postgres, Keycloak,
+  # the Argo and Kubernetes APIs, arbitrary git remotes and arbitrary
+  # tenant-supplied management nodes. The last two are not statically
+  # expressible (the runner policy's rule 3 says so of the same problem), so
+  # any such policy permits 0.0.0.0/0 and an SMTP rule inside it narrows
+  # nothing. The relay address is also a per-tenant database column typed in at
+  # runtime, and a NetworkPolicy matches CIDRs and pod labels, never DNS names.
+  # ADR-0011 (docs/ADR/0011-cpt-cf-qa-adr-smtp-egress.md) has the argument.
+  #
+  # Hostnames only -- no CIDRs, no patterns, no wildcard -- matched
+  # case-insensitively against the tenant's `email_smtp_host` as stored.
+  #
+  #   --set qaInsights.smtpAllowedHosts[0]=smtp.corp.example
+  #
+  # THE PASSWORD IS NOT CONFIGURED HERE and never appears in this chart: it is
+  # a credstore reference on the tenant's own notification settings
+  # (`email_smtp_credstore_ref`), resolved by the gear at send time under that
+  # tenant's identity.
+  smtpAllowedHosts: []
 
 # Only consumed when gears.hostAliases.enabled is true (i.e. only if Task 1
 # measured the pod->node hostPort hairpin as broken). deploy-k8s.sh resolves the
 # ui Service's ClusterIP and passes it with --set.
 uiServiceClusterIP: ""
 
-# WHETHER THE 22 METRIC FAMILIES LEAVE THE PROCESS AT ALL, and where they go.
-# The catalog -- series name, type, labels, and what each supports -- is
+# WHETHER THE 22 METRIC FAMILIES LEAVE THE PROCESS AT ALL, and how. The
+# catalog -- series name, type, labels, and what each supports -- is
 # docs/DESIGN.md 3.11.
 #
-# METRICS ARE PUSHED OVER OTLP, NOT SCRAPED, so there is no port to open and no
-# scrape annotation to add: libs/toolkit's `init_metrics_provider` builds an
-# OTLP exporter behind a periodic reader, and nothing in this repository serves
-# a `/metrics` route. `endpoint` is where that reader pushes.
+# TWO INDEPENDENT PATHS OUT. `metrics.enabled` is PUSH (OTLP, at a collector
+# you name); `metrics.scrape.enabled` is PULL (a Prometheus text endpoint the
+# gears pod serves on `gears.metricsPort`). They are two readers on one meter
+# provider in libs/toolkit -- either, both or neither.
 #
-# OFF BY DEFAULT, and off is a working state rather than a broken one: with
-# `enabled: false` the process-global meter provider stays the built-in no-op,
-# every instrument is a no-op, and the gears behave identically. Nothing is
-# observable, and nothing misbehaves.
+# SCRAPE IS ON BY DEFAULT; PUSH IS NOT. Before the scrape endpoint existed a
+# default install of this chart made all 22 families reachable by nothing
+# whatsoever -- push off, no route anywhere in the repository. That is now fixed at the cheap end: scraping needs a socket and
+# no external dependency, so it can be a default, while push needs a collector
+# address a default install cannot know. With push on and nothing listening the
+# periodic reader logs an export failure every interval, forever, which is a
+# worse default than off.
+#
+# WHAT SCRAPE ON GIVES YOU. The gears Deployment declares a `metrics`
+# containerPort, the gears Service publishes it, and the pod template carries
+# `prometheus.io/scrape|port|path`.
+#
+# EXPECT FEWER THAN 22 FAMILIES ON A LIVE SCRAPE. 22 is what the gears DEFINE;
+# an instrument that has never taken a measurement emits no data point, so its
+# family is absent until the path that records it runs. 18 of 22 were present
+# on the dev stand after a default install had served a few requests. That is
+# the endpoint working, not a gap -- docs/DESIGN.md 3.11, "How to reach these
+# numbers", has the full statement.
+#
+# THOSE ANNOTATIONS ARE INERT TODAY, and saying so is more useful than implying
+# a pipeline that does not exist. Measured on the dev stand (2026-09-18): 12
+# CRDs, none under `monitoring.coreos.com`, so there is no ServiceMonitor or
+# PodMonitor kind to create; no pod in any namespace runs Prometheus, Grafana,
+# VictoriaMetrics or an OTel collector; and no pod in the cluster carries a
+# scrape annotation of any kind. There is no existing convention here to copy,
+# so this picks the one every common scraper understands without a CRD
+# (kube-prometheus via additional-scrape-configs, VictoriaMetrics' vmagent,
+# Grafana Agent) -- it costs three lines of YAML and starts working the day
+# something is installed. What makes the endpoint reachable NOW is the Service
+# port, not the annotations:
+# `kubectl -n qa-platform port-forward svc/qa-platform-gears 9464:9464`.
+#
+# Nothing here exposes the port outside the cluster: the gears Service is
+# ClusterIP with no NodePort, and the ingress routes only the http port.
+#
+# TURNING SCRAPE OFF is `--set opentelemetry.metrics.scrape.enabled=false`. Do
+# that and, with push also off, you are back to the all-no-op state: nothing
+# observable, nothing misbehaving.
 #
 # `endpoint` IS REQUIRED WHEN `enabled` IS TRUE -- gears-config-configmap.yaml
 # refuses to render the pair otherwise. The committed config's value is the
@@ -239,3 +501,5 @@ opentelemetry:
   metrics:
     enabled: false
     endpoint: ""
+    scrape:
+      enabled: true

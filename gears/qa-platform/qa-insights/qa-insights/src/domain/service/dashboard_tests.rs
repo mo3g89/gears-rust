@@ -59,6 +59,7 @@ use qa_runs_sdk::{Run, RunState, RunTarget};
 use time::macros::{date, datetime};
 use time::{Duration, OffsetDateTime};
 use toolkit_db::DBProvider;
+use toolkit_gts::GTS_ID_PREFIX;
 use uuid::Uuid;
 
 use super::{
@@ -66,13 +67,15 @@ use super::{
     format_duration, is_active, kpi_of, quality_vector_pass_rates, resolve_days, run_trend_points,
     summarize_runs, window_start,
 };
+use crate::domain::analytics::aggregates::build_quality_vector_summary;
 use crate::domain::error::DomainError;
 use crate::domain::repos::{
     FileStatusCount, FlakyGroup, NewTestResult, ResultsRepository, RunStatusCount, StatusRowCount,
 };
 use crate::domain::service::test_support::{
     CatalogFailure, DEFAULT_BRANCH, DenyAllAuthZ, FakeCatalog, FakeRuns, RecordingAuthZ,
-    ResourceConstrainedAuthZ, TenantScopedAuthZ, ctx, run_in_state, test_repo, ts, universe_test,
+    ResourceConstrainedAuthZ, TenantScopedAuthZ, UNIVERSE_TEST_REPO_ID, ctx, run_in_state,
+    test_repo, ts, universe_test,
 };
 use crate::infra::storage::results_sea_repo::OrmResultsRepository;
 use crate::infra::storage::test_db::{inmem_db, scope};
@@ -644,10 +647,24 @@ fn a_card_with_no_finish_instant_falls_back_to_the_runs_creation_instant() {
 // ---------------------------------------------------------------------------
 
 /// One counted file: `(test_file, passed, failed)`, with `total` derived as the
-/// union the read derives it as.
+/// union the read derives it as, and `repo_id` defaulted to
+/// [`UNIVERSE_TEST_REPO_ID`] — the same repository every `vectored`/`universe_test`
+/// fixture in this file stamps, so an ordinary call still joins.
 fn file_count(test_file: &str, passed: u64, failed: u64) -> FileStatusCount {
+    file_count_for_repo(UNIVERSE_TEST_REPO_ID, test_file, passed, failed)
+}
+
+/// [`file_count`], with the repository named explicitly — for the tests that are
+/// about which repository a counted file belongs to.
+fn file_count_for_repo(
+    repo_id: Uuid,
+    test_file: &str,
+    passed: u64,
+    failed: u64,
+) -> FileStatusCount {
     FileStatusCount {
         test_file: test_file.to_owned(),
+        repo_id: Some(repo_id),
         passed,
         failed,
         total: passed + failed,
@@ -659,6 +676,19 @@ fn vectored(test_file: &str, vectors: &[&str]) -> qa_catalog_sdk::UniverseTest {
     qa_catalog_sdk::UniverseTest {
         quality_vectors: vectors.iter().map(|v| (*v).to_owned()).collect(),
         ..universe_test(test_file)
+    }
+}
+
+/// [`vectored`], with the repository named explicitly — for the tests that are
+/// about a path collision between two repositories.
+fn vectored_for_repo(
+    repo_id: Uuid,
+    test_file: &str,
+    vectors: &[&str],
+) -> qa_catalog_sdk::UniverseTest {
+    qa_catalog_sdk::UniverseTest {
+        repo_id,
+        ..vectored(test_file, vectors)
     }
 }
 
@@ -976,6 +1006,123 @@ fn a_file_in_two_universe_entries_is_one_vector_test() {
             rates[0].tests
         ),
         (2, 1, 3, 1),
+    );
+}
+
+/// **A cross-repository path collision does not let one repo's execution
+/// outcome land on another's vector** — fix-round-2's correction to `by_file`'s
+/// key.
+///
+/// Two repositories each have a `tests/test_smoke.py`: repo A's is tagged
+/// `Security` and passes 3/0; repo B's is untagged (no `quality_vectors` at
+/// all) and fails 0/4. Bare-path keying merges the two universe entries into
+/// one `by_file` bucket — repo B's untagged file inherits repo A's `Security`
+/// tag through the shared key — so *both* counted rows would be folded into
+/// `Security`, reporting `(3, 4, 7)` and silently attributing repo B's four
+/// failures to repo A's vector. Keyed on `(repo_id, test_file)`, repo B's
+/// counted row joins repo B's own empty bucket instead, contributes to no
+/// vector at all, and `Security` reports only repo A's numbers.
+///
+/// This is the same property `quality_vector_pass_rates`'s doc states as
+/// "a counted file the universe does not know is dropped" — repo B's file is
+/// not *unknown* here, it is known and untagged, and the untagged bucket being
+/// empty is what makes the join a no-op for it. Observed red under the
+/// previous `test_file`-only key, which produces the merged `(3, 4, 7)` row.
+#[test]
+fn a_cross_repo_path_collision_does_not_mix_vector_pass_rates() {
+    let repo_a = Uuid::from_u128(0x31);
+    let repo_b = Uuid::from_u128(0x32);
+    let counts = [
+        file_count_for_repo(repo_a, "tests/test_smoke.py", 3, 0),
+        file_count_for_repo(repo_b, "tests/test_smoke.py", 0, 4),
+    ];
+    let universe = [
+        vectored_for_repo(repo_a, "tests/test_smoke.py", &["Security"]),
+        vectored_for_repo(repo_b, "tests/test_smoke.py", &[]),
+    ];
+
+    let rates = quality_vector_pass_rates(&counts, &universe);
+
+    assert_eq!(
+        rates
+            .iter()
+            .map(|item| (
+                item.vector.as_str(),
+                item.passed,
+                item.failed,
+                item.total,
+                item.tests
+            ))
+            .collect::<Vec<_>>(),
+        vec![("Security", 3, 0, 3, 1)],
+        "repo B's failures must not reach Security, and repo B's untagged file \
+         contributes no row of its own — this fold has no unclassified residue: {rates:?}",
+    );
+}
+
+/// **Two repositories that share a `test_file` and both declare the same
+/// vector are two distinct files, not one** — the case
+/// [`a_cross_repo_path_collision_does_not_mix_vector_pass_rates`] does not
+/// reach, because there repo B is untagged and never joins `Security` at all.
+///
+/// Here both repo A's and repo B's `tests/test_smoke.py` declare `Security`,
+/// so both counted rows join it. The counters are keyed on nothing but the
+/// vector and correctly sum both repositories' outcomes (`3+0` passed,
+/// `0+4` failed). `tests` must do the same: it is a distinct-file count, and
+/// there are two distinct files here — repo A's and repo B's — that happen to
+/// share a path. A `tests` fold still keyed on the bare path alone collapses
+/// them into one `BTreeSet<&str>` entry and reports `1`; keyed on
+/// `(repo_id, &str)` it reports `2`.
+///
+/// [`build_quality_vector_summary`] is this fold's sibling over the same
+/// universe, and it counts files-per-vector the same way
+/// (`by_file: BTreeMap<(Uuid, &str), ...>`, `aggregates.rs:1721`). For this
+/// exact universe it reports `2` for `Security` too — the two folds must
+/// agree, because a UI rendering both is presenting one concept, "how many
+/// tests carry this vector", under two names.
+#[test]
+fn two_repositories_sharing_a_test_file_and_vector_are_two_tests() {
+    let repo_a = Uuid::from_u128(0x41);
+    let repo_b = Uuid::from_u128(0x42);
+    let counts = [
+        file_count_for_repo(repo_a, "tests/test_smoke.py", 3, 0),
+        file_count_for_repo(repo_b, "tests/test_smoke.py", 0, 4),
+    ];
+    let universe = [
+        vectored_for_repo(repo_a, "tests/test_smoke.py", &["Security"]),
+        vectored_for_repo(repo_b, "tests/test_smoke.py", &["Security"]),
+    ];
+
+    let rates = quality_vector_pass_rates(&counts, &universe);
+
+    assert_eq!(
+        rates
+            .iter()
+            .map(|item| (
+                item.vector.as_str(),
+                item.passed,
+                item.failed,
+                item.total,
+                item.tests
+            ))
+            .collect::<Vec<_>>(),
+        vec![("Security", 3, 4, 7, 2)],
+        "both repositories' outcomes must sum, and the shared path must count \
+         as two distinct files, not one: {rates:?}",
+    );
+
+    let summary = build_quality_vector_summary(&universe);
+    let security_tests = summary
+        .items
+        .iter()
+        .find(|item| item.vector == "Security")
+        .map(|item| item.tests)
+        .expect("Security must appear in the overview's summary too");
+    assert_eq!(
+        u64::try_from(security_tests).unwrap(),
+        rates[0].tests,
+        "the dashboard's per-vector test count must agree with the overview's \
+         for the same universe - one concept, two renderings",
     );
 }
 
@@ -1584,15 +1731,25 @@ async fn a_product_filter_narrows_the_sql_aggregates_too() {
     fx.catalog.add_repo(test_repo(repo_b, product_b));
 
     // `vectored` keys on the file `seed_for_repo_at` writes: `tests/{name}.py`.
+    // Each entry's `repo_id` is stamped to the repository whose rows actually
+    // carry that file — `vectored`'s default `UNIVERSE_TEST_REPO_ID` would
+    // match neither `repo_a` nor `repo_b`, and the fold now joins on
+    // `(repo_id, test_file)`, not `test_file` alone.
     fx.catalog.add(
         Uuid::new_v4(),
         DEFAULT_BRANCH,
-        vectored("tests/flaky_a.py", &["Security"]),
+        qa_catalog_sdk::UniverseTest {
+            repo_id: repo_a,
+            ..vectored("tests/flaky_a.py", &["Security"])
+        },
     );
     fx.catalog.add(
         Uuid::new_v4(),
         DEFAULT_BRANCH,
-        vectored("tests/flaky_b.py", &["Resilience"]),
+        qa_catalog_sdk::UniverseTest {
+            repo_id: repo_b,
+            ..vectored("tests/flaky_b.py", &["Resilience"])
+        },
     );
 
     let run_a = Uuid::from_u128(0xD1);
@@ -2105,7 +2262,10 @@ async fn the_dashboard_authorizes_under_test_result_list_once() {
 
     assert_eq!(
         authz.asked(),
-        vec![("qa.test_result".to_owned(), "list".to_owned())],
+        vec![(
+            format!("{GTS_ID_PREFIX}cf.qa.insights.test_result.v1~"),
+            "list".to_owned()
+        )],
         "one decision, on the resource the aggregate reads",
     );
 }
@@ -2311,21 +2471,35 @@ async fn the_dashboard_reports_the_seven_day_quality_vector_pass_rates() {
     let plan = "plans/smoke/plan.yaml";
 
     // `seed_named` writes `tests/{name}.py`, which is what the universe entries
-    // below are keyed on.
+    // below are keyed on. Every entry's `repo_id` is `seed_named_at`'s own
+    // `Uuid::from_u128(0xC0)` rather than `vectored`'s default
+    // `UNIVERSE_TEST_REPO_ID` — the fold now joins on `(repo_id, test_file)`, so
+    // the fixture's repository has to be the one the counted rows actually carry,
+    // exactly as `fx.catalog.add`'s first argument (a product id, not this field)
+    // never did.
     fx.catalog.add(
         Uuid::new_v4(),
         DEFAULT_BRANCH,
-        vectored("tests/test_a.py", &["Security", "Resilience"]),
+        qa_catalog_sdk::UniverseTest {
+            repo_id: Uuid::from_u128(0xC0),
+            ..vectored("tests/test_a.py", &["Security", "Resilience"])
+        },
     );
     fx.catalog.add(
         Uuid::new_v4(),
         DEFAULT_BRANCH,
-        vectored("tests/test_b.py", &["Security"]),
+        qa_catalog_sdk::UniverseTest {
+            repo_id: Uuid::from_u128(0xC0),
+            ..vectored("tests/test_b.py", &["Security"])
+        },
     );
     fx.catalog.add(
         Uuid::new_v4(),
         DEFAULT_BRANCH,
-        vectored("tests/test_c.py", &[]),
+        qa_catalog_sdk::UniverseTest {
+            repo_id: Uuid::from_u128(0xC0),
+            ..vectored("tests/test_c.py", &[])
+        },
     );
 
     fx.seed_named(
@@ -2620,7 +2794,10 @@ async fn the_coverage_view_authorizes_under_test_result_list_once() {
 
     assert_eq!(
         authz.asked(),
-        vec![("qa.test_result".to_owned(), "list".to_owned())],
+        vec![(
+            format!("{GTS_ID_PREFIX}cf.qa.insights.test_result.v1~"),
+            "list".to_owned()
+        )],
         "one decision, on the same resource and action as the dashboard",
     );
 }

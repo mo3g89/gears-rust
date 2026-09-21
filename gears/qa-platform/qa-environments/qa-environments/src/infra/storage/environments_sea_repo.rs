@@ -338,7 +338,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         // "unset" reading, so the outer `Some` alone carries the caller's intent.
         // Clearing the product's *previous* default is not done here -- that is a
         // second row, and `EnvironmentsService` owns the rule; see
-        // `m20260831_000009_platform_is_default`.
+        // `m20260831_000009_platform_is_default` (folded into `migrations::m20260812_000001_initial` by the docs squash).
         if let Some(is_default) = patch.is_default {
             am.is_default = ActiveValue::Set(is_default);
         }

@@ -423,10 +423,32 @@ esc_issuer_origin="$(escape_sed_replacement "$(escape_regex_literal "$PUBLIC_ISS
 # QA_RUNS_ARGO_CONFIG produces the exact expression list this script always
 # had. `r`'s filename argument runs to the end of its expression, which is why
 # it cannot share an `-e` with anything.
+#
+# The password does NOT go into an `-e` expression like the other three
+# fields: an `-e` value is part of `sed`'s argv, and argv is world-readable
+# for the life of the process (`/proc/<pid>/cmdline`, and anything shelling
+# out to `ps`) to anyone in this container's PID namespace -- not just this
+# script's own caller. `umask 077` before either file below is created
+# handles the second half of the same leak: without it, RENDERED_CONFIG_FILE
+# -- which carries the password in cleartext once rendered -- would be
+# written at whatever mode the ambient umask allows, group/world-readable on
+# a fair number of base images. Both are reset the moment the render is
+# done: this umask is not this script's general policy, only the render's.
+old_umask="$(umask)"
+umask 077
+password_sed_script="$(mktemp)"
+# mktemp's file is already mode 0600 by construction (not merely by the
+# umask just set), so its own permissions do not depend on this container's
+# base image getting that right; the render's OUTPUT still does, which is
+# what the umask above is for. Only the `password_sed_script`'s PATH goes
+# into sed's argv below -- its contents, including the password, never do.
+trap 'rm -f "$password_sed_script"' EXIT
+printf 's/^      password: "qa"$/      password: "%s"/\n' "$esc_password" > "$password_sed_script"
+
 SED_ARGS=(
     -e "s/^      host: \"localhost\"\$/      host: \"${esc_host}\"/"
     -e "s/^      user: \"qa\"\$/      user: \"${esc_user}\"/"
-    -e "s/^      password: \"qa\"\$/      password: \"${esc_password}\"/"
+    -f "$password_sed_script"
     -e "s|^          - issuer_pattern: \"http://localhost:8180/realms/qa-platform\"\$|          - issuer_pattern: '${esc_issuer_origin}/realms/qa-platform'|"
 )
 if [[ -n "$QA_RUNS_ARGO_CONFIG" ]]; then
@@ -437,6 +459,8 @@ if [[ -n "$QA_ENVIRONMENTS_ARGO_CONFIG" ]]; then
 fi
 
 sed "${SED_ARGS[@]}" "$CONFIG_FILE" > "$RENDERED_CONFIG_FILE"
+rm -f "$password_sed_script"
+umask "$old_umask"
 
 # POST-CONDITION for the insertion, and it is not a restatement of the checks
 # above: those validated the FRAGMENT, this proves the RENDERED file received

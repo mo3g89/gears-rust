@@ -281,11 +281,19 @@ use crate::domain::analytics::{CaseRow, ExecRow, PlanRef};
 /// downstream recomputes them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OverviewSummary {
-    /// `universe.len()` (`:1231`) — **not** a count of distinct files. Legacy
-    /// keys its universe on `(source, repo_id, test_file)` (`:899-903`), so one
-    /// file listed by two plans is two entries and is counted twice, here and in
-    /// every other counter on this struct. Pinned by
-    /// `the_summary_total_is_the_universe_length_so_a_file_in_two_plans_counts_twice`.
+    /// `universe.len()` (`:1231`) — one entry per `(repo_id, test_file)`, not
+    /// per path. **This used to say a file listed by two plans is two entries
+    /// and is counted twice, and that reading was wrong**: qa-catalog's
+    /// `walk_repo_universe` keys its per-repository walk on `test_file` and
+    /// merges a second plan's contribution into the first plan's entry
+    /// (`qa-catalog/src/domain/service/plans.rs`), so a file two plans of the
+    /// **same** repository both list is one universe entry and is counted
+    /// once, here and in every other counter on this struct. Two **different**
+    /// repositories sharing a path are a different case: each keeps its own
+    /// entry, and each is counted, because they are two distinct tests that
+    /// happen to share a name — that is the case
+    /// [`ExecRow::repo_id`](super::ExecRow::repo_id) exists to keep distinct
+    /// through every fold, not a duplicate to collapse.
     pub total: usize,
     /// Universe files whose latest bucket is `PASSED`.
     pub passed: usize,
@@ -334,16 +342,28 @@ pub struct OverviewSummary {
 /// makes the lookup total — legacy spells the default at every call site
 /// (`:1408`, `stats.get(..).cloned().unwrap_or_default()`) and there is only ever
 /// one right answer for a file no row mentions.
+///
+/// **Keyed on `(repo_id, test_file)`, not `test_file` alone** — a fix-round
+/// correction. A product owns several repositories and `(tenant_id,
+/// product_id)` is not a unique index, so two repositories can each hold
+/// `tests/test_smoke.py`; a fold keyed on the path alone would tally both
+/// repositories' rows into one bucket and every list item's `pass_count`,
+/// `fail_count` and `skipped_count` would count one repository's runs against
+/// the other's test. See [`ExecRow::repo_id`](super::ExecRow::repo_id).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StatsMap(HashMap<String, StatusStats>);
+pub struct StatsMap(HashMap<(Uuid, String), StatusStats>);
 
 impl StatsMap {
-    /// The tally for `test_file`, or three zeros if no row mentioned it.
+    /// The tally for `(repo_id, test_file)`, or three zeros if no row
+    /// mentioned it.
     ///
     /// Legacy's `:1408` with the `unwrap_or_default` folded in.
     #[must_use]
-    pub fn get(&self, test_file: &str) -> StatusStats {
-        self.0.get(test_file).copied().unwrap_or_default()
+    pub fn get(&self, repo_id: Uuid, test_file: &str) -> StatusStats {
+        self.0
+            .get(&(repo_id, test_file.to_owned()))
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -434,11 +454,13 @@ pub struct CaseData {
     pub skipped: usize,
     pub xfail: usize,
     pub xpass: usize,
-    /// The per-file signal, keyed on the resolved `test_file`, and present
+    /// The per-file signal, keyed on `(repo_id, test_file)` — a fix-round
+    /// correction from the resolved `test_file` alone, for the same
+    /// cross-repository reason [`StatsMap`] carries the pair — and present
     /// **only** for a file whose latest run actually reported cases (`:1369`).
     /// A file that took the fallback arm has no entry, which is why a list item's
     /// `case_status` stays `None` rather than echoing its file-level status.
-    pub by_file: HashMap<String, CaseFileSignal>,
+    pub by_file: HashMap<(Uuid, String), CaseFileSignal>,
 }
 
 impl CaseData {
@@ -585,9 +607,14 @@ pub fn pct(value: f64, total: f64) -> f64 {
 
 /// The per-file pass/fail/other tallies across every row in scope.
 ///
-/// `build_stats_map` (`analytics.rs:1212-1225`) verbatim. Keyed on `test_file`,
-/// which is the grain every analytics consumer uses — [`ExecRow`]'s header
-/// records that `test_name` is not one — and expects
+/// `build_stats_map` (`analytics.rs:1212-1225`), keyed on `(repo_id,
+/// test_file)` rather than legacy's bare `test_file` — a fix-round correction,
+/// for the same reason [`build_latest_map`](super::universe::build_latest_map)
+/// carries `repo_id`: two repositories can share a `test_file`, and legacy has
+/// no such collision to guard against because it has no concept of several
+/// repositories feeding one universe. `test_file` is still the grain every
+/// analytics consumer uses on top of that — [`ExecRow`]'s header records that
+/// `test_name` is not one — and this expects
 /// [`resolve_rows`](super::universe::resolve_rows)' output, so that one file's
 /// history is under one spelling.
 ///
@@ -600,11 +627,13 @@ pub fn pct(value: f64, total: f64) -> f64 {
 /// step without a symptom.
 #[must_use]
 pub fn build_stats_map(rows: &[ExecRow]) -> StatsMap {
-    let mut stats: HashMap<String, StatusStats> = HashMap::new();
+    let mut stats: HashMap<(Uuid, String), StatusStats> = HashMap::new();
 
     for row in rows {
         tally(
-            stats.entry(row.test_file.clone()).or_default(),
+            stats
+                .entry((row.repo_id, row.test_file.clone()))
+                .or_default(),
             row.status.as_str(),
         );
     }
@@ -703,7 +732,7 @@ pub fn effective_case_status(statuses: &[String]) -> Option<String> {
 #[must_use]
 pub fn build_case_data<S: BuildHasher>(
     universe: &[UniverseTest],
-    latest: &HashMap<String, LatestInfo, S>,
+    latest: &HashMap<(Uuid, String), LatestInfo, S>,
     rows: &[CaseRow],
 ) -> CaseData {
     let mut by_key: HashMap<(Uuid, &str), Vec<&CaseRow>> = HashMap::new();
@@ -717,7 +746,7 @@ pub fn build_case_data<S: BuildHasher>(
     let mut data = CaseData::default();
 
     for test in universe {
-        let Some(info) = latest.get(&test.test_file) else {
+        let Some(info) = latest.get(&(test.repo_id, test.test_file.clone())) else {
             continue;
         };
         let Some(run_id) = info.run_id else {
@@ -741,7 +770,7 @@ pub fn build_case_data<S: BuildHasher>(
             tickets.dedup();
 
             data.by_file.insert(
-                test.test_file.clone(),
+                (test.repo_id, test.test_file.clone()),
                 CaseFileSignal {
                     status: effective_case_status(&statuses),
                     tickets,
@@ -778,7 +807,7 @@ pub fn build_case_data<S: BuildHasher>(
 #[must_use]
 pub fn summarize<S: BuildHasher>(
     universe: &[UniverseTest],
-    latest: &HashMap<String, LatestInfo, S>,
+    latest: &HashMap<(Uuid, String), LatestInfo, S>,
     cases: &CaseData,
 ) -> OverviewSummary {
     let total = universe.len();
@@ -788,7 +817,7 @@ pub fn summarize<S: BuildHasher>(
 
     for test in universe {
         match latest
-            .get(&test.test_file)
+            .get(&(test.repo_id, test.test_file.clone()))
             .map_or(NOT_RUN, |item| item.status_bucket)
         {
             "PASSED" => passed += 1,
@@ -844,7 +873,7 @@ pub fn summarize<S: BuildHasher>(
 #[must_use]
 pub fn build_lists<S: BuildHasher>(
     universe: &[UniverseTest],
-    latest: &HashMap<String, LatestInfo, S>,
+    latest: &HashMap<(Uuid, String), LatestInfo, S>,
     stats: &StatsMap,
     cases: &CaseData,
 ) -> AnalyticsLists {
@@ -853,9 +882,12 @@ pub fn build_lists<S: BuildHasher>(
     let mut not_run = Vec::new();
 
     for test in universe {
-        let info = latest.get(&test.test_file).cloned().unwrap_or_default();
-        let tally = stats.get(test.test_file.as_str());
-        let signal = cases.by_file.get(&test.test_file);
+        let info = latest
+            .get(&(test.repo_id, test.test_file.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let tally = stats.get(test.repo_id, test.test_file.as_str());
+        let signal = cases.by_file.get(&(test.repo_id, test.test_file.clone()));
         let bucket = info.status_bucket;
 
         let item = AnalyticsListItem {
@@ -1159,19 +1191,29 @@ pub fn recent_days(today: Date, days: usize) -> Vec<Date> {
 ///
 /// # A two-level map where legacy has a `(String, NaiveDate)` tuple key
 ///
-/// What the re-keying saves is the **lookup** clone, not the insert one. Legacy's
-/// tuple key forces a `test_file.clone()` **per cell** at lookup time (`:1475`),
-/// i.e. `universe.len() * days` string allocations for the heatmap alone; keying
-/// the outer map on the file and the inner on the day makes that lookup borrow
-/// (`String: Borrow<str>`), so it allocates nothing.
+/// **The outer key is `(repo_id, test_file)`, not `test_file` alone — a
+/// fix-round correction.** A product owns several repositories and
+/// `(tenant_id, product_id)` is not a unique index, so two repositories can
+/// each hold `tests/test_smoke.py`; a fold keyed on the path alone would fold
+/// both repositories' rows onto one calendar and hand one repository's
+/// heatmap and trend cells to the other's test. This is the same collision
+/// [`build_latest_map`](super::universe::build_latest_map) closes, reached
+/// here instead through [`ExecRow::repo_id`](super::ExecRow::repo_id).
 ///
-/// **The insert still clones once per in-window row**, not once per distinct
-/// `(file, day)`: `HashMap::entry` takes its key by value, so the `clone()` below
-/// is evaluated before the map can say whether the key is already present. Legacy
-/// pays exactly the same per-row clone (`:1461`), so this is not a regression —
-/// but the sentence here claimed per-*pair* until the Task 22 review, and a
-/// `get_mut` fast path would be the change that made it true. Identical
-/// first-wins semantics either way; the entry API nests the same way.
+/// This costs back the lookup-allocation saving the paragraph below used to
+/// describe: `(Uuid, String)` has no `Borrow<(Uuid, &str)>`, so
+/// [`bucket_at`] now allocates one `String` per lookup — `universe.len() *
+/// days` of them, exactly the quantity the old two-level split avoided. That is
+/// a bounded cost (the universe and the axis, not the row count this module's
+/// other headers worry about), and correctness is not optional, so the
+/// allocation is accepted rather than engineered around.
+///
+/// What the two-level split still saves, unchanged: the **insert** clones once
+/// per in-window row either way — `HashMap::entry` takes its key by value, so
+/// the `clone()` below runs before the map can say whether the key is already
+/// present, exactly as legacy's tuple-keyed insert does (`:1461`) — so splitting
+/// the map was never an insert-side saving, only ever a lookup-side one, and the
+/// paragraph above is what that saving now costs to keep correct.
 fn buckets_by_file_and_day(rows: &[ExecRow], window: &HashSet<Date>) -> DayBuckets {
     let mut buckets: DayBuckets = HashMap::new();
 
@@ -1180,7 +1222,7 @@ fn buckets_by_file_and_day(rows: &[ExecRow], window: &HashSet<Date>) -> DayBucke
             continue;
         }
         buckets
-            .entry(row.test_file.clone())
+            .entry((row.repo_id, row.test_file.clone()))
             .or_default()
             .entry(row.day)
             .or_insert_with(|| bucketize_status(row.status.as_str()));
@@ -1189,8 +1231,9 @@ fn buckets_by_file_and_day(rows: &[ExecRow], window: &HashSet<Date>) -> DayBucke
     buckets
 }
 
-/// [`buckets_by_file_and_day`]'s index: file, then day, then bucket.
-type DayBuckets = HashMap<String, HashMap<Date, &'static str>>;
+/// [`buckets_by_file_and_day`]'s index: `(repo_id, test_file)`, then day, then
+/// bucket.
+type DayBuckets = HashMap<(Uuid, String), HashMap<Date, &'static str>>;
 
 /// One file's bucket on one day, or [`NOT_RUN`].
 ///
@@ -1200,9 +1243,9 @@ type DayBuckets = HashMap<String, HashMap<Date, &'static str>>;
 /// is what makes a day with no run renderable at all** — the cell is the literal
 /// `NOT_RUN`, not an empty string and not an absent element, so every row is
 /// exactly as long as the axis.
-fn bucket_at(buckets: &DayBuckets, test_file: &str, day: Date) -> &'static str {
+fn bucket_at(buckets: &DayBuckets, repo_id: Uuid, test_file: &str, day: Date) -> &'static str {
     buckets
-        .get(test_file)
+        .get(&(repo_id, test_file.to_owned()))
         .and_then(|by_day| by_day.get(&day))
         .copied()
         .unwrap_or(NOT_RUN)
@@ -1221,9 +1264,18 @@ fn bucket_at(buckets: &DayBuckets, test_file: &str, day: Date) -> &'static str {
 ///
 /// * **One row per universe entry, in the universe's order** (`:1472`, a plain
 ///   `for test in universe`). Not sorted — the sibling fold [`build_lists`]
-///   *does* sort, so symmetry is the trap — and not de-duplicated, so a file
-///   listed by two plans is two identical rows, the same grain
-///   [`summarize`]'s `total` counts twice.
+///   *does* sort, so symmetry is the trap. **Not de-duplicated either, and this
+///   used to describe that as a live defect: "a file listed by two plans is
+///   two identical rows, the same grain `summarize`'s `total` counts twice."**
+///   That input cannot occur: qa-catalog's `walk_repo_universe` merges a
+///   second plan's contribution into the first, within one repository, before
+///   the universe ever reaches this fold, so a file two plans of the **same**
+///   repository list is one universe entry here too. Two **different**
+///   repositories listing the same path is a different, real case, and — a
+///   second, fix-round correction — this fold is now part of the fix that
+///   closed that gap: [`buckets_by_file_and_day`]'s map is keyed on
+///   `(repo_id, test_file)`, per [`ExecRow::repo_id`](super::ExecRow::repo_id),
+///   not on the path alone.
 /// * **Every row is `days` long**, [`NOT_RUN`] where nothing ran. See
 ///   [`bucket_at`].
 /// * **First row per `(file, day)` wins**, so the caller's order decides the
@@ -1253,7 +1305,7 @@ pub fn build_heatmap(
             test_name: test.test_name.clone(),
             values: axis
                 .iter()
-                .map(|day| bucket_at(&buckets, test.test_file.as_str(), *day))
+                .map(|day| bucket_at(&buckets, test.repo_id, test.test_file.as_str(), *day))
                 .collect(),
         })
         .collect();
@@ -1309,7 +1361,7 @@ pub fn build_trend(
             let mut not_run = 0usize;
 
             for test in universe {
-                match bucket_at(&buckets, test.test_file.as_str(), day) {
+                match bucket_at(&buckets, test.repo_id, test.test_file.as_str(), day) {
                     "PASSED" => passed += 1,
                     "FAILED" => failed += 1,
                     _ => not_run += 1,
@@ -1445,10 +1497,19 @@ pub fn flaky_cutoff(today: Date, days: usize) -> Date {
 ///    rows and no universe entry is dropped, because rows outlive deleted test
 ///    files and a flaky list naming files that no longer exist is noise.
 ///
-/// # It is keyed on `test_file`, and the *dashboard's* flaky fold is not
+/// # It is keyed on `(repo_id, test_file)`, and the *dashboard's* flaky fold
+/// # is not
+///
+/// **Fix-round correction**: this fold used to key on `test_file` alone, so
+/// two repositories sharing a path had their rows tallied together and their
+/// flaky verdicts (and evidence counts) attributed to whichever repository's
+/// universe entry the lookup happened to find. A product owns several
+/// repositories and `(tenant_id, product_id)` is not a unique index, so that
+/// collision is real, not hypothetical — the same one
+/// [`ExecRow::repo_id`](super::ExecRow::repo_id) exists to close.
 ///
 /// Legacy has **two** flaky folds and they agree on nothing but the word. This
-/// one keys on `test_file` and uses the three-way split; the dashboard's
+/// one keys on `(repo_id, test_file)` and uses the three-way split; the dashboard's
 /// (`manager/src/routes/dashboard.rs:379-405`) groups by `tr.test_name,
 /// rr.plan_id` and counts under ruling R5's *sixth* classification, whose
 /// denominator excludes everything that is not `PASSED`, `FAILED` or `ERROR`.
@@ -1487,26 +1548,30 @@ pub fn build_flaky(
 ) -> Vec<FlakyTest> {
     let cutoff = flaky_cutoff(today, days);
 
-    let mut by_test: HashMap<&str, StatusStats> = HashMap::new();
+    let mut by_test: HashMap<(Uuid, &str), StatusStats> = HashMap::new();
     for row in rows {
         // `< cutoff`, not `window.contains(..)` — see `flaky_cutoff`.
         if row.day < cutoff {
             continue;
         }
         tally(
-            by_test.entry(row.test_file.as_str()).or_default(),
+            by_test
+                .entry((row.repo_id, row.test_file.as_str()))
+                .or_default(),
             row.status.as_str(),
         );
     }
 
-    let universe_by_file: HashMap<&str, &UniverseTest> = universe
+    let universe_by_file: HashMap<(Uuid, &str), &UniverseTest> = universe
         .iter()
-        .map(|item| (item.test_file.as_str(), item))
+        .map(|item| ((item.repo_id, item.test_file.as_str()), item))
         .collect();
 
     let mut flaky: Vec<FlakyTest> = by_test
         .into_iter()
-        .filter_map(|(test_file, stats)| flaky_entry(&universe_by_file, test_file, stats))
+        .filter_map(|((repo_id, test_file), stats)| {
+            flaky_entry(&universe_by_file, repo_id, test_file, stats)
+        })
         .collect();
 
     flaky.sort_by(|left, right| {
@@ -1525,7 +1590,8 @@ pub fn build_flaky(
 /// three levels of nesting. Legacy's gate order is preserved: executions, then
 /// the band, then the universe lookup.
 fn flaky_entry(
-    universe_by_file: &HashMap<&str, &UniverseTest>,
+    universe_by_file: &HashMap<(Uuid, &str), &UniverseTest>,
+    repo_id: Uuid,
     test_file: &str,
     stats: StatusStats,
 ) -> Option<FlakyTest> {
@@ -1539,7 +1605,7 @@ fn flaky_entry(
         return None;
     }
 
-    let test = universe_by_file.get(test_file)?;
+    let test = universe_by_file.get(&(repo_id, test_file))?;
     Some(FlakyTest {
         test_file: test_file.to_owned(),
         test_name: test.test_name.clone(),
@@ -1600,6 +1666,18 @@ pub struct QualityVectorSummary {
 /// why this fold re-keys rather than iterating the slice.
 /// `a_file_in_two_plans_is_one_quality_vector_test` pins it.
 ///
+/// # Keyed on `(repo_id, test_file)`, not the bare path — a fix-round-2 correction
+///
+/// Two repositories can each hold a `tests/test_smoke.py`; keying `by_file` on
+/// the path alone would merge their vector sets, so repo B's untagged file
+/// would inherit repo A's `quality_vectors` and stop counting toward
+/// `unclassified_tests` — carrying that metadata correctly is this fold's whole
+/// job. [`StatsMap`] is keyed the same way for the same reason; see its own
+/// doc. `plan_path` stays out of the key: it plays no part in the collision
+/// this section is about, and the section above already establishes that a
+/// file listed twice **within one repo** de-duplicates to one vector test —
+/// adding `plan_path` to the key would undo that.
+///
 /// # Where the vectors come from, and what happened to legacy's cache
 ///
 /// Legacy parses `TEST_META` off disk. There are **two** such readers and only
@@ -1640,9 +1718,11 @@ pub struct QualityVectorSummary {
 /// finding one row where the other has two has found this, not a bug.
 #[must_use]
 pub fn build_quality_vector_summary(universe: &[UniverseTest]) -> QualityVectorSummary {
-    let mut by_file: BTreeMap<&str, BTreeMap<String, &str>> = BTreeMap::new();
+    let mut by_file: BTreeMap<(Uuid, &str), BTreeMap<String, &str>> = BTreeMap::new();
     for test in universe {
-        let bucket = by_file.entry(test.test_file.as_str()).or_default();
+        let bucket = by_file
+            .entry((test.repo_id, test.test_file.as_str()))
+            .or_default();
         for vector in &test.quality_vectors {
             let trimmed = vector.trim();
             if trimmed.is_empty() {
@@ -1871,7 +1951,7 @@ pub fn build_grouped_summaries(universe: &[UniverseTest], rows: &[ExecRow]) -> G
 
     for test in universe {
         let bucket = latest
-            .get(&test.test_file)
+            .get(&(test.repo_id, test.test_file.clone()))
             .map_or(NOT_RUN, |value| value.status_bucket);
 
         let component = test
@@ -1919,7 +1999,7 @@ fn platform_groups(universe: &[UniverseTest], rows: &[ExecRow]) -> Vec<PlatformG
             for test in universe {
                 totals.add(
                     latest
-                        .get(&test.test_file)
+                        .get(&(test.repo_id, test.test_file.clone()))
                         .map_or(NOT_RUN, |value| value.status_bucket),
                 );
             }
@@ -2043,7 +2123,9 @@ pub fn apply_universe_group_filter(
 /// The newest row per universe file, with the build it ran against.
 ///
 /// Legacy's private `LatestBuildTestSnapshot` (`analytics.rs:1607-1613`), field
-/// for field with ruling R12's one substitution. It is `pub` here where legacy's
+/// for field with ruling R12's one substitution, plus [`Self::repo_id`], a
+/// fix-round addition legacy's shape has no analogue of — legacy has one
+/// repository's worth of tests to key on and this port does not. It is `pub` here where legacy's
 /// is private because both of its consumers' *outputs* —
 /// [`BuildLastRunDistribution`] and [`BuildTestDetail`] — are shaped by it and
 /// the DTOs a task later are written over those; a private type would force the
@@ -2065,6 +2147,14 @@ pub struct LatestBuildTestSnapshot {
     /// none. Verbatim otherwise — including the literal `"unknown"`, which
     /// legacy cannot distinguish from the substitution either.
     pub build: String,
+    /// The repository this snapshot's universe entry belongs to — a
+    /// fix-round addition. [`build_test_details`] joins a snapshot back to its
+    /// universe entry's metadata (`test_name`, `component`, `tags`), and doing
+    /// that on `test_file` alone would hand one repository's component and
+    /// tags to another repository's test of the same name; the pair is what
+    /// [`latest_per_test_snapshot`] already folds on, so this is that key's
+    /// other half riding along on the value.
+    pub repo_id: Uuid,
     /// The universe file this is the newest row for.
     pub test_file: String,
     /// The row's status under this fold's own mapping (`:1633-1639`) — *not*
@@ -2141,32 +2231,43 @@ pub struct LatestBuildTestSnapshot {
 /// [`build_test_details`]' final `sort_by` is stable, so two entries agreeing on
 /// both sort keys keep their arrival order.
 ///
-/// This port returns them ordered by `test_file` instead, which is ruling R14.
-/// **It is not a parity break**: legacy's pick among exact ties is arbitrary
-/// rather than specified, so no particular legacy output is contradicted. It is a
-/// testability requirement — a non-reproducible aggregate cannot be pinned, and
-/// this crate has to pin it. The `>` comparison in the consumer is kept verbatim
-/// so the *rule* still reads as legacy's; only the tie-break becomes nameable.
+/// This port returns them ordered by `(repo_id, test_file)` instead, which is
+/// ruling R14. **It is not a parity break**: legacy's pick among exact ties is
+/// arbitrary rather than specified, so no particular legacy output is
+/// contradicted. It is a testability requirement — a non-reproducible
+/// aggregate cannot be pinned, and this crate has to pin it. The `>`
+/// comparison in the consumer is kept verbatim so the *rule* still reads as
+/// legacy's; only the tie-break becomes nameable.
 /// `the_build_tests_snapshots_come_back_in_test_file_order` and
 /// `the_build_distribution_picks_the_latest_run_id_by_a_strictly_greater_scan`
-/// are the two tests.
+/// are the two tests, and the first is unaffected by the repository joining
+/// the key: every fixture in this module holds one repository, so ordering by
+/// the pair and ordering by the path alone agree.
+///
+/// # Keyed on `(repo_id, test_file)`, not `test_file` alone
+///
+/// A product owns several repositories and `(tenant_id, product_id)` is not a
+/// unique index, so two repositories can each hold `tests/test_smoke.py`.
+/// Keying this fold — and its membership set — on the path alone would let
+/// one repository's snapshot stand in for the other's, which is exactly the
+/// failure [`ExecRow::repo_id`](super::ExecRow::repo_id) exists to close.
 #[must_use]
 pub fn latest_per_test_snapshot(
     universe: &[UniverseTest],
     rows: &[ExecRow],
 ) -> Vec<LatestBuildTestSnapshot> {
-    let universe_files: HashSet<&str> = universe
+    let universe_files: HashSet<(Uuid, &str)> = universe
         .iter()
-        .map(|test| test.test_file.as_str())
+        .map(|test| (test.repo_id, test.test_file.as_str()))
         .collect();
 
     // A `BTreeMap` rather than legacy's `HashMap` is the whole of ruling R14's
-    // determinism: the key is the `test_file`, so `into_values` yields the
-    // snapshots in that order instead of the hasher's.
-    let mut latest: BTreeMap<&str, LatestBuildTestSnapshot> = BTreeMap::new();
+    // determinism: the key is `(repo_id, test_file)`, so `into_values` yields
+    // the snapshots in that order instead of the hasher's.
+    let mut latest: BTreeMap<(Uuid, &str), LatestBuildTestSnapshot> = BTreeMap::new();
 
     for row in rows {
-        if !universe_files.contains(row.test_file.as_str()) {
+        if !universe_files.contains(&(row.repo_id, row.test_file.as_str())) {
             continue;
         }
 
@@ -2174,9 +2275,10 @@ pub fn latest_per_test_snapshot(
         // spelled as one lookup rather than a `contains_key` and an `insert`
         // (`clippy::map_entry`): the closure does not run when the key is there.
         latest
-            .entry(row.test_file.as_str())
+            .entry((row.repo_id, row.test_file.as_str()))
             .or_insert_with(|| LatestBuildTestSnapshot {
                 build: collapse_build(row.build.as_deref()),
+                repo_id: row.repo_id,
                 test_file: row.test_file.clone(),
                 status: snapshot_status(row.status.as_str()).to_owned(),
                 run_id: row.run_id,
@@ -2444,13 +2546,18 @@ pub struct BuildTestDetail {
 ///   an empty list, because this fold is where legacy's untrimmed match is.
 /// * **The universe and the rows are already narrowed** — `filtered_universe` and
 ///   `rows_for_scope` (`:403-417`). This fold narrows nothing itself.
-/// * **The metadata is the universe entry's, not the row's** (`:432`, `:436-437`).
-///   A universe with the same file in two plans (legacy keys it on
-///   `(source, repo_id, test_file)`, `:899-903`) still yields **one** item for
-///   that file — the snapshot fold is keyed on the file alone — and the metadata
-///   is whichever of the duplicate entries the file map kept, which for a
-///   `HashMap` built by `collect` is the last. Legacy's behaviour exactly, and
-///   worth knowing before reading a duplicated component off this list.
+/// * **The metadata is the universe entry's, not the row's** (`:432`,
+///   `:436-437`), joined on `(repo_id, test_file)` — a fix-round correction.
+///   This used to join on `test_file` alone and cite "legacy's behaviour
+///   exactly" for doing so, reasoning from the same wrong "two plans" premise
+///   corrected elsewhere in this module (a universe file two plans of one
+///   repository list is *one* entry, merged upstream by
+///   `walk_repo_universe` — that input never reaches this map at all). What
+///   the bare key actually collided on is two **different** repositories
+///   sharing a path: their metadata would land in one `HashMap` slot and the
+///   `collect`-built map's last-wins order would hand one repository's
+///   component and tags to the other's test. [`LatestBuildTestSnapshot::repo_id`]
+///   exists so this join can tell them apart.
 /// * **The sort is stable** (`:444-452`), so two entries agreeing on both keys
 ///   keep [`latest_per_test_snapshot`]'s order — reachable, because legacy keys
 ///   the universe on `(source, repo_id, test_file)` (`:899-903`) and two distinct
@@ -2471,24 +2578,32 @@ pub fn build_test_details(
     rows: &[ExecRow],
     build: &str,
 ) -> Vec<BuildTestDetail> {
-    let by_file: HashMap<&str, &UniverseTest> = universe
+    let by_file: HashMap<(Uuid, &str), &UniverseTest> = universe
         .iter()
-        .map(|test| (test.test_file.as_str(), test))
+        .map(|test| ((test.repo_id, test.test_file.as_str()), test))
         .collect();
 
     let mut items = latest_per_test_snapshot(universe, rows)
         .into_iter()
         .filter(|snapshot| snapshot.build.eq_ignore_ascii_case(build))
         .filter_map(|snapshot| {
-            let test = by_file.get(snapshot.test_file.as_str())?;
+            // The three `.clone()`s are bound before `snapshot.test_file`
+            // moves below: `by_file`'s key is now `(Uuid, &str)`, not the
+            // lifetime-erased `&str` legacy's shape let this borrow past a
+            // move for free, so `test`'s borrow of `snapshot.test_file` has
+            // to end before this closure moves it.
+            let test = by_file.get(&(snapshot.repo_id, snapshot.test_file.as_str()))?;
+            let test_name = test.test_name.clone();
+            let component = test.component.clone();
+            let tags = test.tags.clone();
             Some(BuildTestDetail {
                 test_file: snapshot.test_file,
-                test_name: test.test_name.clone(),
+                test_name,
                 status: snapshot.status,
                 run_id: snapshot.run_id,
                 run_finished_at: snapshot.ts,
-                component: test.component.clone(),
-                tags: test.tags.clone(),
+                component,
+                tags,
             })
         })
         .collect::<Vec<_>>();

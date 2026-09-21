@@ -40,10 +40,11 @@
 //!    16c: an errored `watch` and an empty stream are the two answers the port
 //!    forbids conflating, and only one of them was constructible.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
@@ -59,6 +60,38 @@ use crate::domain::state_machine::ExecutorOutcome;
 /// so a run driven by the default script exercises the same counter mapping a
 /// real one does.
 const DEFAULT_TEST_NAME: &str = "test_mock_default";
+
+/// Stamp every `Log` event in `events` with a synthesized emission instant,
+/// strictly increasing across the whole sequence, one second apart — the
+/// mock's stand-in for kubelet's own per-line clock (Task 2, WS5).
+///
+/// A pure function of `events` alone: the same script stamped twice (as a
+/// re-`watch` does — [`MockRunExecutor::watch`] calls this fresh every
+/// time, never caching the result) assigns the same instant to the same
+/// event every time, which is what lets a `resume` built from an earlier
+/// `watch`'s own emitted events compare correctly against a later one —
+/// exactly the property a real kubelet log has (the same byte-identical
+/// line always carries the same timestamp) and the mock has no other way
+/// to reproduce, since it has no real per-line clock of its own.
+fn stamp_log_events(events: &[ExecutionEvent]) -> Vec<ExecutionEvent> {
+    let mut clock = 0i64;
+    events
+        .iter()
+        .cloned()
+        .map(|event| match event {
+            ExecutionEvent::Log { node, line, .. } => {
+                let when = OffsetDateTime::UNIX_EPOCH + Duration::seconds(clock);
+                clock += 1;
+                ExecutionEvent::Log {
+                    node,
+                    line,
+                    emitted_at: Some(when),
+                }
+            }
+            other => other,
+        })
+        .collect()
+}
 
 /// Everything the mock remembers.
 ///
@@ -329,14 +362,14 @@ impl RunExecutor for MockRunExecutor {
         // Resolved under the lock, replayed outside it: holding a std mutex
         // across an await is denied for good reason, and the whole sequence is
         // known before the first send.
-        let events = self.lock().script_for(execution_ref);
+        let events = stamp_log_events(&self.lock().script_for(execution_ref));
         let (sink, stream) = ExecutionStream::channel(events.len().max(1));
-        // **Resume, not replay** — Task 13, review finding #50. The mock has
-        // no real log to seek within, so it does what the Argo adapter now
-        // does too (fix-round 1): skip exactly the `Log` entries `resume`
-        // says this node's archive already has, in order, and keep
-        // everything else. `remaining` starts at `resume.lines_for(node)` per
-        // node the first time that node is seen and counts down, so a node
+        // **Resume, not replay** — Task 13, review finding #50, replaced by
+        // Task 2 (WS5)'s per-node emission instant. The mock has no real
+        // pod log to reissue a `since_time`-bounded read against, so it does
+        // the same comparison the real thing asks Kubernetes to do: skip a
+        // `Log` event for `node` whose synthesized instant is at or before
+        // `resume.last_emitted_for(node)`, keep everything after it. A node
         // `resume` says nothing about (the common case: a first attach,
         // where `resume` is empty) skips nothing.
         //
@@ -346,16 +379,15 @@ impl RunExecutor for MockRunExecutor {
         // making the *duplication* direction falsifiable too
         // (`watch_resumes_without_duplicating_or_dropping_log_lines`), which
         // an adapter that silently dropped the gap could not pass.
-        let mut remaining: HashMap<String, i64> = HashMap::new();
         for event in events {
-            if let ExecutionEvent::Log { node, .. } = &event {
-                let left = remaining
-                    .entry(node.clone())
-                    .or_insert_with(|| resume.lines_for(node));
-                if *left > 0 {
-                    *left -= 1;
-                    continue;
-                }
+            if let ExecutionEvent::Log {
+                node, emitted_at, ..
+            } = &event
+                && let Some(when) = emitted_at
+                && let Some(last) = resume.last_emitted_for(node)
+                && *when <= last
+            {
+                continue;
             }
             // Capacity is the script's length and the observer is still alive
             // here, so this cannot report a dropped observer — written the way
@@ -402,10 +434,18 @@ mod tests {
     };
     use crate::domain::runvars::{self, RunVar, RunVarInputs};
 
+    /// A FIXED id, not `Uuid::new_v4()`: `start_records_the_spec_and_returns_a_reference`
+    /// builds two nodes from this fixture and compares them for equality, so a
+    /// fresh id per call would make that assertion fail on a field the test is
+    /// not about.
+    const NODE_BUNDLE_ID: Uuid = uuid::uuid!("2f1c9a70-0000-4000-8000-000000000002");
+
     fn node() -> ExecutionNode {
         ExecutionNode {
             name: "repo-smoke".to_owned(),
             bundle_ref: "bundle-store://abc".to_owned(),
+            bundle_id: NODE_BUNDLE_ID,
+            bundle_token: String::new(),
             test_files: vec!["tests/test_smoke.py".to_owned()],
         }
     }
@@ -413,6 +453,7 @@ mod tests {
     fn spec_for(run_id: Uuid) -> RunSpec {
         RunSpec {
             run_id,
+            tenant_id: Uuid::new_v4(),
             run_name: "smoke-tests-1".to_owned(),
             nodes: vec![node()],
             env: RunEnv::default(),
@@ -497,6 +538,7 @@ mod tests {
             ExecutionEvent::Log {
                 node: "repo-smoke".to_owned(),
                 line: "collecting ...".to_owned(),
+                emitted_at: None,
             },
             finished(ExecutorOutcome::Succeeded),
         ];
@@ -508,7 +550,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(drain(&mut stream).await, script);
+        // `stamp_log_events`, not `script` itself: `watch` stamps every `Log`
+        // event with a synthesized `emitted_at` (Task 2, WS5) before
+        // emitting it, so the replayed events carry `Some(..)` where the
+        // scripted literals above carry `None`.
+        assert_eq!(drain(&mut stream).await, stamp_log_events(&script));
     }
 
     /// `cpt-cf-qa-nfr-run-duration` requires an 8-hour run to survive a
@@ -545,14 +591,14 @@ mod tests {
         assert_eq!(first_events.len(), 2);
     }
 
-    /// **Both directions of Finding #50's fix.** Since fix-round 1 the Argo
-    /// adapter uses this same count-based mechanism against its own re-read
-    /// pod log (`infra::executor::argo::watch`'s `LineSkip`); this pins what
-    /// "resume, don't replay" means against the mock's in-memory script,
-    /// where nothing stands in the way of doing it exactly.
+    /// **Both directions of Finding #50's fix, replaced by Task 2 (WS5)'s
+    /// timestamp-based mechanism.** The Argo adapter now seeds
+    /// `LogParams::since_time` from `LogResume::last_emitted_for`; this pins
+    /// the identical property against the mock's in-memory script, where
+    /// nothing stands in the way of doing it exactly.
     ///
     /// Two nodes, so a resume position for one cannot be satisfied by
-    /// accident from the other's count.
+    /// accident from the other's.
     #[tokio::test]
     async fn watch_resumes_without_duplicating_or_dropping_log_lines() {
         let executor = MockRunExecutor::new();
@@ -562,23 +608,42 @@ mod tests {
             ExecutionEvent::Log {
                 node: "a".to_owned(),
                 line: "a-one".to_owned(),
+                emitted_at: None,
             },
             ExecutionEvent::Log {
                 node: "b".to_owned(),
                 line: "b-one".to_owned(),
+                emitted_at: None,
             },
             ExecutionEvent::Log {
                 node: "a".to_owned(),
                 line: "a-two".to_owned(),
+                emitted_at: None,
             },
             ExecutionEvent::Log {
                 node: "a".to_owned(),
                 line: "a-three".to_owned(),
+                emitted_at: None,
             },
             finished(ExecutorOutcome::Succeeded),
         ];
         executor.script(run_id, script.clone());
         let execution_ref = executor.start(spec_for(run_id)).await.unwrap();
+
+        // The instant `watch` will stamp onto "a-two" — read off the same
+        // stamping function `watch` itself uses, exactly as a real caller
+        // would build a resume position from an earlier `watch`'s own
+        // emitted events rather than by recomputing the mock's internal
+        // clock.
+        let stamped = stamp_log_events(&script);
+        let ExecutionEvent::Log {
+            emitted_at: Some(a_two_at),
+            ..
+        } = &stamped[3]
+        else {
+            panic!("index 3 of this script must be node a's second line");
+        };
+        let a_two_at = *a_two_at;
 
         // "Two of node a's three lines and none of node b's are already
         // archived" -- what a real re-attach's `log_resume_positions` would
@@ -586,9 +651,7 @@ mod tests {
         let resume: LogResume = [(
             "a".to_owned(),
             crate::domain::repos::LogPosition {
-                lines: 2,
-                first_line: "a-one".to_owned(),
-                last_line: "a-two".to_owned(),
+                last_emitted_at: a_two_at,
             },
         )]
         .into_iter()
@@ -600,7 +663,7 @@ mod tests {
         // No duplication: the two already-archived `a` lines are not resent.
         assert!(
             !replayed.iter().any(
-                |event| matches!(event, ExecutionEvent::Log { node, line } if node == "a" && (line == "a-one" || line == "a-two"))
+                |event| matches!(event, ExecutionEvent::Log { node, line, .. } if node == "a" && (line == "a-one" || line == "a-two"))
             ),
             "the two lines `resume` already accounts for must not be replayed"
         );
@@ -609,10 +672,10 @@ mod tests {
         assert_eq!(
             replayed,
             vec![
-                script[0].clone(),
-                script[2].clone(),
-                script[4].clone(),
-                script[5].clone(),
+                stamped[0].clone(),
+                stamped[2].clone(),
+                stamped[4].clone(),
+                stamped[5].clone(),
             ],
             "b's line and a's un-archived third line must both survive, in \
              their original order",

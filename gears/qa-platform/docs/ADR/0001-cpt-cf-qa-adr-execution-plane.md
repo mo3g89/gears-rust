@@ -60,8 +60,9 @@ Two adapters ship:
 | `ArgoRunExecutor` | non-default `argo` cargo feature | submits an Argo `Workflow`, polls status, follows pod logs, deletes on cancel |
 
 The feature gate is the mechanism that satisfies `cpt-cf-qa-constraint-no-kube`: `kube` and
-`k8s-openapi` enter the tree only when `argo` is enabled, so a default build of every qa-platform
-crate has no Kubernetes dependency.
+`k8s-openapi` enter `qa-runs`' tree only when `argo` is enabled, so a default build of every
+qa-platform **gear** has no Kubernetes dependency. (Not every *crate*: see this document's
+Amendments section for `qa-connector-k8s`, a non-gear crate that carries `kube` unconditionally.)
 
 The port is deliberately **internal**. It is not a public plugin interface, because choosing an
 execution backend is a deployment decision made once in configuration, not a per-product decision
@@ -113,3 +114,32 @@ per-product.
   decision that is made once per deployment.
 * Bad, because a public interface is much harder to change than an internal trait, and this one is
   expected to change as backends are added.
+
+## Amendments
+
+**`qa-environments`' runner-`Secret` writer.** After this ADR's original acceptance,
+`qa-environments` gained a second Kubernetes-touching adapter: `KubeRunnerSecretWriter::ensure_runner_secret`
+(decision D4) writes each runner's credential `Secret` into the Argo cluster, which may differ from
+any environment's own. It needs a Kubernetes client for that write alone. This is gated behind
+`qa-environments`' own non-default `runner-secret` cargo feature — a second, independently-switched
+gate beside `qa-runs`' `argo`, not a relaxation of this ADR's Confirmation criterion: a default
+build of `qa-environments` still carries no Kubernetes dependency
+(`qa-environments/Cargo.toml`'s `[features]` block and `containment_tests.rs` are the authority).
+
+**`qa-connector-k8s` is unconditional, not feature-gated, and that is consistent with this ADR.**
+The Kubernetes transport library the VHP product plugin links (`connectors/qa-connector-k8s`) names
+`kube` and `k8s-openapi` without a feature flag of its own. It needs none: it is not a gear, nothing
+resolves it at runtime, and the only edge to it in any gear's dependency graph is a product plugin
+that already requires a Kubernetes-shaped environment. `cargo tree -p qa-runs -i kube -e normal`
+still prints nothing for a default build; a deployment that never registers the VHP plugin never
+builds this crate's client either. The containment this ADR requires is structural here rather than
+a cargo feature, and is exactly as strong.
+
+Several code comments across `qa-runs`, `qa-environments` and `qa-connector-k8s` referred to the
+two facts above as a "waiver" or an "amendment" dated 2026-08-27, 2026-08-28 or 2026-09-04. No such
+waiver or amendment existed in this document before this section — those dates never appeared above,
+and this ADR was not revised between its acceptance and today. This section is what those comments
+meant to cite. It is added now, dated to when the gap was found rather than backdated to an event
+this document has no record of.
+
+*(Added 2026-09-18, QA Platform review remediation §5.6.2.)*

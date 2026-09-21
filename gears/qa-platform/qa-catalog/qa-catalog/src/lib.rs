@@ -2,7 +2,7 @@
 //! custom plans, products/versions, ephemeral test bundles, SSH key metadata.
 //!
 //! Part of the qa-platform subsystem (see `gears/qa-platform/docs/DESIGN.md`
-//! §3.2 `cpt-cf-qa-component-catalog`).
+//! §3.3 `cpt-cf-qa-component-catalog`).
 
 pub mod api;
 pub mod config;

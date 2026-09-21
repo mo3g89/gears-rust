@@ -690,7 +690,7 @@ if [ "$rc" -ne 0 ]; then
 fi
 token_code="$(cat "$WORKDIR/plugin-token.code")"
 if [ "$token_code" != "200" ]; then
-    echo "FAIL: the qa-platform-workflow client-credentials token request answered $token_code, not 200 (body: $(head -c 300 "$WORKDIR/plugin-token.json" 2>/dev/null)). The product-plugin catalogue itself was NOT reached. Compare the deployed realm's secret against the pinned value: kubectl -n $NAMESPACE get configmap qa-platform-realm -o jsonpath='{.data.realm-qa-platform\.json}' | jq -r '.clients[] | select(.clientId==\"qa-platform-workflow\") | .secret, .serviceAccountsEnabled' should show qa-platform-workflow-dev-secret and true." >&2
+    echo "FAIL: the qa-platform-workflow client-credentials token request answered $token_code, not 200 (body: $(head -c 300 "$WORKDIR/plugin-token.json" 2>/dev/null)). The product-plugin catalogue itself was NOT reached. Compare the deployed realm's secret against the pinned value: kubectl -n $NAMESPACE get secret qa-platform-realm -o jsonpath='{.data.realm-qa-platform\.json}' | base64 -d | jq -r '.clients[] | select(.clientId==\"qa-platform-workflow\") | .secret, .serviceAccountsEnabled' should show qa-platform-workflow-dev-secret and true." >&2
     exit 1
 fi
 rc=0
@@ -1006,7 +1006,7 @@ else
 fi
 
 step "16: the realm Keycloak imports lists the UI origin as a redirect URI"
-# READ OUT OF THE qa-platform-realm ConfigMap, NOT OUT OF THE ADMIN API --
+# READ OUT OF THE qa-platform-realm Secret, NOT OUT OF THE ADMIN API --
 # rewritten in the final review together with the removal of the `/admin/`
 # proxy (ui-extraconf-configmap.yaml). The previous form obtained a
 # master-realm admin token over the PUBLIC ORIGIN with the committed
@@ -1015,45 +1015,81 @@ step "16: the realm Keycloak imports lists the UI origin as a redirect URI"
 # published on the application's public origin for a verification check's
 # convenience. It was the only consumer of that proxy.
 #
-# THE CONFIGMAP IS NOT A WEAKER SOURCE THAN THE ADMIN API HERE. It is the
-# EXACT document Keycloak imports: keycloak-realm-configmap.yaml renders it
-# for this release's publicOrigin into configmap/qa-platform-realm, and
+# THE SECRET IS NOT A WEAKER SOURCE THAN THE ADMIN API HERE. It is the
+# EXACT document Keycloak imports: keycloak-realm-secret.yaml renders it
+# for this release's publicOrigin into secret/qa-platform-realm, and
 # keycloak-deployment.yaml mounts that at /opt/keycloak/data/import for
-# `--import-realm`. Reading the ConfigMap therefore checks the same pin the
+# `--import-realm`. Reading the Secret therefore checks the same pin the
 # admin API would have -- "does the realm this cluster will import name this
 # origin?" -- against the cluster's own copy rather than the file on disk
 # that produced it, and unlike the admin API it is answerable BEFORE any
 # login flow works and on a Keycloak whose H2 store has just been discarded.
 #
-# What it does NOT prove is that the import SUCCEEDED. That is already
-# covered, twice: keycloak-deployment.yaml's readiness probe gates on
+# WAS A CONFIGMAP UNTIL THE REALM-SECRECY REVIEW: keycloak-realm-secret.yaml
+# used to be keycloak-realm-configmap.yaml, `kind: ConfigMap`, `data:` --
+# converted because the realm carries the workflow client's confidential
+# secret in the clear (see that file's own header). `kubectl get configmap`
+# read `.data.<key>` as plain text; a Secret's `.data.<key>` is base64 no
+# matter whether the template writes `data:` or `stringData:` -- Kubernetes
+# stores it the same way either way -- so the read below now pipes through
+# `base64 -d`. This is the one-word fix Task 3's implementer named and
+# deliberately left for this task, in the same paragraph as the reminder
+# that the "product-plugin catalogue" check's diagnostic hint text (a few
+# hundred lines up) carries the identical `get configmap` typo and needs the
+# identical fix -- fixed there too, not just here.
+#
+# What it does NOT prove is that the import SUCCEEDED, or that a RUNNING
+# Keycloak actually reflects this Secret's current content -- a Secret
+# volume mount updates on the node without restarting the pod that mounts
+# it, and `--import-realm` only runs on Keycloak's own first start (H2 is
+# ephemeral by design, see keycloak-deployment.yaml). So a release whose
+# publicOrigin changed via `helm upgrade` while the Keycloak pod happened
+# not to be replaced yet would have THIS check comparing the NEW Secret
+# against the NEW $PUBLIC_ORIGIN and passing, even though the RUNNING
+# Keycloak's KC_HOSTNAME -- and therefore its advertised issuer -- is still
+# the old one. That blind spot is covered separately, twice, by checks that
+# read the RUNNING Keycloak rather than the desired-state Secret:
+# keycloak-deployment.yaml's readiness probe gates on
 # /realms/qa-platform/.well-known/openid-configuration (which only answers
-# after the import), and "k8s 4/4" below fetches that same document through
-# nginx and compares its issuer. So the split is: those two prove the realm
-# imported, this one proves the realm that imported carries the right
-# redirect URI.
-rc=0
-kubectl -n "$NAMESPACE" get configmap qa-platform-realm \
-    -o jsonpath='{.data.realm-qa-platform\.json}' > "$WORKDIR/realm.json" 2>"$WORKDIR/realm.err" || rc=$?
+# after the import), and "k8s 4/4" below fetches that same document
+# unauthenticated through the UI nginx and compares its `issuer` field
+# against this same $PUBLIC_ORIGIN. Verified live (2026-09-18): pausing the
+# Keycloak rollout, then `helm upgrade`-ing publicOrigin to a new value,
+# reproduces exactly the case this paragraph describes -- this check (PASS,
+# reading the already-updated Secret) and "k8s 4/4" (FAIL, reading the
+# still-old running issuer) diverge exactly as predicted, and both agree
+# again once the paused rollout is resumed and the new pod is Ready. So the
+# split is: those two prove the realm the cluster is ACTUALLY RUNNING
+# imported and advertises the right issuer, this one proves the realm
+# Keycloak is CONFIGURED to import next carries the right redirect URI.
+kubectl -n "$NAMESPACE" get secret qa-platform-realm \
+    -o jsonpath='{.data.realm-qa-platform\.json}' 2>"$WORKDIR/realm.err" | base64 -d > "$WORKDIR/realm.json" 2>>"$WORKDIR/realm.err"
+# PIPESTATUS[0], NOT $? -- $? after a pipe is base64's exit code, and
+# `base64 -d` on empty input (what kubectl writes to stdout when the get
+# itself fails, since its error text goes to stderr, captured separately
+# above) exits 0. Reading kubectl's own status out of PIPESTATUS is what
+# makes the `rc -ne 0` half of the check below actually fire on a real
+# `get secret` failure, rather than leaning on the empty-file half alone.
+rc="${PIPESTATUS[0]}"
 if [ "$rc" -ne 0 ] || [ ! -s "$WORKDIR/realm.json" ]; then
-    echo "FAIL: could not read configmap/qa-platform-realm's realm-qa-platform.json key in namespace $NAMESPACE (exit $rc): $(cat "$WORKDIR/realm.err" 2>/dev/null). keycloak-realm-configmap.yaml renders it from the chart's files/keycloak/realm-qa-platform.json; an empty value means that template produced nothing, or keycloakRealmJson was overridden with an empty file." >&2
+    echo "FAIL: could not read secret/qa-platform-realm's realm-qa-platform.json key in namespace $NAMESPACE (exit $rc): $(cat "$WORKDIR/realm.err" 2>/dev/null). keycloak-realm-secret.yaml renders it from the chart's files/keycloak/realm-qa-platform.json; an empty value means that template produced nothing, or keycloakRealmJson was overridden with an empty file." >&2
     exit 1
 fi
 rc=0
 uris="$(jq -r --arg c qa-platform-ui '.clients[] | select(.clientId==$c) | .redirectUris | join(" ")' "$WORKDIR/realm.json" 2>"$WORKDIR/realm.jq.err")" || rc=$?
 if [ "$rc" -ne 0 ]; then
-    echo "FAIL: jq could not read the qa-platform-ui client's redirectUris out of the realm ConfigMap (exit $rc): $(cat "$WORKDIR/realm.jq.err" 2>/dev/null). The ConfigMap's value is not the JSON this check expects." >&2
+    echo "FAIL: jq could not read the qa-platform-ui client's redirectUris out of the realm Secret (exit $rc): $(cat "$WORKDIR/realm.jq.err" 2>/dev/null). The Secret's value is not the JSON this check expects, or is not valid base64 -- confirm with 'kubectl -n $NAMESPACE get secret qa-platform-realm -o jsonpath={.data.realm-qa-platform\\.json} | base64 -d | head'." >&2
     exit 1
 fi
 if [ -z "$uris" ]; then
-    echo "FAIL: the realm ConfigMap has no qa-platform-ui client, or that client has an empty redirectUris list. An absent client is not an absent problem: the SPA cannot complete a login at all. Check the chart's files/keycloak/realm-qa-platform.json." >&2
+    echo "FAIL: the realm Secret has no qa-platform-ui client, or that client has an empty redirectUris list. An absent client is not an absent problem: the SPA cannot complete a login at all. Check the chart's files/keycloak/realm-qa-platform.json." >&2
     exit 1
 fi
 case " $uris " in
     *" $PUBLIC_ORIGIN/* "*)
-        echo "PASS: the realm this cluster imports lists $PUBLIC_ORIGIN/* as a qa-platform-ui redirect URI (all: [$uris])" ;;
+        echo "PASS: the realm this cluster is configured to import lists $PUBLIC_ORIGIN/* as a qa-platform-ui redirect URI (all: [$uris])" ;;
     *)
-        echo "FAIL: the realm this cluster imports does NOT list $PUBLIC_ORIGIN/* for qa-platform-ui -- it lists [$uris]. The release was installed with a different publicOrigin than this script was invoked with; re-run with a matching --public-origin, or 'helm upgrade' the release with the right one. Note the realm imports only on Keycloak's FIRST start (H2 is ephemeral by design, see keycloak-deployment.yaml), so after correcting the ConfigMap 'kubectl -n $NAMESPACE delete pod -l app.kubernetes.io/component=keycloak' is what makes the new realm take effect." >&2
+        echo "FAIL: the realm this cluster is configured to import does NOT list $PUBLIC_ORIGIN/* for qa-platform-ui -- it lists [$uris]. The release was installed with a different publicOrigin than this script was invoked with; re-run with a matching --public-origin, or 'helm upgrade' the release with the right one. Note the realm imports only on Keycloak's FIRST start (H2 is ephemeral by design, see keycloak-deployment.yaml), so after correcting the Secret 'kubectl -n $NAMESPACE delete pod -l app.kubernetes.io/component=keycloak' is what makes the new realm take effect -- 'k8s 4/4' below is what would have caught a pod that needed exactly that and didn't get it." >&2
         exit 1 ;;
 esac
 
@@ -1067,11 +1103,16 @@ step "17: the gears' rendered config carries the OpenTelemetry metrics block"
 # gears serve normally while nothing is observable. There is NO error, no log
 # line and no failed probe to notice, which is exactly why this is a check.
 #
-# THERE IS NOTHING TO CURL. Metrics here are PUSHED over OTLP by a periodic
-# reader (libs/toolkit's `init_metrics_provider` builds an
-# `opentelemetry_otlp::MetricExporter`); no gear serves a `/metrics` route and
-# no chart in this repository carries a scrape annotation. So the observable
-# fact on the node is the rendered CONFIG, not an endpoint.
+# THIS STEP IS ABOUT THE PUSH HALF ONLY, and the observable fact for it on the
+# node is the rendered CONFIG rather than an endpoint: an OTLP periodic reader
+# (libs/toolkit's `init_metrics_provider`) either was built or was not, and
+# there is nothing on this side to ask. The PULL half -- the scrape endpoint,
+# which there very much is something to curl -- is step 18b below.
+#
+# The `enabled: false` this step reads and reports is therefore NOT "metrics
+# are off": with the scrape reader attached, a real meter provider is
+# installed and every instrument records. It means no collector is being
+# pushed to.
 #
 # READ FROM /var/lib/cf-gears/.rendered-*, not from the ConfigMap: that
 # rendered file is what the server actually loaded (entrypoint.sh writes it and
@@ -1171,7 +1212,7 @@ fi
 # instead of metrics leaves metrics reading `false`, and without this check the
 # step would print its cheerful "metrics are DISABLED (the chart default)" PASS
 # over a stack whose operator asked for metrics and got a tracing pipeline.
-# `test_metrics_config.py`'s `check_enabled` holds the same property at render
+# `check_metrics_config.py`'s `check_enabled` holds the same property at render
 # time; this holds it against what the server actually loaded.
 if [ "$otel_tracing" != "false" ]; then
     echo "FAIL: opentelemetry.tracing.enabled is '$otel_tracing', expected 'false'. No value in this chart turns tracing on, so either the metrics transform in gears-config-configmap.yaml matched the tracing block (both blocks carry the identical line '    enabled: false' -- that is why the metrics sentinel is two lines), or the committed config was hand-edited. Either way the metrics flag read from this file ('$otel_metrics') cannot be trusted to mean what it says." >&2
@@ -1189,7 +1230,7 @@ if [ "$otel_metrics" = "true" ]; then
     esac
     echo "PASS: metrics are ENABLED and push to '$otel_endpoint' (service_name=$otel_service, tracing=$otel_tracing)"
 else
-    echo "PASS: the metrics block is present and correctly shaped, in a config proven above to have come from the ConfigMap; metrics are DISABLED (the chart default). NOTE: nothing from DESIGN 3.11 leaves this stack. Turn it on with --set opentelemetry.metrics.enabled=true --set opentelemetry.metrics.endpoint=<collector>."
+    echo "PASS: the metrics block is present and correctly shaped, in a config proven above to have come from the ConfigMap; OTLP PUSH is disabled (the chart default). That is not 'nothing is observable' -- step 18b below scrapes the same families off this pod's /metrics, which is on by default. Add a collector too with --set opentelemetry.metrics.enabled=true --set opentelemetry.metrics.endpoint=<collector>."
 fi
 
 step "18: the deployed binary carries exactly the metric catalog, name for name"
@@ -1213,6 +1254,7 @@ step "18: the deployed binary carries exactly the metric catalog, name for name"
 # that an instrument was built with it -- which is precisely the half the
 # in-process tests already hold. Neither alone is the whole property.
 cat > "$WORKDIR/metrics.want" <<'CATALOG'
+qa_catalog_bundle_download_total
 qa_catalog_plugin_resolution_duration_seconds
 qa_catalog_plugin_resolution_total
 qa_environments_observation_cycle_duration_seconds
@@ -1231,6 +1273,8 @@ qa_insights_jira_rerun_total
 qa_runs_dispatch_decision_total
 qa_runs_dispatch_duration_seconds
 qa_runs_dispatch_total
+qa_runs_free_to_start_duration_seconds
+qa_runs_free_to_start_unanchored_total
 qa_runs_ingest_duration_seconds
 qa_runs_ingest_total
 qa_runs_queue_wait_duration_seconds
@@ -1250,7 +1294,7 @@ if [ "$rc" -gt 1 ]; then
 fi
 sort -u "$WORKDIR/metrics.raw" > "$WORKDIR/metrics.have"
 if [ ! -s "$WORKDIR/metrics.have" ]; then
-    echo "FAIL: the deployed gears binary carries NONE of the 22 catalog series names. The running image predates the observability work, or the metric modules were compiled out. Rebuild and redeploy: deploy/remote/deploy-k8s.sh builds the image the tag in images.gears.tag names." >&2
+    echo "FAIL: the deployed gears binary carries NONE of the catalog series names. The running image predates the observability work, or the metric modules were compiled out. Rebuild and redeploy: deploy/remote/deploy-k8s.sh builds the image the tag in images.gears.tag names." >&2
     exit 1
 fi
 if diff -u "$WORKDIR/metrics.want" "$WORKDIR/metrics.have" > "$WORKDIR/metrics.diff" 2>&1; then
@@ -1260,6 +1304,91 @@ else
     cat "$WORKDIR/metrics.diff" >&2
     exit 1
 fi
+
+step "18b: the scrape endpoint ANSWERS, and a counter on it MOVES when work happens"
+# CHECK 18 READS THE BINARY; THIS ONE READS THE RUNNING PROCESS. They catch
+# different things and neither substitutes for the other: 18 proves the image
+# was compiled with the catalog, this proves the numbers can be got out of the
+# pod at all. For the whole life of this stack before the scrape endpoint,
+# 18 passed while every one of those 22 families was reachable by nothing --
+# push was off (it needs a collector) and no route served them.
+#
+# THIS CHECK DOES NOT COUNT FAMILIES, and must not be strengthened into doing
+# so. 22 is what the binary DEFINES, which is what check 18 asserts; an
+# instrument that has never recorded emits no data point, so a healthy endpoint
+# on a freshly-rolled pod carries fewer (18 of 22, measured 2026-09-19) and the
+# number rises as the stack is exercised. Asserting 22 here would fail on a
+# correct deployment. What is asserted instead is that the endpoint answers and
+# that a counter MOVES -- see below. A load test
+# had to stand up a throwaway OTel collector to read this stack's own numbers.
+#
+# CURLED FROM THE NODE, AGAINST THE SERVICE ClusterIP. Three constraints meet
+# here: the gears image carries no curl, wget, nc or bash (Debian trixie slim
+# plus ca-certificates and openssh-client -- see qa-platform.Dockerfile), so
+# there is nothing to exec INSIDE the pod; the node's own resolver does not
+# serve cluster DNS, so the Service NAME does not resolve here; but a k3s node
+# does route ClusterIPs. So: resolve the ClusterIP with kubectl, curl the IP.
+# That also makes this a stronger check than hitting the pod IP would be --
+# it proves the Service's `targetPort: metrics` actually selects a listening
+# container port, which is the wiring most likely to be wrong.
+#
+# A STATIC RESPONSE MUST NOT PASS. Two scrapes with a real request between
+# them, asserting the request counter went UP, is the whole point: a handler
+# that returned a fixed blob, a stale cache, or a reader wired to the wrong
+# provider would all satisfy "200 with metric-looking text". The counter used
+# is the api-gateway's own `http_server_request_duration_count`, bumped by the
+# 401 that check 6b already relies on -- and NOT by this check's own scrapes,
+# which land on a different listener that the gateway's middleware never sees.
+metrics_port="$(kubectl -n "$NAMESPACE" get svc qa-platform-gears \
+    -o jsonpath='{.spec.ports[?(@.name=="metrics")].port}' 2>/dev/null || true)"
+if [ -z "$metrics_port" ]; then
+    echo "FAIL: the qa-platform-gears Service publishes no port named 'metrics'. Either this release was installed with --set opentelemetry.metrics.scrape.enabled=false, or the chart regressed -- deploy/helm/tests/check_metrics_config.py's check_scrape holds the render side of this." >&2
+    exit 1
+fi
+gears_ip="$(kubectl -n "$NAMESPACE" get svc qa-platform-gears -o jsonpath='{.spec.clusterIP}')"
+metrics_url="http://${gears_ip}:${metrics_port}/metrics"
+
+scrape_metrics() {
+    # $1 = output file. Fails loudly on anything but a 200; an unreadable
+    # endpoint is UNVERIFIED, never "no metrics".
+    _rc=0
+    _code="$(curl -s -o "$1" -w '%{http_code}' --max-time 15 "$metrics_url")" || _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        echo "FAIL: curl exited $_rc fetching $metrics_url. The gears pod is not listening on the port its Service and its prometheus.io/port annotation advertise -- check 'kubectl -n $NAMESPACE logs deploy/qa-platform-gears | grep -i \"metrics scrape\"', which logs either the bind or the reason it failed." >&2
+        exit 1
+    fi
+    if [ "$_code" != "200" ]; then
+        echo "FAIL: $metrics_url answered $_code, expected 200. A 503 means the process built no meter provider at all (scrape.enabled false in the RENDERED config -- read /var/lib/cf-gears/.rendered-qa-platform-stack.yaml, the way check 17 does); a 404 means it is serving a different path than the annotation advertises." >&2
+        exit 1
+    fi
+}
+
+scrape_metrics "$WORKDIR/scrape.before"
+if ! grep -q '^# TYPE ' "$WORKDIR/scrape.before"; then
+    echo "FAIL: $metrics_url answered 200 but carries no '# TYPE' line, so it is not a Prometheus exposition. First 300 bytes: $(head -c 300 "$WORKDIR/scrape.before")" >&2
+    exit 1
+fi
+counter_line() { grep -c '^http_server_request_duration_count' "$WORKDIR/$1" 2>/dev/null || true; }
+if [ "$(counter_line scrape.before)" = "0" ]; then
+    echo "FAIL: $metrics_url carries no http_server_request_duration_count series. That instrument is created by the api-gateway's own middleware on the SAME global meter provider the qa-platform gears use, so its absence means the scrape reader is attached to a different provider than the one the gears record into -- the exact false green this check exists for. Families present: $(grep -c '^# TYPE ' "$WORKDIR/scrape.before")" >&2
+    exit 1
+fi
+before="$(awk '/^http_server_request_duration_count/ {s+=$NF} END {print s+0}' "$WORKDIR/scrape.before")"
+
+# The work. A 401 is a complete request through the gateway's middleware stack
+# (check 6b explains why 401 is the right answer here), and the metrics layer
+# is OUTSIDE the auth layer -- see gears/system/api-gateway/src/gear.rs, which
+# adds http_metrics with `layer` rather than `route_layer` precisely so
+# refused requests are still counted.
+curl -s -o /dev/null --max-time 15 "http://${gears_ip}:$(kubectl -n "$NAMESPACE" get svc qa-platform-gears -o jsonpath='{.spec.ports[?(@.name=="http")].port}')/qa/v1/environments" || true
+
+scrape_metrics "$WORKDIR/scrape.after"
+after="$(awk '/^http_server_request_duration_count/ {s+=$NF} END {print s+0}' "$WORKDIR/scrape.after")"
+if [ "$after" -le "$before" ]; then
+    echo "FAIL: http_server_request_duration_count was $before before a request and $after after it. The endpoint answers, but its numbers do not move -- a static or cached response, or a reader that is not collecting from the live provider. This is the failure a 200-and-it-looks-like-metrics check would have missed." >&2
+    exit 1
+fi
+echo "PASS: $metrics_url answers 200 with $(grep -c '^# TYPE ' "$WORKDIR/scrape.after") metric families, and http_server_request_duration_count rose $before -> $after across one request -- the numbers are live, not a fixture"
 
 # ========================================================= new for k8s ====
 # Four checks for the cluster-shaped concerns the probes above do not touch:

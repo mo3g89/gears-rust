@@ -76,19 +76,19 @@ spec:
   # DO NOT "fix" this by raising maxUnavailable on a RollingUpdate instead --
   # that produces the same delete-then-create ordering with more moving parts,
   # and nothing stops a future replicas: 2 from reintroducing the port
-  # conflict. The gears and keycloak Deployments bind no hostPort and keep the
-  # default RollingUpdate on purpose.
+  # conflict. Keycloak binds no hostPort and keeps the default RollingUpdate on
+  # purpose. The gears Deployment also binds no hostPort, but is Recreate for a
+  # different reason entirely -- a rolling update would briefly run two gears
+  # pods, which its own replica guard says is unsafe; see its comment.
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: qa-platform
-      app.kubernetes.io/component: ui
+      {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "ui") | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: qa-platform
-        app.kubernetes.io/component: ui
+        {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "ui") | nindent 8 }}
     spec:
       containers:
         - name: ui

@@ -211,46 +211,53 @@ pub type DbProvider = DBProvider<DbError>;
 /// this citation had already drifted twice as a line range.
 pub mod resources {
     use super::ResourceType;
+    use toolkit_gts::gts_id;
     use toolkit_security::pep_properties;
 
     /// The environment aggregate's authorization resource type.
     ///
-    /// **Both the constant and the string stay `PLATFORM` / `"qa.platform"`
-    /// after the aggregate was renamed `TargetPlatform` → `Environment`, on
-    /// purpose.** The string is the resource type PDP policies are written
-    /// against, so changing it would silently change who is authorized for
-    /// what — a behaviour change, which the rename explicitly is not. The
-    /// constant keeps the string's name so the two cannot drift apart in a
-    /// reader's head. Renaming the resource type is a policy migration of its
-    /// own, not part of this rename.
+    /// **The constant kept the name `PLATFORM`, and the entity token stayed
+    /// `platform`, after the aggregate was renamed `TargetPlatform` →
+    /// `Environment`, on purpose.** The string no longer reads bare
+    /// `"qa.platform"` — it is now the GTS type id
+    /// `gts.cf.qa.environments.platform.v1~` (see [`PLATFORM_NAME`]) — but
+    /// that later conversion did not touch the entity token PDP policies are
+    /// written against, so who is authorized for what did not change either.
+    /// The constant keeps the string's name so the two cannot drift apart in
+    /// a reader's head. Renaming the resource type's entity token is a policy
+    /// migration of its own, not part of either change.
     pub const PLATFORM: ResourceType = ResourceType::from_static(
         PLATFORM_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
-    /// [`PLATFORM`]'s name as a `&'static str`, for the reason this module's
-    /// header cites. **The string is `qa.platform`, not the aggregate's Rust
-    /// name** — see [`PLATFORM`]'s own doc for why the rename to `Environment`
-    /// deliberately stopped at the type and left the PDP string alone.
-    pub const PLATFORM_NAME: &str = "qa.platform";
+    /// [`PLATFORM`]'s name as a `&'static str`.
+    ///
+    /// A concrete GTS type id rather than a bare string, so the RBAC
+    /// role-definition validator can resolve it as a `target_type`; the stub
+    /// type-schema that registers it is
+    /// [`crate::gts::authz_types::QaPlatformV1`].
+    ///
+    /// The entity token is `platform`, not `environment`: the D5 aggregate
+    /// rename never reached these ids and the error surface already publishes
+    /// `platform`. Renaming it is a separate change to a published contract.
+    pub const PLATFORM_NAME: &str = gts_id!("cf.qa.environments.platform.v1~");
 
     pub const VARIABLE: ResourceType = ResourceType::from_static(
         VARIABLE_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
-    /// [`VARIABLE`]'s name as a `&'static str`, for the reason this module's
-    /// header cites.
-    pub const VARIABLE_NAME: &str = "qa.variable";
+    /// [`VARIABLE`]'s name. See [`PLATFORM_NAME`] for why it is a GTS type id.
+    pub const VARIABLE_NAME: &str = gts_id!("cf.qa.environments.variable.v1~");
 
     pub const LEASE: ResourceType = ResourceType::from_static(
         LEASE_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
-    /// [`LEASE`]'s name as a `&'static str`, for the reason this module's
-    /// header cites.
-    pub const LEASE_NAME: &str = "qa.lease";
+    /// [`LEASE`]'s name. See [`PLATFORM_NAME`].
+    pub const LEASE_NAME: &str = gts_id!("cf.qa.environments.lease.v1~");
 }
 
 pub mod actions {

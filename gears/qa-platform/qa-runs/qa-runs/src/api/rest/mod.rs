@@ -19,3 +19,8 @@ pub mod error;
 pub(crate) mod handlers;
 pub(crate) mod routes;
 pub mod sse;
+
+/// The gear's route definitions with nothing bound to them, re-exported so the
+/// `qa-platform-openapi` generator can register them into an `OpenAPI`
+/// registry without an `AppServices`. `routes` itself stays `pub(crate)`.
+pub use routes::register_operations;

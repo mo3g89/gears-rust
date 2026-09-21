@@ -1,7 +1,7 @@
 //! Initial schema: runs, the per-platform run queue, and per-test results.
 //!
 //! Follows the two shipped sibling gears' migration shape — a backend `match`
-//! producing one `execute_unprepared` DDL blob per dialect (DESIGN §3.7,
+//! producing one `execute_unprepared` DDL blob per dialect (DESIGN §3.8,
 //! "Database Schemas & Tables"). Column, index and FK order is kept identical
 //! across `POSTGRES_UP`, `MYSQL_UP` and `SQLITE_UP`, because a three-way
 //! eyeball diff is the only thing that catches a forgotten dialect: the tests
@@ -9,9 +9,9 @@
 //!
 //! ## A note on how `DESIGN.md` is cited here
 //!
-//! **By section and heading text, not by line number.** `DESIGN.md` §3.7 has
-//! drifted three times during this gear's implementation — twice from edits
-//! made by this very task — and each time it silently repointed a citation at a
+//! **By section and heading text, not by line number.** `DESIGN.md` §3.8
+//! (formerly §3.7) has drifted four times during this gear's implementation —
+//! and each time it silently repointed a citation at a
 //! *different* rule, which is worse than no citation. A line number that is
 //! right today and wrong next week is a trap; a heading is greppable forever.
 //! Where a target has no heading, the line number is given together with enough
@@ -60,9 +60,9 @@
 //! ## Every unique index is tenant-prefixed
 //!
 //! The rule, and the squatting/oracle argument behind it, are stated in full
-//! under this same heading in DESIGN §3.7 and repeated for implementers in
-//! `qa-catalog`'s migration, which is the one repetition DESIGN designates.
-//! Not repeated a third time here.
+//! in `qa-catalog`'s migration, the one place that states it in full.
+//! DESIGN.md no longer states it centrally as of the 3.7->3.8 renumbering; if
+//! it returns, point this comment back at it too. Not repeated here.
 //!
 //! What is specific to *this* schema: both unique indexes sit on tables whose
 //! parent already carries the tenant, so both are exactly the case the rule is
@@ -137,7 +137,7 @@
 //! one: the next implementer reads it as authoritative and populates it. The
 //! claim reconciler joins through `run_id` instead.
 //!
-//! DESIGN §3.7's qa-runs table list previously named `execution_ref` on `run_queue`; that entry was
+//! DESIGN §3.8's qa-runs table list previously named `execution_ref` on `run_queue`; that entry was
 //! removed in the same change as this migration.
 //!
 //! ## Obligations this schema hands to later tasks
@@ -197,9 +197,12 @@ CREATE TABLE IF NOT EXISTS qa_runs (
     target_test_file VARCHAR(1024) NULL,
     target_custom_plan_id UUID NULL,
     -- Unconstrained on purpose: the platform lives in qa-environments and
-    -- DESIGN section 3.7 forbids cross-schema FKs (cross-gear references are
-    -- by ID only). The obligation that replaces
-    -- the missing constraint: **the launch path must verify the caller's
+    -- DESIGN section 3.8 says each gear owns its own schema and no gear reads
+    -- another's tables directly; cross-gear reads go through SDK clients
+    -- instead of a foreign key (DESIGN.md section 3.8, Database Schemas &
+    -- Tables, verbatim). The obligation
+    -- that replaces the missing constraint: **the launch path must verify
+    -- the caller's
     -- tenant owns this platform, through a tenant-scoped qa-environments
     -- client, before persisting the row.** Nothing downstream re-checks.
     -- Why it matters more here than for a normal cross-gear id:
@@ -225,7 +228,7 @@ CREATE TABLE IF NOT EXISTS qa_runs (
     state VARCHAR(16) NOT NULL,
     -- `resolved_exclusive`, not `exclusive`: this is the decision the
     -- exclusivity resolver reached, not the tri-state `Option<bool>` a launch
-    -- requests. DESIGN section 3.7's qa-runs table list and
+    -- requests. DESIGN section 3.8's qa-runs table list and
     -- `qa_runs_sdk::Run::resolved_exclusive` both
     -- spell it this way, and the SDK field's doc records why the short name is
     -- a trap (it makes the wrong re-run transcription type-check). The queue
@@ -340,8 +343,7 @@ CREATE TABLE IF NOT EXISTS qa_run_queue (
     source VARCHAR(16) NOT NULL,
     exclusive BOOLEAN NOT NULL,
     -- Seven states: queued / dispatching / running / done / failed / cancelled
-    -- / expired. Frozen vocabulary -- see DESIGN section 3.7's decision-D1
-    -- amendment and
+    -- / expired. Frozen vocabulary -- see
     -- `../testrunner/docs/guides/exclusive-runs-and-the-queue.md` lines 88-96.
     -- `dispatching` and `running` are the two that hold a claim on the platform
     -- (`manager/src/services/run_queue.rs:104`, `CLAIM_STATES`).
@@ -358,9 +360,8 @@ CREATE TABLE IF NOT EXISTS qa_run_queue (
     -- `enqueued_at` is the domain fact: the FIFO sort key
     -- (`manager/src/services/run_queue.rs:248`) and the TTL sweep's clock
     -- (`run_queue.rs:379`, `WHERE state = 'queued' AND enqueued_at < $1`).
-    -- `created_at` beside it is the house-style audit column DESIGN section
-    -- 3.7 requires of every table
-    -- requires; the two are equal at insert and only a future re-enqueue would
+    -- `created_at` beside it is the house-style audit column every table
+    -- carries; the two are equal at insert and only a future re-enqueue would
     -- separate them.
     enqueued_at TIMESTAMPTZ NOT NULL,
     dispatched_at TIMESTAMPTZ NULL,
@@ -472,8 +473,7 @@ CREATE TABLE IF NOT EXISTS qa_run_test_results (
     -- columns on legacy's `test_results` (`001_initial.sql:70-71`).
     launch_id VARCHAR(255) NULL,
     jira_key VARCHAR(64) NULL,
-    -- `updated_at` is the house-style column DESIGN section 3.7 requires of
-    -- every table. Under
+    -- `updated_at` is the house-style column every table carries. Under
     -- delete-then-insert dedupe it always equals `created_at`, because a row is
     -- replaced rather than updated in place.
     created_at TIMESTAMPTZ NOT NULL,
@@ -749,7 +749,8 @@ DROP TABLE IF EXISTS qa_runs;
 /// `Migrator` against a Postgres container whenever the `integration` feature is
 /// on, so that blob's syntax is checked — just not by the default gate.
 /// `MYSQL_UP` is the half that stands: nothing on any tier runs it, and only its
-/// declarations are checked. The sibling `m20260813_000004_schedules` recorded
+/// declarations are checked. A later migration (`m20260813_000004_schedules`,
+/// since squashed into this same file -- see `qa_schedules` above) recorded
 /// the correction against this file when it landed; two tasks then declined to
 /// make it here as outside their ownership, which is how a known-false sentence
 /// survives.
@@ -787,7 +788,7 @@ mod tests {
     use time::OffsetDateTime;
     use uuid::Uuid;
 
-    use crate::infra::storage::entity::{run, run_queue, run_test_result};
+    use crate::infra::storage::entity::{run, run_log, run_queue, run_test_result};
 
     /// Deterministic fixture UUIDs. `Uuid::new_v4` would depend on a cargo
     /// feature this crate does not ask for, and would make a failure
@@ -908,7 +909,12 @@ mod tests {
             .expect("failed to connect to in-memory sqlite database");
         conn.execute_unprepared("PRAGMA foreign_keys = ON;")
             .await
-            .expect("failed to enable sqlite foreign key enforcement");
+            // The doc comment above is explicit that this statement is a
+            // no-op -- sqlx's SQLite driver already turns foreign keys on for
+            // every connection it opens -- so a failure here would mean the
+            // statement itself could not be issued (a broken connection),
+            // not that enforcement was left off.
+            .expect("failed to issue the (no-op) foreign-key pragma");
 
         let manager = SchemaManager::new(&conn);
         for migration in super::super::Migrator::migrations() {
@@ -1169,6 +1175,8 @@ mod tests {
             failed: ActiveValue::Set(2),
             skipped: ActiveValue::Set(1),
             in_progress: ActiveValue::Set(4),
+            xfail: ActiveValue::Set(0),
+            xpass: ActiveValue::Set(0),
             total: ActiveValue::Set(10),
             created_at: ActiveValue::Set(now()),
             updated_at: ActiveValue::Set(now()),
@@ -1205,10 +1213,12 @@ mod tests {
             duration: ActiveValue::Set(Some("85.06s (0:01:25)".to_owned())),
             launch_id: ActiveValue::Set(Some("7204".to_owned())),
             jira_key: ActiveValue::Set(Some("VHP-2618".to_owned())),
-            // Added by `m20260818_000005_case_fidelity`, at their column
-            // defaults: nothing here asserts on them and that migration's own
-            // test module owns all three. Set to the defaults rather than to
-            // realistic values precisely so this fixture's meaning is unchanged.
+            // Added by `m20260818_000005_case_fidelity` (folded into this
+            // migration by the docs squash), at their column defaults:
+            // nothing here asserts on them and `schema_behaviour_tests`
+            // owns all three (it is what still names "case fidelity" as
+            // the reason). Set to the defaults rather than to realistic
+            // values precisely so this fixture's meaning is unchanged.
             //
             // Named rather than `..Default::default()`, which does compile —
             // a wildcard would let a later migration's columns join this
@@ -1218,6 +1228,16 @@ mod tests {
             reason: ActiveValue::Set(None),
             ticket: ActiveValue::Set(None),
             created_at: ActiveValue::Set(now()),
+            updated_at: ActiveValue::Set(now()),
+        }
+    }
+
+    fn run_log_am(run_id: Uuid, tenant: Uuid) -> run_log::ActiveModel {
+        run_log::ActiveModel {
+            run_id: ActiveValue::Set(run_id),
+            tenant_id: ActiveValue::Set(tenant),
+            text: ActiveValue::Set("smoke-1: 3 passed\n".to_owned()),
+            lines: ActiveValue::Set(1),
             updated_at: ActiveValue::Set(now()),
         }
     }
@@ -1329,8 +1349,9 @@ mod tests {
     /// service to another by squatting its `run_id`.
     ///
     /// This is the assertion that fails if `idx_qa_run_queue_tenant_run` ever
-    /// loses its leading `tenant_id`, which is the exact defect DESIGN §3.7's "Every unique index is tenant-prefixed"
-    /// is about. Verified by breaking it: with the index rewritten to
+    /// loses its leading `tenant_id`, which is the exact defect this module's
+    /// "Every unique index is tenant-prefixed" rule is about. Verified by
+    /// breaking it: with the index rewritten to
     /// `(run_id)`, the squatter's insert fails with a UNIQUE violation and this
     /// test fails.
     #[tokio::test]
@@ -1461,6 +1482,46 @@ mod tests {
         );
     }
 
+    /// D-RLP-1 retention is nothing but this cascade. The DDL-substring test
+    /// (`every_dialect_cascades_from_qa_runs_on_the_composite_key`, below)
+    /// proves the clause is declared; this proves it fires.
+    #[tokio::test]
+    async fn deleting_a_run_deletes_its_log() {
+        let conn = migrated_db().await;
+        let tenant = uuid(1);
+        let run_id = uuid(2);
+
+        run_am(run_id, tenant, "smoke-1")
+            .insert(&conn)
+            .await
+            .unwrap();
+        run_log_am(run_id, tenant)
+            .insert(&conn)
+            .await
+            .unwrap();
+
+        assert!(
+            run_log::Entity::find_by_id(run_id)
+                .one(&conn)
+                .await
+                .unwrap()
+                .is_some(),
+            "setup failed to write the log row -- without this the assertion \
+             below would pass vacuously, proving nothing about the cascade"
+        );
+
+        run::Entity::delete_by_id(run_id).exec(&conn).await.unwrap();
+
+        assert!(
+            run_log::Entity::find_by_id(run_id)
+                .one(&conn)
+                .await
+                .unwrap()
+                .is_none(),
+            "deleting a run must cascade to its log row"
+        );
+    }
+
     /// `down()` is dead weight unless it actually drops the tables, and it has
     /// to drop them children-first or the foreign keys refuse.
     #[tokio::test]
@@ -1474,14 +1535,25 @@ mod tests {
         // and `down()` has to run in the *reverse* of it. The moment Task 17's
         // schedules migration lands, the loop would drop these tables first and
         // then run the second migration's `down()` against a schema that no
-        // longer has them — failing while naming the wrong migration. This test
-        // owns this migration; the sibling gear's
-        // `m20260813_000004_observed_build` does the same.
+        // longer has them — failing while naming the wrong migration. This
+        // test owns this migration. (It cited a sibling gear's
+        // `m20260813_000004_observed_build` as doing the same; that
+        // migration was squashed into qa-environments'
+        // `migrations::m20260812_000001_initial`, which this repository no
+        // longer has an equivalent down-ordering test for -- not verified
+        // here, so not repeated as a live claim.)
         sea_orm_migration::MigrationTrait::down(&super::Migration, &manager)
             .await
             .unwrap();
 
-        for table in ["qa_runs", "qa_run_queue", "qa_run_test_results"] {
+        for table in [
+            "qa_runs",
+            "qa_run_queue",
+            "qa_run_test_results",
+            "qa_schedules",
+            "qa_schedule_ticks",
+            "qa_run_logs",
+        ] {
             conn.execute_unprepared(&format!("SELECT 1 FROM {table}"))
                 .await
                 .expect_err("every table must be gone after down()");

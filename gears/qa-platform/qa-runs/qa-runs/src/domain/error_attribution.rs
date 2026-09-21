@@ -50,15 +50,20 @@ pub(crate) struct QueueResourceError;
 /// `qa_schedules`, the third resource type this gear owns.
 ///
 /// **The vocabulary is the plan's, not `DESIGN.md`'s** — corrected here after
-/// this comment shipped attributing it to DESIGN §3.7. It is not there: the
-/// whole document contains no `qa.queue_entry` and no `qa.run` resource type
-/// (its six `qa.run` hits are event topics), and its single `qa.schedule` is the
-/// `qa.schedule.fired` *event* in §3.3's **Events** table. What §3.7 names are
-/// **tables**. The three resource types are listed in the plan, and the
-/// attribution was already correct three files away, in
-/// `domain::service::resources`: *"The plan lists three — `qa.run`,
-/// `qa.queue_entry` and `qa.schedule`"*. That module remains where the
-/// vocabulary is recorded, so the names do not get invented twice.
+/// this comment shipped attributing it to DESIGN §3.7. That citation was
+/// wrong even then: at the time, `qa.run` appeared in DESIGN.md only as an
+/// event topic and the sole `qa.schedule` was the `qa.schedule.fired`
+/// *event*, in old §3.3's **Events** table — never as a resource type, and
+/// never in old §3.7 (`Database Schemas & Tables`). A documentation squash
+/// then removed that Events table along with the rest of old §3.3, so today
+/// `DESIGN.md` contains **zero** occurrences of `qa.run`, `qa.schedule` or
+/// `qa.queue_entry` (`grep -c` for each), and current §3.7 is
+/// `Product SDK, Product Plugins, Connectors` — no section of the document
+/// lists resource types or tables under either number. The three resource
+/// types are listed in the plan, and the attribution was already correct
+/// three files away, in `domain::service::resources`: *"The plan lists three
+/// — `qa.run`, `qa.queue_entry` and `qa.schedule`"*. That module remains
+/// where the vocabulary is recorded, so the names do not get invented twice.
 ///
 /// Declared by Task 17 rather than by Task 20, which owns the schedules REST
 /// layer, because the boundary mapping's `match` is exhaustive: adding

@@ -36,9 +36,22 @@ use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::bundle_store::BundleStore;
+use crate::domain::ports::metrics::NoopMetrics;
 use crate::domain::ports::repo_sync::{RepoSyncPort, SyncResult};
 use crate::domain::repos::BundlesRepository;
-use crate::domain::service::{AppServices, QaProductRegistry, ServiceDeps, SyncCache};
+use crate::domain::service::{
+    AppServices, BundleDownloadSigningSecret, QaProductRegistry, ServiceDeps, SyncCache,
+};
+
+/// The bundle-download signing secret every fixture service is built with.
+///
+/// **Over `bundles::MIN_SIGNING_SECRET_LEN`, deliberately.** The download path
+/// fails closed on a short or empty secret, so a blank fixture would make every
+/// signature test in this crate pass for the wrong reason: the 403 would be
+/// "this deployment has no secret" rather than "this tag does not verify", and
+/// a broken verification would still look green. Tests that want the
+/// unconfigured behaviour ask for it explicitly.
+pub const FIXTURE_BUNDLE_SIGNING_SECRET: &str = "fixture-bundle-download-signing-secret";
 use crate::gear::ConcreteAppServices;
 use crate::infra::storage::{
     OrmBundlesRepository, OrmCustomPlansRepository, OrmProductsRepository, OrmSshKeysRepository,
@@ -375,6 +388,7 @@ pub async fn seed_expired_bundle(db: &Db, tenant_id: Uuid, offset: time::Duratio
                 size_bytes: 1,
                 expires_at: now + offset,
                 created_at: now - time::Duration::hours(2),
+                download_sig: String::new(),
             },
         )
         .await
@@ -394,12 +408,15 @@ fn throwaway_repos_dir() -> PathBuf {
 /// The product-plugin instance id every `build_services*` fixture has
 /// registered, and the one [`seed_product`] binds to.
 ///
-/// It is the id `m20260903_000003_product_plugin_instance`'s backfill uses, so
-/// a fixture product looks like a real one. Spelled out rather than composed
-/// from `QaProductPluginSpecV1::TYPE_ID` for the reason
-/// `an_update_that_names_no_plugin_leaves_the_products_binding_alone` gives:
-/// that migration's own test holds the composition, and duplicating it here
-/// would give a type-id change two places to break instead of one.
+/// It is the id the `m20260903_000003_product_plugin_instance` migration's
+/// backfill used, back when this gear's schema still had a backfill step
+/// (that migration, and the test that verified its composition against
+/// `QaProductPluginSpecV1::TYPE_ID`, were both folded into
+/// `migrations::m20260812_000002_initial` by the docs squash and are not
+/// recoverable from the tree; the fold replaced the backfill with a
+/// straight `NOT NULL` column, so there is nothing left to compose against).
+/// Spelled out rather than composed from `QaProductPluginSpecV1::TYPE_ID`
+/// so this fixture does not depend on either.
 pub const FIXTURE_PLUGIN_INSTANCE_ID: &str =
     "gts.cf.toolkit.plugins.plugin.v1~cf.core.qa_product.plugin.v1~cf.core._.vhp_product.v1";
 
@@ -529,6 +546,14 @@ fn build_services_with_engine(
             bundle_store: Arc::new(NoopBundleStore),
             repos_dir,
             bundle_ttl: time::Duration::seconds(3600),
+            // A real, over-the-floor fixture secret: the signed download path
+            // fails closed under a short or empty one, so a blank here would
+            // make every bundle-download test in this crate pass for the wrong
+            // reason (403 because unconfigured, not 403 because unsigned).
+            bundle_download_signing_secret: BundleDownloadSigningSecret(
+                FIXTURE_BUNDLE_SIGNING_SECRET.to_owned(),
+            ),
+            bundle_download_metrics: Arc::new(NoopMetrics),
             // Zero TTL: the freshness cache never short-circuits, so every
             // sync call in these tests reaches the (inert) engine double.
             sync_cache: Arc::new(SyncCache::new(std::time::Duration::ZERO)),
@@ -589,6 +614,10 @@ pub fn build_services_tenant_scoped_with_credstore(
             bundle_store: Arc::new(NoopBundleStore),
             repos_dir: throwaway_repos_dir(),
             bundle_ttl: time::Duration::seconds(3600),
+            bundle_download_signing_secret: BundleDownloadSigningSecret(
+                FIXTURE_BUNDLE_SIGNING_SECRET.to_owned(),
+            ),
+            bundle_download_metrics: Arc::new(NoopMetrics),
             sync_cache: Arc::new(SyncCache::new(std::time::Duration::ZERO)),
         },
     ))

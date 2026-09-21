@@ -127,8 +127,7 @@ gears:
       #
       # THE EXCEPTIONS, so the next reader's enumeration starts complete.
       # Public by design and harmless: `/docs` and `/openapi.json` (marked
-      # public at gears/system/api-gateway/src/gear.rs:228-229 -- which is also
-      # why `make ui-contract` still works without a token) and the health
+      # public at gears/system/api-gateway/src/gear.rs:228-229) and the health
       # probes. `/metrics` is NOT public and answers 401.
       #
       # And one route under `/qa/v1` itself: **`POST /qa/v1/collect/{repo_id}`
@@ -610,6 +609,31 @@ gears:
     # through the PEP as normal (`src/domain/elevated.rs`).
     config:
       branch_refresh_interval_seconds: 900
+      # THE ONLY ACCESS CONTROL ON `GET /qa/v1/test-bundles/{id}`.
+      #
+      # That route is registered `.anonymous().exposed()`, because its caller is
+      # an Argo runner pod with no user to borrow a session from. It used to be
+      # `.authenticated()`, and the pod solved that by carrying a confidential
+      # OIDC client secret and exchanging it for a bearer token in-pod -- a
+      # deployment-wide, unexpiring, fullScopeAllowed credential in the
+      # environment of a process tree that executes tenant-authored pytest, with
+      # a tenant_id claim hardcoded to one tenant (so every other tenant got a
+      # 404 on its own bundles). This value replaced that credential; it did not
+      # join it.
+      #
+      # qa-catalog HKDF-derives each tenant's key from this root and signs
+      # `(bundle_id, tenant_id)`; the tag rides TEST_BUNDLE_URL's `?sig=`.
+      # Verification is fail-closed: empty or shorter than 16 characters refuses
+      # EVERY download, so a deployment in that state runs no tests at all, and
+      # the gears log one WARN at boot naming this setting.
+      #
+      # The literal below is a DEV FIXTURE. The Helm chart's
+      # gears-config-configmap.yaml rewrites it -- to
+      # `.Values.bundleDownloadSigningSecret`, or to a per-render random when
+      # that is unset -- and FAILS THE RENDER if this exact string stops
+      # appearing here, so renaming it without updating that template is a
+      # helm error rather than a cluster shipping the committed key.
+      bundle_download_signing_secret: "dev-bundle-download-signing-secret"
 
   qa-runs:
     database:
@@ -694,6 +718,32 @@ gears:
       # (`deploy/helm/qa-platform/templates/gears-config-configmap.yaml`).
       collect_report_base_url: "http://127.0.0.1:8087"
       collect_report_signing_secret: "dev-collect-report-signing-secret"
+      # WHETHER THIS DEPLOYMENT MAY SEND EMAIL AT ALL, and to which relays.
+      #
+      # Empty -- the default, and what ships here -- binds
+      # `infra::notify::UnsupportedMailClient`: every email notification FAILS
+      # with `unsupported_egress` and is audited as such, and the settings
+      # page's test button answers 501. That is the honest answer for a stack
+      # with no relay, and it is a change from how this gear behaved before
+      # 2026-09-21, when the same situation was reported as a success.
+      #
+      # A NON-EMPTY LIST BINDS THE REAL SMTP TRANSPORT and is, on its own, the
+      # whole egress control. The relay address a tenant actually uses is the
+      # per-tenant `qa_notification_config.email_smtp_host` column typed into
+      # the settings page; a Kubernetes NetworkPolicy matches CIDRs and pod
+      # labels, never DNS names, and all four qa-platform gears share one pod
+      # whose egress already has to include arbitrary git remotes and arbitrary
+      # tenant management nodes -- so there is no network-layer rule that could
+      # narrow this. ADR-0011 (`docs/ADR/0011-cpt-cf-qa-adr-smtp-egress.md`)
+      # carries that argument in full. Whatever you put here is the complete
+      # list of hosts this deployment will open a TCP connection to on a
+      # tenant's behalf.
+      #
+      # Hostnames, matched case-insensitively against the tenant's column as
+      # stored. No wildcard: a `"*"` would make the field decorative.
+      # The SMTP password itself is NEVER configured here -- it is a credstore
+      # reference on the tenant's own settings (`email_smtp_credstore_ref`).
+      smtp_allowed_hosts: []
 
   # THE PRODUCT PLUGIN -- the odd one out, and stated here on purpose.
   #
@@ -725,34 +775,49 @@ gears:
 
 # OpenTelemetry configuration (resource identity, tracing, metrics)
 #
-# THE METRICS HALF IS NOW LOAD-BEARING. The four qa-platform gears declare 22
+# THE METRICS HALF IS LOAD-BEARING. The four qa-platform gears declare 22
 # metric families between them (the catalog is docs/DESIGN.md 3.11, enumerated
-# from the constants in each gear's `domain::metrics`), and this block is the
-# only switch that decides whether any of them leaves the process.
+# from the constants in each gear's `domain::metrics`), and this block decides
+# whether any of them leaves the process.
 #
-# THEY ARE PUSHED, NOT SCRAPED, and that is the whole reason this is a config
-# block rather than a container port. `libs/toolkit/src/telemetry/init.rs`'
-# `init_metrics_provider` builds an `SdkMeterProvider` with an
-# `opentelemetry_otlp::MetricExporter` and a periodic reader; nothing in this
-# repository serves a `/metrics` route and no chart here carries a scrape
-# annotation. A metrics port on the gears Deployment would answer nothing, and
-# adding one would invent a second convention beside this one.
+# THERE ARE TWO WAYS OUT, AND THEY ARE INDEPENDENT. `metrics.enabled` is PUSH:
+# `libs/toolkit/src/telemetry/init.rs`' `init_metrics_provider` attaches an
+# `opentelemetry_otlp::MetricExporter` behind a periodic reader and ships data
+# points at a collector. `metrics.scrape.enabled` is PULL:
+# `libs/toolkit/src/telemetry/scrape.rs` attaches a manual reader to the SAME
+# meter provider and serves the Prometheus text exposition on a listener of its
+# own. Either, both or neither; one provider, two readers.
 #
-# WHAT `enabled: false` MEANS, precisely, because it is not "metrics are
-# broken": `init_metrics_provider` returns before building anything and the
-# process-global meter provider stays the built-in no-op, so every instrument
-# each gear's `build_default_adapter` obtains is a no-op and every emission is
-# silent. The gears run identically either way -- each gear's own
-# "no pipeline configured" test is the evidence -- so the cost of leaving this
-# off is that nothing is observable, not that anything misbehaves.
+# WHY PULL IS ON AND PUSH IS OFF, and it is not a coin toss. Every metric this
+# stack records used to be reachable by NOTHING in a default install: push was
+# off (see below for why it stays off) and nothing served a route. Scraping
+# costs a socket and depends on nothing outside the pod, so it can be the
+# default; pushing needs a collector that a default install has no way to know
+# about, and with the flag on and nothing listening the periodic reader logs an
+# export failure every interval, forever, into a dashboard nobody has. So the
+# reachable-by-default path is the one that cannot fail, and the collector is
+# the opt-in.
 #
-# TURNING IT ON NEEDS A COLLECTOR AT `endpoint`. Under `cargo run` that is a
+# WHAT `metrics.enabled: false` MEANS, precisely, because it is not "metrics
+# are broken": no OTLP exporter is built. It no longer means the provider is a
+# no-op -- with `scrape.enabled: true` below, a real `SdkMeterProvider` is
+# installed and every instrument each gear's `build_default_adapter` obtains
+# records for real. Set BOTH to false to get the old all-no-op behaviour back.
+#
+# TURNING PUSH ON NEEDS A COLLECTOR AT `endpoint`. Under `cargo run` that is a
 # local one, which is why the loopback address below is right here and wrong in
 # a pod (its own 127.0.0.1 is the pod); the Helm chart rewrites both the flag
 # and the address from `.Values.opentelemetry.metrics`, the same way it rewrites
-# `collect_report_base_url` above and for the same reason. With the flag on and
-# nothing listening, the periodic reader logs an export failure every interval
-# and the gears still serve -- an operator-visible nuisance, not an outage.
+# `collect_report_base_url` above and for the same reason.
+#
+# THE SCRAPE LISTENER IS NOT THE API GATEWAY'S. `bind_addr` below is a second
+# port, 9464 (the OpenTelemetry project's conventional Prometheus port), and
+# the api-gateway's 8087 is untouched. That is deliberate: 8087 is what the
+# ingress routes to and what the auth middleware guards, and an unauthenticated
+# scrape route on it would be a hole that has to be remembered rather than one
+# that cannot exist. The chart gives the gears Service a `metrics` port and the
+# pod the `prometheus.io/*` annotations; nothing exposes 9464 outside the
+# cluster. Under `cargo run` it is http://127.0.0.1:9464/metrics.
 opentelemetry:
   # WITHOUT THIS EVERY DATA POINT IS ATTRIBUTED TO `cf-gears`, which is
   # `OpenTelemetryResource`'s own default (`libs/toolkit/src/telemetry/config.rs`,
@@ -769,3 +834,12 @@ opentelemetry:
     exporter:
       kind: otlp_grpc
       endpoint: "http://127.0.0.1:4317"
+    # The pull half. `bind_addr` is rewritten from `.Values.gears.metricsPort`
+    # by gears-config-configmap.yaml, and `enabled` from
+    # `.Values.opentelemetry.metrics.scrape.enabled` -- both transforms are
+    # `fail`-guarded, so an edit here that breaks their sentinels stops the
+    # render rather than silently shipping this file's literals.
+    scrape:
+      enabled: true
+      bind_addr: "0.0.0.0:9464"
+      path: "/metrics"

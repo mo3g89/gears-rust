@@ -32,16 +32,25 @@
 #
 # THIS SCRIPT IS A CONVENIENCE, NOT A DEPENDENCY OF THE CHART. Everything
 # the platform needs to exist is in the chart: `helm upgrade --install
-# deploy/helm/qa-platform --set publicOrigin=...` installs a working stack on
-# any cluster that can pull the images. What this script adds is the part a
-# chart cannot do on a registry-less k3s node -- build the three images from
-# this checkout and import them into containerd -- plus the rsync and the
-# post-deploy verification that make a dev round-trip one command.
+# deploy/helm/qa-platform --set publicOrigin=... --set keycloak.adminPassword=...
+# --set bundleDownloadSigningSecret=... --set collectReportSigningSecret=...`
+# installs a working stack on any cluster that can pull the images -- those
+# FOUR are the chart's `required` values (values.yaml documents each), and
+# there is no fifth. The count was two until 2026-09-21; the two signing
+# secrets joined it when their per-render `randAlphaNum` fallback turned out
+# to rotate a live key on every upgrade. What
+# this script adds is the part a chart cannot do on a registry-less k3s node
+# -- build the three images from this checkout and import them into
+# containerd -- plus the rsync and the post-deploy verification that make a
+# dev round-trip one command. It also supplies `keycloak.adminPassword` and
+# `devMode=true` for you (see ADMIN_PASSWORD and the HELM_ARGS below) so that
+# the one-command convenience stays one command; that is this script's own
+# choice as a dev-stand tool, not something the chart needs.
 #
 # In particular the realm and the Argo workflow Secret are NO LONGER RENDERED
 # HERE. Keycloak 26.0.8 still will not expand a `${env.VAR}` placeholder in an
 # import file (measured, it aborts start-up), but the substitution now happens
-# at TEMPLATE time inside the chart -- see keycloak-realm-configmap.yaml and
+# at TEMPLATE time inside the chart -- see keycloak-realm-secret.yaml and
 # workflow-oidc-secret.yaml, which carry the full reasoning.
 #
 # THERE IS NO REGISTRY IN THIS DEPLOYMENT. `docker build` puts an image in
@@ -72,7 +81,8 @@
 # state.
 #
 # Usage:
-#   deploy-k8s.sh [--target USER@HOST] [--public-origin URL] [--dry-run]
+#   deploy-k8s.sh [--target USER@HOST] [--public-origin URL]
+#                 [--admin-password PASSWORD] [--dry-run]
 #
 #   --target         ssh destination, e.g. root@node.example.com. REQUIRED
 #                     (or set QA_PLATFORM_TARGET). No default: this used to
@@ -86,6 +96,23 @@
 #                     for the same reason as --target: the old default baked one
 #                     development host into every UI bundle and certificate this
 #                     script produced.
+#   --admin-password Keycloak's MASTER-REALM bootstrap admin password (chart
+#                     value keycloak.adminPassword, which values.yaml ships
+#                     with no default and keycloak-deployment.yaml `required`s
+#                     -- see that file's header for why). Optional (or set
+#                     QA_PLATFORM_ADMIN_PASSWORD): when omitted, this script
+#                     generates one with `openssl rand -base64 24` and prints
+#                     it at the end, rather than falling back to the
+#                     well-known "admin" fixture -- keycloak-deployment.yaml's
+#                     H2 store is wiped on every pod restart (its own header
+#                     comment) and IMAGE_TAG below forces a restart on every
+#                     run, so a fresh password each run is never a stale one.
+#                     This script also passes `--set devMode=true`
+#                     unconditionally (a throwaway-dev-stand choice, not the
+#                     chart's default) so the realm's fixture application
+#                     users (admin/AdminPass1!, viewer/ViewerPass1! --
+#                     realm-qa-platform.json) still seed; that is a SEPARATE
+#                     login from this master-realm admin password.
 #   --dry-run         rsync --dry-run, and print every remote command instead
 #                     of running it. The read-only ssh/kubectl/helm preflight
 #                     still runs, so this also answers "can I reach the host,
@@ -106,7 +133,7 @@ source "$SCRIPT_DIR/lib.sh"
 # environment. They named one particular development node before, so `deploy-k8s.sh`
 # with no arguments rsynced to it, rebuilt on it and pointed a UI bundle and a TLS
 # certificate at it -- convenient for exactly one person and a footgun for everyone
-# else. `test_no_environment_hardcode.py` is what keeps them empty.
+# else. `check_no_environment_hardcode.py` is what keeps them empty.
 REMOTE_TARGET="${QA_PLATFORM_TARGET:-}"
 # A DEDICATED MIRROR DIRECTORY, never an arbitrary path: the rsync below is
 # `-a --delete`, and lib.sh's MARKER file is what lets this script recognise a
@@ -114,6 +141,30 @@ REMOTE_TARGET="${QA_PLATFORM_TARGET:-}"
 # `preflight_rsync_path_guard`.
 REMOTE_PATH="/opt/gears-rust"
 PUBLIC_ORIGIN="${QA_PLATFORM_PUBLIC_ORIGIN:-}"
+# The chart's OTHER required value (keycloak.adminPassword -- see
+# keycloak-deployment.yaml's `required` and values.yaml's comment). Left
+# empty here on purpose: generated below, after parsing, only if the caller
+# did not supply one -- see the --admin-password case below and the usage
+# block above for why a generated value, not a committed default.
+ADMIN_PASSWORD="${QA_PLATFORM_ADMIN_PASSWORD:-}"
+# The chart's two OTHER required values, added 2026-09-21. Each is the only
+# access control on an anonymously reachable route (qa-catalog's bundle
+# download, qa-insights' collect report) and each used to fall back to a
+# per-render `randAlphaNum 32` in gears-config-configmap.yaml -- which rotated
+# the key on every render and produced a 403 for any bundle built before an
+# upgrade and fetched after it. Generated below if unset, exactly like
+# ADMIN_PASSWORD, and for the same reason: no committed literal in this file.
+#
+# ENVIRONMENT ONLY, NO FLAG, unlike --admin-password. A stand's bootstrap admin
+# password is something an operator types once and reads back off the terminal;
+# a signing key is not, and this script's stand is thrown away and rebuilt on
+# every run anyway -- IMAGE_TAG already forces a pod roll, so a fresh key per
+# run is never a key the running process disagrees with. Export
+# QA_PLATFORM_BUNDLE_SIGNING_KEY/QA_PLATFORM_COLLECT_SIGNING_KEY to pin them
+# across runs, which is what you want if anything outside a run is holding a
+# `?sig=` across a deploy.
+BUNDLE_SIGNING_KEY="${QA_PLATFORM_BUNDLE_SIGNING_KEY:-}"
+COLLECT_SIGNING_KEY="${QA_PLATFORM_COLLECT_SIGNING_KEY:-}"
 DRY_RUN=false
 
 NAMESPACE="qa-platform"
@@ -123,8 +174,9 @@ CHART_REL="gears/qa-platform/deploy/helm/qa-platform"
 # ------------------------------------------------------------------- parse --
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --target)         REMOTE_TARGET="${2:?--target needs a value}"; shift 2 ;;
-        --public-origin)  PUBLIC_ORIGIN="${2:?--public-origin needs a value}"; shift 2 ;;
+        --target)          REMOTE_TARGET="${2:?--target needs a value}"; shift 2 ;;
+        --public-origin)   PUBLIC_ORIGIN="${2:?--public-origin needs a value}"; shift 2 ;;
+        --admin-password)  ADMIN_PASSWORD="${2:?--admin-password needs a value}"; shift 2 ;;
         --dry-run)        DRY_RUN=true; shift ;;
         -h|--help)        sed -n '/^# Usage:/,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//;$d'; exit 0 ;;
         *)                echo "deploy-k8s: unknown argument '$1' (try --help)" >&2; exit 2 ;;
@@ -147,6 +199,32 @@ if [[ ! "$PUBLIC_ORIGIN" =~ ^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[
     echo "deploy-k8s: --public-origin '$PUBLIC_ORIGIN' is not a plain 'http(s)://host[:port]' origin (no trailing slash, no path) -- refusing to continue" >&2
     exit 1
 fi
+
+# keycloak.adminPassword is the chart's other REQUIRED value (see
+# keycloak-deployment.yaml's `required` and values.yaml's comment). Generate
+# one HERE, not as a bash default on the assignment above, so a caller who
+# passed --admin-password/QA_PLATFORM_ADMIN_PASSWORD never pays for a
+# subshell they did not ask for, and so this script never carries a
+# committed password literal for check_no_environment_hardcode.py-style
+# guards to eventually have to ban the same way it banned the old
+# hostname/IP defaults.
+if [[ -z "$ADMIN_PASSWORD" ]]; then
+    command -v openssl >/dev/null 2>&1 || die "openssl not found locally -- needed to generate keycloak.adminPassword. Install it, or pass --admin-password/QA_PLATFORM_ADMIN_PASSWORD yourself."
+    ADMIN_PASSWORD="$(openssl rand -base64 24)"
+    echo "deploy-k8s: no --admin-password/QA_PLATFORM_ADMIN_PASSWORD -- generated a fresh Keycloak bootstrap admin password for this run (printed again at the end)."
+fi
+
+# The two signing keys, generated the same way and for the same reasons. Not
+# printed: unlike the admin password there is nothing for a human to log in
+# with, and the run view renders pod logs, so the fewer places a signing key is
+# echoed the better. `-hex 24` rather than `-base64 24` because the value
+# travels through `--set` into a YAML scalar and a base64 alphabet includes
+# characters `--set` treats specially.
+if [[ -z "$BUNDLE_SIGNING_KEY" ]] || [[ -z "$COLLECT_SIGNING_KEY" ]]; then
+    command -v openssl >/dev/null 2>&1 || die "openssl not found locally -- needed to generate the chart's two signing keys. Install it, or set QA_PLATFORM_BUNDLE_SIGNING_KEY and QA_PLATFORM_COLLECT_SIGNING_KEY yourself."
+fi
+[[ -n "$BUNDLE_SIGNING_KEY" ]]  || BUNDLE_SIGNING_KEY="$(openssl rand -hex 24)"
+[[ -n "$COLLECT_SIGNING_KEY" ]] || COLLECT_SIGNING_KEY="$(openssl rand -hex 24)"
 
 # --------------------------------------------------------------- repo root --
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -385,7 +463,7 @@ fi
 
 echo "=== docker build $IMAGE (gears) ==="
 # CARGO_FEATURES from the CANONICAL argo list (deploy/cargo-features.argo),
-# not the Dockerfile's own ARG default -- test_features.py is what keeps
+# not the Dockerfile's own ARG default -- check_features.py is what keeps
 # that file a superset of the Dockerfile default. The in-cluster deploy always
 # builds the argo-featured image, so it reads the canonical list rather than
 # letting the Dockerfile's default decide.
@@ -544,6 +622,28 @@ HELM_ARGS=(upgrade --install "$RELEASE" "$CHART_REL"
            --set "publicOrigin=$PUBLIC_ORIGIN"
            --set "images.gears.tag=$IMAGE_TAG"
            --set "images.ui.tag=$IMAGE_TAG"
+           # keycloak.adminPassword is the chart's other REQUIRED value --
+           # ADMIN_PASSWORD above is either --admin-password/
+           # QA_PLATFORM_ADMIN_PASSWORD or a freshly generated one; either
+           # way it is never empty and never the well-known "admin" fixture
+           # by default.
+           --set "keycloak.adminPassword=$ADMIN_PASSWORD"
+           # The chart's two remaining required values -- see their
+           # declarations near ADMIN_PASSWORD above.
+           --set "bundleDownloadSigningSecret=$BUNDLE_SIGNING_KEY"
+           --set "collectReportSigningSecret=$COLLECT_SIGNING_KEY"
+           # devMode=true: a deliberate choice OF THIS SCRIPT, not the
+           # chart's own default (values.yaml's devMode stays false). This
+           # is a throwaway dev stand by construction -- rebuilt from
+           # whatever is in the working tree, imported into containerd with
+           # no registry, torn down and reinstalled on every run -- and
+           # devMode=true is what keeps the realm's fixture application
+           # users seeded (realm-qa-platform.json's admin/AdminPass1! and
+           # viewer/ViewerPass1!) so the "Done" banner's login line below
+           # stays true. It has no effect on keycloak.adminPassword's
+           # refusal of the literal "admin" once that value is a generated
+           # secret rather than the fixture string.
+           --set "devMode=true"
            # ---------------------------------------------------------------
            # NO `--wait`. NEVER RE-ADD IT. `--timeout` stays -- it still
            # bounds the post-install HOOKS (db-migrate, tenant-seed), which
@@ -759,6 +859,7 @@ if $DRY_RUN; then
 else
     echo "deploy-k8s: stack installed as release '$RELEASE' in namespace '$NAMESPACE' on $REMOTE_TARGET"
     echo "deploy-k8s: images: gears=$GEARS_IMAGE ui=$UI_IMAGE (both imported into containerd, no registry involved)"
-    echo "deploy-k8s: open the UI at $PUBLIC_ORIGIN and log in with admin/admin (dev fixture credentials from the realm file)"
+    echo "deploy-k8s: open the UI at $PUBLIC_ORIGIN and log in with admin/AdminPass1! (dev fixture credentials from the realm file, seeded because this script passes devMode=true; the realm's own passwordPolicy no longer allows admin/admin)"
+    echo "deploy-k8s: Keycloak's MASTER-REALM admin console (a separate login from the UI fixture above; not proxied on the public origin, see keycloak-deployment.yaml/ui-extraconf-configmap.yaml) bootstrap credentials for this run: admin / $ADMIN_PASSWORD"
     echo "deploy-k8s: watch the crash-loop-then-recover gears pod with: ssh $REMOTE_TARGET 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n $NAMESPACE get pods -w'"
 fi

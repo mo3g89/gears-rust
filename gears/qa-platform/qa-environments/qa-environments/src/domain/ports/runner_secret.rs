@@ -28,11 +28,18 @@
 
 use async_trait::async_trait;
 use credstore_sdk::SecretValue;
+use uuid::Uuid;
 
 /// Write an environment's credential into the Argo cluster as a `Secret`.
 #[async_trait]
 pub trait RunnerSecretWriter: Send + Sync {
-    /// Apply the `Secret` a run mounts, named after `credstore_ref`.
+    /// Apply the `Secret` a run mounts, named after `tenant_id` and
+    /// `credstore_ref`.
+    ///
+    /// `tenant_id` is folded into the name so two tenants naming the same
+    /// (or same-prefix) reference do not derive one `Secret` in the shared
+    /// Argo namespace — see [`Self::derived_secret_name`]'s own doc for the
+    /// collision this closes.
     ///
     /// `Err` carries fixed operator-facing text. It is deliberately not a
     /// `DomainError`: the caller logs it and carries on, because a runner
@@ -40,25 +47,29 @@ pub trait RunnerSecretWriter: Send + Sync {
     /// that triggered it.
     async fn ensure_runner_secret(
         &self,
+        tenant_id: Uuid,
         credstore_ref: &str,
         material: &SecretValue,
     ) -> Result<(), String>;
 
     /// The name [`Self::ensure_runner_secret`] would give the object it
-    /// applies for `credstore_ref`.
+    /// applies for `tenant_id` and `credstore_ref`.
     ///
     /// # Why the caller needs to ask
     ///
-    /// The name is **derived**, not stored, and the derivation is lossy: the
-    /// implementation that writes into Kubernetes sanitises the reference and
-    /// truncates it to the longest name an API server accepts, which leaves
-    /// only part of it. While an environment had exactly one credential that
-    /// could not matter. With N it can: `CredentialSubmission::Reference` is
-    /// a first-class, caller-supplied path, and two path-style references
-    /// sharing a long enough prefix derive **one** name. The second apply
-    /// then overwrites the first's material and `qa-runs` mounts that one
-    /// object at both paths, with no error on either gear -- a run reading
-    /// the wrong credential at the right path, silently.
+    /// The name is **derived**, not stored, and truncation to the longest
+    /// name an API server accepts is why the caller cannot just compare
+    /// references itself: the implementation that writes into Kubernetes
+    /// ends the name in a fixed-width digest of the whole
+    /// `(prefix, tenant_id, credstore_ref)` tuple precisely so truncating
+    /// the human-readable head never makes two distinct tuples collide (see
+    /// the implementation's own doc for the construction and why an earlier,
+    /// truncation-only version of this rule did not have that property).
+    /// While an environment had exactly one credential this question could
+    /// not arise. With N it can: `CredentialSubmission::Reference` is a
+    /// first-class, caller-supplied path, and `domain/` has no way to know
+    /// on its own whether two of them would derive the same name without
+    /// asking the port that owns the rule.
     ///
     /// So the caller asks each credential's name *before* writing anything
     /// and refuses the second claimant. It compares the strings and nothing
@@ -67,15 +78,33 @@ pub trait RunnerSecretWriter: Send + Sync {
     /// `domain/` never learns Kubernetes exists -- true while still letting
     /// the collision be caught where the decision to write is made.
     ///
-    /// # The default is the identity, deliberately
+    /// `tenant_id` is a parameter here (rather than folded silently into some
+    /// per-writer state) for the same reason it is a parameter on
+    /// [`Self::ensure_runner_secret`]: every credential this is asked about
+    /// belongs to the one environment `materialise_runner_secret`'s caller
+    /// (`domain::service::environments`) is looking at, and that environment
+    /// has exactly one tenant, so the value never varies within one loop --
+    /// but the signature says so rather than leaving it an implicit,
+    /// easy-to-violate assumption.
     ///
-    /// A writer that does not transform the reference cannot collide, so
-    /// "distinct references, distinct names" is the honest default and every
-    /// implementation that *does* transform must say so by overriding. Test
-    /// doubles inherit it; the one that exists to reproduce a collision
-    /// overrides it on purpose.
-    fn derived_secret_name(&self, credstore_ref: &str) -> String {
-        credstore_ref.to_owned()
+    /// # The default folds the tenant in but transforms nothing else,
+    ///   deliberately
+    ///
+    /// A writer that does not sanitise or truncate the reference cannot
+    /// reproduce the real writer's *truncation* collision (there being none
+    /// to reproduce), but it can still stand in for the tenant-scoping
+    /// question this method exists to answer: two credentials of one
+    /// environment share one tenant, so folding `tenant_id` in and leaving
+    /// `credstore_ref` untouched is injective in exactly the sense the
+    /// caller needs -- within one environment's credential loop `tenant_id`
+    /// is constant, so two credentials still collide under this default if
+    /// and only if their references do. Every implementation that
+    /// transforms the reference itself (sanitising, truncating, hashing)
+    /// must still say so by overriding; test doubles that need no such
+    /// transform inherit this default, and the one that exists to reproduce
+    /// a collision overrides it on purpose.
+    fn derived_secret_name(&self, tenant_id: Uuid, credstore_ref: &str) -> String {
+        format!("{tenant_id}-{credstore_ref}")
     }
 }
 
@@ -99,6 +128,7 @@ pub struct NoopRunnerSecretWriter;
 impl RunnerSecretWriter for NoopRunnerSecretWriter {
     async fn ensure_runner_secret(
         &self,
+        _tenant_id: Uuid,
         _credstore_ref: &str,
         _material: &SecretValue,
     ) -> Result<(), String> {
@@ -115,21 +145,26 @@ impl RunnerSecretWriter for NoopRunnerSecretWriter {
 mod tests {
     use super::*;
 
-    /// The default derivation is the identity: a writer that does not
-    /// transform the reference cannot make two of them collide, and one that
-    /// does has to override and say so.
+    /// The default derivation folds the tenant in but transforms nothing
+    /// else: two credentials of one environment (one tenant, held constant
+    /// here) still collide only when their references do.
     #[test]
-    fn the_default_derived_name_is_the_reference_itself() {
+    fn the_default_derived_name_prepends_the_tenant_and_leaves_the_reference_alone() {
+        let tenant: Uuid = uuid::uuid!("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         assert_eq!(
-            NoopRunnerSecretWriter.derived_secret_name("environment/9f2c/kubeconfig"),
-            "environment/9f2c/kubeconfig"
+            NoopRunnerSecretWriter.derived_secret_name(tenant, "environment/9f2c/kubeconfig"),
+            format!("{tenant}-environment/9f2c/kubeconfig")
         );
     }
 
     #[tokio::test]
     async fn the_noop_writer_is_an_error_not_a_silent_success() {
         let error = NoopRunnerSecretWriter
-            .ensure_runner_secret("credstore://ref", &SecretValue::from("x".to_owned()))
+            .ensure_runner_secret(
+                Uuid::new_v4(),
+                "credstore://ref",
+                &SecretValue::from("x".to_owned()),
+            )
             .await
             .expect_err("a build with no writer must say so");
         assert!(

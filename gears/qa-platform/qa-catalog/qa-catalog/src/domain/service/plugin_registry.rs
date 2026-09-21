@@ -3,8 +3,10 @@
 //! One question, answered in one hop: *which plugin owns this product's
 //! behaviour?* The binding is `qa_products.plugin_instance_id`, a column on
 //! this gear's own aggregate, which is why the resolver lives here and not in
-//! the two gears that consume it (`PRODUCT-PLUGINS-DESIGN.md` §3, decision
-//! that products are `qa-catalog`'s aggregate).
+//! the two gears that consume it (products are `qa-catalog`'s aggregate per
+//! `DESIGN.md` §3.3's `products` service: "Product CRUD; binds a product to
+//! its plugin instance" -- `PRODUCT-PLUGINS-DESIGN.md` §3, cited here
+//! before the docs squash, no longer exists).
 //!
 //! # Shape borrowed from `chat-engine`
 //!
@@ -288,7 +290,7 @@ impl<P: ProductsRepository> QaProductRegistry<P> {
             .ok_or(DomainError::NotFound { id: product_id })?;
 
         // No `Option` to unwrap since Task 20a: the column is `NOT NULL`
-        // (`m20260903_000004_plugin_instance_id_not_null`) and the model
+        // (`m20260903_000004_plugin_instance_id_not_null` (folded into `migrations::m20260812_000002_initial` by the docs squash)) and the model
         // followed, so "this product names no plugin" is not a state that
         // reaches here any more -- and `DomainError::ProductPluginUnavailable`
         // dropped its `Option` to match (review finding IMPORTANT-5).

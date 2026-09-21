@@ -10,8 +10,7 @@ metadata:
     app.kubernetes.io/component: keycloak
 spec:
   selector:
-    app.kubernetes.io/name: qa-platform
-    app.kubernetes.io/component: keycloak
+    {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "keycloak") | nindent 4 }}
   ports:
     - name: http
       port: 8080

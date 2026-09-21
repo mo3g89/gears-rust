@@ -60,7 +60,8 @@ use crate::domain::analytics::ExecRow;
 use crate::domain::ports::CatalogReader;
 use crate::domain::service::ingest::{StatusBucket, classify};
 use crate::domain::service::test_support::{
-    DEFAULT_BRANCH, FakeCatalog, ctx, exec_row_at, universe_test, universe_test_full,
+    DEFAULT_BRANCH, FakeCatalog, UNIVERSE_TEST_REPO_ID, ctx, exec_row_at, universe_test,
+    universe_test_full,
 };
 
 /// A row whose producer reported no file at all — the case the whole alias map
@@ -114,7 +115,8 @@ fn a_non_ascii_letter_normalizes_to_a_space() {
     )];
     let aliases = build_alias_map(&universe);
     assert_eq!(
-        resolve_row_test_file(None, "upgrade \u{fc}ber", &aliases).as_deref(),
+        resolve_row_test_file(UNIVERSE_TEST_REPO_ID, None, "upgrade \u{fc}ber", &aliases)
+            .as_deref(),
         Some("tests/upgrade.py"),
         "the row and the universe are mangled identically, so they still meet",
     );
@@ -207,7 +209,7 @@ fn a_row_with_only_a_test_name_resolves_through_any_of_the_four_aliases() {
         "tests/cluster/test_upgrade.py",
     ] {
         assert_eq!(
-            resolve_row_test_file(None, name, &aliases).as_deref(),
+            resolve_row_test_file(UNIVERSE_TEST_REPO_ID, None, name, &aliases).as_deref(),
             Some("tests/cluster/test_upgrade.py"),
             "alias {name} must resolve"
         );
@@ -224,7 +226,10 @@ fn an_ambiguous_alias_resolves_to_nothing() {
         universe_test_full("tests/b/test_smoke.py", "test_smoke", None),
     ];
     let aliases = build_alias_map(&universe);
-    assert_eq!(resolve_row_test_file(None, "test_smoke", &aliases), None);
+    assert_eq!(
+        resolve_row_test_file(UNIVERSE_TEST_REPO_ID, None, "test_smoke", &aliases),
+        None
+    );
 }
 
 /// `add_alias:1771-1779`: poisoning is **permanent** and does not spread.
@@ -243,9 +248,18 @@ fn poisoning_is_permanent_and_confined_to_the_ambiguous_alias() {
     ];
     let aliases = build_alias_map(&universe);
 
-    assert_eq!(resolve_row_test_file(None, "test_smoke", &aliases), None);
     assert_eq!(
-        resolve_row_test_file(None, "tests/b/test_smoke.py", &aliases).as_deref(),
+        resolve_row_test_file(UNIVERSE_TEST_REPO_ID, None, "test_smoke", &aliases),
+        None
+    );
+    assert_eq!(
+        resolve_row_test_file(
+            UNIVERSE_TEST_REPO_ID,
+            None,
+            "tests/b/test_smoke.py",
+            &aliases
+        )
+        .as_deref(),
         Some("tests/b/test_smoke.py"),
         "the path alias of each entry is still unique, so it still resolves",
     );
@@ -271,7 +285,7 @@ fn the_same_alias_for_the_same_file_is_not_an_ambiguity() {
     ];
     let aliases = build_alias_map(&universe);
     assert_eq!(
-        resolve_row_test_file(None, "test_upgrade", &aliases).as_deref(),
+        resolve_row_test_file(UNIVERSE_TEST_REPO_ID, None, "test_upgrade", &aliases).as_deref(),
         Some("tests/test_upgrade.py"),
     );
 }
@@ -295,10 +309,16 @@ fn a_blank_alias_is_never_registered() {
     let universe = vec![universe_test_full("tests/a.py", "a", Some("!!!"))];
     let aliases = build_alias_map(&universe);
 
-    assert_eq!(resolve_row_test_file(None, "***", &aliases), None);
-    assert_eq!(resolve_row_test_file(None, "", &aliases), None);
     assert_eq!(
-        resolve_row_test_file(None, "a", &aliases).as_deref(),
+        resolve_row_test_file(UNIVERSE_TEST_REPO_ID, None, "***", &aliases),
+        None
+    );
+    assert_eq!(
+        resolve_row_test_file(UNIVERSE_TEST_REPO_ID, None, "", &aliases),
+        None
+    );
+    assert_eq!(
+        resolve_row_test_file(UNIVERSE_TEST_REPO_ID, None, "a", &aliases).as_deref(),
         Some("tests/a.py"),
         "the blank title must not have disturbed the entry's other aliases",
     );
@@ -324,11 +344,17 @@ fn an_explicit_test_file_bypasses_the_alias_map() {
 
     // The alias resolves — to the *other* file.
     assert_eq!(
-        resolve_row_test_file(None, "irrelevant", &aliases).as_deref(),
+        resolve_row_test_file(UNIVERSE_TEST_REPO_ID, None, "irrelevant", &aliases).as_deref(),
         Some("tests/b.py"),
     );
     assert_eq!(
-        resolve_row_test_file(Some("./tests/a.py"), "irrelevant", &aliases).as_deref(),
+        resolve_row_test_file(
+            UNIVERSE_TEST_REPO_ID,
+            Some("./tests/a.py"),
+            "irrelevant",
+            &aliases
+        )
+        .as_deref(),
         Some("tests/a.py"),
     );
 }
@@ -349,7 +375,13 @@ fn a_blank_test_file_falls_through_to_the_alias_map() {
 
     for stored in ["", "   "] {
         assert_eq!(
-            resolve_row_test_file(Some(stored), "test_upgrade", &aliases).as_deref(),
+            resolve_row_test_file(
+                UNIVERSE_TEST_REPO_ID,
+                Some(stored),
+                "test_upgrade",
+                &aliases
+            )
+            .as_deref(),
             Some("tests/cluster/test_upgrade.py"),
             "a stored {stored:?} is absent, not a path",
         );
@@ -497,7 +529,8 @@ fn the_latest_status_is_the_first_row_and_rows_outside_the_universe_are_ignored(
     let latest = build_latest_map(&universe, &rows);
     assert_eq!(latest.len(), 1);
     assert_eq!(
-        latest["tests/a.py"].status_bucket, "PASSED",
+        latest[&(UNIVERSE_TEST_REPO_ID, "tests/a.py".to_owned())].status_bucket,
+        "PASSED",
         "first row wins; a fold comparing timestamps would answer FAILED",
     );
 }
@@ -517,7 +550,7 @@ fn the_latest_entry_carries_every_field_the_lists_render() {
     let expected = row.clone();
 
     let latest = build_latest_map(&universe, &[row]);
-    let info = &latest["tests/a.py"];
+    let info = &latest[&(UNIVERSE_TEST_REPO_ID, "tests/a.py".to_owned())];
 
     assert_eq!(info.status_bucket, "PASSED");
     assert_eq!(info.environment_id, expected.environment_id);
@@ -569,22 +602,28 @@ fn the_latest_build_is_collapsed_exactly_as_legacy_collapses_it() {
     let latest = build_latest_map(&universe, &rows);
 
     assert_eq!(
-        latest["tests/absent.py"].build.as_deref(),
+        latest[&(UNIVERSE_TEST_REPO_ID, "tests/absent.py".to_owned())]
+            .build
+            .as_deref(),
         Some(UNKNOWN_BUILD),
         "a run that named no build is `unknown`, not absent",
     );
     assert_eq!(
-        latest["tests/blank.py"].build.as_deref(),
+        latest[&(UNIVERSE_TEST_REPO_ID, "tests/blank.py".to_owned())]
+            .build
+            .as_deref(),
         Some(UNKNOWN_BUILD),
         "`normalize_optional` maps a blank to absent first",
     );
     assert_eq!(
-        latest["tests/padded.py"].build.as_deref(),
+        latest[&(UNIVERSE_TEST_REPO_ID, "tests/padded.py".to_owned())]
+            .build
+            .as_deref(),
         Some("9.1"),
         "the label is trimmed before it is rendered",
     );
     assert!(
-        !latest.contains_key("tests/never.py"),
+        !latest.contains_key(&(UNIVERSE_TEST_REPO_ID, "tests/never.py".to_owned())),
         "no row means no entry, and `LatestInfo::default` is the `None`",
     );
     assert_eq!(LatestInfo::default().build, None);
@@ -619,14 +658,17 @@ fn a_file_with_no_row_has_no_entry_and_defaults_to_not_run() {
     )];
 
     let latest = build_latest_map(&universe, &rows);
-    assert!(!latest.contains_key("tests/b.py"));
+    assert!(!latest.contains_key(&(UNIVERSE_TEST_REPO_ID, "tests/b.py".to_owned())));
 
     // Legacy's own consumer pattern, verbatim (`:1407`,
     // `latest.get(..).cloned().unwrap_or_default()`). Asserting the whole value
     // rather than only its bucket is what pins `LatestInfo::default` — a default
     // that acquired a `PASSED` bucket, or a stray `run_id`, would make every
     // never-executed test render as a run that happened.
-    let absent = latest.get("tests/b.py").cloned().unwrap_or_default();
+    let absent = latest
+        .get(&(UNIVERSE_TEST_REPO_ID, "tests/b.py".to_owned()))
+        .cloned()
+        .unwrap_or_default();
     assert_eq!(absent, LatestInfo::default());
     assert_eq!(absent.status_bucket, NOT_RUN);
     assert_eq!(absent.run_id, None);
@@ -671,11 +713,11 @@ async fn the_universe_a_reader_returns_feeds_the_alias_map() {
     let aliases = build_alias_map(&universe);
 
     assert_eq!(
-        resolve_row_test_file(None, "Cluster Upgrade", &aliases).as_deref(),
+        resolve_row_test_file(UNIVERSE_TEST_REPO_ID, None, "Cluster Upgrade", &aliases).as_deref(),
         Some("tests/cluster/test_upgrade.py"),
     );
     assert_eq!(
-        resolve_row_test_file(None, "test_gone", &aliases),
+        resolve_row_test_file(UNIVERSE_TEST_REPO_ID, None, "test_gone", &aliases),
         None,
         "the other branch's universe is not in scope, so its aliases are not \
          registered",

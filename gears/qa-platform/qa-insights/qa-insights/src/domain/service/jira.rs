@@ -187,7 +187,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use authz_resolver_sdk::PolicyEnforcer;
-use qa_insights_sdk::{JiraBug, JiraConfig, JiraPollerConfig, NewJiraBug, TestResultRecord};
+use qa_insights_sdk::{
+    JIRA_SUMMARY_MAX_CHARS, JiraBug, JiraConfig, JiraPollerConfig, NewJiraBug, TestResultRecord,
+};
 use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
 use toolkit_security::{AccessScope, SecurityContext};
@@ -655,6 +657,18 @@ where
     /// [`resources::TEST_RESULT`] scope [`Self::file_bugs`] compiles for the
     /// identical table, R87's rule applied to a second caller of it.
     ///
+    /// # `repo_id` is a parameter — task 2's fix
+    ///
+    /// `plan_path` is repository-relative, so passing it alone let two
+    /// repositories of one tenant that both declare the same `plan_path`
+    /// share one answer — see
+    /// [`ResultsRepository::latest_version_for_plan`]'s doc for the whole
+    /// argument. The caller
+    /// ([`domain::service::jira_poller::JiraPollerService::maybe_rerun`])
+    /// already has `bug.repo_id` — the same value its own call to
+    /// `find_plan_test_file` two lines later requires — so this is the
+    /// caller's existing value threaded through, not a new lookup.
+    ///
     /// # Errors
     ///
     /// [`DomainError::Forbidden`] when the PDP denies.
@@ -662,12 +676,13 @@ where
     pub async fn latest_version_for_plan(
         &self,
         ctx: &SecurityContext,
+        repo_id: Uuid,
         plan_path: &str,
     ) -> Result<Option<String>, DomainError> {
         let access = self.results_scope(ctx).await?;
         let conn = self.db.conn()?;
         self.results
-            .latest_version_for_plan(&conn, &access, ctx.subject_tenant_id(), plan_path)
+            .latest_version_for_plan(&conn, &access, ctx.subject_tenant_id(), repo_id, plan_path)
             .await
     }
 
@@ -1099,15 +1114,34 @@ fn optional_plan_ref(
 
 /// The stored bug's summary text — the same string the adapter sends JIRA
 /// as the issue summary (`infra::jira::oagw_client::summary_for`, legacy
-/// `jira.rs:113` for the wording and `:99`/`:185` for both of its call sites).
+/// `jira.rs:113` for the wording and `:99`/`:185` for both of its call sites),
+/// truncated the same way and for the same reason: `test_name` is
+/// `VARCHAR(512)`, wider than JIRA's 255-character `summary` field, so a
+/// parameterised name can exceed it. Before this bound existed here, this
+/// function stored the untruncated string while `summary_for` truncated what
+/// actually reached JIRA — a divergence nothing caught, because each builds
+/// its own copy and neither reads the other's.
 ///
-/// Duplicated rather than shared, [`BLANK_ISSUE_TYPE`]'s reason: the domain
-/// layer must not depend on the infra adapter. `pub(crate)`, not private, so
-/// `infra::jira::oagw_client`'s own test module can pin the two literals
-/// together — `the_stored_summary_matches_the_one_sent_to_jira` — rather than
-/// leaving them to drift apart unnoticed.
+/// The *format string* is duplicated rather than shared,
+/// [`BLANK_ISSUE_TYPE`]'s reason: the domain layer must not depend on the
+/// infra adapter. The truncation *bound*, unlike the format string, is not a
+/// second literal to keep in sync by hand — both this function and
+/// `summary_for` take [`JIRA_SUMMARY_MAX_CHARS`] from the contract crate both
+/// layers already depend on, so there is one `255`, not two. Characters, not
+/// bytes: a parameterised `test_name` can carry non-ASCII, and a byte-based
+/// cut could split a UTF-8 sequence.
+///
+/// `pub(crate)`, not private, so `infra::jira::oagw_client`'s own test module
+/// can pin the two functions together —
+/// `the_stored_summary_matches_the_one_sent_to_jira` and, past the
+/// truncation boundary,
+/// `the_stored_summary_matches_the_one_sent_to_jira_past_the_truncation_boundary`
+/// — rather than leaving them to drift apart unnoticed.
 pub(crate) fn bug_summary(test_name: &str) -> String {
     format!("[VHP] Test Failed: {test_name}")
+        .chars()
+        .take(JIRA_SUMMARY_MAX_CHARS)
+        .collect()
 }
 
 #[cfg(test)]

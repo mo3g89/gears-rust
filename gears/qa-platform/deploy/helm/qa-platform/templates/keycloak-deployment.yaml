@@ -1,5 +1,5 @@
 {{/* Keycloak runs `start-dev` on its embedded H2 database -- deliberately, not
-     an oversight. That is only safe because keycloak-realm-configmap.yaml's
+     an oversight. That is only safe because keycloak-realm-secret.yaml's
      realm-qa-platform.json pins the qa-platform-workflow client's secret: a
      pod restart discards H2, `--import-realm` re-imports the realm, and the
      re-import produces the SAME client secret every time, so the
@@ -57,16 +57,26 @@ metadata:
     app.kubernetes.io/name: qa-platform
     app.kubernetes.io/component: keycloak
 spec:
+  {{- /* "admin" is the fixture value realm-qa-platform.json's own
+         x-qa-platform-dev-only marker documents ("admin/admin" throughout).
+         KC_BOOTSTRAP_ADMIN_PASSWORD now arrives via keycloak-admin-secret.yaml's
+         `valueFrom.secretKeyRef` (see that file for why and for what this
+         does and does not protect) -- this `fail` is the one place
+         enforcement can actually stop the well-known literal from being
+         used at all, regardless of how it is delivered to the pod: refuse
+         to render with it unless the installer has explicitly said this is
+         a throwaway stand. */}}
+  {{- if and (not .Values.devMode) (eq .Values.keycloak.adminPassword "admin") }}
+  {{- fail "Refusing to install with the development admin password. Set keycloak.adminPassword, or set devMode=true if this is a throwaway stand." }}
+  {{- end }}
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: qa-platform
-      app.kubernetes.io/component: keycloak
+      {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "keycloak") | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: qa-platform
-        app.kubernetes.io/component: keycloak
+        {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "keycloak") | nindent 8 }}
     spec:
       containers:
         - name: keycloak
@@ -92,9 +102,15 @@ spec:
               containerPort: 8080
           env:
             - name: KC_BOOTSTRAP_ADMIN_USERNAME
-              value: {{ .Values.keycloak.adminUser | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: qa-platform-keycloak-admin
+                  key: KC_BOOTSTRAP_ADMIN_USERNAME
             - name: KC_BOOTSTRAP_ADMIN_PASSWORD
-              value: {{ .Values.keycloak.adminPassword | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: qa-platform-keycloak-admin
+                  key: KC_BOOTSTRAP_ADMIN_PASSWORD
             - name: KC_HTTP_ENABLED
               value: "true"
             - name: KC_PROXY_HEADERS
@@ -125,5 +141,5 @@ spec:
             failureThreshold: 30
       volumes:
         - name: realm
-          configMap:
-            name: qa-platform-realm
+          secret:
+            secretName: qa-platform-realm

@@ -291,6 +291,25 @@ pub struct NewSavedView {
 
 // ==================== JIRA bug registry ====================
 
+/// JIRA Cloud's own `summary` field limit, in **characters**.
+///
+/// [`JiraBug::summary`]/[`NewJiraBug::summary`] are built in two places that
+/// must agree byte-for-byte: `qa-insights`' `infra::jira::oagw_client::summary_for`
+/// (what is actually sent to JIRA) and `domain::service::jira::bug_summary`
+/// (what is stored locally in `qa_jira_bugs.summary`, a `TEXT` column with no
+/// bound of its own). Both need this number, and neither may depend on the
+/// other — the domain layer must not depend on the infra adapter, and the
+/// infra adapter's truncation is not a fact the domain layer should redefine
+/// as a second bare `255`. This crate is the one place both legitimately
+/// import from already ([`JiraConfig`], [`NewJiraBug`], ...), so the constant
+/// lives here instead of drifting into two copies.
+///
+/// [`TestResultRecord::test_name`] is `VARCHAR(512)`, wider than this bound,
+/// so a parameterised test name routinely exceeds it; characters, not bytes,
+/// because a `.len()` cut on a summary carrying non-ASCII (from that same
+/// parameterised name) could split a UTF-8 sequence.
+pub const JIRA_SUMMARY_MAX_CHARS: usize = 255;
+
 /// A tracked bug against a test.
 ///
 /// The plan identity is the `(repo_id, plan_path)` pair (this module's note 1,
@@ -550,7 +569,38 @@ pub struct NotificationConfig {
     pub run_queue_queued_slack_enabled: bool,
     pub email_smtp_host: String,
     /// Defaults to 587.
+    ///
+    /// **This field also selects the TLS mode**, and nothing else does. 465 is
+    /// the port IANA assigned to submission-over-implicit-TLS (RFC 8314 §3.3),
+    /// so the mailer wraps the socket in TLS before the first byte; every other
+    /// port is dialled in the clear and required to offer `STARTTLS`. See
+    /// `qa-insights`' `infra::notify::mail_smtp` for why that is a two-value
+    /// rule derived from the port rather than a third column an operator can
+    /// set to something that contradicts it.
     pub email_smtp_port: u16,
+    /// The SMTP AUTH username, in the clear — the *name* of an identity, not the
+    /// proof of it.
+    ///
+    /// Empty (together with [`Self::email_smtp_credstore_ref`]) means the relay
+    /// takes unauthenticated submission, which is the normal shape for an
+    /// in-cluster or IP-allow-listed relay. Non-empty means both must be
+    /// non-empty; the write path rejects half a credential rather than sending
+    /// as nobody.
+    ///
+    /// Plaintext here is the same split [`JiraConfig`] already makes — `email`
+    /// beside `api_token_credstore_ref`. A username identifies an account and
+    /// possession of it authorizes nothing.
+    pub email_smtp_username: String,
+    /// Credstore reference to the SMTP AUTH password. **Never the password.**
+    ///
+    /// The third of this gear's credentials held by reference, and the first
+    /// one this gear resolves *itself*: a Slack webhook and a JIRA token both
+    /// ride HTTP, so oagw can fetch and inject them, and SMTP is not HTTP.
+    /// `qa-insights`' `infra::notify::mail_smtp` reads this through
+    /// `credstore_sdk::CredStoreClientV1` at send time and hands the value
+    /// straight to `lettre`; it is never logged, never rendered and never
+    /// returned by the GET surface, which answers with this reference.
+    pub email_smtp_credstore_ref: String,
     pub email_from: String,
     /// The recipient list is one string, not a `Vec` — the split happens in the
     /// mailer. Kept as stored so a round-trip through settings cannot reformat
@@ -575,6 +625,8 @@ impl Default for NotificationConfig {
             run_queue_queued_slack_enabled: false,
             email_smtp_host: String::new(),
             email_smtp_port: 587,
+            email_smtp_username: String::new(),
+            email_smtp_credstore_ref: String::new(),
             email_from: String::new(),
             email_recipients: String::new(),
             email_enabled: false,

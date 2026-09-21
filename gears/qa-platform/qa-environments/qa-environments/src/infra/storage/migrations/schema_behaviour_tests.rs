@@ -10,8 +10,41 @@
 //! Carried over from the ten migrations the chain was collapsed into
 //! `m20260812_000001_initial`. What was dropped with those files was the
 //! mechanics of the transition — the per-column `ALTER` spellings, the
-//! backfills from the Kubernetes-shaped columns, the `down` paths, the SQLite
+//! backfills from the Kubernetes-shaped columns, the `down` paths, the `SQLite`
 //! table rebuilds — which describe a sequence a fresh database never performs.
+
+// THE ONE LINT ALLOWANCE IN THIS FILE, and why it is here rather than in
+// `clippy.toml`.
+//
+// `Select::one` is on `clippy.toml`'s `disallowed-methods` list because a
+// production read that bypasses `SecureSelect` escapes tenant scoping. Nothing
+// below is a production read, and there is no tenant to scope with: every test
+// here opens a raw `SeaORM` connection against a freshly migrated, throwaway
+// database and writes the rows it then reads back. The subject is the SCHEMA's
+// behaviour -- that a foreign key really cascades, that an omitted column
+// really takes its declared default, that a unique index is scoped to the
+// tenant -- not the access path a production read travels. Routing these
+// through `SecureSelect` means constructing an `AccessScope` that nothing in a
+// migration module represents, and the assertion would then be about the
+// wrapper rather than about the schema: the test would say it exercises the
+// collapsed schema while exercising something else.
+//
+// IT IS SCOPED TO THIS FILE BECAUSE THAT IS THE NARROWEST FORM THAT EXISTS.
+// Clippy's `disallowed-methods` is a single global list of paths with no
+// per-file, per-module or per-crate form, so an "allowance" written in
+// `clippy.toml` is not an allowance -- it deletes `Select::one` from the list
+// for every crate in the workspace, including the repositories the rule was
+// written for. An inner attribute stops at this file's last line, and moves
+// with the file.
+//
+// The per-migration test modules in this directory carry the same allowance
+// for the same reason; `m20260921_000002_lease_freed_at`'s test module
+// carries the long form of the argument.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a schema behaviour test drives a raw connection and has no tenant to scope \
+              with -- see the comment above this attribute"
+)]
 
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
@@ -251,6 +284,7 @@ async fn deleting_an_environment_cascades_to_its_variables_and_lease() {
         holders: ActiveValue::Set(serde_json::json!([])),
         version: ActiveValue::Set(0),
         updated_at: ActiveValue::Set(now()),
+        freed_at: ActiveValue::Set(None),
     }
     .insert(&conn)
     .await

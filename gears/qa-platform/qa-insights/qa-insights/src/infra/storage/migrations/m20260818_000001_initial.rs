@@ -138,9 +138,9 @@
 //! ## Every unique index is tenant-prefixed
 //!
 //! The rule, and the squatting/existence-oracle argument behind it, are stated
-//! in full in DESIGN §3.7 and repeated for implementers in `qa-catalog`'s
-//! migration, which is the one repetition DESIGN designates. Not repeated a
-//! fourth time here.
+//! in full in `qa-catalog`'s migration, the one place that states it in full.
+//! DESIGN.md no longer states it centrally as of the 3.7->3.8 renumbering; if
+//! it returns, point this comment back at it too.
 //!
 //! What is specific to *this* schema: legacy is single-tenant, so **every**
 //! unique key here is wider than its legacy original, and two of them are the
@@ -156,7 +156,8 @@
 //!
 //! `run_id`, `repo_id` and `environment_id` all name rows in *other gears'*
 //! schemas — qa-runs, qa-catalog and qa-environments respectively — and DESIGN
-//! §3.7 forbids cross-schema foreign keys. There is nothing inside this schema
+//! §3.8 says each gear owns its own schema and no gear reads another's tables
+//! directly. There is nothing inside this schema
 //! for a child to reference either: `qa_test_results` and
 //! `qa_test_case_results` are siblings, not parent and child. So unlike
 //! qa-runs' migration this file declares no `REFERENCES` at all, and the
@@ -606,7 +607,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_analytics_saved_views_unique ON qa_anal
 -- The JIRA bug registry. Legacy `jira_bugs` (001_initial.sql:78-89).
 --
 -- **There is no `auto_rerun` column, and that is checked, not assumed.** An
--- earlier draft of the plan and DESIGN 3.7's original one-line list both gave
+-- earlier draft of the plan and DESIGN 3.8's original one-line list both gave
 -- this table one. Legacy's CREATE TABLE stops at `resolved_at` (:88) and
 -- `manager/migrations/` holds exactly one file, so nothing adds the column
 -- later either. Auto-rerun is a *global* switch --

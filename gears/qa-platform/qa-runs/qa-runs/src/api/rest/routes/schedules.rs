@@ -94,6 +94,33 @@ pub(super) fn register_schedule_routes(
         .error_500(openapi)
         .register(router, openapi);
 
+    // GET /qa/v1/schedules/{id}/ticks
+    router = OperationBuilder::get("/qa/v1/schedules/{id}/ticks")
+        .operation_id("qa_runs.list_schedule_ticks")
+        .summary("Get a schedule's fire history")
+        .description(
+            "One schedule's fire history, most recent due_at first: what a real fire's \
+             fixed claim produced, or why it did not -- plus, unfiltered, any \
+             referential-check row (claimed_by == \"referential-check\"), which was never \
+             a claim and always carries a null run_id. Absent and another tenant's \
+             schedule are the same 404, matching every other read in this gear.",
+        )
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .path_param("id", "Schedule UUID")
+        .handler(handlers::schedules::list_schedule_ticks)
+        .json_array_response_with_schema::<dto::ScheduleTickDto>(
+            openapi,
+            StatusCode::OK,
+            "The schedule's fire history, most recent first",
+        )
+        .error_401(openapi)
+        .error_403(openapi)
+        .error_404(openapi)
+        .error_500(openapi)
+        .register(router, openapi);
+
     // PUT /qa/v1/schedules/{id} - full replace
     router = OperationBuilder::put("/qa/v1/schedules/{id}")
         .operation_id("qa_runs.replace_schedule")

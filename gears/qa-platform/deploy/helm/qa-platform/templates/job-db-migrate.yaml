@@ -154,8 +154,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: qa-platform
-        app.kubernetes.io/component: db-migrate
+        {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "db-migrate") | nindent 8 }}
     spec:
       restartPolicy: OnFailure
       containers:

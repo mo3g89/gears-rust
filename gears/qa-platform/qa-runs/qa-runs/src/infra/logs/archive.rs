@@ -20,8 +20,8 @@
 //! because "bounded by the flush period" assumes one flush period's worth of
 //! *new* output, not the same output arriving again and again between
 //! flushes. With that fixed (the preceding commit; the resume position is
-//! recovered from the archived text itself, see
-//! [`LogResume::from_archived_text`](crate::domain::repos::LogResume::from_archived_text)),
+//! recovered from a per-node kubelet emission instant, see
+//! [`RunLogsRepository::log_resume_positions`](crate::domain::repos::RunLogsRepository::log_resume_positions)),
 //! what is left between two flushes really is one flush period's worth of a
 //! run's own output — and that can still be enormous for a genuinely chatty
 //! run, which is Finding #22. [`MAX_PENDING_BYTES_PER_RUN`] bounds it.
@@ -35,71 +35,21 @@
 //! so a run that overflows this buffer has that fact recorded in its own
 //! archived text, not merely absent from it.
 //!
-//! # The residual this hands Task 13's resume guard, named rather than left implicit
+//! # Cap eviction and resume no longer interact — Task 2 (WS5)
 //!
-//! `LogResume::from_archived_text` recovers each execution node's
-//! `first_line`/`last_line` anchors by re-parsing the archived text's own
-//! `"[node] "` prefixes (`domain::repos::run_logs_repo`), and
-//! `infra::executor::argo::watch`'s re-attach guard suppresses a node's
-//! replayed output only while a fresh re-read's first line still matches the
-//! archived `first_line` for that node. Eviction interacts with that guard
-//! two different ways, depending on *which* flush window it hits.
-//!
-//! **Eviction on a node's very first flush window.** If this cap ever
-//! evicts a node's true first archived line — the line the guard was built
-//! to compare against — the archive's first line for that node stops being
-//! the pod's actual first line. The next re-attach's first-line guard then
-//! mismatches by construction, suppression is disabled *for that node* for
-//! the rest of the run (that guard's own doc: "the archive's first line will
-//! never match the retained window again"), and the run re-duplicates its
-//! whole retained window on every re-attach after that.
-//!
-//! **Eviction on a later flush window, once the node has already flushed
-//! successfully at least once — the common case, since it only takes one
-//! flush tick's worth of quiet before a run turns chatty.** The node's true
-//! first archived line was written by that earlier, un-evicted flush and is
-//! untouched, so the first-line guard matches normally and suppression is
-//! not disabled. What eviction leaves behind instead is a *hole*: the
-//! archived text for that node stops being a contiguous prefix of what the
-//! pod printed, because the evicted lines never reached the archive at all —
-//! they are exactly the marker's `dropped` count, not a gap `lines_for` can
-//! see (`lines_for` only counts what is actually there). `consume` still
-//! suppresses exactly `lines_for(node)` lines of a fresh, gapless re-read
-//! counted from byte 0. That re-suppresses the same lines the marker already
-//! recorded as gone — no *new* loss, they were already gone — but it stops
-//! short of where the archive's own tail (the lines *after* the hole)
-//! actually sits in that re-read, so the tail is re-emitted and re-archived:
-//! duplicated, not lost. This is not silent either: `consume`'s *last*-line
-//! guard compares the last suppressed line against archived
-//! `last_line_for(node)`, and a hole makes that comparison fail, firing the
-//! same `error!` the pre-fix-inflated-count case already fires for.
-//!
-//! Neither Task 13 nor this crate's plan anticipated a *cap* being the thing
-//! that moves the window or opens a hole; both are named here because the
-//! connection is easy to miss from either file alone. Neither is fixed here,
-//! and neither needs to be — both fail toward duplication, which is the
-//! direction `LineSkip`'s own header already documents this crate accepting:
-//! "safe, because emitting everything is the duplication direction, never
-//! the loss direction." A cap that could instead cause an *over-count* —
-//! `lines_for(node)` answering more than the archive truly holds for that
-//! node, which would make `consume` suppress lines the archive never
-//! actually has — would not be safe by that same argument; this one cannot,
-//! for the reason in the next paragraph. That is narrower than "cannot cause
-//! a positional mismatch": the hole case just above **is** one, and it is
-//! safe for the reason already given there — detected by the last-line
-//! guard, and duplicating rather than losing — not because a hole cannot
-//! occur.
-//!
-//! [`broadcast::truncation_marker`](crate::infra::logs::broadcast::truncation_marker)'s
-//! own text — `"[qa-runs] log truncated: …"` — happens to parse as a
-//! `"[node] "` prefix too, filed under a phantom node named `qa-runs`. That
-//! cannot inflate a real node's count: `LogResume::lines_for` is only ever
-//! consulted with a real node name (`repo-{uuid}`, `ExecutionNode::name`'s
-//! one production source), so the phantom's count is never read by anything.
-//! **Do not "fix" the marker's wording so it stops parsing as a bracketed
-//! prefix** — nothing needs that, and the real hazard runs the other way: a
-//! marker that ever collided with an actual node name would turn a harmless
-//! phantom into a real over-count, which is loss.
+//! This section used to record a genuinely subtle interaction between
+//! `Self::enforce_cap`'s eviction and `infra::executor::argo::watch`'s
+//! per-node suppression counter (deleted by Task 2, WS5): evicting a
+//! node's true first archived line could disable that node's suppression
+//! for the rest of the run, and evicting a later line opened a "hole" the
+//! last-line guard would flag as a false alarm. Both hazards are gone with
+//! that counter itself. A resumed read now seeds `LogParams::since_time` from
+//! `RunLogsRepository::log_resume_positions` — an emission instant kubelet
+//! itself stamped on the line, recorded in `qa_run_log_positions`
+//! independently of whether this buffer's own `text` still holds that
+//! line's bytes at flush time. Eviction here still means the evicted bytes
+//! are gone from `qa_run_logs`' archived text (recorded by the visible
+//! truncation marker below), but it has nothing left to desynchronise from.
 //!
 //! # What is actually true about the cap, stated rather than asserted
 //!
@@ -198,6 +148,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::PolicyEnforcer;
+use time::OffsetDateTime;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -252,6 +203,14 @@ struct Pending {
     /// search for a marker that may or may not already be present in two
     /// different pieces of text.
     dropped: u64,
+    /// Each node's most recent emission instant seen since this `Pending`
+    /// was last taken — Task 2 (WS5). Independent of [`Self::enforce_cap`]'s
+    /// eviction: a node's position only ever moves forward, regardless of
+    /// whether older text for it was evicted from the front of `text`.
+    /// Absent for a node this buffer has only ever seen with `emitted_at:
+    /// None` (a non-Argo executor, or an archived-run line from before this
+    /// task).
+    positions: HashMap<String, OffsetDateTime>,
 }
 
 impl Pending {
@@ -327,6 +286,7 @@ impl std::fmt::Debug for Pending {
             .field("text_len", &self.text.len())
             .field("lines", &self.lines)
             .field("dropped", &self.dropped)
+            .field("nodes_with_a_position", &self.positions.len())
             .finish()
     }
 }
@@ -473,6 +433,10 @@ where
             taken.text.push_str(&newer.text);
             taken.lines += newer.lines;
             taken.dropped = taken.dropped.saturating_add(newer.dropped);
+            // `newer` arrived chronologically after `taken` was taken out,
+            // so wherever it names a node at all its instant is the later
+            // one — a plain overwrite, not a max, is correct here.
+            taken.positions.extend(newer.positions);
             taken.enforce_cap();
         }
         state.pending.insert(run_id, taken);
@@ -523,7 +487,43 @@ where
         let lines = taken.archived_lines();
         self.runs
             .append_log(&conn, &scope, run_id, taken.tenant_id, &text, lines)
-            .await
+            .await?;
+
+        // Task 2 (WS5): alongside the text this flush just archived, upsert
+        // every node's most recent emission instant this buffer saw — the
+        // schema-backed replacement for `infra::executor::argo::watch`'s
+        // deleted per-node suppression counter. Only after the append above
+        // has succeeded: a
+        // position advanced past text that was never actually archived
+        // (because `append_log` failed) would tell a resumed read to skip
+        // past lines this run's archive does not yet have.
+        //
+        // One node's upsert failing here does not un-write the text `append_log`
+        // just committed, and is not folded into this call's own `Result`:
+        // failing the whole flush over a position write would put the text
+        // back into `pending` (`RunLogArchive::flush`'s `Err` arm) and
+        // re-archive it — a duplicate write for a line that is not the one
+        // that actually failed. Logged and otherwise accepted: the cost of
+        // a stale position is a re-attach re-emitting more of this node's
+        // log than strictly necessary, the same "under-suppress, never
+        // lose" direction this whole mechanism already tolerates.
+        for (node, last_emitted_at) in &taken.positions {
+            if let Err(error) = self
+                .runs
+                .upsert_log_position(&conn, &scope, run_id, taken.tenant_id, node, *last_emitted_at)
+                .await
+            {
+                warn!(
+                    run_id = %run_id,
+                    node = %node,
+                    %error,
+                    "failed to record this node's resume position; a later re-attach may \
+                     re-read more of its log than necessary, but no line is lost",
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// `run_id`'s currently buffered byte count, `0` if nothing is pending.
@@ -546,18 +546,29 @@ impl<R> LogArchive for RunLogArchive<R>
 where
     R: RunLogsRepository + 'static,
 {
-    fn record(&self, tenant_id: Uuid, run_id: Uuid, line: &str) {
+    fn record(
+        &self,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        node: &str,
+        line: &str,
+        emitted_at: Option<OffsetDateTime>,
+    ) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = state.pending.entry(run_id).or_insert_with(|| Pending {
             tenant_id,
             text: String::new(),
             lines: 0,
             dropped: 0,
+            positions: HashMap::new(),
         });
         entry.text.push_str(line);
         entry.text.push('\n');
         entry.lines += 1;
         entry.enforce_cap();
+        if let Some(when) = emitted_at {
+            entry.positions.insert(node.to_owned(), when);
+        }
     }
 
     async fn flush(&self, run_id: Uuid) -> Result<(), DomainError> {
@@ -733,7 +744,7 @@ mod tests {
     #[tokio::test]
     async fn flushing_twice_does_not_duplicate_a_line() {
         let fx = fixture().await;
-        fx.archive.record(fx.tenant, fx.run_id, "[a] one");
+        fx.archive.record(fx.tenant, fx.run_id, "a", "[a] one", None);
         fx.archive.flush(fx.run_id).await.unwrap();
         fx.archive.flush(fx.run_id).await.unwrap();
 
@@ -745,7 +756,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_flush_keeps_its_text_for_the_next_one() {
         let fx = fixture().await;
-        fx.archive.record(fx.tenant, fx.run_id, "[a] one");
+        fx.archive.record(fx.tenant, fx.run_id, "a", "[a] one", None);
 
         fx.fail_next_append();
         assert!(
@@ -753,7 +764,7 @@ mod tests {
             "the injected failure must surface",
         );
 
-        fx.archive.record(fx.tenant, fx.run_id, "[a] two");
+        fx.archive.record(fx.tenant, fx.run_id, "a", "[a] two", None);
         fx.archive.flush(fx.run_id).await.unwrap();
 
         assert_eq!(
@@ -777,7 +788,7 @@ mod tests {
     #[tokio::test]
     async fn a_flush_that_fails_while_a_new_line_arrives_preserves_arrival_order() {
         let fx = fixture().await;
-        fx.archive.record(fx.tenant, fx.run_id, "[a] one");
+        fx.archive.record(fx.tenant, fx.run_id, "a", "[a] one", None);
 
         let gate = fx.mock.block_next_append();
         let flush = fx.archive.flush(fx.run_id);
@@ -787,7 +798,7 @@ mod tests {
             // ever awaiting `write`), so this lands into a fresh entry rather
             // than being concatenated onto text that has not yet been removed.
             gate.wait_for_entry().await;
-            fx.archive.record(fx.tenant, fx.run_id, "[a] two");
+            fx.archive.record(fx.tenant, fx.run_id, "a", "[a] two", None);
             gate.release();
         };
         let (flush_result, ()) = tokio::join!(flush, arrive_while_the_write_is_in_flight);
@@ -836,7 +847,7 @@ mod tests {
     #[tokio::test]
     async fn a_second_concurrent_flush_for_the_same_run_is_a_no_op() {
         let fx = fixture().await;
-        fx.archive.record(fx.tenant, fx.run_id, "[a] one");
+        fx.archive.record(fx.tenant, fx.run_id, "a", "[a] one", None);
 
         let gate = fx.mock.block_next_append();
         let first = fx.archive.flush(fx.run_id);
@@ -847,7 +858,7 @@ mod tests {
             gate.wait_for_entry().await;
             // A genuinely new, disjoint line: without the guard this is what
             // a second `take` would steal.
-            fx.archive.record(fx.tenant, fx.run_id, "[a] two");
+            fx.archive.record(fx.tenant, fx.run_id, "a", "[a] two", None);
             let second = fx.archive.flush(fx.run_id).await;
             assert!(
                 second.is_ok(),
@@ -887,8 +898,8 @@ mod tests {
     #[tokio::test]
     async fn flush_due_drains_every_buffered_run() {
         let fx = fixture().await;
-        fx.archive.record(fx.tenant, uuid(10), "[a] first run");
-        fx.archive.record(fx.tenant, uuid(11), "[a] second run");
+        fx.archive.record(fx.tenant, uuid(10), "a", "[a] first run", None);
+        fx.archive.record(fx.tenant, uuid(11), "a", "[a] second run", None);
 
         let report = fx.archive.flush_due().await;
 
@@ -921,7 +932,7 @@ mod tests {
     #[tokio::test]
     async fn a_drained_buffer_is_removed_from_the_map() {
         let fx = fixture().await;
-        fx.archive.record(fx.tenant, fx.run_id, "[a] one");
+        fx.archive.record(fx.tenant, fx.run_id, "a", "[a] one", None);
         fx.archive.flush(fx.run_id).await.unwrap();
         assert_eq!(fx.buffered_runs(), 0);
     }
@@ -956,7 +967,7 @@ mod tests {
     #[tokio::test]
     async fn a_panic_while_a_flush_is_in_flight_still_clears_the_flag() {
         let fx = fixture().await;
-        fx.archive.record(fx.tenant, fx.run_id, "[a] one");
+        fx.archive.record(fx.tenant, fx.run_id, "a", "[a] one", None);
 
         // Take directly: holds the `InFlightGuard` `take()` hands out, then
         // panics while it is still alive — mirroring a panic inside `write`
@@ -971,7 +982,7 @@ mod tests {
         // If the guard had leaked instead of clearing on unwind, this second
         // flush would see `run_id` still marked in-flight and no-op silently
         // — the run would never be archived again.
-        fx.archive.record(fx.tenant, fx.run_id, "[a] two");
+        fx.archive.record(fx.tenant, fx.run_id, "a", "[a] two", None);
         fx.archive.flush(fx.run_id).await.unwrap();
         assert_eq!(
             fx.stored_text(),
@@ -991,7 +1002,7 @@ mod tests {
     #[tokio::test]
     async fn a_nil_tenant_is_never_archived() {
         let fx = fixture().await;
-        fx.archive.record(Uuid::nil(), fx.run_id, "[a] one");
+        fx.archive.record(Uuid::nil(), fx.run_id, "a", "[a] one", None);
 
         let error = fx
             .archive
@@ -1030,7 +1041,7 @@ mod tests {
         let fx = fixture().await;
         let line = "x".repeat(1024);
         for _ in 0..(MAX_PENDING_BYTES_PER_RUN / 1024 + 64) {
-            fx.archive.record(fx.tenant, fx.run_id, &line);
+            fx.archive.record(fx.tenant, fx.run_id, "a", &line, None);
         }
 
         let pending = fx.archive.pending_len(fx.run_id);
@@ -1049,7 +1060,7 @@ mod tests {
     async fn a_single_line_longer_than_the_cap_is_kept_whole() {
         let fx = fixture().await;
         let huge = "y".repeat(MAX_PENDING_BYTES_PER_RUN * 2);
-        fx.archive.record(fx.tenant, fx.run_id, &huge);
+        fx.archive.record(fx.tenant, fx.run_id, "a", &huge, None);
 
         assert_eq!(
             fx.archive.pending_len(fx.run_id),
@@ -1075,7 +1086,7 @@ mod tests {
         let line = "x".repeat(1024);
         let pushes = MAX_PENDING_BYTES_PER_RUN / 1024 + 64;
         for _ in 0..pushes {
-            fx.archive.record(fx.tenant, fx.run_id, &line);
+            fx.archive.record(fx.tenant, fx.run_id, "a", &line, None);
         }
 
         let report = fx.archive.flush_due().await;
@@ -1118,7 +1129,7 @@ mod tests {
         let batch = MAX_PENDING_BYTES_PER_RUN / 1024 * 3 / 5;
 
         for _ in 0..batch {
-            fx.archive.record(fx.tenant, fx.run_id, &line);
+            fx.archive.record(fx.tenant, fx.run_id, "a", &line, None);
         }
         assert!(
             fx.archive.pending_len(fx.run_id) <= MAX_PENDING_BYTES_PER_RUN,
@@ -1133,7 +1144,7 @@ mod tests {
             // same synchronization the merge-order tests above use.
             gate.wait_for_entry().await;
             for _ in 0..batch {
-                fx.archive.record(fx.tenant, fx.run_id, &line);
+                fx.archive.record(fx.tenant, fx.run_id, "a", &line, None);
             }
             gate.release();
         };

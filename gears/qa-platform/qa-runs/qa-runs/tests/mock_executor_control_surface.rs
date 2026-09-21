@@ -30,10 +30,13 @@ use uuid::Uuid;
 fn spec_for(run_id: Uuid) -> RunSpec {
     RunSpec {
         run_id,
+        tenant_id: Uuid::new_v4(),
         run_name: "smoke-tests-1".to_owned(),
         nodes: vec![ExecutionNode {
             name: "repo-smoke".to_owned(),
             bundle_ref: "bundle-store://abc".to_owned(),
+            bundle_id: Uuid::new_v4(),
+            bundle_token: String::new(),
             test_files: vec!["tests/test_smoke.py".to_owned()],
         }],
         env: RunEnv::new(BTreeMap::new(), BTreeMap::new()),

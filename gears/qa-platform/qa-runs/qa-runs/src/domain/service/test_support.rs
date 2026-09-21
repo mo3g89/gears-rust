@@ -41,7 +41,7 @@ use qa_environments_sdk::{
     AcquireOutcome, Environment, EnvironmentPatch, LeaseMode, LeaseState, NewEnvironment,
     NewVariable, QaEnvironmentsClientV1, QaEnvironmentsError, Variable,
 };
-use qa_runs_sdk::{ExclusiveTier, Run, RunResult, RunState, RunTarget};
+use qa_runs_sdk::{ExclusiveTier, FinishedRunCursor, Run, RunResult, RunState, RunTarget};
 use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
 use toolkit_db::{ConnectOpts, DBProvider, connect_db};
@@ -72,9 +72,9 @@ use toolkit_security::PlatformSecurityContext;
 
 use crate::domain::repos::SchedulesRepository;
 use crate::domain::repos::{
-    ArchivedLog, LogResume, NewRun, NewTestResult, OwnedRunId, RunLogsRepository, RunResultDelta,
-    RunStatePatch, RunWithResult, RunsRepository, TestResultRow, TimeoutCandidate, WatchCandidate,
-    Windowed,
+    ArchivedLog, LogPosition, LogResume, NewRun, NewTestResult, OwnedRunId, RunLogsRepository,
+    RunResultDelta, RunStatePatch, RunWithResult, RunsRepository, TestResultRow, TimeoutCandidate,
+    WatchCandidate, Windowed,
 };
 
 /// Wrap a double's whole fixture as a single page.
@@ -261,6 +261,13 @@ pub struct MockRunsRepository {
     /// call, which then rendezvous-blocks on it before failing. See
     /// [`AppendGate`]'s own doc for why this exists.
     append_gate: Mutex<Option<AppendGate>>,
+    /// Per-run, per-node resume positions — the in-memory stand-in for
+    /// `qa_run_log_positions` (Task 2, WS5). `RunLogsRepository::
+    /// upsert_log_position` overwrites an entry; `log_resume_positions`
+    /// reads them back directly, the same shape the real repository uses
+    /// now that there is a per-node column to read rather than a scan of
+    /// the archived text.
+    positions: Mutex<HashMap<Uuid, HashMap<String, OffsetDateTime>>>,
 }
 
 /// A one-shot rendezvous between a test and one gated `append_log` call, added
@@ -309,6 +316,7 @@ impl MockRunsRepository {
             append_calls: Mutex::new(0),
             fail_next_append: Mutex::new(false),
             append_gate: Mutex::new(None),
+            positions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -560,7 +568,7 @@ impl RunsRepository for MockRunsRepository {
         &self,
         _runner: &C,
         _scope: &AccessScope,
-        _since: OffsetDateTime,
+        _cursor: FinishedRunCursor,
         _limit: u32,
     ) -> Result<Vec<Run>, DomainError> {
         Err(unsupported("list_finished_since"))
@@ -755,10 +763,28 @@ impl RunLogsRepository for MockRunsRepository {
         Ok(self.logs.lock().unwrap().get(&run_id).cloned())
     }
 
-    /// Calls the one shared implementation
-    /// (`domain::repos::LogResume::from_archived_text`) rather than stubbing
-    /// `unsupported`, so a test built over this double can exercise
-    /// `RunLogArchive::resume_positions` too.
+    async fn upsert_log_position<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        run_id: Uuid,
+        _tenant_id: Uuid,
+        node: &str,
+        last_emitted_at: OffsetDateTime,
+    ) -> Result<(), DomainError> {
+        self.positions
+            .lock()
+            .unwrap()
+            .entry(run_id)
+            .or_default()
+            .insert(node.to_owned(), last_emitted_at);
+        Ok(())
+    }
+
+    /// Reads back exactly what [`Self::upsert_log_position`] recorded, so a
+    /// test built over this double can exercise `RunLogArchive::
+    /// resume_positions` too — the in-memory analogue of the real
+    /// repository's direct read of `qa_run_log_positions`.
     async fn log_resume_positions<C: DBRunner>(
         &self,
         _runner: &C,
@@ -766,13 +792,17 @@ impl RunLogsRepository for MockRunsRepository {
         run_id: Uuid,
     ) -> Result<LogResume, DomainError> {
         Ok(self
-            .logs
+            .positions
             .lock()
             .unwrap()
             .get(&run_id)
-            .map_or_else(LogResume::default, |log| {
-                LogResume::from_archived_text(&log.text)
-            }))
+            .map(|per_node| {
+                per_node
+                    .iter()
+                    .map(|(node, when)| (node.clone(), LogPosition { last_emitted_at: *when }))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 }
 
@@ -1055,6 +1085,7 @@ impl QaCatalogClientV1 for MockCatalog {
             content_root: String::new(),
             credential_ref: None,
             last_synced_at: Some(now),
+            head_commit: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
             sync_error: None,
             created_at: now,
             updated_at: now,
@@ -1735,7 +1766,15 @@ pub(super) struct NullLogArchive;
 
 #[async_trait]
 impl LogArchive for NullLogArchive {
-    fn record(&self, _tenant_id: Uuid, _run_id: Uuid, _line: &str) {}
+    fn record(
+        &self,
+        _tenant_id: Uuid,
+        _run_id: Uuid,
+        _node: &str,
+        _line: &str,
+        _emitted_at: Option<OffsetDateTime>,
+    ) {
+    }
 
     async fn flush(&self, _run_id: Uuid) -> Result<(), DomainError> {
         Ok(())
@@ -2135,6 +2174,43 @@ impl Fleet {
             .expect("the fixture's archived log must be insertable");
     }
 
+    /// One tick row, written directly at the repository under `tenant`.
+    ///
+    /// Exposed for the handler suites in `api::rest`, which need a fired
+    /// schedule's history to exist before they can exercise
+    /// `list_schedule_ticks` — going through `ScheduleService::fire_due_schedules_at`
+    /// instead would make those tests depend on the catalog and environments
+    /// doubles resolving a plan and on a real due time, which is a different
+    /// subject entirely. Mirrors [`Self::seed_run`]: written under the
+    /// schedule's own tenant scope through the real repository, so tenancy is
+    /// still real rather than bypassed.
+    pub async fn seed_tick(
+        &self,
+        tenant: Uuid,
+        schedule_id: Uuid,
+        due_at: OffsetDateTime,
+        run_id: Option<Uuid>,
+        error: Option<&str>,
+    ) -> Uuid {
+        let conn = self.db.conn().unwrap();
+        let token = OrmSchedulesRepository
+            .resolve_owned_schedule(&conn, &scope(tenant), schedule_id)
+            .await
+            .expect("the fixture schedule must be visible to its own tenant");
+        let tick_id = OrmSchedulesRepository
+            .claim_tick(&conn, &scope(tenant), tenant, token, due_at, "qa-runs-0")
+            .await
+            .unwrap()
+            .expect("the fixture's claim must win - nothing else claims this due time");
+        assert!(
+            OrmSchedulesRepository
+                .record_tick_outcome(&conn, &scope(tenant), tick_id, run_id, error)
+                .await
+                .unwrap()
+        );
+        tick_id
+    }
+
     /// The stored cursor, read directly.
     pub async fn cursor_of(&self, tenant: Uuid, id: Uuid) -> Option<OffsetDateTime> {
         let conn = self.db.conn().unwrap();
@@ -2201,11 +2277,13 @@ impl Fleet {
 
     /// Every tick row under `tenant`.
     ///
-    /// `qa_schedule_ticks` has **no read path on `SchedulesRepository`** — that
-    /// absence is deliberate and recorded there as a tracked deferral — so this
-    /// goes at the entity through the same `SecureORM` scoping a repository
-    /// method would use. It exists only as ground truth for the two assertions
-    /// that are about what a claim wrote.
+    /// Predates `SchedulesRepository::list_ticks` (WS5 Task 1), which reads by
+    /// **schedule id**, scoped for `qa.schedule` - not by tenant across every
+    /// schedule, which is what these assertions about a cross-tenant claim
+    /// need. So this still goes at the entity directly, through the same
+    /// `SecureORM` scoping a repository method would use, as ground truth for
+    /// the assertions that are about what a claim wrote rather than about one
+    /// schedule's history.
     pub(in crate::domain::service) async fn ticks_of(
         &self,
         tenant: Uuid,

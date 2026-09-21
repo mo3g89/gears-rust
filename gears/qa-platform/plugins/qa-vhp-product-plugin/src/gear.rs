@@ -12,16 +12,19 @@
 //!
 //! [`RegisteredPlugin::new`] is the only constructor of that type and it runs
 //! `validate_schemas` itself, so a value of this type *is* the evidence that
-//! §5.1's three registration-time invariants hold — at most one field per
-//! `FieldRole`, no secret kind in `observed_schema`, no key in both schemas.
-//! Holding the wrapper rather than the bare plugin moves that from a
-//! convention ("`init` remembers to call the checker") to a type-system fact.
-//! See `PRODUCT-PLUGINS-DESIGN.md` §5.3, whose `RegisteredPlugin` row records
-//! why the free-function form was withdrawn.
+//! `validate_schemas`' three registration-time invariants hold — at most one
+//! field per `FieldRole`, no secret kind in `observed_schema`, no key in
+//! both schemas (`qa_product_sdk::descriptor::validate_schemas`'s own body
+//! is the source of truth for the three; `SchemaError`'s variants name
+//! them). Holding the wrapper rather than the bare plugin moves that from a
+//! convention ("`init` remembers to call the checker") to a type-system
+//! fact. [`RegisteredPlugin`]'s own doc comment records why the
+//! free-function form was withdrawn (`PRODUCT-PLUGINS-DESIGN.md` §5.3 was
+//! cited here before the docs squash; that document no longer exists).
 //!
 //! A schema failure therefore leaves `init` as an error and the process does
 //! not come up: a plugin whose `observed_schema` declared a secret would
-//! render credential material on the environment page (§9), which is not a
+//! render credential material on the environment page, which is not a
 //! thing to degrade gracefully around.
 //!
 //! # Why there are no `deps` beyond `types_registry`, and no `capabilities`

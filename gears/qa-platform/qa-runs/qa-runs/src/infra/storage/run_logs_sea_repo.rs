@@ -40,8 +40,10 @@
 //!
 //! None of the three dialects' `NULL`-handling difference between `concat()`
 //! and `||` matters here: `qa_run_logs.text` is `NOT NULL DEFAULT ''`
-//! (`migrations::m20260831_000008_run_logs`), so this statement only ever
-//! runs against a row that already holds a non-`NULL` string.
+//! (`migrations::m20260813_000003_initial`, `CREATE TABLE ... qa_run_logs`;
+//! declared there under `m20260831_000008_run_logs` before that migration
+//! was squashed into this one), so this statement only ever runs against a
+//! row that already holds a non-`NULL` string.
 //!
 //! # A scoped update first, an insert only if nothing matched
 //!
@@ -75,11 +77,15 @@
 //!
 //! **The composite foreign key is what closes that.**
 //! `(run_id, tenant_id) REFERENCES qa_runs(id, tenant_id)`
-//! (`migrations::m20260831_000008_run_logs`, which carries the full mechanism
-//! and why it was reachable nowhere in production) makes the insert fail in
-//! the database when the supplied tenant is not the run's owner. Both halves
-//! are pinned by `a_foreign_scoped_append_is_refused` below; deleting that
-//! foreign key turns one of its two assertions red.
+//! (`migrations::m20260813_000003_initial`'s `qa_run_logs` declaration,
+//! preceded there by the comment explaining the parent unique index it
+//! needs; the fuller mechanism -- and why the un-scoped path was never
+//! reachable in production -- was recorded under
+//! `m20260831_000008_run_logs` before that migration was squashed into this
+//! one, and is not repeated here) makes the insert fail in the database
+//! when the supplied tenant is not the run's owner. Both halves are pinned
+//! by `a_foreign_scoped_append_is_refused` below; deleting that foreign key
+//! turns one of its two assertions red.
 //!
 //! # `sea-orm`'s `debug-print` feature would print a tenant's log text
 //!
@@ -110,9 +116,12 @@ use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::repos::{ArchivedLog, LogResume, RunLogsRepository};
+use crate::domain::repos::{ArchivedLog, LogPosition, LogResume, RunLogsRepository};
 use crate::infra::storage::db::db_err;
 use crate::infra::storage::entity::run_log::{self, Column as LogColumn, Entity as LogEntity};
+use crate::infra::storage::entity::run_log_position::{
+    self, Column as PositionColumn, Entity as PositionEntity,
+};
 use crate::infra::storage::runs_sea_repo::OrmRunsRepository;
 
 #[async_trait]
@@ -187,27 +196,83 @@ impl RunLogsRepository for OrmRunsRepository {
         }))
     }
 
+    async fn upsert_log_position<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        run_id: Uuid,
+        tenant_id: Uuid,
+        node: &str,
+        last_emitted_at: OffsetDateTime,
+    ) -> Result<(), DomainError> {
+        // A SCOPED UPDATE FIRST, THEN AN INSERT IF THERE WAS NOTHING TO
+        // UPDATE — the identical shape `append_log` uses above, for the
+        // identical reason: the insert half of an upsert takes no
+        // `AccessScope`, so keeping the scope on the path that touches an
+        // existing row is what this module does everywhere it upserts.
+        let updated = PositionEntity::update_many()
+            .filter(
+                Condition::all()
+                    .add(PositionColumn::RunId.eq(run_id))
+                    .add(PositionColumn::Node.eq(node)),
+            )
+            .secure()
+            .scope_with(scope)
+            .col_expr(PositionColumn::LastEmittedAt, Expr::value(last_emitted_at))
+            .col_expr(PositionColumn::UpdatedAt, Expr::value(OffsetDateTime::now_utc()))
+            .exec(runner)
+            .await
+            .map_err(db_err)?;
+
+        if updated.rows_affected > 0 {
+            return Ok(());
+        }
+
+        // First position recorded for this (run_id, node). `tenant_id` comes
+        // from the tenant-bound system context the flush minted, never from
+        // a caller — the same provenance `append_log`'s own insert half
+        // documents.
+        let am = run_log_position::ActiveModel {
+            run_id: ActiveValue::Set(run_id),
+            node: ActiveValue::Set(node.to_owned()),
+            tenant_id: ActiveValue::Set(tenant_id),
+            last_emitted_at: ActiveValue::Set(last_emitted_at),
+            updated_at: ActiveValue::Set(OffsetDateTime::now_utc()),
+        };
+        secure_insert::<PositionEntity>(am, scope, runner)
+            .await
+            .map_err(db_err)?;
+
+        Ok(())
+    }
+
     async fn log_resume_positions<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
         run_id: Uuid,
     ) -> Result<LogResume, DomainError> {
-        let found = LogEntity::find()
-            .filter(LogColumn::RunId.eq(run_id))
+        let rows = PositionEntity::find()
+            .filter(PositionColumn::RunId.eq(run_id))
             .secure()
             .scope_with(scope)
-            .one(runner)
+            .all(runner)
             .await
             .map_err(db_err)?;
 
-        // No row: nothing archived yet, so an empty `LogResume` is the right
-        // answer — see the trait doc's "first attach" case. A row: recover a
-        // per-node count from the interleaved text via the one shared
-        // implementation — see `LogResume::from_archived_text`'s own doc.
-        Ok(found.map_or_else(LogResume::default, |model| {
-            LogResume::from_archived_text(&model.text)
-        }))
+        // No rows: nothing recorded yet, so an empty `LogResume` is the
+        // right answer — see the trait doc's "first attach" case.
+        Ok(rows
+            .into_iter()
+            .map(|model| {
+                (
+                    model.node,
+                    LogPosition {
+                        last_emitted_at: model.last_emitted_at,
+                    },
+                )
+            })
+            .collect())
     }
 }
 
@@ -437,18 +502,11 @@ mod tests {
         );
     }
 
-    /// A run with nothing archived yet answers an empty [`LogResume`] — the
-    /// case that must make a first attach read from the beginning rather than
-    /// resume from a position that does not exist.
-    ///
-    /// The per-node counting itself — two nodes' interleaved text told apart
-    /// and counted correctly — is `LogResume::from_archived_text`'s own unit
-    /// test (`domain::repos::run_logs_repo`), the one implementation this
-    /// method and `test_support::MockRunsRepository`'s both call. What this
-    /// test adds is the thing only a real row can prove: a run with **no**
-    /// row reads as empty, not as a database error.
+    /// A run with nothing recorded yet answers an empty [`LogResume`] — the
+    /// case that must make a first attach read from the beginning rather
+    /// than a `since_time` set to a position that does not exist.
     #[tokio::test]
-    async fn a_run_with_no_archived_log_has_no_resume_position() {
+    async fn a_run_with_no_recorded_position_has_no_resume_position() {
         let fx = fixture().await;
         let run_id = fx.seed_run().await;
 
@@ -458,31 +516,25 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resume.lines_for("a"), 0);
+        assert_eq!(resume.last_emitted_for("a"), None);
     }
 
-    /// The same recovery, against a real row built from two separate
-    /// `append_log` calls — the way two pods' drains would actually arrive —
-    /// rather than a single in-memory string, which is all
-    /// `LogResume::from_archived_text`'s own unit test can exercise.
+    /// Two nodes' positions for one run, recorded independently, are
+    /// answered independently — the property `infra::executor::argo::watch`
+    /// relies on to seed each node's own `LogParams::since_time`.
     #[tokio::test]
-    async fn resume_positions_are_counted_per_node_from_a_row_built_by_two_appends() {
+    async fn two_nodes_positions_are_recorded_and_read_independently() {
         let fx = fixture().await;
         let run_id = fx.seed_run().await;
+        let a_at = now_at(1);
+        let b_at = now_at(2);
 
         fx.repo
-            .append_log(
-                &fx.conn(),
-                &fx.scope,
-                run_id,
-                fx.tenant,
-                "[a] one\n[b] uno\n",
-                2,
-            )
+            .upsert_log_position(&fx.conn(), &fx.scope, run_id, fx.tenant, "a", a_at)
             .await
             .unwrap();
         fx.repo
-            .append_log(&fx.conn(), &fx.scope, run_id, fx.tenant, "[a] two\n", 1)
+            .upsert_log_position(&fx.conn(), &fx.scope, run_id, fx.tenant, "b", b_at)
             .await
             .unwrap();
 
@@ -492,12 +544,76 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resume.lines_for("a"), 2, "node a has two of its own lines");
-        assert_eq!(resume.lines_for("b"), 1, "node b has one, not three");
+        assert_eq!(resume.last_emitted_for("a"), Some(a_at));
+        assert_eq!(resume.last_emitted_for("b"), Some(b_at));
         assert_eq!(
-            resume.lines_for("never-appeared"),
-            0,
-            "a node this run never emitted answers 0, not a missing-key panic",
+            resume.last_emitted_for("never-appeared"),
+            None,
+            "a node this run never emitted answers None, not a missing-key panic",
         );
+    }
+
+    /// **A second `upsert_log_position` for the same `(run_id, node)`
+    /// updates the row rather than duplicating it.** This is what makes a
+    /// long run's per-node position a single, ever-advancing value instead
+    /// of a growing table — the direct analogue of `append_log`'s own
+    /// "a second append concatenates rather than replacing" property, but
+    /// for the position row this task adds beside it.
+    #[tokio::test]
+    async fn a_second_upsert_for_the_same_node_updates_rather_than_duplicating() {
+        let fx = fixture().await;
+        let run_id = fx.seed_run().await;
+
+        fx.repo
+            .upsert_log_position(&fx.conn(), &fx.scope, run_id, fx.tenant, "a", now_at(1))
+            .await
+            .unwrap();
+        fx.repo
+            .upsert_log_position(&fx.conn(), &fx.scope, run_id, fx.tenant, "a", now_at(2))
+            .await
+            .unwrap();
+
+        let resume = fx
+            .repo
+            .log_resume_positions(&fx.conn(), &fx.scope, run_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resume.last_emitted_for("a"),
+            Some(now_at(2)),
+            "the second upsert must move the position forward, not add a row beside it",
+        );
+    }
+
+    /// A stranger cannot record a position under a run it does not own —
+    /// the identical scoped-update-then-insert protection `append_log`
+    /// already has, proved here for the sibling table.
+    #[tokio::test]
+    async fn a_foreign_scoped_upsert_is_refused() {
+        let fx = fixture().await;
+        let run_id = fx.seed_run().await;
+        let stranger_tenant = uuid(999);
+        let stranger = scope(stranger_tenant);
+
+        assert!(
+            fx.repo
+                .upsert_log_position(
+                    &fx.conn(),
+                    &stranger,
+                    run_id,
+                    stranger_tenant,
+                    "a",
+                    now_at(1),
+                )
+                .await
+                .is_err(),
+            "a stranger must not be able to create this run's position row under its own \
+             tenant",
+        );
+    }
+
+    fn now_at(offset_seconds: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_789_689_600 + offset_seconds).unwrap()
     }
 }

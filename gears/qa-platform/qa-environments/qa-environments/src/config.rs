@@ -22,14 +22,19 @@
 //! `deny_unknown_fields` still catches a genuine typo — while **the feature
 //! still decides what is built**: these structs name no Kubernetes type (they
 //! are `String`/`bool`/`u64`), so keeping them costs a default build nothing
-//! and breaks no part of ADR-0001's waiver. What is feature-gated is the
-//! *reader*: `crate::gear::build_observer` and the ticker spawn, which are the
-//! things that actually need `kube`.
+//! and is consistent with ADR-0001 (see its Amendments section). What is
+//! feature-gated is the *reader* of [`Self::argo`] alone —
+//! `crate::gear::build_runner_secret_writer`, the only thing that actually
+//! needs `kube`.
 //!
 //! The one consequence, made explicit rather than left to be discovered: in a
-//! build without `runner-secret` these fields are accepted and then
-//! ignored. `crate::gear` already logs once at startup saying the observation
-//! feature is absent, which is the signal that covers it.
+//! build without `runner-secret`, [`Self::argo`]'s fields are accepted and
+//! then ignored — nothing reads them. **[`Self::observation`]'s fields are not
+//! part of that consequence.** Since Task 15 moved observation to the product
+//! plugin (no Kubernetes client needed), `ObservationConfig` is parsed *and*
+//! read in every build, feature or no feature, and the observation ticker
+//! spawns unconditionally — see `crate::gear::QaEnvironments::serve_with_services`'s
+//! own doc, "Unconditional since Task 19b."
 
 use serde::Deserialize;
 
@@ -133,12 +138,14 @@ impl Default for ArgoObserverConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ObservationConfig {
-    /// Whether the ticker runs at all. Independent of the cargo feature this
-    /// struct is itself gated on: that feature decides whether the ticker
-    /// *exists* (`crate::gear::QaEnvironments::serve` never spawns it at all
-    /// in a build without `runner-secret`, logging once at startup to
-    /// say so); this flag decides whether an operator who compiled the
-    /// feature in still wants it running.
+    /// Whether the ticker runs at all.
+    ///
+    /// **Not gated on any cargo feature** — neither this struct nor the
+    /// ticker spawn is. `crate::gear::QaEnvironments::serve_with_services`
+    /// spawns the ticker in every build whenever this flag is `true`; a
+    /// build without `runner-secret` observes exactly the same way a build
+    /// with it does. This flag is the *only* on/off switch, for an operator
+    /// who wants environments to stop refreshing on their own.
     pub enabled: bool,
     /// Seconds between cycles, before flooring. Read only through
     /// [`Self::effective_poll_interval_seconds`] — never raw — so this field

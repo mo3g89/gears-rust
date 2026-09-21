@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use toolkit_db::DBProvider;
+use toolkit_gts::GTS_ID_PREFIX;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -473,6 +474,65 @@ async fn a_signature_does_not_verify_for_a_different_repository() {
     assert!(matches!(err, DomainError::Forbidden), "{err:?}");
 }
 
+/// Task 7: the collect signing key is derived per tenant from
+/// `collect_report_signing_secret` via HKDF, rather than every tenant's tag
+/// being `HMAC(root_secret, payload)` under the one root secret directly.
+///
+/// [`a_signature_does_not_verify_for_a_different_tenant`] already proves tags
+/// differ across tenants, but that property holds even under the *old*
+/// single-key scheme, because `signing_payload` already embeds `tenant_id` --
+/// a different HMAC *input* yields a different tag with or without per-tenant
+/// key derivation. That test alone cannot tell "the key is derived" apart
+/// from "the payload differs", so it would have passed unchanged before this
+/// task's fix and proves nothing about the fix itself.
+///
+/// What actually distinguishes the two schemes is the *key*, not the
+/// payload: this test recomputes what the pre-fix code would have produced
+/// -- `HMAC_SHA256(root_secret, payload)`, the root secret used directly as
+/// the HMAC key -- and asserts [`CollectService::sign`]'s real output is
+/// something else entirely, for both tenants. Before this task's fix these
+/// two assertions are tautologies (`sig == legacy`) and fail; after it, the
+/// tag is over a key HKDF derived from the root secret and `tenant_id`, so
+/// the two never coincide.
+#[tokio::test]
+async fn per_tenant_derivation_changes_the_key_not_just_the_payload() {
+    let f = fixture().await;
+    let other_tenant = Uuid::from_u128(0x0B);
+
+    let sig_a = f.sig_for(REPO, "main", TENANT);
+    let sig_b = f.sig_for(REPO, "main", other_tenant);
+    assert_ne!(
+        sig_a, sig_b,
+        "different tenants must still get different tags"
+    );
+
+    let legacy_a = legacy_single_key_sign(REPO, "main", TENANT);
+    let legacy_b = legacy_single_key_sign(REPO, "main", other_tenant);
+    assert_ne!(
+        sig_a, legacy_a,
+        "the tag must not equal what HMAC(root_secret, payload) directly \
+         would produce -- if it does, the root secret is still being used \
+         as the HMAC key unmodified, and per-tenant derivation is not \
+         actually happening"
+    );
+    assert_ne!(sig_b, legacy_b, "same property, for the second tenant");
+}
+
+/// [`CollectService::sign`]'s pre-Task-7 construction, reproduced here only
+/// so [`per_tenant_derivation_changes_the_key_not_just_the_payload`] has
+/// something to diff the real, current output against. Deliberately
+/// independent of production code: it must keep computing the *old* scheme
+/// even as `sign` changes underneath it, or the comparison above would stop
+/// meaning anything.
+fn legacy_single_key_sign(repo_id: Uuid, branch: &str, tenant_id: Uuid) -> String {
+    let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, SECRET.as_bytes());
+    let tag = aws_lc_rs::hmac::sign(
+        &key,
+        super::signing_payload(repo_id, branch, tenant_id).as_bytes(),
+    );
+    hex::encode(tag.as_ref())
+}
+
 /// Fix round 1's fail-closed requirement: an unconfigured signing secret must
 /// refuse every report, never accept one under a publicly-known empty key.
 #[tokio::test]
@@ -704,7 +764,10 @@ async fn trigger_asks_the_pdp_for_exactly_qa_test_result_collect() {
 
     assert_eq!(
         recorder.asked(),
-        vec![("qa.test_result".to_owned(), "collect".to_owned())],
+        vec![(
+            format!("{GTS_ID_PREFIX}cf.qa.insights.test_result.v1~"),
+            "collect".to_owned()
+        )],
     );
 }
 

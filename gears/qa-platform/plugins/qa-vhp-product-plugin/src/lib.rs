@@ -66,9 +66,9 @@ use qa_product_sdk::plugin::{
 /// The VHP product plugin.
 ///
 /// Stateless, and deliberately so: it caches no credential, so there is
-/// nothing for [`QaProductPluginV1::health_check`] — whose signature carries
-/// no credential material at all — to echo. Everything it needs arrives on the
-/// [`EnvironmentHandle`] of the call being served.
+/// nothing for any later call on the same `&dyn QaProductPluginV1` object to
+/// echo. Everything it needs arrives on the [`EnvironmentHandle`] of the call
+/// being served.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct VhpProductPlugin;
 

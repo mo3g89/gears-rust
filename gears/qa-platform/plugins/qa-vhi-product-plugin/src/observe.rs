@@ -16,10 +16,10 @@
 //!
 //! # Health travels separately
 //!
-//! There is no `health_check` here, deliberately: the trait's method takes no
-//! [`EnvironmentHandle`], so it has nothing to probe, and VHI leaves its
-//! default (`Ok`) in place the same way VHP does. A VHI environment's health
-//! is [`health_from`]'s reading of `RELEASE_COMMAND` alone, carried in
+//! There is no environment-independent health call on the trait: one existed
+//! (`health_check`), took no [`EnvironmentHandle`], had nothing to probe, and
+//! was deleted having never had a production caller. A VHI environment's
+//! health is [`health_from`]'s reading of `RELEASE_COMMAND` alone, carried in
 //! [`qa_product_sdk::observation::PluginObservation::health`]. It fails
 //! *independently* of the environment half -- a node whose release file just
 //! became unparseable is still alive -- but a node whose release file is
@@ -298,8 +298,9 @@ struct ObserveTarget<'a> {
     vinfra_username: &'a str,
 }
 
-/// The environment half of an observation: the three reads of spec §5, in
-/// order.
+/// The environment half of an observation: the three reads `observe`
+/// performs, in order (`PRODUCT-PLUGINS-DESIGN.md` §5, cited here before
+/// the docs squash, is not in the repository any more).
 ///
 /// Split out of [`observe`] so it can be driven against a real `sshd` fixture
 /// without stored credential material -- [`observe`] builds its own session

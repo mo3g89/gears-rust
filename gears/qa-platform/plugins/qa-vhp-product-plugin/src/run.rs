@@ -276,11 +276,12 @@ pub fn runner() -> RunnerSpec {
 /// # Which names, and why exactly these two
 ///
 /// Parity with `qa-runs::domain::params::RESERVED_NAMES` as it stands today.
-/// Of its eleven names, nine are the platform's own (`TEST_FILES`,
+/// Of its twelve names, ten are the platform's own (`TEST_FILES`,
 /// `TEST_BUNDLE_URL`, `TEST_VERSION`, `APP_VERSION`, `APP_BUILD`,
-/// `PRODUCT_KEY`, `RP_PROJECT`, `RP_API_KEY`, `SKIP_TESTS_WITH_BUGS`) and stay
-/// with the platform. The two that are facts about *this product's* target —
-/// its Kubernetes namespace and its mounted kubeconfig — come here.
+/// `PRODUCT_KEY`, `RP_PROJECT`, `RP_API_KEY`, `SKIP_TESTS_WITH_BUGS`,
+/// `QA_RUNNER_PYTEST_ARGS`) and stay with the platform. The two that are facts
+/// about *this product's* target — its Kubernetes namespace and its mounted
+/// kubeconfig — come here.
 ///
 /// # The two that are conspicuously absent
 ///

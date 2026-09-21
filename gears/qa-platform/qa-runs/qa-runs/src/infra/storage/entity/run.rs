@@ -83,6 +83,15 @@ pub struct Model {
     pub failed: i32,
     pub skipped: i32,
     pub in_progress: i32,
+    /// Results the runner reported as `XFAIL` — an expected failure that
+    /// failed. Added by `m20260921_000005_run_xfail_counter`.
+    pub xfail: i32,
+    /// Results the runner reported as `XPASS` — an expected failure that
+    /// unexpectedly passed. Added by `m20260921_000006_run_xpass_counter`,
+    /// which is what makes the categorised counters sum to [`Self::total`]
+    /// unconditionally; `xfail` alone left a suite containing an `XPASS`
+    /// short.
+    pub xpass: i32,
     pub total: i32,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,

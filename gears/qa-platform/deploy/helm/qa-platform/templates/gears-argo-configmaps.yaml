@@ -79,14 +79,21 @@
         # directly: gears-service.yaml is a normal ClusterIP Service, so
         # nothing here is loopback-bound and no nginx hop is needed.
         bundle_base_url: {{ printf "http://qa-platform-gears.%s.svc.cluster.local:%d" .Release.Namespace (.Values.gears.port | int) | quote }}
-        # NO SECRET VALUE HERE: client_secret_secret/_key NAME a Kubernetes
-        # Secret (workflow-oidc-secret.yaml creates it) that the KUBELET
-        # resolves. This adapter never opens it -- see ADR-0001.
-        bundle_auth:
-          token_url: {{ printf "http://qa-platform-keycloak.%s.svc.cluster.local:8080/realms/qa-platform/protocol/openid-connect/token" .Release.Namespace | quote }}
-          client_id: {{ .Values.argo.workflowClientId | quote }}
-          client_secret_secret: {{ .Values.argo.workflowSecretName | quote }}
-          client_secret_key: {{ .Values.argo.workflowSecretKey | quote }}
+        # NO `bundle_auth` BLOCK, AND THAT IS THE CHANGE. It used to carry a
+        # Keycloak token_url, a client_id and the name of a Kubernetes Secret
+        # (workflow-oidc-secret.yaml, now deleted) holding a confidential client
+        # secret, which the adapter turned into a `secretKeyRef` on every runner
+        # pod. A runner pod executes TENANT-AUTHORED pytest, and that client was
+        # fullScopeAllowed with a tenant_id claim hardcoded to seedTenantId --
+        # so the credential was readable by tenant code and, separately, wrong
+        # for every tenant but one.
+        #
+        # qa-catalog's bundle route is anonymous now, authorised by a per-bundle
+        # HMAC tag qa-runs renders into TEST_BUNDLE_URL's `?sig=`. The tag rides
+        # ExecutionNode, not this config, so there is nothing to put here. The
+        # root secret is qa-catalog's own `bundle_download_signing_secret` (see
+        # gears-config-configmap.yaml), and NetworkPolicy egress rule 5 --
+        # Keycloak -- went with it.
 {{- end }}
 {{- define "qa-platform.gearsArgoQaEnvironmentsFragment" }}
       # QA_ENVIRONMENTS_ARGO_FRAGMENT

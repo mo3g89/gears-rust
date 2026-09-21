@@ -5,7 +5,7 @@
 //! JIRA bug loop and the notification egress.
 //!
 //! Part of the qa-platform subsystem (see `gears/qa-platform/docs/DESIGN.md`
-//! §3.2 `cpt-cf-qa-component-insights`). The contract lives next door in
+//! §3.5 `cpt-cf-qa-component-insights`). The contract lives next door in
 //! `qa-insights-sdk`.
 //!
 //! # What exists as of Task 40 — the gear is fully wired

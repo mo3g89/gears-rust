@@ -4,7 +4,7 @@ use super::*;
 use crate::access::{RunAccess, RunVar, RunVarContract, RunnerSpec};
 use crate::descriptor::{FieldDesc, FieldKind, FieldRole};
 use crate::observation::{
-    FailureClass, HealthOutcome, HealthState, ObservationOutcome, ObservedAttrs, PluginFailure,
+    FailureClass, HealthOutcome, ObservationOutcome, ObservedAttrs, PluginFailure,
     PluginObservation,
 };
 use crate::plugin::{
@@ -26,11 +26,6 @@ enum LeakMode {
     /// parse-failure path — reaching the decimal byte-array encoding this
     /// harness's `marker_variants` was blind to before this fix round.
     ByteDebug,
-    /// Important-2: leaks through `health_check`, whose signature carries no
-    /// credential material at all — only reachable because a stateful
-    /// plugin shares one `&dyn QaProductPluginV1` object across every
-    /// method.
-    HealthCheck,
     /// Important-3: leaks the PEM marker with its newlines collapsed to
     /// single spaces, defeating a byte-identical comparison while the
     /// content stays fully sensitive.
@@ -51,8 +46,8 @@ enum LeakMode {
 /// realistic shape of a careless plugin reproducing the 2026-08-28 leak, not
 /// a contrived one. Holding the canary directly (rather than reading it back
 /// out of call arguments) is what lets a single fixture also exercise
-/// `credential_schema`/`observed_schema`/`health_check`, none of which take
-/// any credential material as an argument.
+/// `credential_schema`/`observed_schema`, neither of which takes any
+/// credential material as an argument.
 ///
 /// The *argument*-driven half of the contract — a plugin reading a credential
 /// back out of `CredentialInput`/`EnvironmentHandle` by its own declared key
@@ -93,7 +88,6 @@ impl QaProductPluginV1 for FixturePlugin {
             | LeakMode::Tracing
             | LeakMode::RunVar
             | LeakMode::ByteDebug
-            | LeakMode::HealthCheck
             | LeakMode::ReformattedPem => Vec::new(),
         }
     }
@@ -138,7 +132,6 @@ impl QaProductPluginV1 for FixturePlugin {
             LeakMode::None
             | LeakMode::RunVar
             | LeakMode::ByteDebug
-            | LeakMode::HealthCheck
             | LeakMode::ReformattedPem
             | LeakMode::FieldDescHelp
             | LeakMode::FieldDescLabel => {}
@@ -189,7 +182,6 @@ impl QaProductPluginV1 for FixturePlugin {
             | LeakMode::RemoteMessage
             | LeakMode::ObservedAttrs
             | LeakMode::Tracing
-            | LeakMode::HealthCheck
             | LeakMode::FieldDescHelp
             | LeakMode::FieldDescLabel => {}
         }
@@ -202,16 +194,6 @@ impl QaProductPluginV1 for FixturePlugin {
 
     fn env_contract(&self) -> RunVarContract {
         RunVarContract::default()
-    }
-
-    async fn health_check(&self) -> Result<HealthState, PluginFailure> {
-        if matches!(self.mode, LeakMode::HealthCheck) {
-            return Err(
-                PluginFailure::classified(FailureClass::Internal, "health probe failed")
-                    .with_remote_message(self.canary.token.clone()),
-            );
-        }
-        Ok(HealthState::Ok)
     }
 }
 
@@ -275,20 +257,6 @@ async fn a_plugin_that_returns_the_canary_in_a_run_var_fails() {
 async fn a_plugin_that_debug_prints_credential_bytes_fails() {
     let canary = Canary::vhp_shaped();
     let plugin = fixture(LeakMode::ByteDebug, &canary);
-    assert_no_leak(&plugin, &canary).await;
-}
-
-/// Important-2 regression test: `health_check` takes no credential material
-/// in its signature, but a stateful plugin shares one `&dyn
-/// QaProductPluginV1` object across every method, so it can still leak
-/// through `health_check`'s own `PluginFailure.remote_message`.
-#[tokio::test]
-#[should_panic(
-    expected = "marker `token` reached surface `health_check() PluginFailure.remote_message`"
-)]
-async fn a_plugin_that_leaks_through_health_check_fails() {
-    let canary = Canary::vhp_shaped();
-    let plugin = fixture(LeakMode::HealthCheck, &canary);
     assert_no_leak(&plugin, &canary).await;
 }
 

@@ -371,11 +371,37 @@ pub(crate) fn case_row_from_result(m: test_case_result::Model) -> CaseRow {
 /// * `day` ← `ts`'s calendar date, legacy's `ts.date_naive()`.
 ///
 /// Everything `qa_test_results` carries that legacy's `ExecRow` does not —
-/// `duration`, `launch_id`, `jira_key`, `product_version`, `repo_id`,
-/// `plan_path`, `branch` — is deliberately dropped. `branch` and
-/// `product_version` are *predicates* here, on
-/// [`UniverseFilter`](crate::domain::analytics::UniverseFilter); `repo_id` is
-/// write-only in legacy and `ExecRow`'s header records why it is not reproduced.
+/// `duration`, `launch_id`, `jira_key`, `product_version`, `branch` — is
+/// deliberately dropped. Both are *predicates* here, on
+/// [`UniverseFilter`](crate::domain::analytics::UniverseFilter), not
+/// projections of the row.
+///
+/// **`repo_id` and `plan_path` are not dropped, and this is the one place they
+/// are filled.** Legacy's own `ExecRow::repo_id` is write-only — assigned and
+/// read by nothing — which is exactly why an earlier pass of `ExecRow`'s
+/// header declared the field dead and left it off this port too. It is not
+/// dead here: `(tenant_id, product_id)` is not a unique index, so a product's
+/// several repositories can each hold `tests/test_smoke.py`, and
+/// `walk_repo_universe` only deduplicates *within* one repository — two such
+/// repositories produce two universe entries sharing one `test_file`. Every
+/// fold downstream must key on `(repo_id, test_file)` or it attributes one
+/// repository's status to the other's test. The values are not fetched
+/// specially: `m.repo_id`/`m.plan_path` are exactly the pair
+/// [`UniverseFilter::plans`](crate::domain::analytics::UniverseFilter::plans)'s
+/// predicate already filtered this row on, so filling them here is carrying
+/// the query's own predicate forward.
+///
+/// Both columns are nullable — a row from a custom or collect run that names
+/// no plan stores `NULL` in both, deliberately (`domain::service::ingest::plan_identity`).
+/// `list_for_universe`'s scoped read only ever returns such a row when the
+/// caller's plan filter is empty, which the analytics service never sends
+/// (`domain::service::analytics::universe_filter` always derives `plans` from
+/// the universe), so [`ExecRow::repo_id`] and
+/// [`ExecRow::plan_path`](crate::domain::analytics::ExecRow::plan_path) default
+/// to the nil `Uuid` and `""` rather than carry an `Option` no real caller can
+/// produce; a row that hit that default resolves to nothing in
+/// [`resolve_rows`](crate::domain::analytics::universe::resolve_rows) and is
+/// dropped there, exactly as an out-of-universe row already is.
 pub(crate) fn exec_row_from_result(m: test_result::Model) -> ExecRow {
     // The in-memory twin of `results_sea_repo::effective_ts`, which names this
     // function back and carries the both-NULL corner from the SQL side. It has to
@@ -399,6 +425,8 @@ pub(crate) fn exec_row_from_result(m: test_result::Model) -> ExecRow {
         .unwrap_or(m.created_at);
     ExecRow {
         run_id: m.run_id,
+        repo_id: m.repo_id.unwrap_or_default(),
+        plan_path: m.plan_path.unwrap_or_default(),
         test_file: m.test_file,
         test_name: m.test_name,
         status: m.status,
@@ -775,6 +803,8 @@ pub(crate) fn notification_config_to_sdk(
             "notification_config.email_smtp_port",
             m.id,
         )?,
+        email_smtp_username: m.email_smtp_username,
+        email_smtp_credstore_ref: m.email_smtp_credstore_ref,
         email_from: m.email_from,
         email_recipients: m.email_recipients,
         email_enabled: m.email_enabled,
@@ -1032,6 +1062,8 @@ mod tests {
             run_queue_queued_slack_enabled: true,
             email_smtp_host: "smtp.example".to_owned(),
             email_smtp_port: 2525,
+            email_smtp_username: "qa@example".to_owned(),
+            email_smtp_credstore_ref: "qa-smtp-password".to_owned(),
             email_from: "qa@example".to_owned(),
             email_recipients: "a@example, b@example".to_owned(),
             email_enabled: true,
@@ -1041,6 +1073,11 @@ mod tests {
         let config = notification_config_to_sdk(row).unwrap();
         assert_eq!(config.slack_webhook_credstore_ref, "cred://hook");
         assert_eq!(config.email_smtp_port, 2525);
+        assert_eq!(config.email_smtp_username, "qa@example");
+        assert_eq!(
+            config.email_smtp_credstore_ref, "qa-smtp-password",
+            "the reference crosses the mapper; the password never does"
+        );
         assert!(!config.notify_on_failure, "the one gate legacy starts ON");
         assert_eq!(config.email_recipients, "a@example, b@example");
     }

@@ -381,7 +381,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use aws_lc_rs::hmac;
+use aws_lc_rs::{hkdf, hmac};
 use time::OffsetDateTime;
 use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
@@ -1066,11 +1066,16 @@ where
     /// non-allow-listed `sha2` import), and why `signing_payload`'s `|`-joined
     /// format cannot be confused across two different `(repo_id, branch,
     /// tenant_id)` triples.
+    ///
+    /// **Task 7: the HMAC key is `tenant_id`'s own key, HKDF-derived from
+    /// `collect_report_signing_secret`** — see [`derive_signing_key`] for the
+    /// construction and what it does and does not mitigate — rather than
+    /// `collect_report_signing_secret` used directly as the key for every
+    /// tenant: a compromised root secret still derives any tenant's key on
+    /// demand, but a leaked *derived* key now verifies for the one tenant it
+    /// was derived for, not for every tenant at once.
     fn sign(&self, repo_id: Uuid, branch: &str, tenant_id: Uuid) -> String {
-        let key = hmac::Key::new(
-            hmac::HMAC_SHA256,
-            self.collect_report_signing_secret.0.as_bytes(),
-        );
+        let key = derive_signing_key(&self.collect_report_signing_secret.0, tenant_id);
         let tag = hmac::sign(&key, signing_payload(repo_id, branch, tenant_id).as_bytes());
         hex::encode(tag.as_ref())
     }
@@ -1141,10 +1146,7 @@ where
         let Ok(tag) = hex::decode(signature) else {
             return Err(SignatureRefusal::Malformed);
         };
-        let key = hmac::Key::new(
-            hmac::HMAC_SHA256,
-            self.collect_report_signing_secret.0.as_bytes(),
-        );
+        let key = derive_signing_key(&self.collect_report_signing_secret.0, tenant_id);
         hmac::verify(
             &key,
             signing_payload(repo_id, branch, tenant_id).as_bytes(),
@@ -1204,10 +1206,157 @@ impl From<SignatureRefusal> for CollectReportOutcome {
     }
 }
 
+/// The domain-separation label for [`derive_signing_key`]'s HKDF salt.
+///
+/// Public/non-secret by construction — RFC 5869 §3.1 salt never needs to be
+/// secret — and fixed rather than random because there is no per-deployment
+/// random value available to store or transmit here that `collect_report_
+/// signing_secret` does not already provide; a fixed, versioned label is the
+/// standard fallback recommended when no such value exists (`hkdf::Salt`'s
+/// own doc says the same: use a real salt "when you can", else document why
+/// not). `collect_report_signing_secret` supplies the extract step's actual
+/// entropy (input keying material, the secret half of HKDF-Extract) — this
+/// constant's only job is binding the derivation to *this* call site, so a
+/// future second HKDF use elsewhere in this crate over the same or a
+/// different root secret cannot collide with this one's output by accident.
+/// The trailing `v1` is deliberate: changing this constant changes every
+/// derived key at once, the same "never do this without a real reason"
+/// warning `signing_payload`'s format carries.
+const COLLECT_SIGNING_HKDF_SALT: &[u8] = b"qa-insights/collect-report-signing/v1";
+
+/// Task 7: HKDF-derive tenant `tenant_id`'s own HMAC-SHA256 key from the one
+/// root `collect_report_signing_secret` a deployment configures, so that
+/// secret is no longer the HMAC key every tenant's tag is computed under.
+///
+/// # Why this closes the single-point-of-compromise the task names
+///
+/// Before this task, `collect_report_signing_secret` itself was the HMAC
+/// key, for every tenant. Whoever held that one string could sign a tag for
+/// *any* `(repo_id, branch, tenant_id)` triple, because `tenant_id` inside
+/// the signed tuple ([`signing_payload`]) is chosen by whoever signs, not
+/// authenticated by anything outside the tag itself. After this task, the
+/// same leak (this one root secret) still lets an attacker derive tenant
+/// `T`'s key for a `T` of their choosing — the root secret remains the one
+/// thing a deployment must protect — but that is unavoidable for *any*
+/// scheme that derives every tenant's key from a single configured value
+/// without an out-of-band per-tenant secret store, which this task's brief
+/// does not ask for (the config surface stays one value). What the
+/// derivation actually buys, stated precisely: a root secret is a
+/// deployment-wide operational credential an operator types into
+/// configuration once; a *derived* tenant key is not that same credential,
+/// so nothing downstream of this function — a log line, a metrics label, an
+/// error payload, a future feature that hands a caller "their" signing
+/// material for some legitimate reason this task cannot foresee — can leak a
+/// value that, held alone, works for a different tenant, the way the un-derived
+/// root secret itself would.
+///
+/// # The construction
+///
+/// `PRK = HKDF-Extract(salt = `[`COLLECT_SIGNING_HKDF_SALT`]`, ikm =
+/// root_secret)`, then `OKM = HKDF-Expand(PRK, info = tenant_id's 16 raw
+/// bytes, len = HMAC-SHA256's key length)`, both HMAC-SHA256-based
+/// (`hkdf::HKDF_SHA256`) — the same primitive [`CollectService::sign`] and
+/// [`CollectService::verify_signature`] already used directly, so this adds
+/// no new hash algorithm, only a key-derivation step in front of the
+/// existing HMAC. `tenant_id.as_bytes()` is `Uuid`'s fixed 16-byte
+/// representation — fixed-width, so unlike a delimited string it needs no
+/// [`signing_payload`]-style delimiter-safety argument: `expand`'s own doc
+/// warns that concatenated variable-length `info` fields can collide across
+/// distinct inputs, which does not apply to a single fixed-length field.
+///
+/// `aws_lc_rs::hmac::Key: From<hkdf::Okm<'_, hkdf::Algorithm>>` (the crate's
+/// own documented pattern for "derive a key, then use it as an HMAC key" —
+/// see `hkdf`'s module-level example) hands the OKM straight to `hmac::sign`
+/// / `hmac::verify` without this function ever materialising the raw key
+/// bytes itself.
+///
+/// # Why `aws_lc_rs::hkdf`, not `hkdf`/`ring`
+///
+/// Same reasoning as `hmac` above it: Dylint `DE0708` bans a new
+/// non-allow-listed `sha2` import, and `aws-lc-rs` is this workspace's
+/// mandated FIPS-validated primitive for this shape of problem
+/// (`Cargo.toml`'s own comment on the `aws-lc-rs` dependency). Reaching for
+/// the `hkdf` or `ring` crates instead would both reintroduce a
+/// non-FIPS-validated implementation and add a dependency this workspace has
+/// already decided it does not want for exactly this problem.
+///
+/// # Fail-closed is unaffected
+///
+/// This function is never the thing that decides whether a report is
+/// accepted or refused — [`CollectService::verify_signature`] still checks
+/// [`signing_secret_is_configured`] first and returns
+/// [`SignatureRefusal::SecretUnconfigured`] before this function, or
+/// `aws_lc_rs`, is ever reached. An empty or too-short root secret still
+/// disables the public collect route exactly as before; this function only
+/// changes *what key* a properly configured secret's HMAC runs under.
+///
+/// # Constant-time verification is unaffected
+///
+/// `hmac::verify`'s constant-time comparison (this module's header) is
+/// unchanged: it still compares two 32-byte HMAC-SHA256 tags. Deriving the
+/// key first does not touch that comparison, and HKDF-Expand's own
+/// computation is a fixed, input-length-independent sequence of HMAC calls
+/// with no data-dependent branching over secret material, so it introduces
+/// no new timing channel over `tenant_id` (which is not secret; it already
+/// travels in the clear as a `Path`/`Query` value) or over the root secret
+/// (whose value never varies per call in a way an attacker could probe one
+/// bit at a time through this function's timing, since it is the same
+/// literal bytes on every call this process makes).
+#[allow(
+    clippy::expect_used,
+    reason = "the requested OKM length is HMAC-SHA256's own fixed digest length (32 bytes), \
+              never more than the 255x-digest-length cap `Prk::expand` enforces, so this can \
+              never fail for this call site -- matching encode_collect_report_query's own \
+              reason above for why a panic that can never trigger beats a silent fallback."
+)]
+fn derive_signing_key(root_secret: &str, tenant_id: Uuid) -> hmac::Key {
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, COLLECT_SIGNING_HKDF_SALT);
+    let prk = salt.extract(root_secret.as_bytes());
+    // A named binding, not an inline `&[...]` literal: `Okm` borrows this
+    // slice for its own lifetime, and an unnamed temporary array would be
+    // dropped at the end of the `let okm = ...` statement, before
+    // `hmac::Key::from(okm)` below gets to use it (E0716).
+    let info: [&[u8]; 1] = [tenant_id.as_bytes().as_slice()];
+    let okm = prk
+        .expand(&info, hkdf::HKDF_SHA256.hmac_algorithm())
+        .expect(
+            "HKDF-Expand's requested length is HMAC-SHA256's own fixed digest \
+             length (32 bytes), never more than the 255x-digest-length cap \
+             `expand` enforces, so this can never fail for this call site",
+        );
+    hmac::Key::from(okm)
+}
+
 /// The string [`CollectService::sign`] and [`CollectService::verify_signature`]
 /// both compute the HMAC over. See this module's header, "Delimiter safety of
 /// the signed string", for why joining with `|` cannot let one `branch` value
 /// stand in for a different `(repo_id, branch, tenant_id)` triple.
+///
+/// **`tenant_id` here is redundant once [`derive_signing_key`] exists — kept
+/// anyway.** The key is now tenant-specific, so a tag no longer needs
+/// `tenant_id` inside the signed payload to bind the tag to a tenant; the
+/// key already does that. Two reasons this format is unchanged regardless:
+///
+/// * **Changing it invalidates every signature in flight for no gain.** Any
+///   callback URL [`CollectService::collect_url`] has already handed to a
+///   running qa-runs workflow carries a `sig` computed over today's payload
+///   shape; that workflow can report against it for as long as it runs (this
+///   module's own doc on [`CollectService::verify_signature`] — no expiry, no
+///   nonce). Dropping `tenant_id` from the payload changes what every
+///   in-flight tag is a tag *of*, so every one of them would stop verifying
+///   the moment this shipped, with no corresponding security improvement:
+///   the field's only remaining job is defense in depth (below), not the
+///   thing that makes cross-tenant forgery hard.
+/// * **A second, narrower binding, kept for defense in depth.** With
+///   `tenant_id` still in the payload, a bug that derived the *same* key for
+///   two different tenants (a hypothetical [`derive_signing_key`] regression,
+///   not a property of today's construction) would still produce different
+///   tags for those two tenants, because the HMAC input would differ even
+///   under a shared key. That is a strictly weaker property than the key
+///   derivation itself provides today, but it costs nothing to keep — the
+///   field is already there, already typed, already covered by the
+///   delimiter-safety argument below — so there is no reason to spend a
+///   format change removing it.
 fn signing_payload(repo_id: Uuid, branch: &str, tenant_id: Uuid) -> String {
     format!("{repo_id}|{branch}|{tenant_id}")
 }

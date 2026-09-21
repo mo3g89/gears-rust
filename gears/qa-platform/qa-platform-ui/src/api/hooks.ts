@@ -2545,29 +2545,6 @@ export function useUpdateNotificationsConfig() {
   });
 }
 
-/**
- * Send a test notification.
- *
- * A **bodyless POST gains a required body** (row 88): the gear has one test endpoint where
- * legacy had two shapes on the same path, and this hook is the bodyless one, so it cannot
- * be called as written. It is absorbed by sending the currently-saved config plus an
- * event. The event has to be *some* value — `NotificationTestReq.event` is required — and
- * `succeeded` is used because a test message describing a success is the least alarming
- * thing to deliver to a real Slack channel. That choice is this hook's, not the gear's;
- * `useTestScheduledRunNotification` is the variant that lets the caller pick.
- */
-export function useTestNotification() {
-  return useMutation({
-    mutationFn: async (): Promise<void> => {
-      const config = await apiGet<S['NotificationConfigDto']>('/settings/notifications');
-      await apiPost<S['NotificationTestOutcomeDto']>('/settings/notifications/test', {
-        config,
-        event: 'succeeded',
-      } satisfies S['NotificationTestReq']);
-    },
-  });
-}
-
 export function usePreviewScheduledRunNotification() {
   return useMutation({
     mutationFn: async (

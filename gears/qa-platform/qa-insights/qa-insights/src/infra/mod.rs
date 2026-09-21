@@ -1,9 +1,11 @@
 //! Infrastructure layer: storage, cross-gear clients, and the egress adapters.
 //!
 //! * `storage` — the schema and its migrations (Task 10); `SeaORM` entities
-//!   and repositories, Tasks 11-12. Carries one migration for a table an
-//!   ingest path used to own — see `storage::migrations::m20260818_000002_offset_store`'s
-//!   header.
+//!   and repositories, Tasks 11-12. Carries the table an ingest path used to
+//!   own, `qa_ingest_watermarks` — see
+//!   `storage::migrations::m20260818_000001_initial`'s header (that table
+//!   was added by `m20260818_000002_offset_store`, folded into this single
+//!   migration by the docs squash).
 //! * `leader` — the elector the three tickers hold. Created by Task 15,
 //!   because the reconciler's contract is "only one instance sweeps"; the three
 //!   tickers that call it arrived at Task 40, in `crate::gear`'s `serve`.

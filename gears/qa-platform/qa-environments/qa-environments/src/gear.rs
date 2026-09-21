@@ -218,20 +218,12 @@ impl RestApiCapability for QaEnvironments {
 // ---------------------------------------------------------------------------
 
 impl QaEnvironments {
-    /// Lifecycle entry (`stateful` capability). Spawns the background
-    /// observation ticker (Task 8) when this build carries the
-    /// `runner-secret` cargo feature *and* the feature has not been
-    /// switched off at runtime (`qa-environments.observation.enabled`).
-    ///
-    /// # Two independent "off" switches, and each one says which it is
-    ///
-    /// A deployment that expects environments to refresh on their own but got
-    /// neither the cargo feature nor the config flag would otherwise have no
-    /// way to tell "not built in" from "built in, but disabled" apart — both
-    /// look like a gear that silently never refreshes anything. So each has
-    /// its own log line: this method's own branch when the feature was never
-    /// compiled in, and `observation.enabled == false`'s branch below when it
-    /// was but the config says not to run it.
+    /// Lifecycle entry (`stateful` capability). Delegates to
+    /// [`Self::serve_with_services`], which spawns the background
+    /// observation ticker (Task 8) unless `qa-environments.observation.enabled`
+    /// says not to — unconditionally, in every build, since Task 19b. See that
+    /// method's own doc for why there is no longer a cargo-feature branch
+    /// here to describe.
     ///
     /// # Errors
     ///

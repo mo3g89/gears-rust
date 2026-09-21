@@ -60,10 +60,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use qa_runs_sdk::{
-    Exclusivity, LaunchRequest, QaRunsClientV1, QaRunsError, Run, RunSource, RunTarget,
-    RunTestResult, ScheduleNotificationSettings,
+    Exclusivity, FinishedRunCursor, LaunchRequest, QaRunsClientV1, QaRunsError, Run, RunSource,
+    RunTarget, RunTestResult, ScheduleNotificationSettings,
 };
-use time::OffsetDateTime;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -156,18 +155,20 @@ impl RunsReader for QaRunsReader {
     async fn list_runs_finished_since(
         &self,
         ctx: &SecurityContext,
-        since: OffsetDateTime,
+        cursor: FinishedRunCursor,
         limit: u32,
     ) -> Result<Vec<Run>, DomainError> {
         // Neither bound nor ordering is re-applied here. The SDK method's
-        // contract is the port's contract, word for word — `finished_at >=
-        // since`, oldest first, capped at `limit`, never a run that is not
-        // terminal — and re-sorting or re-filtering would create a second place
-        // where the two could disagree. In particular, **re-sorting would
-        // silently invert the ingest ordinal**, which is the hazard
-        // `RunsReader::list_run_test_results` spells out.
+        // contract is the port's contract, word for word — the same two-part
+        // lower bound on `(finished_at, id)`, oldest first, capped at `limit`,
+        // never a run that is not terminal — and re-sorting or re-filtering
+        // would create a second place where the two could disagree. In
+        // particular, **re-sorting would silently invert the ingest ordinal**,
+        // which is the hazard `RunsReader::list_run_test_results` spells out —
+        // and it would now also break the cursor, since a keyset resume is only
+        // sound against the order the far side actually applied.
         self.client
-            .list_runs_finished_since(ctx, since, limit)
+            .list_runs_finished_since(ctx, cursor, limit)
             .await
             .map_err(on_subject)
     }

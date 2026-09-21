@@ -88,6 +88,58 @@ pub struct MetricsConfig {
     /// overflow data point.  `None` means the SDK default is used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cardinality_limit: Option<usize>,
+    /// Pull-based delivery: a Prometheus text-format scrape endpoint served on
+    /// its own listener.
+    ///
+    /// Independent of [`MetricsConfig::enabled`], which governs OTLP *push*
+    /// only. The two signals are separate readers on one meter provider, so a
+    /// deployment may have either, both, or neither. Scraping needs no
+    /// collector and no network egress, which is why it is the cheaper of the
+    /// two to leave on.
+    #[serde(default)]
+    pub scrape: MetricsScrapeConfig,
+}
+
+/// A Prometheus text-format scrape endpoint for the process' OpenTelemetry
+/// metrics.
+///
+/// This is the *pull* half of metrics delivery. `init_metrics_provider`
+/// attaches a manual reader to the meter provider when `enabled` is set and
+/// serves `path` on `bind_addr` from a listener of its own — deliberately not
+/// the gear host's main HTTP port, so the endpoint is never routed through an
+/// ingress and never sits behind (or beside) the API gateway's auth middleware.
+/// Expose it to a scraper by cluster-internal address only.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsScrapeConfig {
+    /// Whether to attach the scrape reader and bind the listener.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `host:port` the scrape listener binds. Defaults to the OpenTelemetry
+    /// project's conventional Prometheus exporter port, 9464.
+    #[serde(default = "default_scrape_bind_addr")]
+    pub bind_addr: String,
+    /// The single route the listener answers. Anything else is a 404.
+    #[serde(default = "default_scrape_path")]
+    pub path: String,
+}
+
+fn default_scrape_bind_addr() -> String {
+    "0.0.0.0:9464".to_owned()
+}
+
+fn default_scrape_path() -> String {
+    "/metrics".to_owned()
+}
+
+impl Default for MetricsScrapeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_addr: default_scrape_bind_addr(),
+            path: default_scrape_path(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq, Copy)]

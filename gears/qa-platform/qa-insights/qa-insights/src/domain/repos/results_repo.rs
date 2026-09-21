@@ -246,12 +246,26 @@ pub struct FlakyGroup {
 /// | | grain | `HAVING` | `LIMIT` |
 /// |---|---|---|---|
 /// | [`FlakyGroup`] | `(test_name, repo_id, plan_path)` (`dashboard.rs:392`) | both counters `> 0` (`:393-394`) | 10 (`:399`) |
-/// | this type | `test_file` (`dashboard.rs:492`) | none | none |
+/// | this type | `(repo_id, test_file)` (`dashboard.rs:492`) | none | none |
 ///
 /// So a file whose tests only ever passed is **absent** from the flaky read and
 /// **present** here with `failed == 0` — which it has to be, because the
 /// quality-vector fold divides by [`Self::total`] and a vector whose files all
 /// pass is a 100% bar rather than a missing one.
+///
+/// # `repo_id`, not `plan_path` — a fix-round-2 correction
+///
+/// Two repositories can each hold a `tests/test_smoke.py`, and the grain used
+/// to be `test_file` alone: repo B's counts joined against repo A's universe
+/// entry for the same path, so repo B's untagged file inherited repo A's
+/// `quality_vectors` and one repo's execution outcome could land on the
+/// other's vector. `repo_id` is carried the same way
+/// [`FlakyGroup::repo_id`] is — `Option<Uuid>`, `None` for a row whose run
+/// named no plan — to close that. `plan_path` is deliberately **not** added:
+/// unlike the flaky grain, a file listed by two plans *within one repo* is
+/// meant to collapse to one vector test
+/// (`a_file_in_two_universe_entries_is_one_vector_test`), and `repo_id` alone
+/// already disambiguates the cross-repository collision this fixes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileStatusCount {
     /// The normalized-ish stored path, verbatim from the column.
@@ -269,6 +283,10 @@ pub struct FileStatusCount {
     /// Normalizing here would be a second definition of that rule in a place a
     /// reader of the fold would not look.
     pub test_file: String,
+    /// The plan's repository, from the denormalized column — see this type's
+    /// note on the grain. `None` for a row whose run named no plan, the same
+    /// as [`FlakyGroup::repo_id`].
+    pub repo_id: Option<Uuid>,
     /// Rows of this file whose status is one of the caller's passed statuses.
     /// May be `0` — there is no `HAVING`.
     pub passed: u64,
@@ -453,9 +471,8 @@ pub trait ResultsRepository: Send + Sync {
     /// That is a legitimate role and the reason it is kept: the alternative is
     /// each test file reaching past the repository into the entity, which is how
     /// a test stops proving that the scoped read path works. Every analytics
-    /// surface reads through [`Self::list_for_universe`] or
-    /// [`Self::latest_per_test`] instead, both of which window and reduce; a
-    /// per-run listing with no window is not the shape any of those needs. If a
+    /// surface reads through [`Self::list_for_universe`] instead, which windows;
+    /// a per-run listing with no window is not the shape any of those needs. If a
     /// later task does find a use, the thing to check first is whether it wants
     /// `list_page` with `$filter=run_id eq …` instead, which pages.
     async fn list_by_run<C: DBRunner>(
@@ -565,54 +582,6 @@ pub trait ResultsRepository: Send + Sync {
     /// filtering, both of which need the universe and belong to Task 20. See
     /// [`ExecRow`].
     async fn list_for_universe<C: DBRunner>(
-        &self,
-        runner: &C,
-        scope: &AccessScope,
-        filter: &UniverseFilter,
-    ) -> Result<Vec<ExecRow>, DomainError>;
-
-    /// The most recent row per `test_file` within `filter`.
-    ///
-    /// For readers that need only the newest outcome per file and not the whole
-    /// history — the dashboard's cards, not the overview's heatmap.
-    ///
-    /// # It *is* a database-side reduction, and two earlier versions of this doc
-    /// were wrong about that
-    ///
-    /// The implementation is
-    /// `(test_file, latest) IN (SELECT test_file, MAX(latest) … GROUP BY test_file)`,
-    /// built through `SecureSelect::project_all`
-    /// (`libs/toolkit-db/src/secure/select.rs:396`) from a clone of the
-    /// already-scoped query, so the subquery carries the caller's `AccessScope`
-    /// by construction rather than by a hand-written predicate.
-    ///
-    /// **Two corrections, recorded because the second was written *as* a
-    /// correction and was worse than the first.** The original doc called this "a
-    /// database-side shortcut", which was right. Task 12 then replaced it with a
-    /// claim that `SecureSelect` "exposes `filter`, `order_by`, `limit` and
-    /// `offset` and nothing else" and that "a repository cannot reach a raw
-    /// connection" — and marked it *measured*. Neither is true: `project_all`
-    /// (`:396`) and `into_inner` (`:416`) sit in the same `impl` block, about 120
-    /// lines below the four methods that were enumerated, and the reading stopped
-    /// before them. `qa-runs`' `queue_sea_repo::platforms_with_queued_rows`
-    /// already carried the identical wrong argument and its correction. The
-    /// lesson is the project's own: an absence claim needs an *attempt*, and
-    /// "measured" must not be asserted about a read.
-    ///
-    /// A `MAX` does not settle a tie, so a first-wins fold still runs — over
-    /// *ties only*, not over history. It consumes [`Self::list_for_universe`]'s
-    /// ordering, so that method's four-key tiebreak is what decides this one's
-    /// winner: `created_at DESC` across runs, `ingest_ordinal DESC` within one.
-    ///
-    /// **Not a substitute for Task 20's latest-map**, and the difference is not
-    /// cosmetic. Legacy's `latest_per_test_snapshot` (`analytics.rs:1615`) keys
-    /// on the *resolved* file — after the alias map has attributed rows whose
-    /// `test_file` is `""` and after the universe filter has dropped the rest —
-    /// and it computes that in memory over the full row set. A `SELECT` can key
-    /// only on the stored column, so for any run whose results carry no file
-    /// path the two answers differ. A caller computing an overview section must
-    /// use [`Self::list_for_universe`] and the core.
-    async fn latest_per_test<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
@@ -806,6 +775,22 @@ pub trait ResultsRepository: Send + Sync {
     /// (`validate_tenant_in_scope`), so this cannot be used to probe a tenant
     /// the caller has no grant for.
     ///
+    /// # `repo_id` is a parameter too — task 2's fix, the same shape as `tenant_id` above
+    ///
+    /// `plan_path` is repository-relative (`plans/smoke.yaml` names a
+    /// different file in every repository that has one), so `(tenant_id,
+    /// plan_path)` alone lets two repositories of one tenant share one
+    /// answer. An earlier revision of this method took only `plan_path` and
+    /// dropped the caller's `repo_id` — the query filtered `(tenant_id,
+    /// plan_path)` and this method answered with whichever repository's row
+    /// sorted newest under the `ORDER BY` below, regardless of which
+    /// repository the caller actually asked about. The composite key this
+    /// method now filters on is `(tenant_id, repo_id, plan_path)`; see
+    /// `domain::service::jira_poller::JiraPollerService::maybe_rerun`'s call
+    /// site for the failure this produced both ways — another repository's
+    /// newer build triggering a rerun this gate exists to prevent, or another
+    /// repository's version suppressing one that should have happened.
+    ///
     /// # Errors
     ///
     /// [`DomainError::Database`] for a driver failure.
@@ -814,6 +799,7 @@ pub trait ResultsRepository: Send + Sync {
         runner: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
+        repo_id: Uuid,
         plan_path: &str,
     ) -> Result<Option<String>, DomainError>;
 
@@ -937,9 +923,11 @@ pub trait ResultsRepository: Send + Sync {
     ///
     /// (Task 12 first shipped this as a fold over every row in the window and
     /// wrote here that `SecureSelect` "has no `distinct()` and no column
-    /// projection". It has both. See [`Self::latest_per_test`] for how that claim
-    /// got written and why it was the more damaging kind of error — it was filed
-    /// as a correction.)
+    /// projection". It has both. The fullest account of how that claim got
+    /// written, and why it was the more damaging kind of error — it was filed
+    /// *as a correction* — was on `latest_per_test`'s doc, which went with that
+    /// method; `qa-runs`' `queue_sea_repo::platforms_with_queued_rows` carries
+    /// the same correction, made one gear earlier.)
     async fn ingested_run_ids_between<C: DBRunner>(
         &self,
         runner: &C,
@@ -1261,8 +1249,9 @@ pub trait ResultsRepository: Send + Sync {
     ///   already-scoped `Select`, so `group_by`, `having`, `order_by` and `limit`
     ///   are all available and none of them can drop the tenant predicate —
     ///   unlike `into_inner()` (`:416`). Two reads in this module were moved into
-    ///   SQL on that discovery (`latest_per_test` and `ingested_run_ids_between`);
-    ///   this one is written that way from the start rather than moved later.
+    ///   SQL on that discovery (`ingested_run_ids_between`, and the
+    ///   since-deleted `latest_per_test`); this one is written that way from the
+    ///   start rather than moved later.
     ///
     /// What stays in the domain is the *vocabulary* and the *card*: the two
     /// status sets are parameters, exactly as [`Self::recent_failures`]' are, and
@@ -1297,8 +1286,9 @@ pub trait ResultsRepository: Send + Sync {
     /// the counter is `0` for every row, the `HAVING` rejects every group, and the
     /// answer is the same empty `Vec`. Deleting the guard leaves the whole suite
     /// green; `a_flaky_read_with_an_empty_status_set_answers_empty` records that
-    /// and says what it does pin instead. Same shape of gap as
-    /// [`Self::latest_per_test`]'s reduction, recorded the same way.
+    /// and says what it does pin instead. Same shape of gap as the
+    /// since-deleted `latest_per_test`'s reduction, which was recorded the same
+    /// way.
     ///
     /// # The rank, and the tiebreak that makes it total
     ///
@@ -1372,13 +1362,15 @@ pub trait ResultsRepository: Send + Sync {
         repo_ids: Option<&[Uuid]>,
     ) -> Result<Vec<FlakyGroup>, DomainError>;
 
-    /// The three counters per **test file** over `[since, ∞)`, for the
-    /// dashboard's quality-vector pass rate.
+    /// The three counters per **`(repo_id, test_file)`** over `[since, ∞)`, for
+    /// the dashboard's quality-vector pass rate.
     ///
     /// Legacy's `dashboard.rs:483-492`, the SQL half of
     /// `DashboardStats::quality_vectors_pass_rate`. The join half is the
     /// catalog's `TEST_META` vectors and lives in
     /// [`crate::domain::service::dashboard`]'s `quality_vector_pass_rates`.
+    /// `repo_id` joined the grain in a fix-round-2 correction — see
+    /// [`FileStatusCount`]'s own doc for why.
     ///
     /// # Ruling R5's **sixth** classification, and not a seventh
     ///

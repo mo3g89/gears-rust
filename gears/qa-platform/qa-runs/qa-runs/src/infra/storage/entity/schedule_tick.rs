@@ -1,7 +1,7 @@
 //! `SeaORM` entity for the `qa_schedule_ticks` table — the exactly-once claim.
 //!
 //! **There is no `updated_at`**, and that is a deliberate departure from the
-//! standard column set DESIGN §3.7 requires of every table. The migration's
+//! house-style standard column set most other tables carry. The migration's
 //! module header carries the argument and names the three departures that
 //! precede it; in short, a claim row is immutable once won, and its only later
 //! writes — `run_id` and `error` — are made once by the instance that won it.

@@ -136,7 +136,8 @@ use authz_resolver_sdk::models::{
 use qa_catalog_sdk::{SOURCE_REPO, TestRepository, UniverseTest};
 use qa_insights_sdk::CollectCount;
 use qa_runs_sdk::{
-    ExclusiveTier, Run, RunSource, RunState, RunTarget, RunTestResult, ScheduleNotificationSettings,
+    ExclusiveTier, FinishedRunCursor, Run, RunSource, RunState, RunTarget, RunTestResult,
+    ScheduleNotificationSettings,
 };
 use time::{Date, Duration, OffsetDateTime};
 use toolkit_security::{SecurityContext, pep_properties};
@@ -330,6 +331,21 @@ impl FakeRuns {
     }
 }
 
+/// The sweep's lower bound, restated once for the two lists `FakeRuns` answers
+/// from.
+///
+/// A cursor with no id is the inclusive instant bound the first page of a walk
+/// takes; one with an id is the keyset resume, strict on the whole
+/// `(finished_at, id)` key — the same total order the sort below imposes and the
+/// same one the real repository's query does. An unfinished run is admitted by
+/// neither.
+fn admits(run: &Run, cursor: FinishedRunCursor) -> bool {
+    run.finished_at.is_some_and(|at| match cursor.after_id() {
+        None => at >= cursor.at(),
+        Some(id) => (at, run.id) > (cursor.at(), id),
+    })
+}
+
 #[async_trait]
 impl RunsReader for FakeRuns {
     async fn get_run(&self, _ctx: &SecurityContext, run_id: Uuid) -> Result<Run, DomainError> {
@@ -373,7 +389,7 @@ impl RunsReader for FakeRuns {
     async fn list_runs_finished_since(
         &self,
         _ctx: &SecurityContext,
-        since: OffsetDateTime,
+        cursor: FinishedRunCursor,
         limit: u32,
     ) -> Result<Vec<Run>, DomainError> {
         // Counted before the failure switch: a listing that was *attempted* is
@@ -388,9 +404,9 @@ impl RunsReader for FakeRuns {
             .unwrap()
             .values()
             // The contract's two filters, reproduced rather than approximated:
-            // `finished_at >= since`, inclusive, and a run that is not yet
-            // terminal is never returned.
-            .filter(|(run, _)| run.finished_at.is_some_and(|at| at >= since))
+            // the two-part lower bound on `(finished_at, id)`, and a run that
+            // is not yet terminal is never returned.
+            .filter(|(run, _)| admits(run, cursor))
             .map(|(run, _)| run.clone())
             .chain(
                 // See `Self::add_finished_run_that_vanishes`: reported here,
@@ -399,7 +415,7 @@ impl RunsReader for FakeRuns {
                     .lock()
                     .unwrap()
                     .iter()
-                    .filter(|run| run.finished_at.is_some_and(|at| at >= since))
+                    .filter(|run| admits(run, cursor))
                     .cloned(),
             )
             .collect();
@@ -1103,6 +1119,7 @@ pub fn test_repo(id: Uuid, product_id: Uuid) -> TestRepository {
         content_root: String::new(),
         credential_ref: None,
         last_synced_at: None,
+        head_commit: None,
         sync_error: None,
         created_at: ts(),
         updated_at: ts(),
@@ -1150,10 +1167,19 @@ pub fn universe_test_full(test_file: &str, test_name: &str, title: Option<&str>)
 /// because a row that names its file never consults the alias map — the tests
 /// that *are* about the alias map build their rows inline with the empty
 /// `test_file` the column actually stores.
+///
+/// `repo_id`/`plan_path` are [`UNIVERSE_TEST_REPO_ID`]/[`UNIVERSE_TEST_PLAN_PATH`]
+/// — the same pair [`universe_test_full`] stamps on every universe entry — so a
+/// row built here already agrees with a universe built by
+/// [`universe_test`]/[`universe_test_full`] on the key every fold now uses.
+/// A test that needs a row to disagree, such as one exercising a second
+/// repository, builds its own [`ExecRow`] with `..exec_row_at(..)`.
 #[must_use]
 pub fn exec_row_at(test_file: &str, status: &str, at: OffsetDateTime) -> ExecRow {
     ExecRow {
         run_id: Uuid::new_v4(),
+        repo_id: UNIVERSE_TEST_REPO_ID,
+        plan_path: UNIVERSE_TEST_PLAN_PATH.to_owned(),
         test_file: test_file.to_owned(),
         test_name: test_file.to_owned(),
         status: status.to_owned(),

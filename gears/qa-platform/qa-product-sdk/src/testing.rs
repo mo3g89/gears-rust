@@ -75,10 +75,7 @@
 //! is *designed* to carry text the plugin received from elsewhere, so
 //! echoing credential material into it looks, to a hurried author, exactly
 //! like the feature working as intended. This harness checks every returned
-//! `remote_message` on every driven call — including `health_check`'s, which
-//! is easy to forget since its signature carries no credential material at
-//! all, but which shares the same `&dyn QaProductPluginV1` object (and so,
-//! for a stateful plugin, the same cached credential) as every other method.
+//! `remote_message` on every driven call.
 //!
 //! # A documented blind spot: coverage is per *driven path*, not per method
 //!
@@ -90,10 +87,9 @@
 //! drive is the contractual one (see
 //! [`crate::plugin::QaProductPluginV1::prepare_run_access`]) and must return
 //! `Ok`; the resolved drive both harvests leak surfaces from a plugin that
-//! cached plaintext during `observe` and echoes it later — the same reason
-//! `health_check` is driven despite its signature carrying no credential
-//! material — and gives the two-drive comparison something to compare, since
-//! an access that changes when plaintext is available was built from it.
+//! cached plaintext during `observe` and echoes it later, and gives the
+//! two-drive comparison something to compare, since an access that changes
+//! when plaintext is available was built from it.
 //!
 //! What that leaves uncovered is exactly where the 2026-08-28 leak lived: an
 //! **error branch**. The key did not escape through a successful parse, it
@@ -838,19 +834,14 @@ fn access_divergences(resolved: &RunAccess, refs_only: &RunAccess) -> Vec<String
 }
 
 /// Drive every method of `plugin` — `credential_schema`, `observed_schema`,
-/// `validate_credentials`, `observe`, `prepare_run_access`, `runner`,
-/// `env_contract`, and `health_check` — with `canary` as the credential
+/// `validate_credentials`, `observe`, `prepare_run_access`, `runner` and
+/// `env_contract` — with `canary` as the credential
 /// material, then check every marker in `canary` against: every returned
 /// string field, each returned value's `Debug` rendering, the serialised
 /// [`crate::observation::ObservedAttrs`], every `RunVar` name and value,
 /// every [`MountSpec`] path and mounted `ConfigValue`, and every `tracing`
-/// event emitted for the
-/// duration of the call. `health_check` is driven too, even though its
-/// signature carries no credential material: it shares the same
-/// `&dyn QaProductPluginV1` object as every other method, so a stateful
-/// plugin that cached a credential in `observe` or `prepare_run_access` can
-/// echo it from there. Panics naming the surface and the marker on the first
-/// leak found.
+/// event emitted for the duration of the call. Panics naming the surface and
+/// the marker on the first leak found.
 ///
 /// The credential material is planted **under the keys the plugin itself
 /// declares** in `credential_schema()` (plus three fixed extras), and the
@@ -1104,12 +1095,6 @@ async fn drive(
         "env_contract() Debug",
         debug_of(&contract),
     ));
-
-    let health = plugin.health_check().await;
-    if let Err(failure) = &health {
-        push_failure(&mut surfaces, "health_check()", failure);
-    }
-    surfaces.push(Surface::visible("health_check() Debug", debug_of(&health)));
 
     drop(guard);
     surfaces.push(Surface::visible("tracing events", captured(&log_buf)));

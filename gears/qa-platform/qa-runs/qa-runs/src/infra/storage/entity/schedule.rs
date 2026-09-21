@@ -84,7 +84,7 @@ pub struct Model {
     /// (`manager/src/models.rs:948-959`, `#[serde(rename_all = "snake_case")]`).
     ///
     /// **`NOT NULL` with a `'[]'` default, never nullable** — one strategy, and
-    /// `m20260818_000007_schedule_notifications` says why. There is therefore no
+    /// `m20260818_000007_schedule_notifications` (folded into `migrations::m20260813_000003_initial` by the docs squash) says why. There is therefore no
     /// `NULL`-means-empty case anywhere in the mapper.
     pub slack_notification_events: Json,
     /// The latest due time this schedule has fired for, and the cron

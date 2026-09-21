@@ -19,12 +19,13 @@ use toolkit_db::secure::DBRunner;
 use toolkit_security::{AccessScope, pep_properties};
 use uuid::Uuid;
 
-use super::bundles::BundlesService;
+use super::bundles::{BundleDownloadSigningSecret, BundlesService};
 use super::test_support::{
     MockTestReposRepository, PermissiveAuthZ, ctx, repo_fixture, test_db_provider,
 };
 use crate::domain::error::DomainError;
 use crate::domain::ports::bundle_store::BundleStore;
+use crate::domain::ports::metrics::NoopMetrics;
 use crate::domain::repos::BundlesRepository;
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::PlatformSecurityContext;
@@ -132,10 +133,15 @@ impl BundlesRepository for MockBundlesRepository {
         Ok(bundle)
     }
 
+    /// **Scope-aware, unlike the first cut of this double.** The real
+    /// `SecureORM` read filters on `owner_tenant_id`, which is precisely what
+    /// makes `get_bundle_content` unable to serve one tenant's bundle to
+    /// another. A double that ignored the scope would make the cross-tenant
+    /// download tests pass whatever the production code did.
     async fn get<C: DBRunner>(
         &self,
         _runner: &C,
-        _scope: &AccessScope,
+        scope: &AccessScope,
         id: Uuid,
     ) -> Result<Option<TestBundle>, DomainError> {
         Ok(self
@@ -143,7 +149,23 @@ impl BundlesRepository for MockBundlesRepository {
             .lock()
             .unwrap()
             .get(&id)
+            .filter(|(tenant_id, _)| Self::scope_admits(scope, *tenant_id))
             .map(|(_, bundle)| bundle.clone()))
+    }
+
+    async fn tenant_of<C: DBRunner>(
+        &self,
+        _runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<Uuid>, DomainError> {
+        Ok(self
+            .rows
+            .lock()
+            .unwrap()
+            .get(&id)
+            .filter(|(tenant_id, _)| Self::scope_admits(scope, *tenant_id))
+            .map(|(tenant_id, _)| *tenant_id))
     }
 
     async fn delete_expired<C: DBRunner>(
@@ -188,15 +210,43 @@ impl BundlesRepository for MockBundlesRepository {
 
 const TEST_TTL: time::Duration = time::Duration::seconds(3600);
 
+/// The signing secret every service built here uses. Comfortably over
+/// [`super::bundles::MIN_SIGNING_SECRET_LEN`]: the download path fails closed
+/// under a short one, so a blank here would turn every signature assertion
+/// below into "this deployment has no secret" and a broken verification would
+/// still look green.
+const TEST_SIGNING_SECRET: &str = "a-test-bundle-download-signing-secret";
+
 async fn build_service(
     bundles: Arc<MockBundlesRepository>,
     repos: Arc<MockTestReposRepository>,
     store: Arc<InMemoryBundleStore>,
     repos_dir: PathBuf,
 ) -> BundlesService<MockBundlesRepository, MockTestReposRepository> {
+    build_service_with_secret(bundles, repos, store, repos_dir, TEST_SIGNING_SECRET).await
+}
+
+/// [`build_service`] with the signing secret named, for the fail-closed tests.
+async fn build_service_with_secret(
+    bundles: Arc<MockBundlesRepository>,
+    repos: Arc<MockTestReposRepository>,
+    store: Arc<InMemoryBundleStore>,
+    repos_dir: PathBuf,
+    secret: &str,
+) -> BundlesService<MockBundlesRepository, MockTestReposRepository> {
     let enforcer = PolicyEnforcer::new(Arc::new(PermissiveAuthZ));
     let db = test_db_provider().await;
-    BundlesService::new(db, bundles, repos, store, repos_dir, TEST_TTL, enforcer)
+    BundlesService::new(
+        db,
+        bundles,
+        repos,
+        store,
+        repos_dir,
+        TEST_TTL,
+        BundleDownloadSigningSecret(secret.to_owned()),
+        Arc::new(NoopMetrics),
+        enforcer,
+    )
 }
 
 /// Tempdir + synced repo fixture with one test file in its `main` branch
@@ -232,6 +282,441 @@ fn untar(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// `sha256_hex` is SHA-256 — the standard digest, not merely whatever the
+/// current provider computes.
+///
+/// Every other assertion about a checksum in this file compares `sha256_hex`
+/// against `sha256_hex`, so all of them stay green under a provider that
+/// computes something else entirely, and a `checksum_sha256` column full of
+/// values no other tool agrees with would look exactly like this suite passing.
+/// These vectors are the published SHA-256 test vectors (FIPS 180-4, and the
+/// empty-input digest), so they are external to this crate and to its hasher.
+///
+/// This test was added when the hasher moved from `sha2` to `aws-lc-rs`
+/// (DE0708). The move is a provider swap that must not change one byte of
+/// output, because `qa_test_bundles.checksum_sha256` and the branch directory
+/// names on disk were written by the old one — and nothing in the suite could
+/// have told the difference.
+#[test]
+fn the_bundle_checksum_is_standard_sha256() {
+    for (input, expected) in [
+        (
+            &b""[..],
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        ),
+        (
+            &b"abc"[..],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        ),
+        (
+            &b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"[..],
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+        ),
+    ] {
+        assert_eq!(
+            sha256_hex(input),
+            expected,
+            "sha256_hex must agree with the published SHA-256 vectors, not \
+             merely with itself"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The per-bundle download signature
+//
+// `GET /qa/v1/test-bundles/{id}?sig=...` is registered `.anonymous().exposed()`,
+// so `sig` is not defence in depth -- it is the only thing between a caller and
+// a tenant's test content. These tests are therefore written to fail closed in
+// both directions: a tag that should work must work (or every run in every
+// deployment stops fetching its tests), and a tag that should not must not.
+//
+// They replaced a credential rather than joining one. Before this, a runner pod
+// carried the confidential secret of a `fullScopeAllowed` Keycloak client with
+// a tenant_id claim hardcoded to the seed tenant -- readable by the
+// tenant-authored pytest the pod exists to run, and wrong for every tenant but
+// one. `a_second_tenant_can_fetch_its_own_bundle` is the test for that second
+// half: it could not have passed before, whatever the code did, because the
+// claim named one tenant.
+// ---------------------------------------------------------------------------
+
+/// Build a bundle for `tenant_id` and hand back the whole descriptor, tag
+/// included. The one place these tests obtain a legitimately minted tag —
+/// nothing here recomputes one by hand, so a test cannot agree with a broken
+/// signer by copying its arithmetic.
+async fn seed_signed_bundle(
+    svc: &BundlesService<MockBundlesRepository, MockTestReposRepository>,
+    tenant_id: Uuid,
+    repo_id: Uuid,
+) -> TestBundle {
+    svc.create_bundle(
+        &ctx(tenant_id),
+        BundleRequest {
+            repo_id,
+            branch: "main".to_owned(),
+            files: vec!["tests/test_a.py".to_owned()],
+        },
+    )
+    .await
+    .expect("the fixture bundle must build")
+}
+
+/// **A bundle built by this gear can be fetched with the tag it returned, and
+/// the bytes are the bundle's own.**
+///
+/// The happy path, and the one that must never be allowed to fail quietly: a
+/// regression here stops every run in every deployment from fetching its tests,
+/// and the symptom (`no tests collected`) looks like a plan problem.
+///
+/// The checksum comparison is what makes this more than "a 200 came back": it
+/// pins that the signed path serves the same bytes the unsigned, authenticated
+/// path does, rather than some other bundle that happens to exist.
+#[tokio::test]
+async fn a_valid_signature_serves_the_bundles_own_bytes() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos) = synced_fixture(repo_id);
+    let svc = build_service(
+        Arc::new(MockBundlesRepository::default()),
+        repos,
+        Arc::new(InMemoryBundleStore::default()),
+        tmp.path().to_path_buf(),
+    )
+    .await;
+
+    let bundle = seed_signed_bundle(&svc, tenant_id, repo_id).await;
+    assert!(
+        !bundle.download_sig.is_empty(),
+        "create_bundle must return a download tag -- an empty one means the \
+         dispatcher has nothing to put on TEST_BUNDLE_URL and the pod fetches \
+         nothing"
+    );
+    assert!(
+        bundle.download_sig.chars().all(|c| c.is_ascii_hexdigit()),
+        "the tag must be hex: it travels in a URL query string and anything \
+         else would need escaping the adapter does not apply: {}",
+        bundle.download_sig
+    );
+
+    let bytes = svc
+        .get_bundle_content_signed(bundle.id, &bundle.download_sig)
+        .await
+        .expect("a bundle's own tag must serve it");
+
+    assert_eq!(
+        sha256_hex(&bytes),
+        bundle.checksum_sha256,
+        "the signed path must serve THIS bundle's bytes, not merely some 200"
+    );
+}
+
+/// **A tampered, an empty and a non-hex tag are all refused, with one status.**
+///
+/// Three refusal paths inside `verify_download_signature` — malformed,
+/// mismatched, and (below) unconfigured — and one `Forbidden` out of all of
+/// them. That merge is deliberate: a response that distinguished them would
+/// hand a caller a free oracle for which guess was closer. The distinction
+/// survives only on the metric.
+///
+/// The tampered case flips the FIRST hex digit rather than appending: an
+/// implementation that compared prefixes, or that truncated, would survive an
+/// appended byte.
+#[tokio::test]
+async fn a_tampered_or_missing_signature_is_refused() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos) = synced_fixture(repo_id);
+    let svc = build_service(
+        Arc::new(MockBundlesRepository::default()),
+        repos,
+        Arc::new(InMemoryBundleStore::default()),
+        tmp.path().to_path_buf(),
+    )
+    .await;
+
+    let bundle = seed_signed_bundle(&svc, tenant_id, repo_id).await;
+
+    let mut flipped: Vec<char> = bundle.download_sig.chars().collect();
+    flipped[0] = if flipped[0] == '0' { '1' } else { '0' };
+    let flipped: String = flipped.into_iter().collect();
+    assert_ne!(flipped, bundle.download_sig);
+
+    let truncated = &bundle.download_sig[..bundle.download_sig.len() - 2];
+
+    for (label, signature) in [
+        ("one flipped hex digit", flipped.as_str()),
+        ("a truncated tag", truncated),
+        ("an empty tag", ""),
+        ("a non-hex tag", "not-a-hex-signature"),
+        ("an odd-length hex tag", "abc"),
+    ] {
+        let err = svc
+            .get_bundle_content_signed(bundle.id, signature)
+            .await
+            .expect_err(&format!("{label} must be refused"));
+        assert!(
+            matches!(err, DomainError::Forbidden),
+            "{label} must answer Forbidden and nothing more specific -- every \
+             refusal path shares one status so the response is not an oracle: \
+             got {err:?}"
+        );
+    }
+}
+
+/// **A second tenant can fetch its own bundle. This is the multi-tenancy bug
+/// the signature fixes, not a side benefit of it.**
+///
+/// Before this change the runner authenticated as a Keycloak client whose
+/// `tenant_id` claim was HARDCODED to `.Values.seedTenantId`, and
+/// `get_bundle_content` scopes the descriptor read to the caller's tenant. So
+/// every bundle owned by any other tenant read as a 404 to every runner pod in
+/// the deployment: a second tenant's runs could not fetch their tests at all,
+/// and `fetch_bundle.py` even printed the symptom ("its `tenant_id` claim names a
+/// tenant that does not own this bundle") without anyone drawing the
+/// conclusion.
+///
+/// The tag carries the bundle's own tenant — recovered from the descriptor row,
+/// never asserted by the caller — so there is no deployment-wide claim left to
+/// be wrong. **This test could not have passed under the old design whatever
+/// the code did**, which is what makes it the proof rather than a restatement.
+#[tokio::test]
+async fn a_second_tenant_can_fetch_its_own_bundle() {
+    let seed_tenant = Uuid::new_v4();
+    let other_tenant = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos) = synced_fixture(repo_id);
+    let svc = build_service(
+        Arc::new(MockBundlesRepository::default()),
+        repos,
+        Arc::new(InMemoryBundleStore::default()),
+        tmp.path().to_path_buf(),
+    )
+    .await;
+
+    let first = seed_signed_bundle(&svc, seed_tenant, repo_id).await;
+    let second = seed_signed_bundle(&svc, other_tenant, repo_id).await;
+    assert_ne!(first.id, second.id);
+    assert_ne!(
+        first.download_sig, second.download_sig,
+        "two tenants' tags over two bundles must differ -- an equal pair would \
+         mean the key is not tenant-derived and the payload not bundle-bound"
+    );
+
+    for (label, bundle) in [("the seed tenant", &first), ("a second tenant", &second)] {
+        let bytes = svc
+            .get_bundle_content_signed(bundle.id, &bundle.download_sig)
+            .await
+            .unwrap_or_else(|err| panic!("{label} must be able to fetch its own bundle: {err:?}"));
+        assert_eq!(sha256_hex(&bytes), bundle.checksum_sha256, "{label}");
+    }
+}
+
+/// **One tenant's tag does not open another tenant's bundle.**
+///
+/// The narrowness claim, stated as an assertion. The key is HKDF-derived per
+/// tenant and the payload binds the bundle id, so a tag is a credential for one
+/// row: neither presenting tenant A's tag against tenant B's bundle, nor
+/// presenting a tag for one of A's own bundles against another of A's bundles,
+/// may work.
+#[tokio::test]
+async fn a_tag_opens_exactly_one_bundle() {
+    let tenant_a = Uuid::new_v4();
+    let tenant_b = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos) = synced_fixture(repo_id);
+    let svc = build_service(
+        Arc::new(MockBundlesRepository::default()),
+        repos,
+        Arc::new(InMemoryBundleStore::default()),
+        tmp.path().to_path_buf(),
+    )
+    .await;
+
+    let a_first = seed_signed_bundle(&svc, tenant_a, repo_id).await;
+    let a_second = seed_signed_bundle(&svc, tenant_a, repo_id).await;
+    let b_bundle = seed_signed_bundle(&svc, tenant_b, repo_id).await;
+
+    for (label, bundle_id, signature) in [
+        (
+            "tenant A's tag against tenant B's bundle",
+            b_bundle.id,
+            &a_first.download_sig,
+        ),
+        (
+            "tenant B's tag against tenant A's bundle",
+            a_first.id,
+            &b_bundle.download_sig,
+        ),
+        (
+            "one of tenant A's own tags against another of its own bundles",
+            a_second.id,
+            &a_first.download_sig,
+        ),
+    ] {
+        let err = svc
+            .get_bundle_content_signed(bundle_id, signature)
+            .await
+            .expect_err(&format!("{label} must be refused"));
+        assert!(
+            matches!(err, DomainError::Forbidden),
+            "{label}: got {err:?}"
+        );
+    }
+}
+
+/// **An expired bundle 404s even under a perfectly valid tag, and a tag carries
+/// no expiry of its own.**
+///
+/// The lifetime decision, pinned. The tag is valid exactly as long as the row it
+/// names, because `get_bundle_content` refuses an expired descriptor before
+/// reading a byte and the GC deletes the blob. That is one clock, not two —
+/// there is no `exp` inside the tag to skew against the row, and no way for a
+/// tag to outlive its bundle or a bundle to outlive its tag.
+///
+/// 404, not 403: an expired bundle reads exactly like a missing one, which is
+/// the pre-existing contract of this route and the message `fetch_bundle.py`
+/// already diagnoses.
+#[tokio::test]
+async fn an_expired_bundle_is_a_404_under_a_valid_signature() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos) = synced_fixture(repo_id);
+    let bundles = Arc::new(MockBundlesRepository::default());
+    let svc = build_service(
+        Arc::clone(&bundles),
+        repos,
+        Arc::new(InMemoryBundleStore::default()),
+        tmp.path().to_path_buf(),
+    )
+    .await;
+
+    let bundle = seed_signed_bundle(&svc, tenant_id, repo_id).await;
+
+    // Age the row past its expiry, leaving the tag untouched: the tag is a
+    // function of (id, tenant_id) only, so it stays valid and the ROW is what
+    // refuses.
+    {
+        let mut rows = bundles.rows.lock().unwrap();
+        let entry = rows.get_mut(&bundle.id).expect("the row must exist");
+        entry.1.expires_at = OffsetDateTime::now_utc() - time::Duration::seconds(1);
+    }
+
+    let err = svc
+        .get_bundle_content_signed(bundle.id, &bundle.download_sig)
+        .await
+        .expect_err("an expired bundle must not be served");
+    assert!(
+        matches!(err, DomainError::NotFound { id } if id == bundle.id),
+        "an expired bundle reads exactly like a missing one, whatever tag is \
+         presented: got {err:?}"
+    );
+}
+
+/// **An unknown bundle id is a 404, and the signature is never consulted.**
+///
+/// Deliberate ordering, and not a leak: an id naming no row cannot be told from
+/// an expired-and-purged one, `get_bundle_content` already answers 404 for
+/// both, and bundle ids are v4 UUIDs. Refusing an unknown id with 403 instead
+/// would make this route the "is this id real" oracle that merging the
+/// signature refusals exists to avoid.
+#[tokio::test]
+async fn an_unknown_bundle_id_is_a_404() {
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos) = synced_fixture(repo_id);
+    let svc = build_service(
+        Arc::new(MockBundlesRepository::default()),
+        repos,
+        Arc::new(InMemoryBundleStore::default()),
+        tmp.path().to_path_buf(),
+    )
+    .await;
+
+    let missing = Uuid::new_v4();
+    let err = svc
+        .get_bundle_content_signed(missing, "00")
+        .await
+        .expect_err("an unknown bundle must not be served");
+    assert!(
+        matches!(err, DomainError::NotFound { id } if id == missing),
+        "got {err:?}"
+    );
+}
+
+/// **An absent or too-short signing secret refuses every download, including a
+/// correctly computed one.**
+///
+/// Fail-closed, and the direction matters: an empty HMAC key is a publicly
+/// known key, not "no protection". A deployment in this state runs no tests at
+/// all, which is loud — and `gear::init` warns once at boot through the same
+/// `signing_secret_is_configured` predicate this refusal uses, so the two
+/// cannot drift the way qa-insights' equivalent pair once did.
+///
+/// The tag presented here is the one the SAME service minted, so this is not
+/// "a wrong tag is refused" restated: under a non-fail-closed implementation it
+/// would verify.
+#[tokio::test]
+async fn an_unconfigured_or_short_secret_refuses_every_download() {
+    for (label, secret) in [
+        ("an empty secret", ""),
+        ("a whitespace-only secret", "                   "),
+        ("a 15-character secret", "123456789012345"),
+    ] {
+        let tenant_id = Uuid::new_v4();
+        let repo_id = Uuid::new_v4();
+        let (tmp, repos) = synced_fixture(repo_id);
+        let svc = build_service_with_secret(
+            Arc::new(MockBundlesRepository::default()),
+            repos,
+            Arc::new(InMemoryBundleStore::default()),
+            tmp.path().to_path_buf(),
+            secret,
+        )
+        .await;
+
+        let bundle = seed_signed_bundle(&svc, tenant_id, repo_id).await;
+        let err = svc
+            .get_bundle_content_signed(bundle.id, &bundle.download_sig)
+            .await
+            .expect_err(&format!("{label} must refuse even its own tag"));
+        assert!(
+            matches!(err, DomainError::Forbidden),
+            "{label}: got {err:?}"
+        );
+    }
+}
+
+/// **The tag is not stored, and a descriptor read back carries none.**
+///
+/// `download_sig` is a transport field on the SDK model, not a column: there is
+/// no migration, no row to rotate and nothing to revoke. A repository read that
+/// returned a tag would mean somebody added a column, and a stored tag is a
+/// credential at rest that the "nothing persists it" argument in this design
+/// depends on not existing.
+#[tokio::test]
+async fn the_tag_is_never_persisted() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos) = synced_fixture(repo_id);
+    let bundles = Arc::new(MockBundlesRepository::default());
+    let svc = build_service(
+        Arc::clone(&bundles),
+        repos,
+        Arc::new(InMemoryBundleStore::default()),
+        tmp.path().to_path_buf(),
+    )
+    .await;
+
+    let bundle = seed_signed_bundle(&svc, tenant_id, repo_id).await;
+    assert!(!bundle.download_sig.is_empty());
+
+    let stored = bundles.rows.lock().unwrap()[&bundle.id].1.clone();
+    assert!(
+        stored.download_sig.is_empty(),
+        "the descriptor written to the repository must carry no tag: {}",
+        stored.download_sig
+    );
+}
 
 #[tokio::test]
 async fn create_bundle_roundtrip() {
@@ -614,6 +1099,7 @@ async fn expired_bundle_is_not_served() {
             size_bytes: 5,
             expires_at: now - time::Duration::seconds(1),
             created_at: now - time::Duration::hours(2),
+            download_sig: String::new(),
         },
     );
 
@@ -659,6 +1145,7 @@ async fn purge_expired_deletes_rows_and_blobs() {
                 size_bytes: 4,
                 expires_at,
                 created_at: now - time::Duration::hours(2),
+                download_sig: String::new(),
             },
         );
     }
@@ -797,7 +1284,17 @@ async fn build_service_with_authz(
 ) -> BundlesService<MockBundlesRepository, MockTestReposRepository> {
     let enforcer = PolicyEnforcer::new(authz);
     let db = test_db_provider().await;
-    BundlesService::new(db, bundles, repos, store, repos_dir, TEST_TTL, enforcer)
+    BundlesService::new(
+        db,
+        bundles,
+        repos,
+        store,
+        repos_dir,
+        TEST_TTL,
+        BundleDownloadSigningSecret(TEST_SIGNING_SECRET.to_owned()),
+        Arc::new(NoopMetrics),
+        enforcer,
+    )
 }
 
 /// Every tenant with an expired bundle is listed once, ascending, and a
@@ -833,6 +1330,7 @@ async fn tenants_with_expired_bundles_lists_each_expired_tenant_once() {
                 size_bytes: 4,
                 expires_at,
                 created_at: now - time::Duration::hours(2),
+                download_sig: String::new(),
             },
         );
     }
@@ -884,6 +1382,7 @@ async fn tenants_with_expired_bundles_excludes_the_nil_tenant() {
                 size_bytes: 4,
                 expires_at,
                 created_at: now - time::Duration::hours(2),
+                download_sig: String::new(),
             },
         );
     }
@@ -933,6 +1432,7 @@ async fn tenants_with_expired_bundles_does_not_consult_the_policy_engine() {
             size_bytes: 4,
             expires_at: now - time::Duration::seconds(1),
             created_at: now - time::Duration::hours(2),
+            download_sig: String::new(),
         },
     );
 
@@ -973,6 +1473,7 @@ async fn purging_each_enumerated_tenant_removes_only_that_tenants_rows() {
                 size_bytes: 4,
                 expires_at: now - time::Duration::seconds(1),
                 created_at: now - time::Duration::hours(2),
+                download_sig: String::new(),
             },
         );
     }

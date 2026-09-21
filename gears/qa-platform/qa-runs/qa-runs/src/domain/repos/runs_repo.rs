@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 use qa_runs_sdk::{
-    ExclusiveTier, Run, RunParameter, RunResult, RunSource, RunState, RunTarget, RunTestResult,
+    ExclusiveTier, FinishedRunCursor, Run, RunParameter, RunResult, RunSource, RunState, RunTarget,
+    RunTestResult,
 };
 use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
@@ -182,7 +183,7 @@ pub struct RunStatePatch {
 /// | Column | Written by |
 /// |---|---|
 /// | `id`, `created_at`, `updated_at` | the repository, at insert |
-/// | `passed`/`failed`/`skipped`/`in_progress`/`total` | [`RunsRepository::add_result_counts`] |
+/// | `passed`/`failed`/`skipped`/`in_progress`/`xfail`/`xpass`/`total` | [`RunsRepository::add_result_counts`] |
 /// | `execution_ref` | [`RunsRepository::set_execution_ref`] |
 /// | `started_at`, `finished_at`, `error` | [`RunsRepository::update_state`] via [`RunStatePatch`] |
 /// | `log_storage_ref` | **nothing, by decision** — see below |
@@ -224,7 +225,7 @@ pub struct NewRun {
     pub timeout_at: Option<OffsetDateTime>,
 }
 
-/// A signed change to the five denormalized counters.
+/// A signed change to the seven denormalized counters.
 ///
 /// **Signed on purpose.** A per-test row moves `PENDING`/`RUNNING` →
 /// `PASSED`, which is `in_progress -1, passed +1, total 0` — so the deltas
@@ -245,6 +246,8 @@ pub struct RunResultDelta {
     pub failed: i64,
     pub skipped: i64,
     pub in_progress: i64,
+    pub xfail: i64,
+    pub xpass: i64,
     pub total: i64,
 }
 
@@ -325,7 +328,7 @@ pub struct NewTestResult {
     ///
     /// Collapsed to `""` by the repository, because
     /// `qa_run_test_results.nodeid` is `NOT NULL DEFAULT ''`
-    /// (`m20260818_000005_case_fidelity`) for the reason
+    /// (`m20260818_000005_case_fidelity` (folded into `migrations::m20260813_000003_initial` by the docs squash)) for the reason
     /// [`Self::test_file`] gives about its own column. The `Option` is kept on
     /// *this* type rather than collapsed by ingest so that the collapse happens
     /// at exactly one place, the write — the same shape the source system uses,
@@ -353,7 +356,7 @@ pub struct NewTestResult {
 /// # It was deliberately narrower until Task 4, and this records why it is not
 ///
 /// Through Tasks 2 and 3 this type omitted `nodeid`, `reason` and `ticket`
-/// (`m20260818_000005_case_fidelity`), which [`NewTestResult`] wrote and
+/// (`m20260818_000005_case_fidelity` (folded into `migrations::m20260813_000003_initial` by the docs squash)), which [`NewTestResult`] wrote and
 /// nothing read back. The omission carried its own expiry date: *"surfacing
 /// them belongs with the read methods that would expose them, which is a
 /// separate change"*. [`RunsRepository::list_test_results`] is now that read —
@@ -586,6 +589,27 @@ pub trait RunsRepository: Send + Sync {
     /// second — a silent, unreproducible data loss. `(finished_at, id)` is
     /// total, so the page boundary falls in the same place every time.
     ///
+    /// # The cursor is total, and that is what lets a caller page
+    ///
+    /// [`FinishedRunCursor::starting_at`] is the first page: the bound is
+    /// `finished_at >= at`, inclusive, exactly as above.
+    /// [`FinishedRunCursor::after`] is a resume: the bound becomes
+    /// `(finished_at, id) > (at, run_id)` under the very order this method
+    /// already sorts by, so the page starts immediately after the run the
+    /// caller last consumed. The two halves travel as one value because a hop
+    /// that kept the instant and dropped the id would compile, read like a
+    /// first page and restore the bound that caused the outage - see
+    /// [`FinishedRunCursor`].
+    ///
+    /// **Without it the sweep could not walk a tie group bigger than its page.**
+    /// The reconciler advances its cursor to the newest instant on the page it
+    /// read; when `limit` runs share one `finished_at`, the next page starts on
+    /// that same instant and is the same page. Everything newer is stranded
+    /// permanently — and a burst of parallel completions produces exactly that
+    /// shape (the 2026-09-18 dev-stand burst held single instants shared by 54,
+    /// 40, 31 and 29 runs). The `id` tiebreak below had already made the page
+    /// boundary *stable*; this is what makes it **passable**.
+    ///
     /// # A `NULL` `finished_at` is excluded
     ///
     /// A run that has not reached a terminal state has nothing to backfill.
@@ -609,7 +633,7 @@ pub trait RunsRepository: Send + Sync {
         &self,
         runner: &C,
         scope: &AccessScope,
-        since: OffsetDateTime,
+        cursor: FinishedRunCursor,
         limit: u32,
     ) -> Result<Vec<Run>, DomainError>;
 
@@ -720,8 +744,9 @@ pub trait RunsRepository: Send + Sync {
     ///
     /// **Order matters relative to the submit, and dispatch calls this first.**
     /// A bundle recorded for a run that never started is a harmless dangling
-    /// reference that `expires_at` reclaims (`DESIGN.md` §3.7, "bundle GC is
-    /// driven purely by `expires_at`, never by run liveness"); a run that started
+    /// reference that `expires_at` reclaims (bundle GC is driven purely by
+    /// `expires_at`, never by run liveness — not stated centrally in
+    /// `DESIGN.md` under either §3.7 or §3.8); a run that started
     /// against bundles nothing recorded is unreproducible.
     ///
     /// **Unguarded**, like [`Self::set_execution_ref`] and

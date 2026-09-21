@@ -3,12 +3,18 @@ import { cn } from '@/lib/utils';
 
 /**
  * The run counts idiom this codebase already uses for a run's outcome —
- * `total/passed/in_progress/failed/skipped`, each dimmed to muted when zero,
- * with the full breakdown in a tooltip. Copied from
+ * `total/passed/in_progress/failed/skipped/xfail/xpass`, each dimmed to muted
+ * when zero, with the full breakdown in a tooltip. Copied from
  * `SchedulesTable.tsx`'s "Latest" column (and the same palette
  * `RecentRunsStrip.tsx` uses for its bar segments), not invented here — Task
  * 10 asked for the run list and run detail to show `skipped` "using the
  * existing UI's own idiom", and this is it.
+ *
+ * **`xfail` and `xpass` are each rendered only when non-zero.** Both are rare,
+ * and two always-present numbers would push every row wider for counts that
+ * are almost always zero. Neither is folded into a neighbour: the whole reason
+ * they have counters is that "expected to fail", "unexpectedly passed" and
+ * "did not run" are different outcomes, and the tooltip names both either way.
  */
 export function RunResultSummary({
   result,
@@ -20,11 +26,11 @@ export function RunResultSummary({
   if (!result) {
     return <span className="text-muted-foreground">—</span>;
   }
-  const { total, passed, in_progress, failed, skipped } = result;
+  const { total, passed, in_progress, failed, skipped, xfail, xpass } = result;
   return (
     <span
       className={cn('tabular-nums', className)}
-      title={`Total ${total} · Pass ${passed} · In progress ${in_progress} · Fail ${failed} · Skip ${skipped}`}
+      title={`Total ${total} · Pass ${passed} · In progress ${in_progress} · Fail ${failed} · Skip ${skipped} · Expected fail ${xfail} · Unexpected pass ${xpass}`}
     >
       <span className="text-muted-foreground">{total}</span>
       <span className="text-muted-foreground">/</span>
@@ -41,6 +47,18 @@ export function RunResultSummary({
       <span className={skipped > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'}>
         {skipped}
       </span>
+      {xfail > 0 && (
+        <>
+          <span className="text-muted-foreground">/</span>
+          <span className="text-violet-600 dark:text-violet-400">{xfail}</span>
+        </>
+      )}
+      {xpass > 0 && (
+        <>
+          <span className="text-muted-foreground">/</span>
+          <span className="text-sky-600 dark:text-sky-400">{xpass}</span>
+        </>
+      )}
     </span>
   );
 }

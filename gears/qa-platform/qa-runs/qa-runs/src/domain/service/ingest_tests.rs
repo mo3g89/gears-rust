@@ -25,7 +25,7 @@ use super::*;
 use crate::domain::metrics::{QA_RUNS_INGEST, QA_RUNS_INGEST_DURATION};
 use crate::domain::ports::metrics::{IngestMetrics, IngestOutcome, NoopMetrics};
 use crate::domain::ports::run_executor::{ExecutionEvent, NodeOutcome, TestObservation};
-use crate::domain::repos::QueueRowRecord;
+use crate::domain::repos::{LogPosition, QueueRowRecord};
 use crate::domain::service::admission::tests::fakes::{
     FakeEnvironments, FakeQueue, FakeRuns, PLATFORM_A, SystemGrantingAuthZ, queued_row, run_fixture,
 };
@@ -114,6 +114,13 @@ struct RecordingArchive {
     /// a flush that never happened — see
     /// `a_failed_archive_flush_does_not_fail_the_completion`.
     flush_failures: Mutex<usize>,
+    /// Per-run, per-node resume positions not yet flushed — the double's
+    /// analogue of `infra::logs::archive::Pending::positions` (Task 2, WS5).
+    pending_positions: Mutex<HashMap<Uuid, HashMap<String, OffsetDateTime>>>,
+    /// Flushed positions — what `resume_positions` actually reads, mirroring
+    /// the split between `pending`/`stored` above for the same reason (see
+    /// that method's own doc).
+    stored_positions: Mutex<HashMap<Uuid, HashMap<String, OffsetDateTime>>>,
 }
 
 impl RecordingArchive {
@@ -146,11 +153,27 @@ impl RecordingArchive {
 
 #[async_trait::async_trait]
 impl LogArchive for RecordingArchive {
-    fn record(&self, _tenant_id: Uuid, run_id: Uuid, line: &str) {
+    fn record(
+        &self,
+        _tenant_id: Uuid,
+        run_id: Uuid,
+        node: &str,
+        line: &str,
+        emitted_at: Option<OffsetDateTime>,
+    ) {
         let mut pending = self.pending.lock().unwrap();
         let entry = pending.entry(run_id).or_default();
         entry.push_str(line);
         entry.push('\n');
+        drop(pending);
+        if let Some(when) = emitted_at {
+            self.pending_positions
+                .lock()
+                .unwrap()
+                .entry(run_id)
+                .or_default()
+                .insert(node.to_owned(), when);
+        }
     }
 
     async fn flush(&self, run_id: Uuid) -> Result<(), DomainError> {
@@ -173,6 +196,14 @@ impl LogArchive for RecordingArchive {
             .entry(run_id)
             .or_default()
             .push_str(&taken);
+        if let Some(positions) = self.pending_positions.lock().unwrap().remove(&run_id) {
+            self.stored_positions
+                .lock()
+                .unwrap()
+                .entry(run_id)
+                .or_default()
+                .extend(positions);
+        }
         Ok(())
     }
 
@@ -197,19 +228,29 @@ impl LogArchive for RecordingArchive {
         report
     }
 
-    /// Reads `self.stored` through the one shared parser
-    /// (`domain::repos::LogResume::from_archived_text`) — **not**
-    /// `self.pending` — which is what makes
+    /// Reads `self.stored_positions` — **not** `self.pending_positions` —
+    /// which is what makes
     /// `resume_positions_flushes_a_pending_tail_before_reading_it` below able
     /// to prove `IngestService::resume_positions` flushes before it reads:
-    /// against a double that read `pending` directly, a missing flush would
-    /// be invisible.
+    /// against a double that read the pending side directly, a missing
+    /// flush would be invisible.
     async fn resume_positions(
         &self,
         _tenant: system_actor::TenantBound,
         run_id: Uuid,
     ) -> Result<LogResume, DomainError> {
-        Ok(LogResume::from_archived_text(&self.stored_text(run_id)))
+        Ok(self
+            .stored_positions
+            .lock()
+            .unwrap()
+            .get(&run_id)
+            .map(|per_node| {
+                per_node
+                    .iter()
+                    .map(|(node, when)| (node.clone(), LogPosition { last_emitted_at: *when }))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 }
 
@@ -225,6 +266,15 @@ struct Harness {
 impl Harness {
     /// Ingest one log line for [`RUN`] under [`owner`]'s tenant.
     async fn ingest_log_line(&self, node: &str, line: &str) {
+        self.ingest_log_line_at(node, line, None).await;
+    }
+
+    /// [`Self::ingest_log_line`] with an explicit `emitted_at` — the one
+    /// caller that needs it is
+    /// `resume_positions_flushes_a_pending_tail_before_reading_it`, which
+    /// has to record an actual position for `resume_positions` to have
+    /// anything to answer.
+    async fn ingest_log_line_at(&self, node: &str, line: &str, emitted_at: Option<OffsetDateTime>) {
         self.ingest
             .apply(
                 &owner(),
@@ -232,6 +282,7 @@ impl Harness {
                 ExecutionEvent::Log {
                     node: node.to_owned(),
                     line: line.to_owned(),
+                    emitted_at,
                 },
             )
             .await
@@ -390,7 +441,7 @@ fn observation(test_name: &str, status: &str) -> TestObservation {
 /// file-level `jira_key`.
 ///
 /// The two differ so a path that filled `ticket` from `jira_key` — the collapse
-/// `m20260818_000005_case_fidelity`'s header argues against — cannot pass.
+/// `m20260818_000005_case_fidelity`'s (folded into `migrations::m20260813_000003_initial` by the docs squash) header argues against — cannot pass.
 fn case_observation(test_name: &str, status: &str) -> TestObservation {
     TestObservation {
         jira_key: Some("VHP-2618".to_owned()),
@@ -428,8 +479,8 @@ fn each_known_status_lands_in_the_counter_the_migration_names() {
         ("SKIPPED", Bucket::Skipped),
         ("PENDING", Bucket::InProgress),
         ("RUNNING", Bucket::InProgress),
-        ("XFAIL", Bucket::Uncategorised),
-        ("XPASS", Bucket::Uncategorised),
+        ("XFAIL", Bucket::Xfail),
+        ("XPASS", Bucket::Xpass),
     ] {
         assert_eq!(bucket(status), expected, "{status}");
     }
@@ -467,6 +518,8 @@ fn a_transition_moves_between_counters_without_moving_the_total() {
         counter_delta(None, "PENDING"),
         RunResultDelta {
             in_progress: 1,
+            xfail: 0,
+            xpass: 0,
             total: 1,
             ..RunResultDelta::default()
         }
@@ -616,6 +669,8 @@ async fn counts_accumulate_from_signed_deltas_across_a_runs_events() {
         h.runs.counts_of(RUN),
         RunResult {
             in_progress: 3,
+            xfail: 0,
+            xpass: 0,
             total: 3,
             ..RunResult::default()
         }
@@ -639,6 +694,8 @@ async fn counts_accumulate_from_signed_deltas_across_a_runs_events() {
             failed: 1,
             skipped: 1,
             in_progress: 0,
+            xfail: 0,
+            xpass: 0,
             total: 3,
         },
         "in_progress must have been decremented by the transitions, not left at 3"
@@ -772,7 +829,8 @@ async fn the_stored_status_is_trimmed_before_the_column_truncates_it() {
 #[tokio::test]
 async fn resume_positions_flushes_a_pending_tail_before_reading_it() {
     let h = harness(RunState::Running, LeaseState::Free).await;
-    h.ingest_log_line("a", "line one").await;
+    let emitted_at = OffsetDateTime::now_utc();
+    h.ingest_log_line_at("a", "line one", Some(emitted_at)).await;
 
     // Premise: nothing has been flushed yet, so a read that skipped the
     // flush would see an empty archive.
@@ -788,9 +846,9 @@ async fn resume_positions_flushes_a_pending_tail_before_reading_it() {
         .unwrap();
 
     assert_eq!(
-        resume.lines_for("a"),
-        1,
-        "the pending line must be flushed before this reads, or it answers 0"
+        resume.last_emitted_for("a"),
+        Some(emitted_at),
+        "the pending position must be flushed before this reads, or it answers None"
     );
     assert!(
         !h.stored_text().is_empty(),
@@ -864,12 +922,14 @@ async fn a_case_level_result_carries_its_three_fields_into_the_stored_row() {
         "two columns, and this is the assertion that stops them being one"
     );
 
-    // XFAIL feeds `total` alone (`routes/plans.rs:188-192`), exactly as it
-    // would for a file-level row: none of the three new fields is an input to
-    // `counter_delta`.
+    // XFAIL feeds `total` and the `xfail` counter, exactly as it would for a
+    // file-level row: none of the three new fields is an input to
+    // `counter_delta`, which is derived from `status` alone.
     assert_eq!(
         h.runs.counts_of(RUN),
         RunResult {
+            xfail: 1,
+            xpass: 0,
             total: 1,
             ..RunResult::default()
         },
@@ -1402,6 +1462,7 @@ async fn a_log_line_is_fanned_out_prefixed_with_the_node_that_produced_it() {
             ExecutionEvent::Log {
                 node: "repo-b".to_owned(),
                 line: "collected 12 items".to_owned(),
+                emitted_at: None,
             },
         )
         .await
@@ -1665,6 +1726,7 @@ async fn the_stream_is_consumed_in_order_and_ends_with_the_verdict() {
         sink.emit(ExecutionEvent::Log {
             node: "repo-a".to_owned(),
             line: "start".to_owned(),
+            emitted_at: None,
         })
         .await
     );
@@ -1755,6 +1817,7 @@ async fn a_log_line_from_another_tenant_is_refused_and_never_reaches_the_stream(
             ExecutionEvent::Log {
                 node: "repo-a".to_owned(),
                 line: "another tenant's output".to_owned(),
+                emitted_at: None,
             },
         )
         .await
@@ -1774,6 +1837,7 @@ async fn every_event_arm_answers_not_found_for_an_unknown_run() {
         ExecutionEvent::Log {
             node: "repo-a".to_owned(),
             line: "x".to_owned(),
+            emitted_at: None,
         },
         ExecutionEvent::TestResult(observation("t", "PASSED")),
         finished(ExecutorOutcome::Succeeded),
@@ -1808,6 +1872,7 @@ async fn a_log_line_for_a_terminal_run_is_still_fanned_out() {
             ExecutionEvent::Log {
                 node: "repo-a".to_owned(),
                 line: "tail".to_owned(),
+                emitted_at: None,
             },
         )
         .await
@@ -1881,10 +1946,10 @@ async fn a_completion_trusts_the_rows_and_not_the_skewed_columns() {
     );
 }
 
-/// The tally itself, over the eight known statuses plus a ninth — the same
-/// projection the source system computes per query
-/// (`../testrunner/manager/src/routes/plans.rs:188-192`), including that `XFAIL`
-/// and `XPASS` reach `total` and none of the four buckets.
+/// The tally itself, over the eight known statuses plus a ninth — the source
+/// system's projection (`../testrunner/manager/src/routes/plans.rs:188-192`)
+/// plus this port's own `xfail` and `xpass` counters, and including that the
+/// ninth, unknown status still reaches `total` and none of the six.
 #[test]
 fn the_tally_is_the_source_systems_projection() {
     let rows: Vec<crate::domain::repos::TestResultRow> = [
@@ -1909,6 +1974,8 @@ fn the_tally_is_the_source_systems_projection() {
             failed: 2,
             skipped: 1,
             in_progress: 2,
+            xfail: 1,
+            xpass: 1,
             total: 9,
         }
     );
@@ -2123,6 +2190,7 @@ async fn a_refused_ingest_records_a_refusal_not_a_failure() {
             ExecutionEvent::Log {
                 node: "repo-a".to_owned(),
                 line: "not yours".to_owned(),
+                emitted_at: None,
             },
         )
         .await;
@@ -2222,8 +2290,15 @@ struct SlowArchive {
 
 #[async_trait::async_trait]
 impl LogArchive for SlowArchive {
-    fn record(&self, tenant_id: Uuid, run_id: Uuid, line: &str) {
-        self.inner.record(tenant_id, run_id, line);
+    fn record(
+        &self,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        node: &str,
+        line: &str,
+        emitted_at: Option<OffsetDateTime>,
+    ) {
+        self.inner.record(tenant_id, run_id, node, line, emitted_at);
     }
 
     async fn flush(&self, run_id: Uuid) -> Result<(), DomainError> {
@@ -2333,4 +2408,75 @@ async fn the_recorded_ingest_duration_tracks_the_pass_it_measures() {
          fixture does not, so a sample there is a fabricated or stale duration rather \
          than a measured one"
     );
+}
+
+/// The categorised counters must account for **every** row of a suite whose
+/// statuses are all known — over **every** known status, not a chosen subset.
+///
+/// This is the arithmetic the report, the run card and every analytics number
+/// built on the counters assume and never stated: a reader who sees `total: 4`
+/// and `passed + failed + skipped + in_progress == 3` has no way to learn where
+/// the fourth row went. `XFAIL` and `XPASS` are the statuses that used to break
+/// it — both are *known* values, so "the open set swallowed it" is not the
+/// explanation — and each having its own counter is what makes the sum close.
+///
+/// **This asserted a limit and no longer does.** An earlier version pinned that
+/// `XPASS` was deliberately uncounted, with an `assert_ne!` on a two-row suite,
+/// because the `xfail` work stopped short of it. The owner's intent was that
+/// the buckets reconcile, so the limit was removed rather than documented. The
+/// loop below is the replacement: a suite carrying one row of every known
+/// status reconciles, which no subset-based assertion can claim.
+///
+/// The unknown status is still outside the guarantee, and
+/// `the_tally_is_the_source_systems_projection` is where that is pinned: it
+/// tallies a ninth, invented value into `total` and no counter.
+#[test]
+fn every_categorised_counter_sums_to_the_total() {
+    let every_known_status = [
+        "PASSED",
+        "FAILED",
+        "ERROR",
+        "SKIPPED",
+        "PENDING",
+        "RUNNING",
+        "XFAIL",
+        "XPASS",
+    ];
+    let rows: Vec<crate::domain::repos::TestResultRow> =
+        every_known_status.into_iter().map(result_row).collect();
+
+    let counts = tally(&rows);
+
+    assert_eq!(
+        counts.passed
+            + counts.failed
+            + counts.skipped
+            + counts.in_progress
+            + counts.xfail
+            + counts.xpass,
+        counts.total,
+        "the categorised counters must sum to the total; a known status that reaches \
+         `total` and no counter is a row the reader cannot account for"
+    );
+    assert_eq!(counts.xfail, 1, "the expected failure lands in its own counter");
+    assert_eq!(
+        counts.xpass, 1,
+        "and the unexpected pass in its own, which is what closes the sum"
+    );
+
+    // Each status alone, so a compensating pair of errors cannot make the
+    // aggregate above pass. `XPASS` on its own is the case that used to fail.
+    for status in every_known_status {
+        let counts = tally(&[result_row(status)]);
+        assert_eq!(
+            counts.passed
+                + counts.failed
+                + counts.skipped
+                + counts.in_progress
+                + counts.xfail
+                + counts.xpass,
+            counts.total,
+            "a one-row suite of {status} must reconcile"
+        );
+    }
 }

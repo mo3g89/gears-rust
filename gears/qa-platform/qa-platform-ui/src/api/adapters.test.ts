@@ -254,7 +254,7 @@ describe('runFromDto', () => {
   // `succeeded` run's non-zero `skipped` instead of hiding it now that a skip
   // no longer fails the run. Passed straight through, not renamed or dropped.
   it('carries result straight through', () => {
-    const result = { passed: 10, failed: 0, skipped: 5, in_progress: 0, total: 15 };
+    const result = { passed: 10, failed: 0, skipped: 5, in_progress: 0, xfail: 0, xpass: 0, total: 15 };
     const run = runFromDto({ ...(RUN_DTO as object), result } as never);
     expect(run.result).toEqual(result);
   });

@@ -23,7 +23,10 @@ use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::repos::{OwnedScheduleId, SchedulesRepository};
+use crate::domain::repos::{
+    MAX_SCHEDULE_SCAN, OwnedScheduleId, REFERENTIAL_CHECK_CLAIMED_BY, ScheduleTickRow,
+    SchedulesRepository, Windowed, overread, window_size,
+};
 use crate::infra::storage::db::db_err;
 use crate::infra::storage::entity::schedule::{
     ActiveModel as ScheduleAM, Column as ScheduleColumn, Entity as ScheduleEntity,
@@ -33,7 +36,7 @@ use crate::infra::storage::entity::schedule_tick::{
 };
 use crate::infra::storage::mapper::{
     exclusive_choice_to_column, json_to_column, parameters_to_column, schedule_to_sdk,
-    target_to_columns,
+    target_to_columns, tick_to_sdk,
 };
 
 /// ORM-based implementation of the [`SchedulesRepository`] trait.
@@ -394,9 +397,18 @@ impl SchedulesRepository for OrmSchedulesRepository {
         &self,
         runner: &C,
         scope: &AccessScope,
-    ) -> Result<Vec<(Schedule, Uuid)>, DomainError> {
+        after: Option<Uuid>,
+    ) -> Result<Windowed<(Schedule, Uuid)>, DomainError> {
+        let mut filter = Condition::all().add(ScheduleColumn::Enabled.eq(true));
+        if let Some(after) = after {
+            // The rotation — see the trait doc. `id` is the only column here
+            // that nothing a schedule *does* changes, matching
+            // `QueueRepository::all_claims`'s own reasoning for the same
+            // choice of sort key.
+            filter = filter.add(ScheduleColumn::Id.gt(after));
+        }
         let rows = ScheduleEntity::find()
-            .filter(Condition::all().add(ScheduleColumn::Enabled.eq(true)))
+            .filter(filter)
             .secure()
             .scope_with(scope)
             // `id`, so a cross-tenant enumeration has one deterministic order
@@ -405,6 +417,7 @@ impl SchedulesRepository for OrmSchedulesRepository {
             // stable, because a ticker that logged its work would otherwise
             // report a different sequence every pass.
             .order_by(ScheduleColumn::Id, sea_orm::Order::Asc)
+            .limit(overread(MAX_SCHEDULE_SCAN))
             .all(runner)
             .await
             .map_err(db_err)?;
@@ -418,7 +431,7 @@ impl SchedulesRepository for OrmSchedulesRepository {
         // the scheduler dark for the deploy. Skipping still fails closed for the
         // offending schedule; it just stops one row from being fleet-wide. See
         // the trait method.
-        Ok(rows
+        let decoded = rows
             .into_iter()
             .filter_map(|m| {
                 let (id, tenant_id) = (m.id, m.tenant_id);
@@ -436,7 +449,8 @@ impl SchedulesRepository for OrmSchedulesRepository {
                     }
                 }
             })
-            .collect())
+            .collect();
+        Ok(Windowed::from_overread(decoded, window_size(MAX_SCHEDULE_SCAN)))
     }
 
     async fn claim_tick<C: DBRunner>(
@@ -546,6 +560,56 @@ impl SchedulesRepository for OrmSchedulesRepository {
             .await
             .map_err(db_err)?;
         Ok(result.rows_affected == 1)
+    }
+
+    async fn list_ticks<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        schedule_id: Uuid,
+    ) -> Result<Vec<ScheduleTickRow>, DomainError> {
+        let rows = TickEntity::find()
+            .filter(TickColumn::ScheduleId.eq(schedule_id))
+            .secure()
+            .scope_with(scope)
+            .order_by(TickColumn::DueAt, sea_orm::Order::Desc)
+            .limit(crate::domain::repos::MAX_TICK_READ_LIMIT)
+            .all(runner)
+            .await
+            .map_err(db_err)?;
+        Ok(rows.into_iter().map(tick_to_sdk).collect())
+    }
+
+    async fn record_referential_check<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        schedule: OwnedScheduleId,
+        checked_at: OffsetDateTime,
+        error: &str,
+    ) -> Result<(), DomainError> {
+        let am = TickAM {
+            id: ActiveValue::Set(Uuid::new_v4()),
+            tenant_id: ActiveValue::Set(tenant_id),
+            // An `OwnedScheduleId`, for the same reason `claim_tick` takes
+            // one: the tenant-blind foreign key must not be what answers
+            // whether this schedule exists.
+            schedule_id: ActiveValue::Set(schedule.get()),
+            // Not a real due instant - the check's own timestamp. Nothing
+            // reads this column as a due time for a synthetic row; a real
+            // fire is the only writer that gives it that meaning.
+            due_at: ActiveValue::Set(checked_at),
+            claimed_by: ActiveValue::Set(REFERENTIAL_CHECK_CLAIMED_BY.to_owned()),
+            claimed_at: ActiveValue::Set(checked_at),
+            run_id: ActiveValue::Set(None),
+            error: ActiveValue::Set(Some(error.to_owned())),
+            created_at: ActiveValue::Set(checked_at),
+        };
+        secure_insert::<TickEntity>(am, scope, runner)
+            .await
+            .map(|_| ())
+            .map_err(db_err)
     }
 }
 
@@ -1353,6 +1417,99 @@ mod tests {
         );
     }
 
+    /// `list_ticks` closes the gap this trait's own header names: a fixed
+    /// claim followed by a failed launch and one that succeeded are both
+    /// readable, newest-`due_at`-first, with `run_id`/`error` intact.
+    #[tokio::test]
+    async fn list_ticks_returns_the_fire_history_newest_first() {
+        let db = inmem_db().await;
+        let conn = db.conn().unwrap();
+        let (tenant, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let repo = OrmSchedulesRepository;
+
+        let schedule = repo
+            .create(
+                &conn,
+                &scope(tenant),
+                tenant,
+                sample_new_schedule("nightly"),
+            )
+            .await
+            .unwrap();
+
+        let earlier = now();
+        let later = now() + time::Duration::hours(1);
+
+        // The earlier due time: claimed and launched successfully.
+        let earlier_tick = repo
+            .claim_tick(
+                &conn,
+                &scope(tenant),
+                tenant,
+                owned(&repo, &conn, tenant, schedule.id).await,
+                earlier,
+                "qa-runs-0",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let run_id = Uuid::new_v4();
+        assert!(
+            repo.record_tick_outcome(&conn, &scope(tenant), earlier_tick, Some(run_id), None)
+                .await
+                .unwrap()
+        );
+
+        // The later due time: claimed, but the launch failed.
+        let later_tick = repo
+            .claim_tick(
+                &conn,
+                &scope(tenant),
+                tenant,
+                owned(&repo, &conn, tenant, schedule.id).await,
+                later,
+                "qa-runs-0",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            repo.record_tick_outcome(
+                &conn,
+                &scope(tenant),
+                later_tick,
+                None,
+                Some("launch refused"),
+            )
+            .await
+            .unwrap()
+        );
+
+        let ticks = repo
+            .list_ticks(&conn, &scope(tenant), schedule.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            ticks
+                .iter()
+                .map(|t| (t.id, t.due_at, t.run_id, t.error.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (later_tick, later, None, Some("launch refused".to_owned())),
+                (earlier_tick, earlier, Some(run_id), None),
+            ],
+            "newest `due_at` first, with run_id/error intact for both outcomes"
+        );
+
+        // Another tenant sees none of it.
+        assert!(
+            repo.list_ticks(&conn, &scope(other), schedule.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     /// The cursor moves forward and refuses to move back.
     ///
     /// The backwards case is not hypothetical: two due times fired out of order
@@ -1430,9 +1587,10 @@ mod tests {
             .unwrap();
 
         let found = repo
-            .list_enabled(&conn, &enumeration_scope(&[a, b]))
+            .list_enabled(&conn, &enumeration_scope(&[a, b]), None)
             .await
-            .unwrap();
+            .unwrap()
+            .rows;
         let mut pairs: Vec<(Uuid, Uuid)> = found.iter().map(|(s, t)| (s.id, *t)).collect();
         pairs.sort();
         let mut expected = vec![(first.id, a), (second.id, b)];
@@ -1444,9 +1602,58 @@ mod tests {
 
         // A single-tenant scope still sees only its own, which is what makes
         // the pairing above a real answer rather than a coincidence.
-        let mine = repo.list_enabled(&conn, &scope(a)).await.unwrap();
+        let mine = repo
+            .list_enabled(&conn, &scope(a), None)
+            .await
+            .unwrap()
+            .rows;
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0].1, a);
+    }
+
+    /// `after` is the rotation the trait doc promises: rows with `id` strictly
+    /// greater than the cursor, still in `id` order. This is what lets
+    /// `ScheduleService` resume past the schedules a previous pass already
+    /// gave a chance to fire, instead of re-reading the same id-ordered head
+    /// of the fleet every tick.
+    #[tokio::test]
+    async fn list_enabled_after_excludes_ids_at_or_below_the_cursor() {
+        let db = inmem_db().await;
+        let conn = db.conn().unwrap();
+        let tenant = Uuid::new_v4();
+        let repo = OrmSchedulesRepository;
+
+        let mut created = Vec::new();
+        for name in ["a", "b", "c"] {
+            created.push(
+                repo.create(&conn, &scope(tenant), tenant, sample_new_schedule(name))
+                    .await
+                    .unwrap(),
+            );
+        }
+        created.sort_by_key(|s| s.id);
+
+        let from_start = repo
+            .list_enabled(&conn, &scope(tenant), None)
+            .await
+            .unwrap()
+            .rows;
+        assert_eq!(
+            from_start.iter().map(|(s, _)| s.id).collect::<Vec<_>>(),
+            created.iter().map(|s| s.id).collect::<Vec<_>>(),
+            "no cursor reads the whole enabled set, in id order"
+        );
+
+        let after_first = repo
+            .list_enabled(&conn, &scope(tenant), Some(created[0].id))
+            .await
+            .unwrap()
+            .rows;
+        assert_eq!(
+            after_first.iter().map(|(s, _)| s.id).collect::<Vec<_>>(),
+            vec![created[1].id, created[2].id],
+            "the cursor's own row must not be re-read"
+        );
     }
 
     /// A disabled schedule is not a candidate. Nothing else filters it out, so
@@ -1475,7 +1682,11 @@ mod tests {
             .await
             .unwrap();
 
-        let found = repo.list_enabled(&conn, &scope(tenant)).await.unwrap();
+        let found = repo
+            .list_enabled(&conn, &scope(tenant), None)
+            .await
+            .unwrap()
+            .rows;
         assert_eq!(
             found.iter().map(|(s, _)| s.id).collect::<Vec<_>>(),
             vec![on.id]
@@ -1575,9 +1786,10 @@ mod tests {
         );
 
         let found = repo
-            .list_enabled(&conn, &scope(tenant))
+            .list_enabled(&conn, &scope(tenant), None)
             .await
-            .expect("one undecodable row must not fail the whole enumeration");
+            .expect("one undecodable row must not fail the whole enumeration")
+            .rows;
         assert_eq!(
             found.iter().map(|(s, _)| s.id).collect::<Vec<_>>(),
             vec![healthy.id],

@@ -256,6 +256,7 @@ pub(crate) type DbProvider = DBProvider<DomainError>;
 /// they compile their first scope.
 pub(crate) mod resources {
     use super::ResourceType;
+    use toolkit_gts::gts_id;
     use toolkit_security::pep_properties;
 
     /// `qa_test_results`, `qa_test_case_results` and, since Task 29,
@@ -294,13 +295,11 @@ pub(crate) mod resources {
 
     /// [`TEST_RESULT`]'s name as a `&'static str`.
     ///
-    /// One literal, two consumers. `ResourceType::name()` borrows from the
-    /// `ResourceType`, and a `const` is materialised as a temporary at each use
-    /// site, so `resources::TEST_RESULT.name()` cannot produce a `&'static str`
-    /// for [`super::DomainError::UnsupportedScope`] to carry. Declaring the
-    /// literal here and building the descriptor from it keeps the PEP resource
-    /// type and the error's `resource` field impossible to disagree about.
-    pub const TEST_RESULT_NAME: &str = "qa.test_result";
+    /// A concrete GTS type id rather than a bare string, so the RBAC
+    /// role-definition validator can resolve it as a `target_type`; the stub
+    /// type-schema that registers it is
+    /// [`crate::gts::authz_types::QaTestResultV1`].
+    pub const TEST_RESULT_NAME: &str = gts_id!("cf.qa.insights.test_result.v1~");
 
     /// `qa_analytics_saved_views`. Task 28, and the **first resource type in
     /// this gear that declares [`pep_properties::OWNER_ID`]** — [`TEST_RESULT`]
@@ -325,9 +324,9 @@ pub(crate) mod resources {
         ],
     );
 
-    /// [`SAVED_VIEW`]'s name as a `&'static str`, for [`TEST_RESULT_NAME`]'s
-    /// reason.
-    pub const SAVED_VIEW_NAME: &str = "qa.saved_view";
+    /// [`SAVED_VIEW`]'s name. See [`TEST_RESULT_NAME`] for why it is a GTS
+    /// type id.
+    pub const SAVED_VIEW_NAME: &str = gts_id!("cf.qa.insights.saved_view.v1~");
 
     /// `qa_jira_config` and `qa_jira_poller_config` — the JIRA settings
     /// singletons. Task 32.
@@ -380,16 +379,12 @@ pub(crate) mod resources {
     pub const JIRA_CONFIG: ResourceType =
         ResourceType::from_static(JIRA_CONFIG_NAME, &[pep_properties::OWNER_TENANT_ID]);
 
-    /// [`JIRA_CONFIG`]'s name as a `&'static str`, for [`TEST_RESULT_NAME`]'s
-    /// reason.
+    /// [`JIRA_CONFIG`]'s name. See [`TEST_RESULT_NAME`].
     ///
-    /// `qa.jira_config` rather than `qa.jira_settings`, and one type rather than
-    /// two: the two tables are one operator-facing concern — "how this tenant
-    /// talks to JIRA" — and a deployment that could grant one without the other
-    /// would be able to let a subject change the poll cadence of an integration
-    /// whose URL and credential reference it cannot see. [`JIRA_BUG`] is a
-    /// *different* resource, declared separately below.
-    pub const JIRA_CONFIG_NAME: &str = "qa.jira_config";
+    /// Unlike its neighbours this id is **minted here**: the JIRA config
+    /// carries no RFC-9457 error surface, so no
+    /// `cf.qa.insights.jira_config.v1~` existed before.
+    pub const JIRA_CONFIG_NAME: &str = gts_id!("cf.qa.insights.jira_config.v1~");
 
     /// `qa_jira_bugs` — the registry itself, as opposed to [`JIRA_CONFIG`]'s two
     /// connection-settings singletons. Task 33's first query under it:
@@ -412,9 +407,8 @@ pub(crate) mod resources {
     pub const JIRA_BUG: ResourceType =
         ResourceType::from_static(JIRA_BUG_NAME, &[pep_properties::OWNER_TENANT_ID]);
 
-    /// [`JIRA_BUG`]'s name as a `&'static str`, for [`TEST_RESULT_NAME`]'s
-    /// reason.
-    pub const JIRA_BUG_NAME: &str = "qa.jira_bug";
+    /// [`JIRA_BUG`]'s name. See [`TEST_RESULT_NAME`].
+    pub const JIRA_BUG_NAME: &str = gts_id!("cf.qa.insights.jira_bug.v1~");
 
     /// `qa_notification_config`, `qa_notification_log` and
     /// `qa_run_notifications` — the tenant's notification settings, the
@@ -429,9 +423,8 @@ pub(crate) mod resources {
     pub const NOTIFICATION_CONFIG: ResourceType =
         ResourceType::from_static(NOTIFICATION_CONFIG_NAME, &[pep_properties::OWNER_TENANT_ID]);
 
-    /// [`NOTIFICATION_CONFIG`]'s name as a `&'static str`, for
-    /// [`TEST_RESULT_NAME`]'s reason.
-    pub const NOTIFICATION_CONFIG_NAME: &str = "qa.notification_config";
+    /// [`NOTIFICATION_CONFIG`]'s name. See [`TEST_RESULT_NAME`].
+    pub const NOTIFICATION_CONFIG_NAME: &str = gts_id!("cf.qa.insights.notification_config.v1~");
 }
 
 /// Authorization actions.

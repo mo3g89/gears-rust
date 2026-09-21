@@ -30,7 +30,8 @@ use qa_runs_sdk::{ExclusiveTier, RunParameter, RunState, RunTarget, ScheduleNoti
 use time::macros::datetime;
 
 use super::*;
-use crate::domain::service::admission::tests::fakes::{PLATFORM_A, REPO};
+use crate::domain::repos::REFERENTIAL_CHECK_CLAIMED_BY;
+use crate::domain::service::admission::tests::fakes::{FakeCatalog, PLATFORM_A, REPO};
 use crate::domain::service::test_support::{
     Asked, Fleet, OTHER_TENANT, OWNER_TENANT, QueueingAdmitter, SchedulerAuthZ, ctx,
 };
@@ -1289,6 +1290,76 @@ async fn a_pass_fires_at_most_the_cap_and_defers_the_rest() {
     assert_eq!(fleet.ticks_of(OWNER_TENANT).await.len(), over_rows);
 }
 
+/// **The starvation this module's own doc names, closed by rotating
+/// `list_enabled`'s cursor.**
+///
+/// The doc's own trigger, reproduced exactly: "an `* * * * *` expression on
+/// more than twenty schedules against a 60 s tick" — a permanently
+/// over-subscribed fleet, one pass per cron occurrence rather than several
+/// passes draining a single occurrence (`a_pass_fires_at_most_the_cap_and_defers_the_rest`
+/// already covers that half; this one advances `now` by a full cron period
+/// between passes, so the previous pass's deferrals are never simply retried
+/// against the *same* due time).
+///
+/// Before `list_enabled` took a cursor, this fails exactly as the doc
+/// predicts: the same lowest-id twenty fire on every single pass, forever,
+/// and the rest never fire, no matter how many passes run. With the cursor,
+/// every schedule has at least one recorded, successful tick within a small
+/// bounded number of passes.
+#[tokio::test]
+async fn a_permanently_oversubscribed_fleet_eventually_reaches_every_schedule() {
+    const EVERY_MINUTE: &str = "* * * * *";
+
+    let fleet = Fleet::new().await;
+    let services = fleet.instance();
+
+    let over = MAX_FIRES_PER_TICK + 5;
+    let mut created = Vec::new();
+    for n in 0..over {
+        created.push(
+            services
+                .schedules
+                .create(
+                    &ctx(OWNER_TENANT),
+                    schedule_payload(&format!("s{n}"), EVERY_MINUTE),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+
+    // One pass per cron occurrence -- the pathological alignment the doc
+    // names -- for comfortably more passes than the `ceil(over /
+    // MAX_FIRES_PER_TICK)` the fix's own analysis needs, so the assertion
+    // below is not a coin flip against an off-by-one in that bound.
+    for n in 0..8 {
+        services
+            .schedules
+            .fire_due_schedules_at(NOON_THIRTY + time::Duration::minutes(i64::from(n)))
+            .await;
+    }
+
+    let fired_schedule_ids: std::collections::HashSet<Uuid> = fleet
+        .ticks_of(OWNER_TENANT)
+        .await
+        .into_iter()
+        .filter(|tick| tick.run_id.is_some())
+        .map(|tick| tick.schedule_id)
+        .collect();
+
+    let starved: Vec<&str> = created
+        .iter()
+        .filter(|s| !fired_schedule_ids.contains(&s.id))
+        .map(|s| s.name.as_str())
+        .collect();
+
+    assert!(
+        starved.is_empty(),
+        "every schedule must fire at least once across a bounded number of passes; \
+         starved: {starved:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Exactly-once (cpt-cf-qa-nfr-scheduler-exactly-once)
 // ---------------------------------------------------------------------------
@@ -1479,6 +1550,18 @@ async fn a_launch_failure_is_recorded_on_the_tick_and_not_retried() {
         !recorded.contains("kubeconfig"),
         "an executor's own vocabulary must not reach a column an operator reads: {recorded}"
     );
+
+    // The same row, through the read surface this task adds: the operator's
+    // only recourse for "my schedule fired late" is now a query, not a SQL
+    // prompt.
+    let read_back = services
+        .schedules
+        .list_ticks(&ctx(OWNER_TENANT), stored.id)
+        .await
+        .unwrap();
+    assert_eq!(read_back.len(), 1);
+    assert_eq!(read_back[0].run_id, None);
+    assert_eq!(read_back[0].error.as_deref(), Some(recorded.as_str()));
 
     // Not retried, at the same instant or at any later one before the next
     // occurrence. One more admission attempt would be a second destructive run.
@@ -1694,6 +1777,15 @@ async fn another_tenants_schedule_is_invisible() {
         services.schedules.delete(&stranger, stored.id).await,
         Err(DomainError::ScheduleNotFound { .. })
     ));
+    // WS5 Task 1's read: same collapse as `get`'s, above, because it checks
+    // visibility with `get` before reading the ticks.
+    assert!(
+        matches!(
+            services.schedules.list_ticks(&stranger, stored.id).await,
+            Err(DomainError::ScheduleNotFound { .. })
+        ),
+        "a foreign schedule's tick history must read as not-found, never as forbidden"
+    );
     // The notification edit is a **mutating cross-gear** method — qa-insights is
     // meant to reach it over the SDK — so it is listed here rather than left to
     // "the same scope as `update`". It resolves its own `AccessScope` under
@@ -1731,4 +1823,180 @@ async fn another_tenants_schedule_is_invisible() {
     );
     assert_eq!(mine.slack_channel, None);
     assert!(mine.slack_notification_events.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Referential integrity (Task 7)
+// ---------------------------------------------------------------------------
+
+/// A schedule naming a custom plan qa-catalog cannot resolve is refused on
+/// write, and never persisted.
+///
+/// Modelled with a `CustomPlan` target rather than a `Plan`/`Test` one:
+/// `FakeCatalog::get_repo`/`get_plan` answer unconditionally for any id (see
+/// their own doc comments in `admission_tests`), so neither can be made to
+/// refuse one specific target the way this test needs. `get_custom_plan` is
+/// the one catalog read this double can be told to refuse, via
+/// `FakeCatalog::refusing_custom_plans` — the same "qa-catalog's client does
+/// not resolve" case Task 7's proof asks for, applied to the target field
+/// this double can actually vary. `LaunchService::resolve_target_exists`
+/// checks a dangling `repo_id`/`plan_path` through the identical not-found
+/// reclassification (see that method's own doc); this is not a claim that
+/// path is untested, only that this double cannot drive it.
+#[tokio::test]
+async fn a_schedule_naming_an_unresolvable_custom_plan_is_refused_on_write() {
+    let mut fleet = Fleet::new().await;
+    fleet.catalog = Arc::new(FakeCatalog::refusing_custom_plans());
+    let services = fleet.instance();
+
+    let payload = NewSchedule {
+        target: RunTarget::CustomPlan {
+            id: Uuid::new_v4(),
+        },
+        environment_id: None,
+        ..schedule_payload("dangling-plan", HOURLY)
+    };
+
+    let error = services
+        .schedules
+        .create(&ctx(OWNER_TENANT), payload)
+        .await
+        .expect_err(
+            "a schedule naming a custom plan qa-catalog cannot resolve must be refused",
+        );
+    assert!(
+        matches!(&error, DomainError::Validation { field, .. } if field == "target.id"),
+        "{error:?}"
+    );
+
+    assert!(
+        services
+            .schedules
+            .list(&ctx(OWNER_TENANT))
+            .await
+            .unwrap()
+            .is_empty(),
+        "a refused create must not persist the schedule"
+    );
+}
+
+/// The same guard at `update`: an edit cannot install what a create refused.
+///
+/// Seeded before the catalog double is swapped to a refusing one, and edited
+/// after — `Fleet::instance` shares `db` by `Arc::clone`, so a second call
+/// to it, over the same `fleet` with a different `catalog`, still sees the
+/// schedule the first call's `AppServices` wrote.
+#[tokio::test]
+async fn a_schedule_edited_onto_an_unresolvable_custom_plan_is_refused_on_write() {
+    let mut fleet = Fleet::new().await;
+    let services = fleet.instance();
+    let stored = seed(&services, OWNER_TENANT).await;
+
+    fleet.catalog = Arc::new(FakeCatalog::refusing_custom_plans());
+    let services = fleet.instance();
+
+    let payload = NewSchedule {
+        target: RunTarget::CustomPlan {
+            id: Uuid::new_v4(),
+        },
+        environment_id: None,
+        ..schedule_payload("dangling-plan", HOURLY)
+    };
+    let error = services
+        .schedules
+        .update(&ctx(OWNER_TENANT), stored.id, payload)
+        .await
+        .expect_err("an edit naming an unresolvable custom plan must be refused too");
+    assert!(
+        matches!(&error, DomainError::Validation { field, .. } if field == "target.id"),
+        "{error:?}"
+    );
+
+    // The refused edit must not have reached the stored row.
+    let unchanged = services
+        .schedules
+        .get(&ctx(OWNER_TENANT), stored.id)
+        .await
+        .unwrap();
+    assert_eq!(unchanged.name, "nightly");
+}
+
+/// A schedule whose target resolves at `create` and goes dangling afterward
+/// — simulating a delete made through qa-catalog's own service, not through
+/// `qa_schedules` — is caught by [`ScheduleService::check_schedule_targets`]:
+/// a new `qa_schedule_ticks` row appears, `claimed_by` names the referential
+/// check (never a real fire's identity), `run_id` stays `None`, and `error`
+/// names the dangling field.
+#[tokio::test]
+async fn a_target_that_goes_dangling_after_creation_surfaces_in_the_tick_history() {
+    let catalog = Arc::new(FakeCatalog::default());
+    let mut fleet = Fleet::new().await;
+    fleet.catalog = Arc::clone(&catalog);
+    let services = fleet.instance();
+
+    let payload = NewSchedule {
+        target: RunTarget::CustomPlan {
+            id: Uuid::new_v4(),
+        },
+        environment_id: None,
+        ..schedule_payload("goes-dangling", HOURLY)
+    };
+    let stored = services
+        .schedules
+        .create(&ctx(OWNER_TENANT), payload)
+        .await
+        .expect("the custom plan resolves at create time, so the write must succeed");
+
+    // Simulate qa-catalog's own service deleting the custom plan out from
+    // under the schedule, well after it was written.
+    catalog.set_refuse_custom_plans(true);
+
+    let report = services.schedules.check_schedule_targets().await;
+    assert_eq!(report.evaluated, 1, "{report:?}");
+    assert_eq!(report.dangling, 1, "{report:?}");
+    assert_eq!(report.failed, 0, "{report:?}");
+
+    let ticks = services
+        .schedules
+        .list_ticks(&ctx(OWNER_TENANT), stored.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        ticks.len(),
+        1,
+        "the check must have written exactly one finding: {ticks:?}"
+    );
+    let tick = &ticks[0];
+    assert_eq!(
+        tick.claimed_by, REFERENTIAL_CHECK_CLAIMED_BY,
+        "a referential-check row must be visually distinguishable from a real fire"
+    );
+    assert_eq!(
+        tick.run_id, None,
+        "a referential check never launches, so it never claims a run"
+    );
+    let error = tick
+        .error
+        .as_deref()
+        .expect("the finding must record why the target does not resolve");
+    assert!(
+        error.contains("target.id"),
+        "the recorded error must name the dangling field: {error:?}"
+    );
+
+    // Running the check again while nothing has changed must not duplicate
+    // the finding forever - though nothing in this task de-duplicates it
+    // either, so this pins the shape the next pass actually produces.
+    let second = services.schedules.check_schedule_targets().await;
+    assert_eq!(second.dangling, 1, "{second:?}");
+    let ticks_after_second_pass = services
+        .schedules
+        .list_ticks(&ctx(OWNER_TENANT), stored.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        ticks_after_second_pass.len(),
+        2,
+        "each pass that still finds the target dangling records its own finding: {ticks_after_second_pass:?}"
+    );
 }

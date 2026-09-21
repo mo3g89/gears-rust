@@ -18,8 +18,8 @@ use uuid::Uuid;
 use crate::config::{PostgresCredStorePluginConfig, SecretConfig};
 use crate::domain::Service;
 use crate::test_support::{
-    connect_migrated, file_dsn, memory_dsn, memory_service, provider_and_repo, repo_over,
-    service_over,
+    connect_migrated, file_dsn, memory_dsn, memory_service, provider_and_repo, service_over,
+    store_over,
 };
 
 fn sref(s: &str) -> SecretRef {
@@ -433,7 +433,7 @@ const SHARED_TENANT: Uuid = Uuid::from_u128(0x1);
 
 async fn seeded_service(dsn: &str) -> Service {
     let db = connect_migrated(dsn).await;
-    Service::from_config(repo_over(db), &seeded_config()).expect("config builds")
+    Service::from_config(store_over(db), &seeded_config()).expect("config builds")
 }
 
 #[tokio::test]
@@ -588,7 +588,7 @@ fn cfg_with(secret: SecretConfig) -> PostgresCredStorePluginConfig {
 
 async fn expect_config_error(secret: SecretConfig, needle: &str) {
     let db = connect_migrated(&memory_dsn()).await;
-    let err = match Service::from_config(repo_over(db), &cfg_with(secret)) {
+    let err = match Service::from_config(store_over(db), &cfg_with(secret)) {
         Ok(_) => panic!("config must be rejected"),
         Err(e) => e.to_string(),
     };
@@ -696,7 +696,7 @@ async fn duplicate_seeds_in_the_same_key_class_are_rejected() {
         ],
         ..Default::default()
     };
-    let err = match Service::from_config(repo_over(db), &cfg) {
+    let err = match Service::from_config(store_over(db), &cfg) {
         Ok(_) => panic!("duplicate must be rejected"),
         Err(e) => e.to_string(),
     };

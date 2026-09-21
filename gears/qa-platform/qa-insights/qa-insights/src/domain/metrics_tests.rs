@@ -25,6 +25,7 @@ use crate::domain::ports::metrics::{
     JiraPollOutcome, NoopMetrics,
 };
 use crate::domain::service::collect::SignatureRefusal;
+use crate::domain::service::resources;
 
 /// **Every metric constant is the literal Prometheus series name.**
 ///
@@ -281,7 +282,7 @@ fn every_domain_error() -> [DomainError; DOMAIN_ERROR_VARIANTS] {
             run_id: Uuid::nil(),
         },
         DomainError::UnsupportedScope {
-            resource: "qa.test_result",
+            resource: resources::TEST_RESULT_NAME,
         },
         DomainError::IngestConflict,
         DomainError::SavedViewNameExists {

@@ -182,6 +182,73 @@ impl DispatchDecision {
     }
 }
 
+/// `reason` label on
+/// [`crate::domain::metrics::QA_RUNS_FREE_TO_START_UNANCHORED`].
+///
+/// One value per way a drained run can fail to yield a
+/// `cpt-cf-qa-nfr-dispatch-latency` sample. Closed and total, like every label
+/// on this trait, so a fifth way to lose a sample is a compile error rather
+/// than an unexplained gap between the drain's count and the histogram's.
+///
+/// **These are not errors.** Each one is a run for which the NFR's window is
+/// genuinely undefined, and the counter exists so a reader can size that
+/// population against the histogram's rather than assume it away — which is
+/// the mistake the retracted 2026-09-18 measurement made in the other
+/// direction, by reporting a quantile over a population that answered a
+/// different question (`docs/DESIGN.md` §3.11, "The dispatch-latency window,
+/// and the measurement that was retracted").
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnanchoredReason {
+    /// The acquisition carried no free instant. Either it joined an existing
+    /// parallel hold — so no free transition admitted this run — or the
+    /// environment has no recorded transition to free at all, which is a
+    /// never-leased environment or one last freed before the column existed.
+    NoFreeInstant,
+    /// The run was **not yet queued** when its environment became free: its
+    /// `enqueued_at` is later than the free instant. Nothing about the free
+    /// transition delayed it, so the NFR's window does not apply — its wait
+    /// started afterwards, for one of the reasons
+    /// [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`]'s doc lists
+    /// (a tick stopped at the concurrency cap, a failed executor listing, or
+    /// simply the gap between sweeps).
+    ///
+    /// A rising count here is a real signal about the dispatcher, not noise:
+    /// it means runs are increasingly arriving at an already-free environment
+    /// and still waiting.
+    NotWaitingAtFree,
+    /// The row carried no `enqueued_at`, so whether it was waiting at the free
+    /// instant is unknowable. Same fail-closed case
+    /// [`crate::domain::metrics::QA_RUNS_QUEUE_WAIT_DURATION`] drops.
+    NoEnqueueInstant,
+    /// The computed span was negative — the stored instant is ahead of this
+    /// process's clock. Skew between two writers, or a fixture. Dropped rather
+    /// than clamped to zero: a zero would be a real-looking observation of
+    /// something that did not happen.
+    NegativeSpan,
+}
+
+impl UnanchoredReason {
+    /// Every value. See [`DispatchOutcome::ALL`].
+    pub const ALL: [Self; 4] = [
+        Self::NoFreeInstant,
+        Self::NotWaitingAtFree,
+        Self::NoEnqueueInstant,
+        Self::NegativeSpan,
+    ];
+
+    /// The label value, as it appears in the series.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoFreeInstant => "no_free_instant",
+            Self::NotWaitingAtFree => "not_waiting_at_free",
+            Self::NoEnqueueInstant => "no_enqueue_instant",
+            Self::NegativeSpan => "negative_span",
+        }
+    }
+}
+
 /// `outcome` label on [`crate::domain::metrics::QA_RUNS_INGEST`] and its
 /// duration histogram.
 ///
@@ -317,6 +384,31 @@ pub trait DispatchMetrics: Send + Sync + 'static {
     /// before writing an alert on it: it is an upper bound on the NFR's
     /// quantity, not the quantity itself.
     fn queue_wait(&self, waited: Duration);
+
+    /// One queued run reaching an accepted execution request, with how long it
+    /// waited **since its environment became free**. Observes into
+    /// [`crate::domain::metrics::QA_RUNS_FREE_TO_START_DURATION`].
+    ///
+    /// This is `cpt-cf-qa-nfr-dispatch-latency`'s own quantity, which
+    /// [`Self::queue_wait`] is only an approximation of. The two are emitted
+    /// from the same call site and share an end instant; they differ in where
+    /// the clock starts.
+    ///
+    /// **Not every call to [`Self::queue_wait`] is accompanied by one of
+    /// these** — see [`Self::free_to_start_unanchored`] for the runs that
+    /// have no such window and why.
+    fn free_to_start(&self, waited: Duration);
+
+    /// One drained run that yielded **no** [`Self::free_to_start`] sample,
+    /// with why. Counts into
+    /// [`crate::domain::metrics::QA_RUNS_FREE_TO_START_UNANCHORED`].
+    ///
+    /// Emitted exactly once per drained run that reached an execution request
+    /// without a usable anchor, so this family and the histogram's sample
+    /// count partition the same population. That partition is the point: it is
+    /// what lets a reader size the quantile's coverage instead of trusting it
+    /// blind.
+    fn free_to_start_unanchored(&self, reason: UnanchoredReason);
 }
 
 /// The ingest path's telemetry — the **gear-side half** of
@@ -356,6 +448,8 @@ impl DispatchMetrics for NoopMetrics {
     fn dispatch_pass(&self, _outcome: DispatchOutcome, _duration: Duration) {}
     fn dispatch_decision(&self, _decision: DispatchDecision) {}
     fn queue_wait(&self, _waited: Duration) {}
+    fn free_to_start(&self, _waited: Duration) {}
+    fn free_to_start_unanchored(&self, _reason: UnanchoredReason) {}
 }
 
 impl IngestMetrics for NoopMetrics {

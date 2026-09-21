@@ -28,8 +28,18 @@ pub trait QaProductPluginV1: Send + Sync {
     async fn observe(&self, env: &EnvironmentHandle<'_>) -> PluginObservation;
 
     // Run lifecycle (qa-runs)
-    async fn prepare_access(&self, env: &EnvironmentHandle<'_>)
-        -> Result<AccessSpec, PluginFailure>;
+    async fn prepare_run_access(&self, env: &EnvironmentHandle<'_>)
+        -> Result<RunAccess, PluginFailure>;
+
+    // Dispatch (qa-runs) — the runner contract
+    fn runner(&self, observed: Option<&ObservedAttrs>) -> RunnerSpec;
+    fn env_contract(&self) -> RunVarContract;
+
+    // Health (defaulted — override only if the product has a cheaper probe
+    // than a full observation)
+    async fn health_check(&self) -> Result<HealthState, PluginFailure> {
+        Ok(HealthState::Ok)
+    }
 }
 ```
 
@@ -52,7 +62,7 @@ Returns detected attributes **and** health in one call, so one client and one ha
 The gear persists the result into `observed_version`, `observed_build`, `observed_base_url`,
 `observed_attrs`, `health_state`, `health_detail` and `health_checked_at`.
 
-### `prepare_access`
+### `prepare_run_access`
 
 Returns the mounts, environment bindings and service account a run needs to reach the environment.
 
@@ -65,6 +75,23 @@ executor do the resolving.
 Run variables whose values are *detected* rather than configured — a base URL, a namespace — come
 from `EnvironmentHandle::observed_role`. That is `None` on an environment nothing has observed yet,
 which dispatch can legitimately produce: **omit the variable, do not fail the call.**
+
+### `runner`
+
+Returns the runner image and command for a run of this product, optionally informed by the
+environment's last observation. This is the runner contract: dispatch (`qa-runs`) calls it to know
+what to launch.
+
+### `env_contract`
+
+Returns the run-variable names this plugin reserves beyond the platform's own floor. The names the
+plugin *owns* are not declared here — they are whatever `prepare_run_access` actually returns in
+`RunAccess::env`.
+
+### `health_check`
+
+Defaulted — a plugin only overrides it if the product has a cheaper liveness probe than a full
+observation.
 
 ## Registration and resolution
 

@@ -15,10 +15,19 @@
 #                                   THE CONTENT ROOT" below). May be empty -- the
 #                                   port says an empty list is not an error
 #                                   (`run_executor.rs:431-436`).
-#        TEST_BUNDLE_URL            where to fetch the tests.
-#        TEST_BUNDLE_TOKEN_URL      } client_credentials, so the authenticated
-#        TEST_BUNDLE_CLIENT_ID      } bundle route can be called at all.
-#        TEST_BUNDLE_CLIENT_SECRET  }
+#        TEST_BUNDLE_URL            where to fetch the tests, INCLUDING the
+#                                   `?sig=` that authorises the fetch. There is
+#                                   no credential beside it and no token
+#                                   exchange: the three TEST_BUNDLE_TOKEN_URL /
+#                                   _CLIENT_ID / _CLIENT_SECRET variables this
+#                                   block used to list are gone, and so is the
+#                                   Keycloak round trip fetch_bundle.py made
+#                                   with them. See that file's header for what
+#                                   that credential could reach from inside a
+#                                   pod running tenant-authored pytest, and why
+#                                   a per-bundle signature replaced it rather
+#                                   than joining it.
+#                                   NEVER echoed whole -- see below.
 #        TEST_BUNDLE_REF            qa-catalog's opaque storage_ref. Logged for
 #                                   correlation; not fetchable from a pod.
 #        KUBECONFIG                 present when the run targets a platform.
@@ -50,26 +59,31 @@ RUNNER_DIR=/opt/qa-runner
 echo "runner: image=qa-platform-pytest-runner pwd=$(pwd) python=$(python3 --version 2>&1)"
 echo "runner: TEST_FILES=${TEST_FILES:-<unset>}"
 echo "runner: TEST_BUNDLE_REF=${TEST_BUNDLE_REF:-<unset>}"
-echo "runner: TEST_BUNDLE_URL=${TEST_BUNDLE_URL:-<unset>}"
-# The secret's LENGTH and nothing else. Written as an if/else rather than
-# `${VAR:+...}${VAR:-...}`, which is what this line said first and which prints
-# the secret itself when it is set: `${VAR:-default}` expands to VAR, not to the
-# default, so the two substitutions concatenate into "<set, 30 bytes>" followed
-# by the credential. Caught by reading it back; a log is exactly where that
-# would have gone unnoticed.
-if [[ -n "${TEST_BUNDLE_CLIENT_SECRET:-}" ]]; then
-    secret_state="<set, ${#TEST_BUNDLE_CLIENT_SECRET} bytes>"
+# THE URL WITHOUT ITS QUERY STRING. `?sig=` carries the HMAC tag that is the
+# entire access control on the bundle route, and this line is rendered in the
+# run view for anyone who can read the run -- so echoing the variable verbatim
+# would publish the tag. `${VAR%%\?*}` strips from the first `?` to the end;
+# the marker is appended separately so "the adapter gave us no signature at
+# all" (no marker) still reads differently from "there is one and it is
+# hidden", because those are different misconfigurations and this line is the
+# only witness to the first.
+#
+# The same discipline this block already applied to the OIDC client secret,
+# which used to be printed here as a byte count. That variable no longer exists
+# -- see the contract block above -- so the count is gone with it.
+if [[ "${TEST_BUNDLE_URL:-}" == *\?* ]]; then
+    bundle_url_state="${TEST_BUNDLE_URL%%\?*}?<redacted>"
 else
-    secret_state="<unset>"
+    bundle_url_state="${TEST_BUNDLE_URL:-<unset>}"
 fi
-echo "runner: TEST_BUNDLE_TOKEN_URL=${TEST_BUNDLE_TOKEN_URL:-<unset>} client_id=${TEST_BUNDLE_CLIENT_ID:-<unset>} client_secret=$secret_state"
+echo "runner: TEST_BUNDLE_URL=$bundle_url_state"
 echo "runner: KUBECONFIG=${KUBECONFIG:-<unset>}"
 
 # NO BUNDLE URL IS A HARD FAILURE, not a fall back to "run whatever is in the
 # image". There is nothing in the image to run, and a runner that exits 0 with
 # no tests is the exact failure this whole adapter exists to end.
 if [[ -z "${TEST_BUNDLE_URL:-}" ]]; then
-    echo "runner: TEST_BUNDLE_URL is unset -- there is no test content to fetch. Set qa-runs.argo.bundle_base_url (and bundle_auth)." >&2
+    echo "runner: TEST_BUNDLE_URL is unset -- there is no test content to fetch. Set qa-runs.argo.bundle_base_url." >&2
     exit 1
 fi
 
@@ -432,19 +446,53 @@ if [[ "${COLLECT_ONLY:-false}" == "true" ]]; then
         echo "runner: no count was accepted -- reporting failure, because a collect cycle that delivered nothing is not a pass" >&2
         exit 1
     fi
+    # A single accepted count used to be enough to exit 0, even with 220 of
+    # 221 files refused or uncollectable -- the zero-results guard above only
+    # catches TOTAL suppression. A partial collect cycle is not a pass either:
+    # the caller (qa-insights) has no way to tell "everything was reported"
+    # from "most of it was refused" apart from this exit code.
+    if [[ "$refused" -gt 0 || "$uncollectable" -gt 0 ]]; then
+        # One condition, not three: whichever of refused/uncollectable fired
+        # (or both) exits non-zero the same way -- only the wording of what
+        # is named differs, so it is composed here rather than branched on.
+        reason=""
+        if [[ "$refused" -gt 0 ]]; then
+            reason="$refused count(s) were refused"
+        fi
+        if [[ "$uncollectable" -gt 0 ]]; then
+            if [[ -n "$reason" ]]; then
+                reason="$reason and $uncollectable file(s) were uncollectable"
+            else
+                reason="$uncollectable file(s) were uncollectable"
+            fi
+        fi
+        echo "runner: $reason -- reporting failure, because a partial collect cycle is not a pass" >&2
+        exit 1
+    fi
     exit 0
 fi
 # `-o cache_dir` because the bundle root may be read-only-ish and a stray
 # `.pytest_cache` in it is noise; `-p no:randomly` is NOT passed -- no such
 # plugin is installed and naming it would abort pytest.
-# QA_RUNNER_PYTEST_ARGS is word-split on purpose (it is an escape hatch for an
-# operator, and `-x --tb=short` has to work), which is why it is an array built
-# from an unquoted expansion rather than one quoted word -- one quoted word made
-# `-x --tb=short` a single argument pytest rejects.
+# QA_RUNNER_PYTEST_ARGS is word-split on purpose (`-x --tb=short` has to work
+# as two argv entries), which is why it is an array built from an unquoted
+# expansion rather than one quoted word -- one quoted word made `-x --tb=short`
+# a single argument pytest rejects. It is a RESERVED name on every writable
+# tier (qa_runs::domain::params::RESERVED_NAMES, and
+# qa_environments_sdk::RESERVED_VARIABLE_NAMES for pipeline/environment
+# variables), and no operator override path exists: the runner pod's
+# environment is built solely from RunSpec.env by the Argo adapter, with no
+# envFrom, chart-level injection, or runner pod template it could arrive
+# through. This variable is set, if at all, only by whatever already sits in
+# this process's own environment -- pathname expansion is still disabled
+# (`set -f` / `set +f`) around the unquoted expansion regardless, so a bare
+# `*` or `?` in it cannot pick up stray files from the current directory.
 declare -a EXTRA=(-v)
 if [[ -n "${QA_RUNNER_PYTEST_ARGS:-}" ]]; then
     # shellcheck disable=SC2206  # word splitting is the point here
+    set -f
     EXTRA=(${QA_RUNNER_PYTEST_ARGS})
+    set +f
 fi
 
 python3 -m pytest \

@@ -231,15 +231,18 @@ impl ODataFieldMapping<EnvironmentFilterField> for EnvironmentODataMapper {
 ///      existence precheck on it and answers 404 for an environment the caller
 ///      cannot see. A `$filter` on the same concept would skip that check and
 ///      quietly answer an empty list instead — the existence-oracle shape this
-///      crate already has a migration and two module docs about
-///      (`m20260813_000005_tenant_scoped_variable_index`).
-///   3. The **physical column is `environment_id`**
-///      (`entity/environment_variable.rs`'s
-///      `#[sea_orm(column_name = "platform_id")]`, kept deliberately: the
-///      tables were renamed, the columns were not). `qa-runs`'
-///      `RunFilterField::EnvironmentId` records the same trap on its own
-///      table. Advertising neither spelling means there is no wire name that
-///      can drift from the column —
+///      crate already has a migration and two module docs about. (The
+///      tenant-scoped unique index behind it was added by
+///      `m20260813_000005_tenant_scoped_variable_index`, since squashed into
+///      this gear's single migration, `migrations::m20260812_000001_initial`.)
+///   3. The **physical column is `environment_id`**, matching the Rust
+///      field name exactly — no wire name or `SeaORM` pin is involved.
+///      `qa-runs`' `RunFilterField::EnvironmentId` is the same: wire name,
+///      `Column` variant and physical column all agree there too, by its
+///      own module doc's account — there is no wire-name/column-name
+///      divergence to guard against on either table. Advertising neither
+///      the legacy `platform_id` spelling nor a separate wire pin means
+///      there is no name that can drift from the column —
 ///      `odata_tests::neither_enum_advertises_platform_id_or_environment_id`
 ///      pins that.
 /// * **`updated_at`** — moves on every upsert, so a cursor keyed on it would

@@ -57,10 +57,15 @@
 //!   been resolved under the caller's own `qa.run` scope. That is structural —
 //!   `NewQueueRow::run` is an `OwnedRunId` and this module physically cannot
 //!   build the payload without minting one — and the reason is the tenant-blind
-//!   foreign key `domain::repos`' header and DESIGN §3.8's
-//!   "every unique index is tenant-prefixed" paragraph both describe: an insert
-//!   carrying a guessed `run_id` would answer differently for a run that exists
-//!   in another tenant than for one that does not exist at all.
+//!   foreign key `domain::repos`' header describes, under "The foreign keys
+//!   are tenant-blind": an insert carrying a guessed `run_id` would answer
+//!   differently for a run that exists in another tenant than for one that
+//!   does not exist at all. (`DESIGN.md` has no "every unique index is
+//!   tenant-prefixed" paragraph under any section number — `grep -i
+//!   "tenant-prefix\|unique index"` on it is empty — so the DESIGN §3.8
+//!   citation this line used to carry pointed at a claim the document does
+//!   not make; the tenant-blind-FK analysis stands on `domain::repos`' own
+//!   authority.)
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -575,7 +580,11 @@ where
             .acquire_lease(ctx, environment_id, run.id, lease_mode(run.resolved_exclusive))
             .await
         {
-            Ok(AcquireOutcome::Acquired) => AdmissionDecision::Dispatch,
+            // `became_free_at` is dropped here deliberately. This is the
+            // *inline* path: the run never entered the FIFO, so there is no
+            // queued run for `cpt-cf-qa-nfr-dispatch-latency` to be stated
+            // over. Only `service::dispatch`'s drain samples that NFR.
+            Ok(AcquireOutcome::Acquired { .. }) => AdmissionDecision::Dispatch,
             Ok(AcquireOutcome::Busy { current }) => {
                 info!(
                     run_id = %run.id,
@@ -728,7 +737,10 @@ where
             // cross-tenant oracle this comment is about, and a platform-global count
             // would let one tenant's queued rows refuse another tenant's launch —
             // a worse denial of service than an over-generous ceiling.
-            // `DESIGN.md` §3.7 carries the full analysis.
+            // This analysis is not restated in `DESIGN.md`; it stood there
+            // under the old §3.7 numbering and does not appear centrally
+            // under §3.8 either, so it stands on this comment's own
+            // authority now.
             return Err(DomainError::QueueFull {
                 environment_id,
                 queued,

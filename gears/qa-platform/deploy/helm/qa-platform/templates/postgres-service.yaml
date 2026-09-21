@@ -8,8 +8,7 @@ metadata:
 spec:
   clusterIP: None
   selector:
-    app.kubernetes.io/name: qa-platform
-    app.kubernetes.io/component: postgres
+    {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "postgres") | nindent 4 }}
   ports:
     - name: postgres
       port: 5432

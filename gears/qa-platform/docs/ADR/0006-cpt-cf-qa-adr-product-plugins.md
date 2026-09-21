@@ -42,7 +42,10 @@ is the whole of what the platform knows about any product:
 | `observed_schema` | what an observation can yield |
 | `validate_credentials` | is this form valid, and which fields are secret |
 | `observe` | what is this environment, and is it healthy |
-| `prepare_access` | what does a run need to reach it |
+| `prepare_run_access` | what does a run need to reach it |
+| `runner` | what image and command does a run of this product launch |
+| `env_contract` | what run-variable names does this plugin reserve |
+| `health_check` (defaulted) | is the plugin itself alive, independent of any environment |
 
 A plugin is a gear. It registers in `ClientHub` under `ClientScope::gts_id(&instance_id)`, and
 `qa_products.plugin_instance_id` holds that id, so any gear resolves a product's behaviour by
@@ -51,7 +54,7 @@ reading the column. **No gear branches on a product key.**
 Two properties of the trait are decisions in their own right:
 
 * `observe` returns attributes **and** health together, so one client and one handshake serve both.
-* `prepare_access` works from credstore references alone. It reads `credstore_ref`, never
+* `prepare_run_access` works from credstore references alone. It reads `credstore_ref`, never
   `resolved`, so dispatch never materialises a plaintext credential in its own process. A plugin
   that needs secret bytes to build a mount has the wrong mount: `MountSpec::Secret` names the
   reference and lets the executor resolve it.

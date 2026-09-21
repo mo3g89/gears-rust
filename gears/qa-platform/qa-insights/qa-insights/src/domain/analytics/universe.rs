@@ -141,60 +141,84 @@ pub const NOT_RUN: &str = "NOT_RUN";
 pub const UNKNOWN_BUILD: &str = "unknown";
 
 /// The alias index: every name a universe file answers to, and the file it
-/// resolves to — or `None` where two files claimed the same name.
+/// resolves to — or `None` where two files **of the same repository** claimed
+/// the same name.
 ///
 /// Legacy's `HashMap<String, Option<String>>` (`analytics.rs:1714`), behind a
-/// newtype for two reasons. `Option<Option<String>>` is what a bare
-/// `HashMap::get` on it yields, and the difference between the outer `None`
-/// ("nothing registered that name") and the inner one ("two files did") is the
-/// difference between a typo and a *poisoned* alias — a distinction worth a name
-/// rather than a nesting level. And a `pub fn` taking a bare `HashMap` trips
-/// `clippy::implicit_hasher`, which would push a `<S: BuildHasher>` parameter
-/// onto every signature in this module for no caller's benefit.
+/// newtype for two reasons, plus a repository scope legacy has no need of.
+/// `Option<Option<String>>` is what a bare `HashMap::get` on it yields, and the
+/// difference between the outer `None` ("nothing registered that name") and
+/// the inner one ("two files did") is the difference between a typo and a
+/// *poisoned* alias — a distinction worth a name rather than a nesting level.
+/// And a `pub fn` taking a bare `HashMap` trips `clippy::implicit_hasher`,
+/// which would push a `<S: BuildHasher>` parameter onto every signature in
+/// this module for no caller's benefit.
+///
+/// **The key is `(repo_id, alias)`, not `alias` alone.** A product owns
+/// several repositories and `(tenant_id, product_id)` is not a unique index,
+/// so two repositories can each hold `tests/test_smoke.py` and therefore
+/// register the identical alias string. Without the repository half of the
+/// key, the second repository's registration would hit
+/// [`Self::add`]'s "same file, same alias" no-op (the two entries' `test_file`
+/// strings are equal even though the files are not the same file), and the
+/// alias would resolve to one repository's path for a row that belongs to the
+/// other. Scoping the key by `repo_id` keeps the two repositories' namespaces
+/// apart, which is what lets a poisoned alias in one repository still resolve
+/// cleanly in another.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct AliasMap(HashMap<String, Option<String>>);
+pub struct AliasMap(HashMap<(Uuid, String), Option<String>>);
 
 impl AliasMap {
-    /// Claim `alias` for `test_file`, poisoning it if another file already has it.
+    /// Claim `alias` for `test_file` within `repo_id`, poisoning it if another
+    /// file of the same repository already has it.
     ///
-    /// `add_alias` (`analytics.rs:1766-1780`) verbatim, including both behaviours
-    /// that look like oversights and are not:
+    /// `add_alias` (`analytics.rs:1766-1780`), with the repository added to the
+    /// key (see [`AliasMap`]'s header) and both of legacy's behaviours that
+    /// look like oversights and are not, preserved:
     ///
     /// * **A blank alias is dropped, not stored** (`:1767-1769`). Without that
     ///   guard the first entry with a punctuation-only title would claim the
     ///   empty alias, the second would poison it, and every row whose
     ///   `test_name` normalizes to nothing would resolve to whichever file got
     ///   there first.
-    /// * **Poisoning is permanent.** The `Some(Some(existing)) if existing ==
-    ///   test_file` arm cannot match an already-poisoned `Some(None)`, so a third
-    ///   claimant re-poisons rather than reclaiming. Attributing a result to one
-    ///   of two candidate tests is worse than attributing it to neither: the
-    ///   wrong test then renders a status it never produced.
-    fn add(&mut self, alias: String, test_file: &str) {
+    /// * **Poisoning is permanent, and confined to the repository that caused
+    ///   it.** The `Some(Some(existing)) if existing == test_file` arm cannot
+    ///   match an already-poisoned `Some(None)`, so a third claimant within the
+    ///   same repository re-poisons rather than reclaiming. Attributing a
+    ///   result to one of two candidate tests is worse than attributing it to
+    ///   neither: the wrong test then renders a status it never produced. A
+    ///   collision in one repository does not touch another repository's entry
+    ///   for the same alias string, because the two live under different keys.
+    fn add(&mut self, repo_id: Uuid, alias: String, test_file: &str) {
         if alias.is_empty() {
             return;
         }
 
-        match self.0.get(&alias) {
+        match self.0.get(&(repo_id, alias.clone())) {
             None => {
-                self.0.insert(alias, Some(test_file.to_owned()));
+                self.0.insert((repo_id, alias), Some(test_file.to_owned()));
             }
-            // The same file claiming the same alias twice is a no-op, which is
-            // routine: legacy keys its universe on `(source, repo_id, test_file)`
-            // (`:899-903`), so one file listed by two plans is two entries with
-            // the same path, and the four alias sources overlap within one entry
-            // as well.
+            // The same file claiming the same alias twice, within one
+            // repository, is a no-op — routine, because `walk_repo_universe`
+            // (qa-catalog) merges a file listed by two plans of the **same**
+            // repository into one universe entry before this ever runs, and
+            // the four alias sources overlap within one entry as well. Two
+            // *different* repositories sharing both an alias and a path
+            // string are two different keys here, so they never reach this
+            // arm at all.
             Some(Some(existing)) if existing == test_file => {}
             _ => {
-                self.0.insert(alias, None);
+                self.0.insert((repo_id, alias), None);
             }
         }
     }
 
-    /// The file `alias` resolves to: `None` if nothing registered it *or* if it
-    /// was poisoned. `analytics.rs:1763`, `aliases.get(&key).cloned().flatten()`.
-    fn resolve(&self, alias: &str) -> Option<String> {
-        self.0.get(alias).cloned().flatten()
+    /// The file `alias` resolves to within `repo_id`: `None` if nothing
+    /// registered it *or* if it was poisoned. `analytics.rs:1763`,
+    /// `aliases.get(&key).cloned().flatten()`, with `repo_id` joined onto the
+    /// key.
+    fn resolve(&self, repo_id: Uuid, alias: &str) -> Option<String> {
+        self.0.get(&(repo_id, alias.to_owned())).cloned().flatten()
     }
 }
 
@@ -355,13 +379,19 @@ pub fn normalize_test_path(path: &str) -> String {
 /// reports a test by its human title has no other way in.
 ///
 /// Order does not matter to the result: same-file duplicates are no-ops and
-/// cross-file collisions poison symmetrically.
+/// cross-file collisions poison symmetrically — both **within one
+/// repository**; see [`AliasMap`]'s header for why every alias here is
+/// registered under `test.repo_id` rather than bare.
 #[must_use]
 pub fn build_alias_map(universe: &[UniverseTest]) -> AliasMap {
     let mut aliases = AliasMap::default();
 
     for test in universe {
-        aliases.add(normalize_alias(&test.test_file), &test.test_file);
+        aliases.add(
+            test.repo_id,
+            normalize_alias(&test.test_file),
+            &test.test_file,
+        );
 
         // The stem is taken from the path as stored, exactly as legacy takes it
         // (`:1724-1730`) — `UniverseTest::test_file` is already
@@ -371,13 +401,17 @@ pub fn build_alias_map(universe: &[UniverseTest]) -> AliasMap {
             .file_stem()
             .and_then(std::ffi::OsStr::to_str)
         {
-            aliases.add(normalize_alias(stem), &test.test_file);
+            aliases.add(test.repo_id, normalize_alias(stem), &test.test_file);
         }
 
-        aliases.add(normalize_alias(&test.test_name), &test.test_file);
+        aliases.add(
+            test.repo_id,
+            normalize_alias(&test.test_name),
+            &test.test_file,
+        );
 
         if let Some(title) = test.title_alias.as_deref() {
-            aliases.add(normalize_alias(title), &test.test_file);
+            aliases.add(test.repo_id, normalize_alias(title), &test.test_file);
         }
     }
 
@@ -403,8 +437,15 @@ pub fn build_alias_map(universe: &[UniverseTest]) -> AliasMap {
 /// path is in the universe. An explicit path resolves to itself whether the
 /// universe holds it or not, which is why [`resolve_rows`] applies the membership
 /// filter separately, exactly as legacy does at `:1022`.
+///
+/// `repo_id` is the row's own — [`ExecRow::repo_id`](super::ExecRow::repo_id) —
+/// and it scopes the alias fallback to that repository's namespace, per
+/// [`AliasMap`]'s header. It plays no part in the first branch: an explicit
+/// path is returned as-is regardless of repository, exactly as it was before
+/// this parameter existed.
 #[must_use]
 pub fn resolve_row_test_file(
+    repo_id: Uuid,
     test_file: Option<&str>,
     test_name: &str,
     aliases: &AliasMap,
@@ -416,7 +457,7 @@ pub fn resolve_row_test_file(
         }
     }
 
-    aliases.resolve(&normalize_alias(test_name))
+    aliases.resolve(repo_id, &normalize_alias(test_name))
 }
 
 /// Attribute every row to a universe file, dropping the ones that cannot be.
@@ -432,6 +473,13 @@ pub fn resolve_row_test_file(
 ///
 /// Takes the rows by value because it rewrites one field of each and returns the
 /// survivors; borrowing would mean cloning every row that lives.
+///
+/// **The membership check is `(repo_id, test_file)`, not `test_file` alone —
+/// and so is the alias resolution a row falls back to.** A row's `repo_id`
+/// already came off the same predicate that scoped the query
+/// ([`ExecRow::repo_id`](super::ExecRow::repo_id)'s header), so a row from one
+/// repository can never resolve to, or survive membership against, another
+/// repository's file of the same name.
 #[must_use]
 pub fn resolve_rows(universe: &[UniverseTest], rows: Vec<ExecRow>) -> Vec<ExecRow> {
     let aliases = build_alias_map(universe);
@@ -440,11 +488,12 @@ pub fn resolve_rows(universe: &[UniverseTest], rows: Vec<ExecRow>) -> Vec<ExecRo
     rows.into_iter()
         .filter_map(|mut row| {
             let resolved = resolve_row_test_file(
+                row.repo_id,
                 Some(row.test_file.as_str()),
                 row.test_name.as_str(),
                 &aliases,
             )
-            .filter(|file| universe_files.contains(file.as_str()))?;
+            .filter(|file| universe_files.contains(&(row.repo_id, file.as_str())))?;
             row.test_file = resolved;
             Some(row)
         })
@@ -553,16 +602,25 @@ pub fn collapse_build(build: Option<&str>) -> String {
 ///
 /// Expects [`resolve_rows`]' output. The membership check is re-applied rather
 /// than assumed — see this module's header.
+///
+/// **Keyed on `(repo_id, test_file)`, not `test_file` alone.** A product owns
+/// several repositories and `(tenant_id, product_id)` is not a unique index,
+/// so two repositories can each hold `tests/test_smoke.py`; keying on the path
+/// alone would let the second repository's row win or lose the first-wins race
+/// against the first's, and whichever won would report its status, run id,
+/// build and environment for a test it never ran. See
+/// [`ExecRow::repo_id`](super::ExecRow::repo_id) for where the key travels
+/// from.
 #[must_use]
 pub fn build_latest_map(
     universe: &[UniverseTest],
     rows: &[ExecRow],
-) -> HashMap<String, LatestInfo> {
+) -> HashMap<(Uuid, String), LatestInfo> {
     let universe_files = file_set(universe);
-    let mut latest: HashMap<String, LatestInfo> = HashMap::new();
+    let mut latest: HashMap<(Uuid, String), LatestInfo> = HashMap::new();
 
     for row in rows {
-        if !universe_files.contains(row.test_file.as_str()) {
+        if !universe_files.contains(&(row.repo_id, row.test_file.as_str())) {
             continue;
         }
 
@@ -571,7 +629,7 @@ pub fn build_latest_map(
         // (`clippy::map_entry`): the closure does not run when the key is
         // already there.
         latest
-            .entry(row.test_file.clone())
+            .entry((row.repo_id, row.test_file.clone()))
             .or_insert_with(|| LatestInfo {
                 status_bucket: bucketize_status(row.status.as_str()),
                 environment_id: row.environment_id,
@@ -660,14 +718,18 @@ pub fn expected_cases(universe: &[UniverseTest], collect_counts: &[CollectCount]
         .sum()
 }
 
-/// The universe's file paths, for membership tests.
+/// The universe's `(repo_id, test_file)` pairs, for membership tests.
 ///
 /// Borrowed rather than owned: both callers hold the universe for their whole
 /// body, and legacy builds the same set per call (`:950-951`, `:1184-1187`).
-fn file_set(universe: &[UniverseTest]) -> HashSet<&str> {
+///
+/// **Keyed on the pair, not the path.** Two repositories can list the same
+/// path, and a set keyed on the path alone would consider either one's row a
+/// member of the other's universe entry.
+fn file_set(universe: &[UniverseTest]) -> HashSet<(Uuid, &str)> {
     universe
         .iter()
-        .map(|test| test.test_file.as_str())
+        .map(|test| (test.repo_id, test.test_file.as_str()))
         .collect()
 }
 

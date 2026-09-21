@@ -45,7 +45,7 @@ pub(super) fn validate_name(field: &str, value: &str) -> Result<(), DomainError>
 
 /// Maximum length, in bytes, of a `plugin_instance_id` — the width of the
 /// `qa_products.plugin_instance_id` column
-/// (`m20260903_000003_product_plugin_instance`).
+/// (`m20260903_000003_product_plugin_instance` (folded into `migrations::m20260812_000002_initial` by the docs squash)).
 ///
 /// Bounded here so an over-long id is a named 400 from this gear rather than
 /// a `DbErr` from the driver, which is the same argument qa-environments'

@@ -7,7 +7,7 @@
 //! filter could replace the scope.
 
 use async_trait::async_trait;
-use qa_runs_sdk::{Run, RunResult, RunState};
+use qa_runs_sdk::{FinishedRunCursor, Run, RunResult, RunState};
 use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
@@ -87,18 +87,33 @@ fn odata_list_query(scope: &AccessScope) -> toolkit_db::secure::SecureSelect<Run
 
 /// The window [`RunsRepository::list_finished_since`] reads.
 ///
-/// Takes its `since`/`limit` so the guard renders the real predicate set rather
-/// than a stripped one — a join is usually added beside a filter, not instead
-/// of it.
+/// Takes its `cursor`/`limit` so the guard renders the real predicate set
+/// rather than a stripped one — a join is usually added beside a filter, not
+/// instead of it.
 fn finished_since_query(
     scope: &AccessScope,
-    since: OffsetDateTime,
+    cursor: FinishedRunCursor,
     limit: u32,
 ) -> toolkit_db::secure::SecureSelect<RunEntity, Scoped> {
+    // The lower bound, in the same total order the two `order_by`s below
+    // impose. A cursor with no id is the first page and keeps the inclusive
+    // instant bound the trait contract defends; one with an id is a resume and
+    // is strict on the whole key, which is what lets a caller step over a tie
+    // group wider than its own page. See the trait doc.
+    let since = cursor.at();
+    let lower = match cursor.after_id() {
+        None => Condition::all().add(RunColumn::FinishedAt.gte(since)),
+        Some(id) => Condition::any().add(RunColumn::FinishedAt.gt(since)).add(
+            Condition::all()
+                .add(RunColumn::FinishedAt.eq(since))
+                .add(RunColumn::Id.gt(id)),
+        ),
+    };
+
     RunEntity::find()
         .filter(
             Condition::all()
-                .add(RunColumn::FinishedAt.gte(since))
+                .add(lower)
                 // Redundant against the comparison above under SQL's
                 // three-valued logic, and kept anyway: the trait contract
                 // says "not yet terminal is never returned", and a reader
@@ -114,6 +129,10 @@ fn finished_since_query(
         // forever, and an unbroken tie between two runs that finished in
         // the same tick would let the watermark step over whichever one the
         // plan put second. See the trait doc - both halves are contract.
+        //
+        // This pair is also exactly the key `FinishedRunCursor` resumes on,
+        // which is what makes the bound above sound rather than merely plausible:
+        // a cursor that did not match the sort order would skip rows.
         .order_by(RunColumn::FinishedAt, sea_orm::Order::Asc)
         .order_by(RunColumn::Id, sea_orm::Order::Asc)
         .limit(sweep_limit(limit))
@@ -287,6 +306,8 @@ fn run_active_model(tenant_id: Uuid, new: &NewRun) -> Result<RunAM, DomainError>
         failed: ActiveValue::Set(0),
         skipped: ActiveValue::Set(0),
         in_progress: ActiveValue::Set(0),
+        xfail: ActiveValue::Set(0),
+        xpass: ActiveValue::Set(0),
         total: ActiveValue::Set(0),
         created_at: ActiveValue::Set(now),
         updated_at: ActiveValue::Set(now),
@@ -399,10 +420,10 @@ impl RunsRepository for OrmRunsRepository {
         &self,
         runner: &C,
         scope: &AccessScope,
-        since: OffsetDateTime,
+        cursor: FinishedRunCursor,
         limit: u32,
     ) -> Result<Vec<Run>, DomainError> {
-        let rows = finished_since_query(scope, since, limit)
+        let rows = finished_since_query(scope, cursor, limit)
             .all(runner)
             .await
             .map_err(db_err)?;
@@ -508,6 +529,8 @@ impl RunsRepository for OrmRunsRepository {
         let failed = db_i32_from_i64(delta.failed, "failed")?;
         let skipped = db_i32_from_i64(delta.skipped, "skipped")?;
         let in_progress = db_i32_from_i64(delta.in_progress, "in_progress")?;
+        let xfail = db_i32_from_i64(delta.xfail, "xfail")?;
+        let xpass = db_i32_from_i64(delta.xpass, "xpass")?;
         let total = db_i32_from_i64(delta.total, "total")?;
 
         // `passed = passed + $n`, evaluated by the database. A
@@ -533,6 +556,8 @@ impl RunsRepository for OrmRunsRepository {
                 RunColumn::InProgress,
                 clamped_increment(RunColumn::InProgress, in_progress),
             )
+            .col_expr(RunColumn::Xfail, clamped_increment(RunColumn::Xfail, xfail))
+            .col_expr(RunColumn::Xpass, clamped_increment(RunColumn::Xpass, xpass))
             .col_expr(RunColumn::Total, clamped_increment(RunColumn::Total, total))
             .col_expr(RunColumn::UpdatedAt, Expr::value(OffsetDateTime::now_utc()))
             .exec(runner)
@@ -647,7 +672,7 @@ impl RunsRepository for OrmRunsRepository {
             launch_id: ActiveValue::Set(result.launch_id),
             jira_key: ActiveValue::Set(result.jira_key),
             // The three case-fidelity columns
-            // (`m20260818_000005_case_fidelity`). Named exhaustively rather
+            // (`m20260818_000005_case_fidelity` (folded into `migrations::m20260813_000003_initial` by the docs squash)). Named exhaustively rather
             // than `..Default::default()`, which does compile here —
             // `sea-orm-macros` derives `Default` for every `ActiveModel`. A
             // wildcard would absorb any column a later migration adds *without
@@ -1114,6 +1139,8 @@ mod tests {
                     run.id,
                     RunResultDelta {
                         in_progress: 1,
+                        xfail: 0,
+                        xpass: 0,
                         total: 1,
                         ..RunResultDelta::default()
                     },
@@ -1155,6 +1182,8 @@ mod tests {
                 failed: 0,
                 skipped: 0,
                 in_progress: 1,
+                xfail: 0,
+                xpass: 0,
                 total: 3,
             }
         );
@@ -1833,7 +1862,7 @@ mod tests {
     /// A file-level observation — all three `None` — stored alongside, because
     /// the claim is not only "a non-empty nodeid is written" but "the two
     /// granularities stay distinguishable in one table", which is what
-    /// `m20260818_000005_case_fidelity` gave up a second table for.
+    /// `m20260818_000005_case_fidelity` (folded into `migrations::m20260813_000003_initial` by the docs squash) gave up a second table for.
     /// `TestObservation::nodeid` records that convention and that nothing
     /// enforces it; this pins that the write path at least produces it.
     #[tokio::test]
@@ -2243,7 +2272,12 @@ mod tests {
             .unwrap();
 
         let found = repo
-            .list_finished_since(&conn, &scope(tenant), at(9), 10)
+            .list_finished_since(
+                &conn,
+                &scope(tenant),
+                FinishedRunCursor::starting_at(at(9)),
+                10,
+            )
             .await
             .unwrap();
 
@@ -2319,7 +2353,12 @@ mod tests {
         // in this test's doc instead.
 
         let full = repo
-            .list_finished_since(&conn, &scope(tenant), tick, 10)
+            .list_finished_since(
+                &conn,
+                &scope(tenant),
+                FinishedRunCursor::starting_at(tick),
+                10,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -2329,7 +2368,12 @@ mod tests {
         );
 
         let page = repo
-            .list_finished_since(&conn, &scope(tenant), tick, 3)
+            .list_finished_since(
+                &conn,
+                &scope(tenant),
+                FinishedRunCursor::starting_at(tick),
+                3,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -2337,6 +2381,96 @@ mod tests {
             ascending[..3].to_vec(),
             "and a short page must cut the same total order in the same place, \
              which is the property the watermark rests on",
+        );
+    }
+
+    /// **The keyset bound steps over a tie group wider than the page**, which
+    /// the instant-only bound could not.
+    ///
+    /// Six runs share one `finished_at` and the page holds three. The caller
+    /// reads the first three, resumes after the third by `(instant, id)`, and
+    /// must get the *other* three plus whatever is newer — not the same three
+    /// again, which is what `finished_at >= since` answers and what stranded
+    /// three days of results on the dev stand.
+    ///
+    /// The third call is the one that matters most: it resumes past the whole
+    /// tie group and must reach the run behind it. Without `after_id` that run
+    /// is unreachable at this page size, forever, by any number of passes.
+    #[tokio::test]
+    async fn the_sweep_resumes_strictly_after_the_run_the_cursor_names() {
+        let db = inmem_db().await;
+        let conn = db.conn().unwrap();
+        let tenant = Uuid::new_v4();
+        let repo = OrmRunsRepository;
+
+        let tick = at(10);
+        let mut tied = Vec::new();
+        for n in 0..6 {
+            let run = repo
+                .create(
+                    &conn,
+                    &scope(tenant),
+                    tenant,
+                    sample_new_run(&format!("tied-{n}")),
+                )
+                .await
+                .unwrap();
+            finish_at(&repo, &conn, tenant, run.id, tick).await;
+            tied.push(run.id);
+        }
+        tied.sort_unstable();
+        let later = repo
+            .create(&conn, &scope(tenant), tenant, sample_new_run("later"))
+            .await
+            .unwrap();
+        finish_at(&repo, &conn, tenant, later.id, at(11)).await;
+
+        let first = repo
+            .list_finished_since(
+                &conn,
+                &scope(tenant),
+                FinishedRunCursor::starting_at(tick),
+                3,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first.iter().map(|run| run.id).collect::<Vec<_>>(),
+            tied[..3].to_vec(),
+            "the first page is the id-ascending prefix of the tie group",
+        );
+
+        let second = repo
+            .list_finished_since(
+                &conn,
+                &scope(tenant),
+                FinishedRunCursor::after(tick, tied[2]),
+                3,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second.iter().map(|run| run.id).collect::<Vec<_>>(),
+            tied[3..].to_vec(),
+            "resuming after the third tied run must yield the other three, not the same \
+             three: an instant-only bound answers the same page here and the walk stops \
+             dead",
+        );
+
+        let third = repo
+            .list_finished_since(
+                &conn,
+                &scope(tenant),
+                FinishedRunCursor::after(tick, tied[5]),
+                3,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            third.iter().map(|run| run.id).collect::<Vec<_>>(),
+            vec![later.id],
+            "and resuming after the last tied run must reach what finished afterwards, \
+             which is the data the old bound stranded",
         );
     }
 
@@ -2362,7 +2496,7 @@ mod tests {
         finish_at(&repo, &conn, b, theirs.id, at(10)).await;
 
         let sweep = repo
-            .list_finished_since(&conn, &scope(a), at(1), 100)
+            .list_finished_since(&conn, &scope(a), FinishedRunCursor::starting_at(at(1)), 100)
             .await
             .unwrap();
         assert_eq!(
@@ -2372,7 +2506,7 @@ mod tests {
         );
 
         assert!(
-            repo.list_finished_since(&conn, &scope(b), at(1), 100)
+            repo.list_finished_since(&conn, &scope(b), FinishedRunCursor::starting_at(at(1)), 100)
                 .await
                 .unwrap()
                 .iter()
@@ -2631,7 +2765,11 @@ mod tests {
             ("list_page (OData)", render(odata_list_query(&scope))),
             (
                 "list_finished_since",
-                render(finished_since_query(&scope, now, 50)),
+                render(finished_since_query(
+                    &scope,
+                    FinishedRunCursor::after(now, Uuid::new_v4()),
+                    50,
+                )),
             ),
             (
                 "list_timeout_candidates",

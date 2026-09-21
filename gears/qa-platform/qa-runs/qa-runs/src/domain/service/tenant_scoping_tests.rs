@@ -33,7 +33,7 @@
 use std::sync::Arc;
 
 use crate::domain::service::DbProvider;
-use qa_runs_sdk::{Exclusivity, LaunchRequest, RunSource, RunState, RunTarget};
+use qa_runs_sdk::{Exclusivity, FinishedRunCursor, LaunchRequest, RunSource, RunState, RunTarget};
 use toolkit_db::DBProvider;
 use toolkit_odata::ODataQuery;
 use uuid::Uuid;
@@ -454,7 +454,11 @@ async fn the_reconciler_reads_are_invisible_to_another_tenant() {
 
     // The sweep: each tenant sees its own run and only its own.
     let swept = client
-        .list_runs_finished_since(&ctx(OWNER_TENANT), WATERMARK, 100)
+        .list_runs_finished_since(
+            &ctx(OWNER_TENANT),
+            FinishedRunCursor::starting_at(WATERMARK),
+            100,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -465,7 +469,11 @@ async fn the_reconciler_reads_are_invisible_to_another_tenant() {
     );
     assert!(
         client
-            .list_runs_finished_since(&ctx(OTHER_TENANT), WATERMARK, 100)
+            .list_runs_finished_since(
+                &ctx(OTHER_TENANT),
+                FinishedRunCursor::starting_at(WATERMARK),
+                100
+            )
             .await
             .unwrap()
             .iter()

@@ -1,6 +1,9 @@
 //! qa-catalog observability metric catalog.
 //!
-//! One path in this gear is measured here: **product plugin resolution** —
+//! Two paths in this gear are measured here. The second is the **anonymous
+//! bundle-download route** ([`QA_CATALOG_BUNDLE_DOWNLOAD`]), whose signature
+//! refusals an operator needs told apart and a caller must not be able to
+//! tell apart. The first is **product plugin resolution** —
 //! `domain::service::QaProductRegistry`'s `plugin_for`, the one hop that turns
 //! a product id into the plugin object that owns that product's behaviour.
 //! Every observation qa-environments performs and every dispatch decision
@@ -88,6 +91,32 @@ pub const QA_CATALOG_PLUGIN_RESOLUTION: &str = "qa_catalog_plugin_resolution_tot
 pub const QA_CATALOG_PLUGIN_RESOLUTION_DURATION: &str =
     "qa_catalog_plugin_resolution_duration_seconds";
 
+/// One `GET /qa/v1/test-bundles/{id}?sig=...` — the anonymous bundle-download
+/// route — counted by how it ended.
+///
+/// **This family is an access-control signal, not a traffic signal.** The
+/// route's `sig` query parameter is its entire access control (it is
+/// registered `.anonymous().exposed()`, because its caller is a workflow pod
+/// with no user to borrow a session from), and the three ways a signature can
+/// be refused mean three different things to an operator while deliberately
+/// meaning one thing — a 403 — to the caller. This counter is the only place
+/// that distinction is allowed to exist; see
+/// `domain::service::bundles::SignatureRefusal` for why the response must not
+/// carry it.
+///
+/// **No duration histogram, on purpose.** The work under the label is one
+/// HKDF-Extract, one HKDF-Expand and one HMAC-SHA256 over 32 bytes — single-digit
+/// microseconds — in front of a handler that then reads a row and streams
+/// megabytes. A quantile over the verification would measure the streaming, and
+/// a quantile over the streaming is a question about bundle size, which
+/// `qa_test_bundles.size_bytes` answers exactly rather than by estimate. The
+/// catalog's `each_duration_family_has_a_counter_of_the_same_stem` rule runs
+/// one way only, so a counter with no histogram is a deliberate shape here and
+/// not an omission the tests would have caught.
+///
+/// Labelled by [`crate::domain::ports::metrics::BundleDownloadOutcome`].
+pub const QA_CATALOG_BUNDLE_DOWNLOAD: &str = "qa_catalog_bundle_download_total";
+
 /// Every counter family this gear exports.
 ///
 /// Declared rather than derived, and therefore its own oracle. What makes it
@@ -110,7 +139,7 @@ pub const QA_CATALOG_PLUGIN_RESOLUTION_DURATION: &str =
               pub(crate) in this gear, so a constant with no production reader is \
               unreachable and deleting it would delete the naming gate"
 )]
-pub const COUNTERS: &[&str] = &[QA_CATALOG_PLUGIN_RESOLUTION];
+pub const COUNTERS: &[&str] = &[QA_CATALOG_PLUGIN_RESOLUTION, QA_CATALOG_BUNDLE_DOWNLOAD];
 
 /// Every duration histogram this gear exports. See [`COUNTERS`] for why the
 /// list is declared, and for why it carries a dead-code allowance.

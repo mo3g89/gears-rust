@@ -28,12 +28,13 @@ Version, build and base URL land in the dedicated columns; the rest of the topol
 
 ## Run access
 
-`prepare_access` returns:
+`prepare_run_access` returns:
 
 * a `MountSpec::Secret` naming the kubeconfig's credstore reference — the plugin never reads the
   bytes,
 * environment bindings for the namespace and base URL, taken from the observation,
-* the service account the workflow runs as.
+* `service_account: None` — the runner authenticates to the cluster with the mounted kubeconfig,
+  not a pod identity, so `RunAccess` carries the field but this plugin never populates it.
 
 `qa-connector-k8s`'s secret writer is what materialises the referenced secret into the cluster the
 runner executes in.

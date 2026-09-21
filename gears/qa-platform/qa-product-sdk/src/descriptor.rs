@@ -1,10 +1,13 @@
 //! What a plugin *declares*: the shape of an environment's credentials and of
 //! what observing it yields.
 //!
-//! The UI renders forms, tables and detail pages from these descriptors
-//! (spec §8), so a plugin adds a field without any UI change. Two invariants
-//! are checked at registration rather than at render time, because both
-//! failures are silent when they happen late — see [`validate_schemas`].
+//! The UI renders forms, tables and detail pages from these descriptors (see
+//! `gears/qa-platform/docs/features/product-plugins.md`'s "No UI code is
+//! written" line under "Adding a product"; `PRODUCT-PLUGINS-DESIGN.md` §8,
+//! cited here before the docs squash, no longer exists), so a plugin adds a
+//! field without any UI change. Two invariants are checked at registration
+//! rather than at render time, because both failures are silent when they
+//! happen late — see [`validate_schemas`].
 
 use serde::{Deserialize, Serialize};
 
@@ -38,11 +41,16 @@ impl FieldKind {
 /// This is what lets observation be fully plugin-defined without costing
 /// `qa-insights` a stable `version`/`build` to group by: the plugin returns an
 /// opaque attribute map, and the platform copies the role-claimed attributes
-/// into real, indexable columns on every write (spec **D10**).
+/// into real, indexable columns on every write (`observed_version`,
+/// `observed_build`, `observed_base_url` — see [`crate::observation::project_roles`];
+/// this was decision **D10** in `PRODUCT-PLUGINS-DESIGN.md`, which no longer
+/// exists).
 ///
-/// # Deviation from spec §5.1: there is no `Health` role
+/// # There is no `Health` role
 ///
-/// §5.1 lists five roles; four are implemented. `Health` is deliberately
+/// A predecessor of this enum (`PRODUCT-PLUGINS-DESIGN.md` §5.1, no longer
+/// readable) listed five roles; only the four below were ever implemented.
+/// `Health` is deliberately
 /// absent: health does not arrive through the attribute map at all. It has
 /// its own channel — [`crate::observation::HealthOutcome`], returned
 /// alongside the attributes by one `observe` call — because the two fail

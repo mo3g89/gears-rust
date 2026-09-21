@@ -70,7 +70,11 @@ pub(crate) fn register_routes(
 
 /// The route definitions alone, with nothing bound to them. See this module's
 /// header for why this is a separate function.
-pub(super) fn register_operations(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
+///
+/// Public because the `qa-platform-openapi` generator renders
+/// `docs/openapi.json` from this crate rather than from a running gateway. It
+/// binds nothing, so it cannot be mistaken for a way to mount the gear.
+pub fn register_operations(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = admin::register_admin_routes(router, openapi);
     router = collections::register_collection_routes(router, openapi);
     router = dashboard::register_dashboard_routes(router, openapi);

@@ -54,6 +54,133 @@ pub const RUN_ID_LABEL: &str = "qa-runs/run-id";
 /// annotation set (`run_executor.rs:90-96`).
 pub const NODE_ANNOTATION: &str = "qa-runs/node";
 
+/// Pod label marking every runner pod as one that executes tenant-written
+/// test code, so the cluster's `NetworkPolicy` can select on it.
+///
+/// # The contract this label is
+///
+/// The runner pod can otherwise reach the gears' own APIs, Postgres,
+/// Keycloak and another tenant's running pod over the pod network — nothing
+/// in `deploy/` stopped it. The fix is one `NetworkPolicy`
+/// (`deploy/helm/qa-platform/templates/runner-networkpolicy.yaml`) whose
+/// `podSelector` selects on this exact key and value. **A `NetworkPolicy`
+/// whose selector matches nothing fails open and looks installed** — it
+/// renders, `helm lint`s clean, and shows up in `kubectl get netpol`, while
+/// protecting nothing — so this pair is asserted from *both* sides rather
+/// than trusted to stay in sync by inspection:
+///   - this module's `every_template_carries_the_network_isolation_label`
+///     test, on the Rust side;
+///   - `deploy/helm/tests/check_runner_networkpolicy.py`, on the chart side,
+///     which reads the rendered policy's `podSelector` **and** greps this
+///     file for these two constants, and fails if the two ever disagree.
+///
+/// Editing the literal value in the chart template without editing this
+/// constant (or the reverse) fails that guard rather than silently
+/// installing a policy that selects nothing.
+///
+/// # How it reaches the pod
+///
+/// The same route as [`NODE_ANNOTATION`]: [`template`] writes this into a
+/// container template's `metadata.labels`, and Argo copies a template's
+/// `metadata` (labels *and* annotations, not only the latter) onto the pod
+/// it creates to run that template. A label set at the *workflow* level
+/// would not do this — it would decorate the `Workflow` object
+/// (`metadata.labels`, alongside [`APP_LABEL`] and [`RUN_ID_LABEL`] in
+/// [`build`]) but never reach the pod a `NetworkPolicy` actually selects on.
+pub const NETWORK_ISOLATION_LABEL: &str = "qa-platform/network-isolated";
+/// [`NETWORK_ISOLATION_LABEL`]'s value. A literal `"true"`, not derived from
+/// anything run-specific: every runner pod, regardless of run or tenant,
+/// carries the same pair, because the `NetworkPolicy` this label feeds is
+/// rendered once at chart-install time and cannot vary per run.
+pub const NETWORK_ISOLATION_LABEL_VALUE: &str = "true";
+
+/// Pod-internal volume name for the `/tmp` `emptyDir` every runner container
+/// mounts.
+///
+/// Not derived from [`mount_volume_name`], which numbers *secret* mounts by
+/// their index in `RunAccess::mounts` — this volume exists whether or not a
+/// run declares any, so it needs a name no such index can collide with. See
+/// [`build`]'s own doc on why the volume exists at all.
+const TMP_VOLUME_NAME: &str = "tmp";
+
+/// Pod-internal volume name for the `/work` `emptyDir` every runner
+/// container mounts.
+///
+/// Fix round 4 of the 2026-09-17 network-isolation task: `runner.Dockerfile`
+/// creates `/work` as root with default ownership and declares no `USER`
+/// (`RUN mkdir -p /work`), and `build`'s own pod `securityContext` runs the
+/// container as `cfg.run_as_user` — a non-root, non-zero uid an earlier
+/// round of this very task measured against (`the_pod_is_unprivileged_but_
+/// keeps_its_service_account_token`, below). That uid cannot write into a
+/// root-owned `755` directory, and `/work` is exactly where
+/// `entrypoint.sh`'s `QA_RUNNER_WORKDIR` unpacks the bundle and where pytest
+/// runs — measured on a live cluster as `PermissionError: [Errno 13]
+/// Permission denied: '/work/.gitignore'`, after the bundle had already
+/// downloaded successfully (rule 5's Keycloak fix, and rule 4's API-server
+/// fix, both working correctly by that point).
+///
+/// The fix is the same shape [`TMP_VOLUME_NAME`] already is, for the same
+/// reason: an `emptyDir` the kubelet creates owned by the pod's own
+/// `fsGroup`/uid rather than a path baked into the image as root. **Not** a
+/// Dockerfile change — making `/work` world-writable inside an image that
+/// unpacks and executes tenant-written test code is the wrong direction, and
+/// this task's own hardening (`runAsNonRoot`, dropped capabilities) exists
+/// to keep that image read-only where nothing needs it writable. The volume
+/// starts empty, which is correct: `fetch_bundle.py` is what populates it,
+/// after the mount exists.
+const WORK_VOLUME_NAME: &str = "work";
+
+/// A writable `$HOME` for the runner container — fix round 5 of the
+/// 2026-09-17 network-isolation task, measured on a live cluster one layer
+/// past [`WORK_VOLUME_NAME`]'s failure: with `/work` writable, the bundle
+/// unpacked and `entrypoint.sh` reached `pip install -r requirements.txt`,
+/// which then failed with `OSError: [Errno 13] Permission denied:
+/// '/nonexistent'`.
+///
+/// `runner.Dockerfile` is `FROM python:3.12-slim` with no `USER` of its own,
+/// so it is built to run as root; its `nobody` account (uid 65534, the same
+/// uid `cfg.run_as_user` hardens the pod to) has `/nonexistent` as `$HOME` on
+/// Debian, which does not exist. pip cannot write to its own install prefix
+/// (`/usr/local`, root-owned) as a non-root user, so it falls back to a
+/// per-user install under `$HOME/.local` — and a `$HOME` that does not exist
+/// makes that fallback fail too, taking every requirement in the bundle with
+/// it. Hardening the uid without giving it a writable home breaks the first
+/// tool that wants one; nothing about `pip` specifically is the cause.
+///
+/// The fix reuses [`TMP_VOLUME_NAME`]'s mount rather than adding a third
+/// volume: `/tmp` is already a writable `emptyDir` every runner container
+/// mounts, and a `$HOME` needs nothing else.
+const HOME_VALUE: &str = "/tmp";
+
+/// `$PATH`, extended with the per-user install location `$HOME`'s
+/// `.local/bin` a non-root `pip install` (see [`HOME_VALUE`]) falls back to.
+/// pytest itself is invoked as `python3 -m pytest` (`entrypoint.sh`), so
+/// nothing in this image's own test-running path needs a console script on
+/// `PATH` — but the bundle's `requirements.txt` is tenant-supplied, and a
+/// suite that shells out to a console script one of its own dependencies
+/// installs would silently find it importable but not runnable without
+/// this: pip warns, on exactly this fallback, that `$HOME/.local/bin` is
+/// "not on PATH".
+///
+/// **A hidden coupling, and named as one** — this file's established term for
+/// one, and now its only remaining instance: the other was `bundle_id()`,
+/// which recovered a bundle's id by parsing `bundle_ref`'s basename and has
+/// been deleted in favour of [`ExecutionNode::bundle_id`]. Here, Kubernetes'
+/// `$(VAR)` substitution in a
+/// container's `env` only resolves against *other entries this same list
+/// declares*, never against a value the image's own `Dockerfile` sets — so
+/// naming `PATH` here at all means replacing it outright, and the literal
+/// tail below is `python:3.12-slim`'s own default (measured directly,
+/// `docker run --rm python:3.12-slim printenv PATH`, since
+/// `runner.Dockerfile` sets no `ENV PATH` of its own and so never overrides
+/// the base image's). If that base image's default `PATH` ever changes —
+/// a different Debian release, a different Python image entirely — this
+/// constant has to change with it, silently otherwise: `kubectl`, `helm`
+/// and `istioctl` all live in `/usr/local/bin`, on this literal path, not
+/// found any other way.
+const PATH_VALUE: &str =
+    "$(HOME)/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 /// The runner control variable carrying a node's file list
 /// (`argo.rs:436`).
 const TEST_FILES_VAR: &str = "TEST_FILES";
@@ -66,28 +193,31 @@ const TEST_FILES_VAR: &str = "TEST_FILES";
 /// the adapter having to guess a URL.
 const TEST_BUNDLE_REF_VAR: &str = "TEST_BUNDLE_REF";
 /// The URL form, when [`ArgoExecutorConfig::bundle_base_url`] makes one
-/// derivable (`argo.rs:40`).
+/// derivable (`argo.rs:40`) — **including the `?sig=` that authorises it**.
+///
+/// # The three variables that used to sit beside this one are gone
+///
+/// `TEST_BUNDLE_TOKEN_URL`, `TEST_BUNDLE_CLIENT_ID` and
+/// `TEST_BUNDLE_CLIENT_SECRET` were emitted here so the runner could perform a
+/// `client_credentials` exchange **inside the pod** and call qa-catalog's
+/// then-`.authenticated()` bundle route. They are deleted, and the deletion is
+/// the point of the change that added `?sig=`:
+///
+/// * That client secret was deployment-wide, unexpiring, `fullScopeAllowed`
+///   and hardcoded to one tenant — and it sat in the environment of a process
+///   tree whose whole job is running **tenant-authored pytest**. Any of that
+///   code could read it, mint a token and call every `.authenticated()` route
+///   in all four gears. The runner `NetworkPolicy` did not mitigate it: it
+///   allow-listed both destinations the credential needed.
+/// * Because the `tenant_id` claim was hardcoded, every tenant but the seeded
+///   one got a 404 on its own bundles.
+///
+/// What replaces them is [`ExecutionNode::bundle_token`] — an HMAC tag
+/// qa-catalog minted over `(bundle_id, tenant_id)`, carried in this URL's
+/// query string. **This value is echoed into the pod log and rendered in the
+/// run view**, so `deploy/runner/entrypoint.sh` and `fetch_bundle.py` both
+/// strip the query string before printing it.
 const TEST_BUNDLE_URL_VAR: &str = "TEST_BUNDLE_URL";
-
-/// Token endpoint the runner posts a `client_credentials` grant to, so it can
-/// present a bearer token on [`TEST_BUNDLE_URL_VAR`].
-///
-/// Not a source-system variable: there the bundle route had no auth middleware
-/// at all (`manager/src/routes/mod.rs:156-158`). Emitted only when
-/// [`crate::config::ArgoExecutorConfig::bundle_auth`] is configured.
-const TEST_BUNDLE_TOKEN_URL_VAR: &str = "TEST_BUNDLE_TOKEN_URL";
-/// The `client_id` for that grant — a public identifier, so a literal.
-const TEST_BUNDLE_CLIENT_ID_VAR: &str = "TEST_BUNDLE_CLIENT_ID";
-/// The client secret for that grant, **always** a `secretKeyRef` and never a
-/// literal.
-///
-/// `optional` is deliberately absent (Kubernetes defaults it to `false`),
-/// unlike the `EnvSource::Secret` arm above where the port makes
-/// non-resolution contractual (`run_executor.rs:63-66`). A pod that starts
-/// without this variable cannot download any test content, and the most likely
-/// way that surfaces is an empty pytest run reported as a pass. Failing the pod
-/// at `CreateContainerConfigError` names the missing `Secret` instead.
-const TEST_BUNDLE_CLIENT_SECRET_VAR: &str = "TEST_BUNDLE_CLIENT_SECRET";
 
 /// A configured string, or `None` when it is absent or only whitespace.
 ///
@@ -212,20 +342,6 @@ pub fn reject_unrenderable_mounts(spec: &RunSpec) -> Result<(), DomainError> {
     Ok(())
 }
 
-/// The bundle id qa-catalog's route takes, recovered from a `storage_ref`.
-///
-/// `LocalFsBundleStore` writes blobs as `<uuid>.tar.gz`
-/// (`qa-catalog/.../infra/bundle_store/local_fs.rs:19-21`), so the basename
-/// minus its extensions is the id. **A hidden coupling, and named as one**: a
-/// deployment that swapped in a different `BundleStore` would break this
-/// silently. The right fix is for the spec to carry the id, which is a change
-/// to `domain/` and therefore not this adapter's to make.
-fn bundle_id(bundle_ref: &str) -> Option<&str> {
-    let basename = bundle_ref.rsplit('/').next()?;
-    let id = basename.split('.').next()?;
-    if id.is_empty() { None } else { Some(id) }
-}
-
 /// One node's environment: the shared assembled environment, then the node's
 /// own runner control variables.
 ///
@@ -244,17 +360,27 @@ fn node_env(spec: &RunSpec, node: &ExecutionNode, cfg: &ArgoExecutorConfig) -> V
         .map(|(name, source)| match source {
             EnvSource::Value(value) => json!({ "name": name, "value": value }),
             // A reference, never the material — the kubelet resolves it.
-            // `optional: true` is the source system's own flag (`argo.rs:449`)
-            // and the port makes it contractual: an `EnvSource::Secret` that
-            // does not resolve leaves the variable unset and the execution
-            // proceeds (`run_executor.rs:63-66`).
+            // `optional: true` was the source system's own flag (`argo.rs:449`),
+            // and the port once made it contractual: an `EnvSource::Secret`
+            // that did not resolve left the variable unset and the run
+            // proceeded, failing the suite the way a broken product fails —
+            // the operator read a red test, not a missing credential.
+            //
+            // `optional: false` inverts that on purpose: the kubelet refuses
+            // to start the pod, and Argo reports `CreateContainerConfigError`
+            // naming the missing `Secret` in the pod's events. A pre-flight
+            // check that asked the API server whether the Secret exists first
+            // is not the fix available here — ADR-0008 cut `secrets` out of
+            // qa-runs' RBAC by construction, so this gear cannot ask that
+            // question — and the pod's own refusal is the achievable form of
+            // the same outcome.
             EnvSource::Secret(reference) => json!({
                 "name": name,
                 "valueFrom": {
                     "secretKeyRef": {
-                        "name": secret_name(&cfg.secret_name_prefix, reference.as_str()),
+                        "name": secret_name(&cfg.secret_name_prefix, spec.tenant_id, reference.as_str()),
                         "key": cfg.secret_key,
-                        "optional": true,
+                        "optional": false,
                     }
                 }
             }),
@@ -273,30 +399,37 @@ fn node_env(spec: &RunSpec, node: &ExecutionNode, cfg: &ArgoExecutorConfig) -> V
         .as_deref()
         .map(str::trim)
         .filter(|base| !base.is_empty());
-    if let (Some(base), Some(id)) = (base, bundle_id(&node.bundle_ref)) {
+    if let Some(base) = base {
         let base = base.trim_end_matches('/');
+        // The id comes off the node, not off a parse of `bundle_ref`'s
+        // basename. That parse used to live here as `bundle_id()` and its own
+        // doc called it "a hidden coupling, and named as one": it assumed
+        // `LocalFsBundleStore`'s `<uuid>.tar.gz` naming, so a deployment with a
+        // different `BundleStore` would have broken it silently. `ExecutionNode`
+        // carries the id now, which is what that doc said the right fix was.
+        //
+        // `bundle_token` is percent-encoding-free by construction (it is
+        // `hex::encode`'s output -- `[0-9a-f]` only), so it needs no escaping
+        // to survive a query string; an empty one still renders, because a
+        // `?sig=` that fails to verify is the loud failure and a *missing*
+        // `sig` would be a 400 from the extractor instead.
         env.push(json!({
             "name": TEST_BUNDLE_URL_VAR,
-            "value": format!("{base}/qa/v1/test-bundles/{id}"),
+            "value": format!(
+                "{base}/qa/v1/test-bundles/{}?sig={}",
+                node.bundle_id, node.bundle_token,
+            ),
         }));
     }
-    // Emitted whether or not a URL was derivable: an image that can fetch a
-    // token cannot be assumed to need `TEST_BUNDLE_URL` to have come from this
-    // adapter, and suppressing the credential when the URL is absent would make
-    // one misconfiguration (no `bundle_base_url`) hide the other.
-    if let Some(auth) = cfg.bundle_auth.as_ref() {
-        env.push(json!({ "name": TEST_BUNDLE_TOKEN_URL_VAR, "value": auth.token_url }));
-        env.push(json!({ "name": TEST_BUNDLE_CLIENT_ID_VAR, "value": auth.client_id }));
-        env.push(json!({
-            "name": TEST_BUNDLE_CLIENT_SECRET_VAR,
-            "valueFrom": {
-                "secretKeyRef": {
-                    "name": auth.client_secret_secret,
-                    "key": auth.client_secret_key,
-                }
-            }
-        }));
-    }
+    // `HOME` then `PATH` — order matters: `PATH`'s value references `$(HOME)`,
+    // and Kubernetes only resolves a `$(VAR)` reference against an entry
+    // earlier in this same list, never against the image's own `Dockerfile`
+    // environment. Pushed last and unconditionally, like `TEST_FILES` above,
+    // so nothing a run's own `spec.env` happens to declare under either name
+    // can shadow the writable home this task's hardening requires (see
+    // `HOME_VALUE`'s and `PATH_VALUE`'s own docs for why each is needed).
+    env.push(json!({ "name": "HOME", "value": HOME_VALUE }));
+    env.push(json!({ "name": "PATH", "value": PATH_VALUE }));
     env
 }
 
@@ -321,6 +454,29 @@ fn template(spec: &RunSpec, node: &ExecutionNode, index: usize, cfg: &ArgoExecut
         "imagePullPolicy": pull_policy,
         "command": command,
         "env": node_env(spec, node, cfg),
+        // The container-level half of the pod's unprivileged posture: no
+        // escalation and every capability dropped. `runAsNonRoot`/`runAsUser`
+        // live on the pod's own securityContext (`build`, above) and apply
+        // here too; they are not repeated per container.
+        "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "capabilities": { "drop": ["ALL"] },
+        },
+        // Deployment-level only — see `ArgoExecutorConfig::runner_resources`'
+        // own doc on why `RunnerSpec` gets no override field for this.
+        // `max_concurrent_runs` bounds how many runs are admitted, not what
+        // one consumes, so without this a single heavy suite could evict its
+        // neighbours off the node.
+        "resources": {
+            "requests": {
+                "cpu": cfg.runner_resources.cpu_request,
+                "memory": cfg.runner_resources.memory_request,
+            },
+            "limits": {
+                "cpu": cfg.runner_resources.cpu_limit,
+                "memory": cfg.runner_resources.memory_limit,
+            },
+        },
     });
 
     // The port carries each mount's **file** path so the caller can assert
@@ -328,7 +484,7 @@ fn template(spec: &RunSpec, node: &ExecutionNode, index: usize, cfg: &ArgoExecut
     // **directory**. So the directory is the path's parent and `items` maps the
     // configured key onto the file name, which is what puts the material at
     // exactly the path the plugin asked for.
-    let mounts: Vec<Value> = secret_mounts(spec)
+    let mut mounts: Vec<Value> = secret_mounts(spec)
         .into_iter()
         .map(|mount| {
             json!({
@@ -338,15 +494,31 @@ fn template(spec: &RunSpec, node: &ExecutionNode, index: usize, cfg: &ArgoExecut
             })
         })
         .collect();
-    if !mounts.is_empty() {
-        container["volumeMounts"] = json!(mounts);
-    }
+    // `/tmp` as a writable emptyDir: pip installs packages into the root
+    // filesystem (`--no-cache-dir` only skips its download cache, not the
+    // install target), which is why `readOnlyRootFilesystem` is not set
+    // above — but the entrypoint already targets `/tmp` specifically for
+    // pytest's own cache (`-o cache_dir=/tmp/pytest_cache`), so this only
+    // makes that existing assumption explicit rather than leaving it to
+    // whatever the image's own filesystem happens to allow.
+    mounts.push(json!({ "name": TMP_VOLUME_NAME, "mountPath": "/tmp" }));
+    // `/work` as a writable emptyDir — fix round 4, [`WORK_VOLUME_NAME`]'s
+    // own doc has the measured failure this closes. `runner.Dockerfile`
+    // creates `/work` as root with no `USER`, and the pod's non-root,
+    // non-zero `run_as_user` cannot write into it otherwise.
+    mounts.push(json!({ "name": WORK_VOLUME_NAME, "mountPath": "/work" }));
+    container["volumeMounts"] = json!(mounts);
 
     json!({
         "name": task_name(&node.name, index),
         // Argo copies a template's metadata onto its pod, which is how `watch`
-        // recovers the un-sanitised node name. See `NODE_ANNOTATION`.
-        "metadata": { "annotations": { NODE_ANNOTATION: node.name } },
+        // recovers the un-sanitised node name (`NODE_ANNOTATION`) and how the
+        // isolation label reaches the pod for `runner-networkpolicy.yaml`'s
+        // `podSelector` to select on (`NETWORK_ISOLATION_LABEL`).
+        "metadata": {
+            "annotations": { NODE_ANNOTATION: node.name },
+            "labels": { NETWORK_ISOLATION_LABEL: NETWORK_ISOLATION_LABEL_VALUE },
+        },
         "container": container,
     })
 }
@@ -414,6 +586,41 @@ pub fn build(spec: &RunSpec, cfg: &ArgoExecutorConfig, name: &str) -> Value {
         // first (`run_executor.rs:469-474`, `argo.rs:539`).
         "activeDeadlineSeconds": spec.timeout_seconds,
         "ttlStrategy": { "secondsAfterCompletion": cfg.workflow_ttl_seconds },
+        // Unprivileged by construction: the runner image keeps kubectl, helm
+        // and istioctl (the product's suites shell out to them), and what
+        // makes that safe is no root and no capabilities — not the absence of
+        // the pod's ServiceAccount token, which stays mounted (below).
+        // `readOnlyRootFilesystem` is deliberately not set: pip installs
+        // packages into the root filesystem (the bundle itself and pytest's
+        // cache have their own emptyDirs, `/work` and `/tmp` — see
+        // `WORK_VOLUME_NAME`'s and `TMP_VOLUME_NAME`'s own docs).
+        "securityContext": {
+            "runAsNonRoot": true,
+            "runAsUser": cfg.run_as_user,
+            // Fix round 8: the fourth field this pod's design specified
+            // alongside the three above, dropped between design and code and
+            // caught only on a live cluster — a Secret volume (a product
+            // plugin's `MountSpec::Secret`, e.g. `qa-vhi-product-plugin`'s
+            // SSH key) is root-owned unless `fsGroup` is set, and
+            // `runAsUser` alone does not change that. See `fs_group`'s own
+            // doc (`config.rs`) for the measurement that the mounted file's
+            // declared mode does not also need to change.
+            "fsGroup": cfg.fs_group,
+            "seccompProfile": { "type": "RuntimeDefault" },
+        },
+        // No `automountServiceAccountToken: false` here: Argo's own executor
+        // (the `wait` container) authenticates to the API server with this
+        // same mounted token to write the pod's `workflowtaskresults` object,
+        // so unmounting it does not narrow the runner's reach — it breaks
+        // reporting. Measured on the dev cluster, 2026-08-27
+        // (`config.rs:440-449`): with the token unmounted, the suite runs to
+        // completion and then fails with exit code 64,
+        // `workflowtaskresults.argoproj.io is forbidden`, because `wait`
+        // could not authenticate at all. The pod's identity is constrained
+        // instead by *which* ServiceAccount it runs as — a declared, minimal
+        // one (`spec.serviceAccountName`, below) scoped by its own Role to
+        // `create` on `workflowtaskresults.argoproj.io` and nothing else, not
+        // by denying the account its token.
         "templates": templates,
     });
 
@@ -429,7 +636,7 @@ pub fn build(spec: &RunSpec, cfg: &ArgoExecutorConfig, name: &str) -> Value {
         workflow_spec["serviceAccountName"] = json!(account.trim());
     }
 
-    let volumes: Vec<Value> = secret_mounts(spec)
+    let mut volumes: Vec<Value> = secret_mounts(spec)
         .into_iter()
         .map(|mount| {
             let (_, file) = split_mount_path(mount.path);
@@ -449,15 +656,20 @@ pub fn build(spec: &RunSpec, cfg: &ArgoExecutorConfig, name: &str) -> Value {
             json!({
                 "name": mount.volume,
                 "secret": {
-                    "secretName": secret_name(&cfg.secret_name_prefix, mount.credstore_ref),
+                    "secretName": secret_name(&cfg.secret_name_prefix, spec.tenant_id, mount.credstore_ref),
                     "items": [item],
                 }
             })
         })
         .collect();
-    if !volumes.is_empty() {
-        workflow_spec["volumes"] = json!(volumes);
-    }
+    // Present on every workflow, secrets or not — every runner container
+    // mounts it (`template`, above).
+    volumes.push(json!({ "name": TMP_VOLUME_NAME, "emptyDir": {} }));
+    // Fix round 4: same reasoning as `/tmp`, above, for `/work` —
+    // `WORK_VOLUME_NAME`'s own doc has the measured failure. Starts empty;
+    // `fetch_bundle.py` populates it after the mount exists.
+    volumes.push(json!({ "name": WORK_VOLUME_NAME, "emptyDir": {} }));
+    workflow_spec["volumes"] = json!(volumes);
 
     json!({
         "apiVersion": "argoproj.io/v1alpha1",
@@ -479,11 +691,14 @@ pub fn build(spec: &RunSpec, cfg: &ArgoExecutorConfig, name: &str) -> Value {
 mod tests {
     use std::collections::BTreeMap;
 
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use uuid::Uuid;
 
-    use super::{APP_LABEL_VALUE, NODE_ANNOTATION, build, reject_unrenderable_mounts};
-    use crate::config::{ArgoExecutorConfig, BundleAuthConfig};
+    use super::{
+        APP_LABEL_VALUE, NETWORK_ISOLATION_LABEL, NETWORK_ISOLATION_LABEL_VALUE, NODE_ANNOTATION,
+        build, reject_unrenderable_mounts,
+    };
+    use crate::config::ArgoExecutorConfig;
     use crate::domain::ports::run_executor::{
         ExecutionNode, MountSpec, RunAccess, RunEnv, RunSpec, RunnerSpec, SecretRef,
     };
@@ -504,18 +719,37 @@ mod tests {
         }
     }
 
+    /// The bundle this module's fixture node names. A real UUID, and
+    /// **deliberately unrelated to `bundle_ref`'s basename below**: the URL is
+    /// now built from this field, so a test whose two values agreed would still
+    /// pass if the adapter went back to parsing the path.
+    const BUNDLE_ID: Uuid = uuid::uuid!("2f1c9a70-0000-4000-8000-000000000001");
+
+    /// The hex tag qa-catalog would have minted for [`BUNDLE_ID`]. Only its
+    /// shape matters here — this module never verifies it, it renders it.
+    const BUNDLE_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     fn node(name: &str) -> ExecutionNode {
         ExecutionNode {
             name: name.to_owned(),
-            bundle_ref: "/var/lib/qa-catalog/bundles/2f1c9a70-0000-4000-8000-000000000001.tar.gz"
+            bundle_ref: "/var/lib/qa-catalog/bundles/99999999-9999-4999-8999-999999999999.tar.gz"
                 .to_owned(),
+            bundle_id: BUNDLE_ID,
+            bundle_token: BUNDLE_TOKEN.to_owned(),
             test_files: vec!["tests/test_smoke.py".to_owned()],
         }
     }
 
+    /// The fixed tenant every golden test in this module runs under — its
+    /// 36-character form is what actually consumes most of the `Secret` name
+    /// budget these tests exercise, and matching `naming.rs`'s own test
+    /// tenant keeps the two files' derived-name expectations comparable.
+    const TENANT: Uuid = uuid::uuid!("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+
     fn spec(nodes: Vec<ExecutionNode>) -> RunSpec {
         RunSpec {
             run_id: Uuid::nil(),
+            tenant_id: TENANT,
             run_name: "Smoke Tests-1".to_owned(),
             nodes,
             env: RunEnv::default(),
@@ -566,10 +800,24 @@ mod tests {
         assert_eq!(templates[0]["container"]["image"], "vhp-test-runner:latest");
         assert_eq!(templates[0]["container"]["imagePullPolicy"], "IfNotPresent");
         assert_eq!(templates[0]["container"]["command"][0], "/entrypoint.sh");
-        assert!(
-            workflow["spec"].get("volumes").is_none(),
-            "no kubeconfig means no volume at all (argo.rs:504)"
+        // Premise changed by Task 1: the pod always carries a `/tmp` emptyDir
+        // (pip installs into the root filesystem, so pytest's own cache gets
+        // a dedicated writable volume rather than sharing it), so "no
+        // secrets" no longer means "no volumes at all". Fix round 4 added a
+        // second always-present volume, `/work` (`WORK_VOLUME_NAME`'s own
+        // doc has the measured failure without it) — so "no secrets" now
+        // means exactly these two, not one.
+        let volumes = workflow["spec"]["volumes"].as_array().expect("volumes");
+        assert_eq!(
+            volumes.len(),
+            2,
+            "no kubeconfig means no secret volume, but /tmp and /work are \
+             always present"
         );
+        assert_eq!(volumes[0]["name"], "tmp");
+        assert_eq!(volumes[0]["emptyDir"], json!({}));
+        assert_eq!(volumes[1]["name"], "work");
+        assert_eq!(volumes[1]["emptyDir"], json!({}));
     }
 
     /// The un-sanitised node name has to survive onto the pod, because `watch`
@@ -585,6 +833,99 @@ mod tests {
             workflow["spec"]["templates"][0]["name"], "n-0-repo--smoke-a",
             "while the template name itself is sanitised"
         );
+    }
+
+    /// The Rust half of the two-sided assertion `NETWORK_ISOLATION_LABEL`'s
+    /// own doc names: every template — and so every pod Argo creates from
+    /// one — carries the exact key and value
+    /// `deploy/helm/qa-platform/templates/runner-networkpolicy.yaml`'s
+    /// `podSelector` selects on. If a future edit changes either constant's
+    /// value without also changing that chart file's literal,
+    /// `deploy/helm/tests/check_runner_networkpolicy.py` fails — not this
+    /// test, which only checks that `build` actually uses the constants it
+    /// claims to (asserted against the constants themselves, not a second
+    /// literal, because *that* half of the contract is "does the code do
+    /// what the doc says", not "do the two sides agree").
+    #[test]
+    fn every_template_carries_the_network_isolation_label() {
+        let workflow = build(&spec(vec![node("a"), node("b")]), &cfg(), "w");
+        let templates = workflow["spec"]["templates"].as_array().expect("templates");
+        // Template 0 is the DAG for a two-node run and carries no metadata of
+        // its own; every node template (1..) must carry the label.
+        let node_templates = &templates[1..];
+        assert!(
+            !node_templates.is_empty(),
+            "premise: this run has node templates to check"
+        );
+        for template in node_templates {
+            assert_eq!(
+                template["metadata"]["labels"][NETWORK_ISOLATION_LABEL],
+                NETWORK_ISOLATION_LABEL_VALUE,
+                "every runner pod must carry the isolation label, or the \
+                 chart's NetworkPolicy selects nothing and fails open \
+                 while looking installed"
+            );
+        }
+
+        // The single-node shape too — no DAG wrapper, template 0 is the node.
+        let single = build(&spec(vec![node("a")]), &cfg(), "w");
+        assert_eq!(
+            single["spec"]["templates"][0]["metadata"]["labels"][NETWORK_ISOLATION_LABEL],
+            NETWORK_ISOLATION_LABEL_VALUE
+        );
+    }
+
+    /// Fix round 5, measured on a live cluster: every runner container
+    /// carries a writable `$HOME`, because `runner.Dockerfile`'s `nobody`
+    /// account (the pod's hardened, non-root `run_as_user`) otherwise gets
+    /// `/nonexistent` from the base image, and pip's own per-user install
+    /// fallback needs somewhere real to write. `$PATH` carries that user
+    /// install's `bin` directory alongside the base image's own directories
+    /// (`kubectl`/`helm`/`istioctl` all live in `/usr/local/bin`), because a
+    /// tenant-supplied `requirements.txt` cannot be assumed to need only
+    /// importable packages and not a console script one of them installs.
+    ///
+    /// Checked on every node template, not just the first: `HOME_VALUE`'s
+    /// own doc explains why a `$(VAR)`-style reference can only be built
+    /// from entries in the same list, so a regression that silently reverted
+    /// to a per-node-only push (rather than the unconditional one `node_env`
+    /// makes) would otherwise slip past a single-node-only test.
+    #[test]
+    fn every_container_carries_a_writable_home_and_an_extended_path() {
+        let workflow = build(&spec(vec![node("a"), node("b")]), &cfg(), "w");
+        let templates = workflow["spec"]["templates"].as_array().expect("templates");
+        let node_templates = &templates[1..];
+        assert!(
+            !node_templates.is_empty(),
+            "premise: this run has node templates to check"
+        );
+        for template in node_templates {
+            let env = template["container"]["env"]
+                .as_array()
+                .expect("an env list")
+                .iter()
+                .map(|entry| (entry["name"].as_str().unwrap_or_default(), entry))
+                .collect::<BTreeMap<_, _>>();
+
+            assert_eq!(
+                env["HOME"]["value"], "/tmp",
+                "must be the SAME emptyDir the container already mounts \
+                 writable, not a path nothing backs"
+            );
+            let path = env["PATH"]["value"].as_str().expect("PATH is a literal");
+            assert!(
+                path.starts_with("$(HOME)/.local/bin:"),
+                "the per-user install location must come first: {path}"
+            );
+            for tool_dir in ["/usr/local/bin", "/usr/bin", "/bin"] {
+                assert!(
+                    path.contains(tool_dir),
+                    "must still carry the base image's own {tool_dir}, or \
+                     kubectl/helm/istioctl (and python3 itself) stop \
+                     resolving: {path}"
+                );
+            }
+        }
     }
 
     /// Several nodes become a DAG whose tasks are independent. A `depends` on
@@ -651,6 +992,15 @@ mod tests {
     /// The invariant the port is built around, asserted on the actual submitted
     /// object: a secret-backed variable appears as a reference and its text
     /// never appears as a literal anywhere in the workflow.
+    ///
+    /// `optional` used to assert `true`, the source system's own flag
+    /// (`argo.rs:449`), which the port once made contractual: an unresolvable
+    /// reference left the variable unset and the run proceeded as though the
+    /// product itself were broken. It now asserts `false` — the pod refuses
+    /// to start and Argo reports `CreateContainerConfigError` naming the
+    /// Secret, which is the achievable form of a pre-flight check: ADR-0008
+    /// cut `secrets` out of qa-runs' RBAC by construction, so this gear
+    /// cannot ask the API server whether the Secret exists first.
     #[test]
     fn a_secret_arm_emits_a_reference_and_never_a_literal() {
         let mut run = spec(vec![node("a")]);
@@ -669,15 +1019,17 @@ mod tests {
         assert!(entry.get("value").is_none(), "no literal for a reference");
         let secret = &entry["valueFrom"]["secretKeyRef"];
         assert_eq!(
-            secret["name"], "qa-platform-credstore---rp-token",
-            "the reference's punctuation each becomes a dash; runs are not \
-             collapsed, so the mapping stays injective"
+            secret["name"], "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-3cfaa05d68d19420",
+            "the reference's punctuation each becomes a dash in the readable head, and the \
+             digest suffix is what actually keeps the mapping injective"
         );
         assert_eq!(secret["key"], "value");
         assert_eq!(
-            secret["optional"], true,
-            "the source system's optional: true (argo.rs:449), which the port \
-             makes contractual: an unresolvable reference leaves the variable unset"
+            secret["optional"], false,
+            "an unresolvable reference must stop the pod, not leave the \
+             variable unset: CreateContainerConfigError names the Secret, \
+             which is the achievable substitute for the pre-flight check \
+             ADR-0008 makes unavailable to this gear"
         );
         assert!(
             !serde_json::to_string(&workflow)
@@ -698,7 +1050,10 @@ mod tests {
 
         let volume = &workflow["spec"]["volumes"][0];
         assert_eq!(volume["name"], "mount-0");
-        assert_eq!(volume["secret"]["secretName"], "qa-platform-platform-9f2c");
+        assert_eq!(
+            volume["secret"]["secretName"],
+            "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-4a90e664f3e346d1"
+        );
         assert_eq!(volume["secret"]["items"][0]["key"], "value");
         assert_eq!(
             volume["secret"]["items"][0]["path"], "kubeconfig",
@@ -753,20 +1108,27 @@ mod tests {
         ];
         let workflow = build(&run, &cfg(), "w");
 
+        // 2 secret volumes plus the always-present /tmp and /work emptyDirs.
         let volumes = workflow["spec"]["volumes"].as_array().expect("volumes");
-        assert_eq!(volumes.len(), 2);
+        assert_eq!(volumes.len(), 4);
         assert_eq!(volumes[0]["name"], "mount-0");
         assert_eq!(volumes[1]["name"], "mount-1");
         assert_eq!(volumes[1]["secret"]["items"][0]["path"], "license.key");
+        assert_eq!(volumes[2]["name"], "tmp");
+        assert_eq!(volumes[3]["name"], "work");
 
         let mounts = workflow["spec"]["templates"][0]["container"]["volumeMounts"]
             .as_array()
             .expect("volumeMounts");
-        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts.len(), 4);
         assert_eq!(mounts[0]["name"], "mount-0");
         assert_eq!(mounts[0]["mountPath"], "/.kube");
         assert_eq!(mounts[1]["name"], "mount-1");
         assert_eq!(mounts[1]["mountPath"], "/etc/product");
+        assert_eq!(mounts[2]["name"], "tmp");
+        assert_eq!(mounts[2]["mountPath"], "/tmp");
+        assert_eq!(mounts[3]["name"], "work");
+        assert_eq!(mounts[3]["mountPath"], "/work");
     }
 
     /// The run's own service account wins over the deployment's; a run that
@@ -851,11 +1213,17 @@ mod tests {
             !error.to_string().contains("not-a-real-token"),
             "and it must never carry the value it refused"
         );
-        assert!(
-            build(&run, &cfg(), "w")["spec"].get("volumes").is_none(),
-            "premise: build renders nothing for it, which is exactly why the \
-             refusal has to come first"
+        let workflow = build(&run, &cfg(), "w");
+        let volumes = workflow["spec"]["volumes"].as_array().expect("volumes");
+        assert_eq!(
+            volumes.len(),
+            2,
+            "premise: build renders nothing for the refused mount -- only the \
+             always-present /tmp and /work volumes -- which is exactly why \
+             the refusal has to come first"
         );
+        assert_eq!(volumes[0]["name"], "tmp");
+        assert_eq!(volumes[1]["name"], "work");
     }
 
     /// Two mounts under one directory are refused, because a secret volume
@@ -885,11 +1253,18 @@ mod tests {
         );
     }
 
-    /// The bundle URL is derived from the `storage_ref`'s basename, and only
-    /// when a base URL is configured. Both halves are pinned because the
-    /// derivation is a hidden coupling to `LocalFsBundleStore`'s file naming.
+    /// The bundle URL is built from `ExecutionNode::bundle_id` and carries the
+    /// node's own download tag, and it is only emitted when a base URL is
+    /// configured.
+    ///
+    /// **The fixture node's `bundle_ref` basename is a different UUID on
+    /// purpose.** The adapter used to recover the id by parsing that basename —
+    /// a hidden coupling to `LocalFsBundleStore`'s file naming, which a
+    /// deployment with a different store would have broken silently. Making
+    /// the two values disagree is what turns "the id comes off the node" from a
+    /// claim into an assertion: if the parse came back, this test fails.
     #[test]
-    fn a_bundle_url_is_derived_only_when_a_base_url_is_configured() {
+    fn a_bundle_url_is_built_from_the_nodes_id_and_carries_its_signature() {
         let workflow = build(&spec(vec![node("a")]), &cfg(), "w");
         assert!(
             !env_of(&workflow, 0).contains_key("TEST_BUNDLE_URL"),
@@ -903,66 +1278,49 @@ mod tests {
         let workflow = build(&spec(vec![node("a")]), &with_base, "w");
         assert_eq!(
             env_of(&workflow, 0)["TEST_BUNDLE_URL"]["value"],
-            "http://10.0.0.1:8080/qa/v1/test-bundles/2f1c9a70-0000-4000-8000-000000000001"
+            format!("http://10.0.0.1:8080/qa/v1/test-bundles/{BUNDLE_ID}?sig={BUNDLE_TOKEN}"),
+            "the id is the node's own, not a parse of bundle_ref's basename, and the \
+             download tag rides the query string"
         );
     }
 
-    /// Bundle authentication: the token URL and client id travel as literals,
-    /// the client secret **only** as a `secretKeyRef`, and none of it appears
-    /// unless it is configured.
+    /// **No runner pod may ever carry an `IdP` credential again**, whatever
+    /// the configuration says.
+    ///
+    /// This is the inverse of the test it replaces, which asserted that
+    /// `TEST_BUNDLE_TOKEN_URL`, `TEST_BUNDLE_CLIENT_ID` and
+    /// `TEST_BUNDLE_CLIENT_SECRET` *were* emitted. They carried the
+    /// confidential secret of a `fullScopeAllowed` service-account client into
+    /// the environment of a pod that runs tenant-authored pytest — see
+    /// `TEST_BUNDLE_URL_VAR`'s doc for what that code could then reach, and
+    /// why the per-bundle signature replaced it rather than joining it.
+    ///
+    /// It sweeps the **whole rendered workflow**, not just the env map, so a
+    /// future revision cannot reintroduce the credential through a volume, an
+    /// `envFrom` or an annotation and still pass.
     #[test]
-    fn bundle_auth_emits_a_reference_for_the_secret_and_literals_for_the_rest() {
-        let workflow = build(&spec(vec![node("a")]), &cfg(), "w");
-        for absent in [
-            "TEST_BUNDLE_TOKEN_URL",
-            "TEST_BUNDLE_CLIENT_ID",
-            "TEST_BUNDLE_CLIENT_SECRET",
-        ] {
-            assert!(
-                !env_of(&workflow, 0).contains_key(absent),
-                "{absent} must not appear when bundle_auth is unset"
-            );
-        }
-
-        let with_auth = ArgoExecutorConfig {
-            bundle_auth: Some(BundleAuthConfig {
-                token_url: "http://idp:8180/realms/r/protocol/openid-connect/token".to_owned(),
-                client_id: "qa-platform-workflow".to_owned(),
-                client_secret_secret: "qa-platform-workflow-oidc".to_owned(),
-                client_secret_key: "client_secret".to_owned(),
-            }),
+    fn no_rendered_workflow_carries_a_bundle_oidc_credential() {
+        let with_base = ArgoExecutorConfig {
+            bundle_base_url: Some("http://10.0.0.1:8080/".to_owned()),
             ..cfg()
         };
-        let workflow = build(&spec(vec![node("a")]), &with_auth, "w");
-        let env = env_of(&workflow, 0);
-        assert_eq!(
-            env["TEST_BUNDLE_TOKEN_URL"]["value"],
-            "http://idp:8180/realms/r/protocol/openid-connect/token"
-        );
-        assert_eq!(
-            env["TEST_BUNDLE_CLIENT_ID"]["value"],
-            "qa-platform-workflow"
-        );
-
-        let entry = &env["TEST_BUNDLE_CLIENT_SECRET"];
-        assert!(
-            entry.get("value").is_none(),
-            "the client secret must never travel as a literal"
-        );
-        let reference = &entry["valueFrom"]["secretKeyRef"];
-        assert_eq!(reference["name"], "qa-platform-workflow-oidc");
-        assert_eq!(reference["key"], "client_secret");
-        assert!(
-            reference.get("optional").is_none(),
-            "required on purpose: a pod with no credential downloads no tests \
-             and would report an empty suite as a pass"
-        );
-        assert_eq!(
-            reference["name"], "qa-platform-workflow-oidc",
-            "the Secret is named verbatim from config, NOT through \
-             secret_name_prefix: it is pre-provisioned by an operator, not \
-             derived from a port SecretRef"
-        );
+        for config in [&cfg(), &with_base] {
+            let workflow = build(&spec(vec![node("a")]), config, "w");
+            let rendered = serde_json::to_string(&workflow).expect("the workflow serialises");
+            for banned in [
+                "TEST_BUNDLE_TOKEN_URL",
+                "TEST_BUNDLE_CLIENT_ID",
+                "TEST_BUNDLE_CLIENT_SECRET",
+                "client_credentials",
+            ] {
+                assert!(
+                    !rendered.contains(banned),
+                    "{banned} must not appear anywhere in a rendered workflow: a runner pod \
+                     executes tenant-authored code, and an IdP credential in its process \
+                     tree is readable by that code"
+                );
+            }
+        }
     }
 
     /// Unset leaves `serviceAccountName` off entirely; set puts it on the spec.
@@ -979,6 +1337,89 @@ mod tests {
         };
         let workflow = build(&spec(vec![node("a")]), &with_account, "w");
         assert_eq!(workflow["spec"]["serviceAccountName"], "argo-workflow");
+    }
+
+    /// The pod runs unprivileged but keeps its `ServiceAccount` token mounted.
+    ///
+    /// The runner image carries `kubectl`, `helm` and `istioctl` deliberately
+    /// (`runner.Dockerfile:61-72`) — the product's suites shell out to them. What
+    /// makes that safe is no root, no privilege escalation and no capabilities —
+    /// **not** an unmounted token. A workflow pod has two containers, and the
+    /// token is Argo's own executor's (`wait`), not just the runner's: `wait`
+    /// authenticates to the API server with it to write the pod's
+    /// `workflowtaskresults` object. Unmounting it does not narrow what the
+    /// runner's `kubectl` can reach — the identity is what constrains that
+    /// (`spec.serviceAccountName`, a declared, minimal account) — it stops
+    /// `wait` from authenticating at all, and the failure mode is worse than a
+    /// hardening win: measured on the dev cluster, 2026-08-27
+    /// (`config.rs:440-449`), the suite runs to completion and only then fails
+    /// with exit code 64, `workflowtaskresults.argoproj.io is forbidden`. A
+    /// future hardening pass must not re-set this to `false`.
+    #[test]
+    fn the_pod_is_unprivileged_but_keeps_its_service_account_token() {
+        let workflow = build(&spec(vec![node("repo-smoke")]), &cfg(), "smoke-tests-1");
+        let pod = &workflow["spec"]["securityContext"];
+
+        assert_eq!(pod["runAsNonRoot"], true, "the pod must not run as root");
+        assert!(
+            pod["runAsUser"].as_u64().is_some_and(|uid| uid != 0),
+            "runAsUser must be set and non-zero"
+        );
+        assert!(
+            pod["fsGroup"].as_u64().is_some_and(|gid| gid != 0),
+            "fsGroup must be set and non-zero -- fix round 8: this pod's \
+             design specified it alongside runAsNonRoot/runAsUser/\
+             seccompProfile from the start, and its absence is exactly what \
+             let a product plugin's Secret-mounted credential (e.g. \
+             qa-vhi-product-plugin's SSH key) end up unreadable by this \
+             pod's own non-root uid"
+        );
+        assert_eq!(pod["seccompProfile"]["type"], "RuntimeDefault");
+        assert!(
+            workflow["spec"]
+                .get("automountServiceAccountToken")
+                .is_none(),
+            "no override here, so Kubernetes' default (mounted) applies: \
+             Argo's own executor container (`wait`) needs this token to \
+             report the run's result, and denying it fails the run after it \
+             has already produced all of its output (exit code 64, \
+             workflowtaskresults.argoproj.io is forbidden -- config.rs:440-449)"
+        );
+
+        let container = &workflow["spec"]["templates"][0]["container"];
+        assert_eq!(
+            container["securityContext"]["allowPrivilegeEscalation"],
+            false
+        );
+        assert_eq!(
+            container["securityContext"]["capabilities"]["drop"][0],
+            "ALL"
+        );
+    }
+
+    /// Every runner container declares requests and limits.
+    ///
+    /// `max_concurrent_runs` limits how many runs are admitted, not what they
+    /// eat; without these a single tenant's heavy suite evicts its neighbours
+    /// off the node.
+    #[test]
+    fn the_container_declares_requests_and_limits() {
+        let workflow = build(&spec(vec![node("repo-smoke")]), &cfg(), "smoke-tests-1");
+        let resources = &workflow["spec"]["templates"][0]["container"]["resources"];
+
+        for (bucket, field) in [
+            ("requests", "cpu"),
+            ("requests", "memory"),
+            ("limits", "cpu"),
+            ("limits", "memory"),
+        ] {
+            assert!(
+                resources[bucket][field]
+                    .as_str()
+                    .is_some_and(|v| !v.is_empty()),
+                "resources.{bucket}.{field} must be set"
+            );
+        }
     }
 
     /// A node variable must win over a same-named entry in the shared

@@ -157,6 +157,89 @@ pub const QA_RUNS_QUEUE_WAIT: &str = "qa_runs_queue_wait_total";
 /// cycle duration is the dispatcher itself slowing down.
 pub const QA_RUNS_QUEUE_WAIT_DURATION: &str = "qa_runs_queue_wait_duration_seconds";
 
+/// **`cpt-cf-qa-nfr-dispatch-latency` itself** — seconds between the instant a
+/// queued run's environment became free and the instant this gear recorded that
+/// run's execution as started.
+///
+/// Named for the two instants rather than for the requirement, because the
+/// requirement is the thing that might be restated and the interval is not —
+/// and because the name that was nearly used, `dispatch_latency`, is what the
+/// retracted measurement thought it was reporting while reporting queue
+/// residency. A reader who asks "latency of what, measured from where?" gets
+/// the answer from the series name.
+///
+/// This is the NFR's own quantity, not a proxy for it. Read it instead of
+/// [`QA_RUNS_QUEUE_WAIT_DURATION`] when the question is whether the
+/// requirement holds; read that one when the question is how long runs are
+/// waiting overall.
+///
+/// # The two instants, and how each is observed
+///
+/// * **Start of the window: the environment transitions to free.**
+///   qa-environments stamps `qa_environment_leases.freed_at` inside the
+///   compare-and-swap that writes `LeaseState::Free`, which happens only on a
+///   release that actually frees the environment — a parallel holder leaving
+///   while others remain writes a still-held state and stamps nothing. The
+///   acquisition that later takes the environment *out* of `Free` reads the
+///   column back and carries it in `AcquireOutcome::Acquired::became_free_at`,
+///   which is how the instant reaches this gear. Because it is a column, the
+///   window may span a control-plane restart: the release can happen in one
+///   process lifetime and the start in the next.
+/// * **End of the window: the same instant [`QA_RUNS_QUEUE_WAIT_DURATION`]
+///   ends at** — `OffsetDateTime::now_utc()` read in `service::dispatch`'s
+///   drain immediately after `dispatch_one` returned `Ok`. Sharing the end
+///   point is deliberate: the two series then differ only in where they start,
+///   so their difference is exactly the predecessor's remaining runtime and the
+///   pair can be read together.
+///
+/// # Why the workload cannot dominate this one
+///
+/// The complaint that retired the previous measurement (2026-09-18;
+/// `docs/DESIGN.md` §3.11, "The dispatch-latency window, and the measurement
+/// that was retracted") was that queue residency is *queue depth × run
+/// duration*: a slower test suite inflates it without the dispatcher changing.
+/// Neither factor can enter this window.
+///
+/// * **Predecessor runtime is outside it by construction.** The clock starts
+///   when the predecessor released, so nothing it did before that is in the
+///   sample.
+/// * **Queue depth does not accumulate into a sample.** With N runs queued
+///   behind one environment, the second run's window starts at the *first*
+///   run's release, not at the original free transition — each run is anchored
+///   to the release that admitted it. Depth multiplies the number of samples,
+///   never the value of one.
+///
+/// What remains inside the window is exactly what the dispatcher controls: the
+/// wait for the next 5 s sweep, `evaluate_cap` stopping a tick at
+/// `max_concurrent_runs`, the drain's own work, and the force-sync and bundle
+/// build inside `dispatch_one`.
+///
+/// # Read it beside its companion counter
+///
+/// [`QA_RUNS_FREE_TO_START_UNANCHORED`] counts the drained runs that
+/// produced **no** sample here. A p95 under 10 s over a population that
+/// excluded most of the drain is not evidence the requirement holds, and the
+/// two families together are what say how much of the drain the quantile
+/// covers.
+pub const QA_RUNS_FREE_TO_START_DURATION: &str = "qa_runs_free_to_start_duration_seconds";
+
+/// Drained runs for which no [`QA_RUNS_FREE_TO_START_DURATION`] sample could
+/// be taken, by why — the coverage denominator, and the reason the quantile
+/// beside it can be trusted or not.
+///
+/// Labelled by [`crate::domain::ports::metrics::UnanchoredReason`]. This family
+/// exists because the alternative is a silently self-selecting histogram: every
+/// exclusion below is a case where the NFR's window is genuinely undefined for
+/// that run, and a reader has no way to tell "the requirement holds" from "the
+/// requirement was measured on four runs out of four hundred" unless the
+/// excluded ones are counted in the open.
+///
+/// A rising `not_waiting_at_free` in particular is not a defect in this
+/// measurement — it is the concurrency-cap and inter-sweep paths
+/// [`QA_RUNS_QUEUE_WAIT_DURATION`]'s doc calls out, showing up as runs whose
+/// wait began after their environment was already free.
+pub const QA_RUNS_FREE_TO_START_UNANCHORED: &str = "qa_runs_free_to_start_unanchored_total";
+
 /// What admission decided for a launch: dispatch inline, queue, or neither.
 ///
 /// Labelled by [`crate::domain::ports::metrics::DispatchDecision`]. The signal

@@ -83,15 +83,33 @@ pub struct RebuildReq {
 
 /// What a rebuild did.
 ///
-/// # `watermark_advanced_to` is deliberately not on the wire
+/// # `watermark_at` is deliberately not on the wire
 ///
-/// `ReconcileOutcome` carries it, and for a rebuild it is always `None` —
-/// meaningfully so: not touching the watermark is the endpoint's contract, not a
-/// gap in it. A field that is structurally always `null` invites a client to
-/// branch on it, and the first client to do so would be writing dead code
-/// against a promise the *other* caller of `ReconcileOutcome` (the reconcile
-/// ticker, which has no HTTP surface) does not keep. The endpoint's description
-/// states the guarantee instead.
+/// `ReconcileOutcome` carries it — as `watermark_advanced_to` until the
+/// 2026-09-18 follow-ups renamed and re-specified it — and for a rebuild it is
+/// always `None`, meaningfully so: not touching the watermark is the
+/// endpoint's contract, not a gap in it. `result_rows_written` stays off for
+/// the neighbouring reason: it is a diagnostic for the ticker's log rather than
+/// a fact about the window an operator asked for. A field that is structurally
+/// always `null` invites a client to branch on it, and the first client to do
+/// so would be writing dead code against a promise the *other* caller of
+/// `ReconcileOutcome` (the reconcile ticker, which has no HTTP surface) does not
+/// keep. The endpoint's description states the guarantee instead.
+///
+/// # `caught_up` **is** on the wire now, as `complete`, and that is the change
+/// # the 2026-09-18 follow-up made here
+///
+/// It used to be excluded by the same argument as `watermark_at` — always
+/// `false` for a rebuild, which read one page and had no walk to finish. That
+/// stopped being true when the rebuild learned to page: it now means "every run
+/// in `[from, to)` was reached", which is the single most important thing this
+/// response says, and its absence is what made a truncated rebuild
+/// indistinguishable from a complete one. The old signal was a `WARN` in the
+/// gear's log, and the outage this endpoint's fix wave came out of established
+/// exactly what a log line nobody branches on is worth.
+///
+/// [`Self::resume_from`] travels with it rather than leaving the operator to
+/// work out a continuation: it is the `from` of the next request.
 ///
 /// # `stopped_at_run` is not on the wire either, and that one is only a scope
 /// # decision
@@ -104,8 +122,8 @@ pub struct RebuildReq {
 /// a tenant's backfill. It would be *useful* here too: an operator reading
 /// `stopped_at_gap: true` currently has to go to the logs to find out which run.
 /// Adding it is an additive key on a shipped response and nothing here objects
-/// to it; it is simply not this review wave's to add. Unlike
-/// `watermark_advanced_to`, there is no argument that it should stay off.
+/// to it; it is simply not this review wave's to add. Unlike `watermark_at`,
+/// there is no argument that it should stay off.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct RebuildOutcomeDto {
@@ -119,6 +137,23 @@ pub struct RebuildOutcomeDto {
     /// there. The runs after it were **not** replayed; re-running the same
     /// window is idempotent and is the intended recovery.
     pub stopped_at_gap: bool,
+    /// `true` when every run that finished in `[from, to)` was reached.
+    ///
+    /// `false` means the rebuild did **part** of the job: it spent its page
+    /// budget, or it stopped on a run it could not re-project. This is the field
+    /// to branch on — a client that ignores it reads a partial replay as a
+    /// complete one, which is the failure this response was reshaped to prevent.
+    /// [`Self::resume_from`] then carries where to continue.
+    pub complete: bool,
+    /// The `from` of the request that finishes what this one did not.
+    ///
+    /// `null` exactly when [`Self::complete`] is `true`. Otherwise an RFC 3339
+    /// instant to post straight back as `from`, with the same `to`. The
+    /// continuation re-replays the run it names and anything tied with it — a
+    /// rebuild is idempotent, so overlapping is free where skipping a tie group
+    /// would not be.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub resume_from: Option<OffsetDateTime>,
 }
 
 impl From<ReconcileOutcome> for RebuildOutcomeDto {
@@ -131,6 +166,8 @@ impl From<ReconcileOutcome> for RebuildOutcomeDto {
             // "backfilled" would misdescribe. See `ReconcileOutcome::backfilled`.
             replayed: o.backfilled,
             stopped_at_gap: o.stopped_at_gap,
+            complete: o.caught_up,
+            resume_from: o.resume_from,
         }
     }
 }
@@ -204,15 +241,15 @@ pub struct TestResultDto {
     /// The build under test. Not a duplicate of [`Self::product_version`]: that
     /// one is the analytics *filter*, this one the analytics *projection*.
     pub app_build: Option<String>,
-    /// Renamed from `environment_id` (Task 25): the wire now agrees with the
+    /// Renamed from `platform_id` (Task 25): the wire now agrees with the
     /// Rust field. The column moved with it: `environment_id` is now the
     /// column, the Rust field and the wire key alike. Every other
-    /// `environment_id` on this crate's wire, whatever its own source entity,
+    /// `platform_id` on this crate's wire, whatever its own source entity,
     /// was renamed the same way — this is the one place it is spelled out
     /// in full.
     ///
     /// **This was a breaking API change** (Task 25): a client reading
-    /// `environment_id` out of a response now finds it absent, replaced by
+    /// `platform_id` out of a response now finds it absent, replaced by
     /// `environment_id`. Every renamed field on this crate's wire is a
     /// response field - unlike `qa-runs`, nothing here is also a request
     /// field, so there is no 400 to raise on this crate's side of ruling G-4.
@@ -390,7 +427,7 @@ pub struct DashboardRunDto {
     /// Sourced from `qa_runs_sdk::Run::environment_id` (this crate's own
     /// `test_result::Model` is not involved here — this row never touches
     /// `qa_test_results`), so it is qa-runs' own physical column, one gear
-    /// over, that this field projects. Renamed from `environment_id` (Task 25)
+    /// over, that this field projects. Renamed from `platform_id` (Task 25)
     /// — see [`TestResultDto::environment_id`]'s doc for why: the same
     /// rename applies on both sides of the boundary, even though the source
     /// column this field is sourced from is qa-runs', not this crate's own.
@@ -528,7 +565,7 @@ pub struct FailedTestCardDto {
     pub plan_path: Option<String>,
     /// The environment the run occupied, as an id rather than a name — the same
     /// substitution [`DashboardRunDto::environment_id`] documents.
-    /// Renamed from `environment_id` (Task 25) — see
+    /// Renamed from `platform_id` (Task 25) — see
     /// [`TestResultDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// When the failure's run finished, falling back to when the row was
@@ -2381,7 +2418,7 @@ pub struct JiraBugDto {
     pub repo_id: Uuid,
     pub plan_path: String,
     pub app_version: Option<String>,
-    /// Renamed from `environment_id` (Task 25) — see
+    /// Renamed from `platform_id` (Task 25) — see
     /// [`TestResultDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// Free JIRA workflow text — `"Open"` unless [`Self::resolved_at`] is set,
@@ -2557,7 +2594,7 @@ impl From<ScheduledRunSlackTemplatesDto> for ScheduledRunSlackTemplates {
 /// until that review nothing enforced it, so an operator following the field's
 /// own name was the only thing keeping the secret out of a document
 /// `GET /qa/v1/settings/notifications` hands to any holder of
-/// `qa.notification_config/get`.
+/// `gts.cf.qa.insights.notification_config.v1~/get`.
 /// `domain::service::notify::NotifyService::save_config` now applies the JIRA
 /// surface's own syntax check to it. The one asymmetry that remains with
 /// [`JiraSettingsDto`] is that an empty value here *clears* the reference
@@ -2582,7 +2619,20 @@ pub struct NotificationConfigDto {
     pub scheduled_run_slack_templates: ScheduledRunSlackTemplatesDto,
     pub run_queue_queued_slack_enabled: bool,
     pub email_smtp_host: String,
+    /// Also the TLS selector: 465 is implicit TLS, everything else is
+    /// `STARTTLS`. `qa_insights_sdk::NotificationConfig::email_smtp_port` and
+    /// `infra::notify::mail_smtp` carry the argument for the rule living on
+    /// this field rather than on a third one an operator could contradict.
     pub email_smtp_port: u16,
+    /// SMTP AUTH username, in the clear — see the SDK field. Empty together
+    /// with [`Self::email_smtp_credstore_ref`] means unauthenticated
+    /// submission; either one alone is rejected by `save_config`.
+    pub email_smtp_username: String,
+    /// Credstore **reference** to the SMTP password. This surface never carries
+    /// the password itself, in either direction: a `PUT` names a reference and
+    /// the `GET` answers with the same reference, exactly as
+    /// [`Self::slack_webhook_credstore_ref`] does.
+    pub email_smtp_credstore_ref: String,
     pub email_from: String,
     pub email_recipients: String,
     pub email_enabled: bool,
@@ -2603,6 +2653,8 @@ impl From<NotificationConfig> for NotificationConfigDto {
             run_queue_queued_slack_enabled: config.run_queue_queued_slack_enabled,
             email_smtp_host: config.email_smtp_host,
             email_smtp_port: config.email_smtp_port,
+            email_smtp_username: config.email_smtp_username,
+            email_smtp_credstore_ref: config.email_smtp_credstore_ref,
             email_from: config.email_from,
             email_recipients: config.email_recipients,
             email_enabled: config.email_enabled,
@@ -2625,6 +2677,8 @@ impl From<NotificationConfigDto> for NotificationConfig {
             run_queue_queued_slack_enabled: dto.run_queue_queued_slack_enabled,
             email_smtp_host: dto.email_smtp_host,
             email_smtp_port: dto.email_smtp_port,
+            email_smtp_username: dto.email_smtp_username,
+            email_smtp_credstore_ref: dto.email_smtp_credstore_ref,
             email_from: dto.email_from,
             email_recipients: dto.email_recipients,
             email_enabled: dto.email_enabled,
@@ -2825,7 +2879,10 @@ mod tests {
         let dto = RebuildOutcomeDto::from(ReconcileOutcome {
             scanned: 3,
             backfilled: 1,
-            watermark_advanced_to: None,
+            result_rows_written: 9,
+            watermark_at: None,
+            caught_up: false,
+            resume_from: Some(datetime!(2026-08-18 09:30:00 UTC)),
             stopped_at_gap: true,
             stopped_at_run: Some(Uuid::from_u128(0x5709)),
         });
@@ -2839,6 +2896,48 @@ mod tests {
             "replayed must carry ReconcileOutcome::backfilled, not scanned"
         );
         assert!(dto.stopped_at_gap);
+        assert!(
+            !dto.complete,
+            "complete must carry ReconcileOutcome::caught_up, and a stopped pass is not complete"
+        );
+        assert_eq!(
+            dto.resume_from,
+            Some(datetime!(2026-08-18 09:30:00 UTC)),
+            "resume_from must carry ReconcileOutcome::resume_from: the whole point of the \
+             field is that a partial rebuild says where to continue"
+        );
+    }
+
+    /// The two new keys are on the JSON, under the names this response
+    /// documents.
+    ///
+    /// A struct-field read is a proxy for the wire shape, not the wire shape
+    /// itself — Important-4 of the Task 25 review, restated here because
+    /// `resume_from` carries a `#[serde(with = ...)]` attribute that a field
+    /// read cannot see at all, and an instant serialized in `time`'s default
+    /// form rather than RFC 3339 is not something an operator can post back as
+    /// `from`.
+    #[test]
+    fn a_truncated_rebuild_renders_complete_and_an_rfc3339_resume_instant() {
+        let dto = RebuildOutcomeDto::from(ReconcileOutcome {
+            scanned: 2000,
+            backfilled: 2000,
+            result_rows_written: 4000,
+            watermark_at: None,
+            caught_up: false,
+            resume_from: Some(datetime!(2026-08-18 09:30:00 UTC)),
+            stopped_at_gap: false,
+            stopped_at_run: None,
+        });
+
+        let json = serde_json::to_value(&dto).expect("the response serializes");
+
+        assert_eq!(json["complete"], serde_json::json!(false));
+        assert_eq!(
+            json["resume_from"],
+            serde_json::json!("2026-08-18T09:30:00Z"),
+            "the instant must come back in the form `RebuildReq::from` accepts"
+        );
     }
 
     /// The clean shape too, because it is the one an operator sees most often and
@@ -2849,13 +2948,21 @@ mod tests {
         let dto = RebuildOutcomeDto::from(ReconcileOutcome {
             scanned: 7,
             backfilled: 7,
-            watermark_advanced_to: None,
+            result_rows_written: 21,
+            watermark_at: None,
+            caught_up: true,
+            resume_from: None,
             stopped_at_gap: false,
             stopped_at_run: None,
         });
 
         assert_eq!((dto.scanned, dto.replayed), (7, 7));
         assert!(!dto.stopped_at_gap);
+        assert!(dto.complete);
+        assert_eq!(
+            dto.resume_from, None,
+            "nothing to resume from when the window was walked to its end"
+        );
     }
 
     /// `#[serde(with = "time::serde::rfc3339")]` on a **request** field, which is
@@ -4448,6 +4555,8 @@ mod tests {
             run_queue_queued_slack_enabled: false,
             email_smtp_host: "smtp.example.com".to_owned(),
             email_smtp_port: 2525,
+            email_smtp_username: "qa@example.com".to_owned(),
+            email_smtp_credstore_ref: "qa-smtp-password".to_owned(),
             email_from: "qa@example.com".to_owned(),
             email_recipients: "a@example.com, b@example.com".to_owned(),
             email_enabled: true,
@@ -4465,6 +4574,8 @@ mod tests {
         assert!(!dto.run_queue_queued_slack_enabled);
         assert_eq!(dto.email_smtp_host, "smtp.example.com");
         assert_eq!(dto.email_smtp_port, 2525);
+        assert_eq!(dto.email_smtp_username, "qa@example.com");
+        assert_eq!(dto.email_smtp_credstore_ref, "qa-smtp-password");
         assert_eq!(dto.email_from, "qa@example.com");
         assert_eq!(dto.email_recipients, "a@example.com, b@example.com");
         assert!(dto.email_enabled);

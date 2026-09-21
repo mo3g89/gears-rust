@@ -8,7 +8,7 @@
 //!
 //! **A `SeaORM` entity's table and column names are runtime strings**, so
 //! `environment::Model::default_branch` compiling proves nothing about the schema.
-//! `m20260814_000006_platform_default_branch` covers the column directly; these
+//! `m20260814_000006_platform_default_branch` (folded into `migrations::m20260812_000001_initial` by the docs squash) covers the column directly; these
 //! cover the *service* path onto it, which is the one an operator actually uses.
 //!
 //! **Task 9b's coverage hole was in this exact gear**: no DB-backed fixture ever
@@ -434,7 +434,10 @@ async fn a_patch_with_a_blank_value_clears_the_override_rather_than_storing_it()
 ///
 /// * the node list and namespace count. The plugin contract keeps only the
 ///   health *verdict* and leaves a product's own facts in `ObservedAttrs`
-///   (`PRODUCT-PLUGINS-DESIGN.md` §5.3), so nothing reaching
+///   (`gears/qa-platform/docs/features/product-plugins.md`'s `observe`
+///   section records the same split of persisted columns; the doc has no
+///   section numbers, so `§5.3`, cited here before the docs squash, no
+///   longer resolves to anything), so nothing reaching
 ///   `record_observation` carries a node list any more, and a successful read
 ///   now clears those two columns rather than filling them. Their coverage
 ///   lives in `record_observation`'s own tests, which are what assert the

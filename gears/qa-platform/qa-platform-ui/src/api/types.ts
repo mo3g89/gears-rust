@@ -85,6 +85,15 @@ export interface RunResultCounts {
   failed: number;
   skipped: number;
   in_progress: number;
+  /** Results the runner reported `XFAIL` - an expected failure that failed. */
+  xfail: number;
+  /** Results the runner reported `XPASS` - an expected failure that unexpectedly passed. The
+   *  twin of `xfail`, and the one that makes passed + failed + skipped + in_progress + xfail
+   *  + xpass === total hold for a run whose every result carries a status the gear
+   *  recognises. A status the runner invents is still counted in `total` alone, so the
+   *  identity accounts for every recognised row rather than being one a renderer may divide
+   *  by. */
+  xpass: number;
   total: number;
 }
 
@@ -209,6 +218,8 @@ export interface ScheduleRunBrief {
   failed: number;
   skipped: number;
   in_progress: number;
+  xfail: number;
+  xpass: number;
   total: number;
 }
 
@@ -681,6 +692,11 @@ export interface TestRepository {
   /** Set by a successful sync, left untouched by a failed one — so this can still hold a
    *  past timestamp while `sync_error` is populated (synced once, failing now). */
   last_synced_at: string | null;
+  /** Commit id the last successful sync materialized; `null` when the repository has never
+   *  synced. This is the content revision — `last_synced_at` is only when the attempt
+   *  happened, so two syncs that find the same upstream tip give two timestamps and one
+   *  revision. Carried over unchanged by a failed sync, exactly like `last_synced_at`. */
+  head_commit: string | null;
   /** Sanitized error text of the last failed sync attempt; cleared back to `null` the next
    *  time a sync succeeds. A populated value here must take precedence over any
    *  `last_synced_at` when rendering sync state. */
@@ -1099,7 +1115,11 @@ export interface NotificationsConfig {
   scheduled_run_slack_enabled: boolean;
   scheduled_run_slack_templates: ScheduledRunSlackTemplatesConfig;
   email_smtp_host: string;
+  /** Also the TLS mode: 465 is implicit TLS, anything else requires STARTTLS. */
   email_smtp_port: number;
+  email_smtp_username: string;
+  /** A credstore reference, never the password. The gear resolves it at send time. */
+  email_smtp_credstore_ref: string;
   email_from: string;
   email_recipients: string;
   email_enabled: boolean;

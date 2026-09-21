@@ -2912,20 +2912,55 @@ async fn a_collect_run_records_its_branch_and_falls_back_to_the_repository_defau
     }
 }
 
-/// The collect deadline reaches the run row: `domain::timeout` resolves 600 for
-/// this kind (legacy's synthetic `timeout_seconds: 600`,
-/// `manager/src/services/collect.rs:106`) and `resolve` must actually pass the
-/// kind through. A launch that hard-coded `RunKind::Plan` there would give a
-/// collect run 300 seconds and nothing else would notice.
+/// The collect deadline reaches the run row, and it is the **configured**
+/// default rather than the per-kind fallback.
+///
+/// Two things at once, and neither subsumes the other. `resolve` must pass the
+/// kind through — a launch that hard-coded `RunKind::Plan` there would give a
+/// collect run 300 seconds and nothing else would notice — and the collect arm
+/// must consult `default_timeout_seconds`, which it did not until the collect
+/// arm was deliberately diverged from legacy's chain (`docs/DESIGN.md` §3.13,
+/// "The collect deadline diverges from the source system"). The configured
+/// value here is deliberately neither 600 nor 300, so neither mistake can
+/// pass.
+///
+/// The unset case — no configured default, legacy's synthetic
+/// `timeout_seconds: 600` (`manager/src/services/collect.rs:106`) — is
+/// `a_collect_runs_deadline_falls_back_to_the_legacy_ten_minutes` below.
 #[tokio::test]
-async fn a_collect_runs_deadline_is_the_legacy_ten_minutes() {
+async fn a_collect_runs_deadline_is_the_configured_default() {
     let before = OffsetDateTime::now_utc();
-    let harness = Builder::new()
-        // Deliberately non-zero, and deliberately not 600: the collect arm
-        // consults neither the configured default nor any plan.
-        .default_timeout(900)
-        .build()
-        .await;
+    let harness = Builder::new().default_timeout(900).build().await;
+
+    let outcome = harness
+        .service
+        .launch(
+            &ctx(OWNER_TENANT),
+            collect_request(REPO_ID, "main", COLLECT_URL),
+        )
+        .await
+        .expect("collect launches");
+    let LaunchOutcome::Started { run } = outcome else {
+        panic!("a collect launch starts immediately");
+    };
+    let deadline = run.timeout_at.expect("a collect run has a deadline");
+    let seconds = (deadline - before).whole_seconds();
+    assert!(
+        (895..=905).contains(&seconds),
+        "expected ~900s, the configured default the collect arm now honours, got {seconds}"
+    );
+}
+
+/// With no configured default, a collect run still gets legacy's ten minutes.
+///
+/// This is the half of register item 13 that bounds the divergence: a
+/// deployment that sets nothing is unchanged. `0` is what `argo.rs:174`
+/// (`Ok(Some(cfg)) if cfg.default_timeout_seconds > 0`) reads as "unset", and
+/// it is what this harness is built with.
+#[tokio::test]
+async fn a_collect_runs_deadline_falls_back_to_the_legacy_ten_minutes() {
+    let before = OffsetDateTime::now_utc();
+    let harness = Builder::new().default_timeout(0).build().await;
 
     let outcome = harness
         .service

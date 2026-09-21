@@ -116,8 +116,8 @@ pub(super) fn register_dashboard_routes(router: Router, openapi: &dyn OpenApiReg
              nothing was dropped then, not because those runs stop existing. Omitting \
              product_id preserves today's deployment-wide behaviour exactly, and an \
              unattributable run is included in that deployment-wide answer as it always \
-             was. Requires the qa.test_result/list grant every request needs, and a \
-             product-scoped request additionally requires qa.test_repo/list: resolving \
+             was. Requires the gts.cf.qa.insights.test_result.v1~/list grant every request needs, and a \
+             product-scoped request additionally requires gts.cf.qa.catalog.test_repo.v1~/list: resolving \
              which repositories the selected product owns is a qa-catalog read of its \
              own, refused independently of the first grant.",
         )
@@ -173,7 +173,7 @@ pub(super) fn register_dashboard_routes(router: Router, openapi: &dyn OpenApiReg
              than reported as zero. The array is empty in every deployment today, and not \
              only where coverage collection is switched off: nothing in this system measures \
              a coverage point yet, and no number is folded out of the ingested test results \
-             to fill the gap. Requires the qa.test_result/list grant, the same one the \
+             to fill the gap. Requires the gts.cf.qa.insights.test_result.v1~/list grant, the same one the \
              dashboard and the test-result collections need.",
         )
         .tag(API_TAG)

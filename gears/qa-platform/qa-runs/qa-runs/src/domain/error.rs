@@ -205,8 +205,9 @@ pub enum DomainError {
     /// than per environment: two tenants sharing a `environment_id` each get
     /// their own budget, and a hierarchical policy whose scope admits several
     /// tenants counts all of them while `insert` stamps only
-    /// `subject_tenant_id`. See `service::admission`'s depth check and
-    /// `DESIGN.md` §3.7 for why the queries are deliberately left that way.
+    /// `subject_tenant_id`. See `service::admission`'s depth check for why
+    /// the queries are deliberately left that way; `DESIGN.md` does not
+    /// state this rationale centrally under either §3.7 or §3.8.
     ///
     /// Kept distinct from [`Self::ConcurrencyLimit`] rather than folded into one
     /// "too many runs" error because the frozen guide enumerates **exactly two**
@@ -443,9 +444,22 @@ impl DomainError {
 
 /// Review finding #25: the source is boxed into [`DomainError::Database`]
 /// rather than flattened to `e.to_string()`, so `.source()` reaches the
-/// original `DbError` and its own cause chain. See that variant's doc; the
-/// TODO(DE1302) comment and its lint allowance, which named exactly this fix,
-/// are gone with it.
+/// original `DbError` and its own cause chain. See that variant's doc.
+///
+/// **The `DE1302` allowance is deliberate and is NOT the defect that lint
+/// exists to catch.** `DE1302` fires on `.to_string()` inside a `From` impl
+/// because that is how an error chain gets destroyed -- the original type
+/// flattened to text, `.source()` answering `None`. Here the source is
+/// *also* boxed into the variant, so `.source()` reaches the original
+/// `DbError` and its own causes; the `String` is the display message
+/// alongside it, not instead of it. The lint cannot see the second field.
+///
+/// This doc previously claimed the allowance was "gone with" the fix. It was
+/// removed, and the lint went on firing -- nobody saw it, because the Dylint
+/// pass never reached this gear (it aborted on another gear's failures
+/// first). Restored, with the reason stated, rather than left as a violation
+/// that only stays quiet while the check does not run.
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<toolkit_db::DbError> for DomainError {
     fn from(e: toolkit_db::DbError) -> Self {
         DomainError::Database {
@@ -634,6 +648,16 @@ fn opaque_internal(e: &DomainError) -> CanonicalError {
     CanonicalError::internal(OPAQUE_ERROR_TEXT).create()
 }
 
+// `DE1302` is allowed for this impl, and here the lint's premise simply does
+// not apply. It fires on `.to_string()` in a `From` because that destroys an
+// error chain -- but this impl's entire job is to RENDER a `DomainError` into
+// the wire error a caller receives, and `CanonicalError` is the boundary past
+// which no Rust error type travels at all. The one `.to_string()` it flags
+// (`DomainError::InvalidCron`) is deliberately putting this gear's own sentence
+// about a bad cron expression into the violation description a caller reads;
+// there is no chain to preserve, because nothing downstream of here can consume
+// one.
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<DomainError> for CanonicalError {
     #[allow(
         clippy::cognitive_complexity,

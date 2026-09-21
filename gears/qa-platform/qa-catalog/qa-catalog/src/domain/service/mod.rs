@@ -62,7 +62,7 @@ use crate::domain::repos::{
 /// distinct resource types among them. The source side of the permission
 /// catalog's anti-drift test - review finding #1.
 pub mod authz_surface;
-mod bundles;
+pub mod bundles;
 mod custom_plans;
 mod plans;
 mod plugin_registry;
@@ -78,7 +78,7 @@ mod ssh_keys;
 mod sync_cache;
 mod validation;
 
-pub use bundles::BundlesService;
+pub use bundles::{BundleDownloadSigningSecret, BundlesService};
 pub use custom_plans::CustomPlansService;
 pub use plans::PlansService;
 pub use plugin_registry::{ProductPluginPresence, QaProductRegistry, RegisteredProductPlugin};
@@ -242,6 +242,7 @@ pub type DbProvider = DBProvider<DomainError>;
 /// this citation had already drifted twice as a line range.
 pub mod resources {
     use super::ResourceType;
+    use toolkit_gts::gts_id;
     use toolkit_security::pep_properties;
 
     pub const TEST_REPO: ResourceType = ResourceType::from_static(
@@ -249,52 +250,54 @@ pub mod resources {
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
-    /// [`TEST_REPO`]'s name as a `&'static str`, for the reason this module's
-    /// header cites.
-    pub const TEST_REPO_NAME: &str = "qa.test_repo";
+    /// [`TEST_REPO`]'s name as a `&'static str`.
+    ///
+    /// A concrete GTS type id rather than a bare string, so the RBAC
+    /// role-definition validator can resolve it as a `target_type`; the stub
+    /// type-schema that registers it is
+    /// [`crate::gts::authz_types::QaTestRepoV1`].
+    pub const TEST_REPO_NAME: &str = gts_id!("cf.qa.catalog.test_repo.v1~");
 
     pub const PLAN: ResourceType =
         ResourceType::from_static(PLAN_NAME, &[pep_properties::OWNER_TENANT_ID]);
 
-    /// [`PLAN`]'s name as a `&'static str`, for the reason this module's header
-    /// cites.
-    pub const PLAN_NAME: &str = "qa.plan";
+    /// [`PLAN`]'s name. See [`TEST_REPO_NAME`] for why it is a GTS type id.
+    pub const PLAN_NAME: &str = gts_id!("cf.qa.catalog.plan.v1~");
 
     pub const CUSTOM_PLAN: ResourceType = ResourceType::from_static(
         CUSTOM_PLAN_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
-    /// [`CUSTOM_PLAN`]'s name as a `&'static str`, for the reason this module's
-    /// header cites.
-    pub const CUSTOM_PLAN_NAME: &str = "qa.custom_plan";
+    /// [`CUSTOM_PLAN`]'s name. See [`TEST_REPO_NAME`].
+    pub const CUSTOM_PLAN_NAME: &str = gts_id!("cf.qa.catalog.custom_plan.v1~");
 
     pub const PRODUCT: ResourceType = ResourceType::from_static(
         PRODUCT_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
-    /// [`PRODUCT`]'s name as a `&'static str`, for the reason this module's
-    /// header cites.
-    pub const PRODUCT_NAME: &str = "qa.product";
+    /// [`PRODUCT`]'s name. See [`TEST_REPO_NAME`].
+    pub const PRODUCT_NAME: &str = gts_id!("cf.qa.catalog.product.v1~");
 
     pub const SSH_KEY: ResourceType = ResourceType::from_static(
         SSH_KEY_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
-    /// [`SSH_KEY`]'s name as a `&'static str`, for the reason this module's
-    /// header cites.
-    pub const SSH_KEY_NAME: &str = "qa.ssh_key";
+    /// [`SSH_KEY`]'s name. See [`TEST_REPO_NAME`].
+    pub const SSH_KEY_NAME: &str = gts_id!("cf.qa.catalog.ssh_key.v1~");
 
     pub const BUNDLE: ResourceType = ResourceType::from_static(
         BUNDLE_NAME,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
-    /// [`BUNDLE`]'s name as a `&'static str`, for the reason this module's
-    /// header cites.
-    pub const BUNDLE_NAME: &str = "qa.bundle";
+    /// [`BUNDLE`]'s name. See [`TEST_REPO_NAME`].
+    ///
+    /// Unlike its five neighbours this id is **minted here**: bundles have no
+    /// RFC-9457 error surface, so no `cf.qa.catalog.bundle.v1~` existed before.
+    pub const BUNDLE_NAME: &str = gts_id!("cf.qa.catalog.bundle.v1~");
 }
 
 pub mod actions {
@@ -350,6 +353,13 @@ pub struct ServiceDeps {
     pub(crate) repos_dir: PathBuf,
     /// `QaCatalogConfig::bundle_ttl_seconds` as a duration.
     pub(crate) bundle_ttl: time::Duration,
+    /// `QaCatalogConfig::bundle_download_signing_secret` — the HMAC root the
+    /// anonymous bundle-download route signs and verifies under.
+    pub(crate) bundle_download_signing_secret: BundleDownloadSigningSecret,
+    /// The bundle-download access-control counter. The same adapter
+    /// `gear.rs` hands the plugin registry, narrowed to the one trait this
+    /// service needs.
+    pub(crate) bundle_download_metrics: Arc<dyn crate::domain::ports::metrics::BundleDownloadMetrics>,
     /// Branch freshness cache + two-tier sync locks (TTL from
     /// `QaCatalogConfig::branch_freshness_ttl_seconds`).
     pub(crate) sync_cache: Arc<SyncCache>,
@@ -422,6 +432,8 @@ where
                 deps.bundle_store,
                 deps.repos_dir,
                 deps.bundle_ttl,
+                deps.bundle_download_signing_secret,
+                deps.bundle_download_metrics,
                 enforcer,
             ),
             plugin_registry,

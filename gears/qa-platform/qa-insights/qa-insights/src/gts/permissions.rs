@@ -22,9 +22,11 @@
 //!
 //! Instance id layout (the suffix needs ≥5 dot-separated tokens):
 //! `gts.cf.toolkit.authz.permission.v1~cf.qa.insights.<pep_entity>_<action>.v1`,
-//! where `pep_entity` is the `resource_type` string with its `qa.` prefix
-//! stripped (e.g. `qa.test_result` → `test_result`). This reuses qa-insights'
-//! own GTS namespace (`cf.qa.insights.*`, the same one its RFC-9457 error
+//! where `pep_entity` is the entity token of the resource type's GTS id:
+//! strip the registry's `GTS_ID_PREFIX` (`gts.`), then this gear's own
+//! `cf.qa.insights.` prefix, then the trailing `.v1~` suffix (e.g.
+//! `gts.cf.qa.insights.test_result.v1~` → `test_result`). This reuses
+//! qa-insights' own GTS namespace (`cf.qa.insights.*`, the same one its RFC-9457 error
 //! surface uses — `cf.qa.insights.test_result.v1~`, `.saved_view.v1~`,
 //! `.notification.v1~`), not `cf.core.*` — that namespace belongs to the
 //! system gears, and qa-insights is not one of them. `permissions_tests`
@@ -33,16 +35,17 @@
 //!
 //! # `notification_config`: one PEP string, two other names, three contracts
 //!
-//! The PEP resource string is `qa.notification_config`, which is what this
-//! catalog's entity token comes from and what a deployment's policy is
-//! written against. The REST surface's `gts_id`, by contrast, is
-//! `gts.cf.qa.insights.notification.v1~` — the RFC-9457 `type` a client
-//! matches on, i.e. a wire contract with its own callers, which is why it was
-//! never renamed to track the PEP string. Every other resource in this gear
-//! keeps the same word on both sides; this one alone drops `_config` on the
-//! REST side. So this catalog's permission instance ids read
-//! `cf.qa.insights.notification_config_<action>.v1`, following the PEP
-//! string, while the unrelated error type stays
+//! The PEP resource type is `resources::NOTIFICATION_CONFIG_NAME`
+//! (`gts.cf.qa.insights.notification_config.v1~`), whose entity token
+//! `notification_config` is what this catalog's instance ids derive from and
+//! what a deployment's policy is written against. The REST surface's
+//! `gts_id`, by contrast, is `gts.cf.qa.insights.notification.v1~` — the
+//! RFC-9457 `type` a client matches on, i.e. a wire contract with its own
+//! callers, which is why it was never renamed to track the PEP entity token.
+//! Every other resource in this gear keeps the same word on both sides; this
+//! one alone drops `_config` on the REST side. So this catalog's permission
+//! instance ids read `cf.qa.insights.notification_config_<action>.v1`,
+//! following the PEP entity token, while the unrelated error type stays
 //! `cf.qa.insights.notification.v1~`. Nothing here is being renamed to make
 //! the two agree — a reader who notices the mismatch should read it as this
 //! paragraph, not as a bug.

@@ -27,7 +27,7 @@ use toolkit_odata::ODataQuery;
 use qa_runs_sdk as sdk;
 
 use crate::domain::error::DomainError;
-use crate::domain::repos::{RunWithResult, TestResultRow};
+use crate::domain::repos::{RunWithResult, ScheduleTickRow, TestResultRow};
 use crate::domain::timeout::MIN_LAUNCH_TIMEOUT_SECONDS;
 
 // ===========================================================================
@@ -417,6 +417,15 @@ impl From<RunStateDto> for sdk::RunState {
 // `#[serde(rename_all = "snake_case")]` would get wrong on its own -
 // `ExclusiveTier::as_str` has always returned the file name, so the rename
 // below is what keeps the wire unchanged.
+//
+// `DE0803` (api/rest enum variants must be snake_case on the wire) is allowed
+// for that one rename and nothing else. The lint's rule is right in general;
+// this value is not a name this gear chose, it is a FILE name -- `plan.yaml` --
+// and `ExclusiveTier::as_str` has returned it since the first release, so
+// "correcting" it to `plan_yaml` would be a breaking wire change to make a
+// lint quiet. Allowed at the type, with the rest of the variants still held to
+// the rule.
+#[allow(unknown_lints, de0803_api_snake_case)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[toolkit_macros::api_dto(request, response)]
 pub enum ExclusiveTierDto {
@@ -538,18 +547,18 @@ pub struct RunDto {
     /// text names the run holding an environment.
     pub name: String,
     pub target: RunTargetDto,
-    /// Renamed from `environment_id` (Task 25): the wire now agrees with the
+    /// Renamed from `platform_id` (Task 25): the wire now agrees with the
     /// Rust field. The column moved with it: `environment_id` is now the
-    /// column, the Rust field and the wire key alike. Every other `environment_id` on this
+    /// column, the Rust field and the wire key alike. Every other `platform_id` on this
     /// crate's wire (requests and responses alike) was renamed the same way
     /// — this is the one place it is spelled out in full.
     ///
     /// **This was a breaking API change** (Task 25): a client reading
-    /// `environment_id` out of a response now finds it absent, replaced by
+    /// `platform_id` out of a response now finds it absent, replaced by
     /// `environment_id`. (This type is a response - a client never *sends*
     /// one, so there is no 400 to raise here. The 400 for a stale *request*
     /// is on the request-side types: [`LaunchRunReq::environment_id`] and
-    /// [`NewScheduleReq::environment_id`] both refuse a `environment_id` sent in
+    /// [`NewScheduleReq::environment_id`] both refuse a `platform_id` sent in
     /// their place explicitly - see the first one's doc, and ruling G-4.)
     pub environment_id: Option<Uuid>,
     /// Branch actually resolved and executed against.
@@ -661,12 +670,19 @@ impl From<RunWithResult> for RunDto {
     }
 }
 
-/// A run's five outcome counters.
+/// A run's seven outcome counters.
 ///
 /// `failed` is the failed-**or-errored** count: `FAILED` and `ERROR` are
 /// distinct per-test statuses and are folded together in every aggregate that
-/// produces these numbers. `sdk::RunResult` explains why a sixth counter would
-/// be a silent regression.
+/// produces these numbers. `sdk::RunResult` explains why an `error` counter
+/// would be a silent regression, and why `xfail` and `xpass` — which are
+/// counters of their own — are not that case.
+///
+/// `passed + failed + skipped + in_progress + xfail + xpass == total` for a
+/// run whose every result carries one of the eight statuses those counters
+/// recognise. A status the runner invents is counted in `total` alone, so a
+/// consumer reads the identity as "the counters account for every recognised
+/// row" rather than as a guarantee it can divide by.
 #[derive(Debug, Clone, Copy)]
 #[toolkit_macros::api_dto(response)]
 pub struct RunResultDto {
@@ -674,6 +690,11 @@ pub struct RunResultDto {
     pub failed: usize,
     pub skipped: usize,
     pub in_progress: usize,
+    /// Results reported `XFAIL` — an expected failure that failed.
+    pub xfail: usize,
+    /// Results reported `XPASS` — an expected failure that unexpectedly
+    /// passed.
+    pub xpass: usize,
     pub total: usize,
 }
 
@@ -684,6 +705,8 @@ impl From<sdk::RunResult> for RunResultDto {
             failed: r.failed,
             skipped: r.skipped,
             in_progress: r.in_progress,
+            xfail: r.xfail,
+            xpass: r.xpass,
             total: r.total,
         }
     }
@@ -765,7 +788,7 @@ pub struct RunDetailDto {
 pub struct QueueEntryDto {
     pub id: Uuid,
     pub run_id: Uuid,
-    /// Renamed from `environment_id` (Task 25) — see [`RunDto::environment_id`]'s
+    /// Renamed from `platform_id` (Task 25) — see [`RunDto::environment_id`]'s
     /// doc for why.
     pub environment_id: Uuid,
     /// `plan`, `test`, or `custom_plan`.
@@ -858,7 +881,7 @@ pub struct StartedRunDto {
 pub struct LaunchRunReq {
     pub target: RunTargetDto,
     /// `null` launches a run with no target environment. Such a run is never
-    /// queued and never blocks anything. Renamed from `environment_id`
+    /// queued and never blocks anything. Renamed from `platform_id`
     /// (Task 25) — see [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// Test-content branch. When absent, resolution falls back to the
@@ -1031,7 +1054,9 @@ impl LaunchRunReq {
 
 /// Longest `name` this boundary accepts, from the column it lands in:
 /// `qa_schedules.name VARCHAR(255)`
-/// (`infra::storage::migrations::m20260813_000004_schedules`).
+/// (`infra::storage::migrations::m20260813_000003_initial`; declared under
+/// `m20260813_000004_schedules` before that migration was folded into this
+/// one by the docs squash).
 ///
 /// The same argument as [`MAX_BRANCH_LEN`], one table across: a schedule's name
 /// is caller-supplied, nothing between here and the `INSERT` measures it, and
@@ -1113,7 +1138,7 @@ pub struct ScheduleDto {
     pub name: String,
     pub target: RunTargetDto,
     /// `null` schedules a run with no target environment. Such a run is
-    /// never queued and never blocks anything. Renamed from `environment_id`
+    /// never queued and never blocks anything. Renamed from `platform_id`
     /// (Task 25) — see [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// Branch each fire resolves against. `null` falls back to the
@@ -1176,6 +1201,49 @@ impl From<sdk::Schedule> for ScheduleDto {
             last_fired_tick: s.last_fired_tick,
             created_at: s.created_at,
             updated_at: s.updated_at,
+        }
+    }
+}
+
+/// One entry of `GET /qa/v1/schedules/{id}/ticks`: what a real fire's fixed
+/// claim produced, or why it did not — **or, unfiltered, a referential-check
+/// row** (`claimed_by == "referential-check"`), written when the schedule's
+/// target stopped resolving. That row was never a claim: `due_at` is the
+/// check's own timestamp rather than a due occurrence, and `run_id` is always
+/// `null`. Nothing in this list tells the two apart except `claimed_by`
+/// itself — do not read every row here as "what a fire produced".
+///
+/// Fields match `domain::repos::ScheduleTickRow` 1:1 - this is a read with no
+/// wire vocabulary to translate, unlike [`ScheduleDto::exclusive_choice`].
+#[derive(Debug, Clone)]
+#[toolkit_macros::api_dto(response)]
+pub struct ScheduleTickDto {
+    pub id: Uuid,
+    pub schedule_id: Uuid,
+    #[serde(with = "time::serde::rfc3339")]
+    pub due_at: OffsetDateTime,
+    pub claimed_by: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub claimed_at: OffsetDateTime,
+    /// `null` until the launch it triggered completes, forever for an
+    /// orphaned claim, or **always**, unconditionally, for a
+    /// referential-check row (`claimed_by == "referential-check"`), which
+    /// never triggers a launch at all.
+    pub run_id: Option<Uuid>,
+    /// Why the claim did not produce a run: `null` on success.
+    pub error: Option<String>,
+}
+
+impl From<ScheduleTickRow> for ScheduleTickDto {
+    fn from(r: ScheduleTickRow) -> Self {
+        Self {
+            id: r.id,
+            schedule_id: r.schedule_id,
+            due_at: r.due_at,
+            claimed_by: r.claimed_by,
+            claimed_at: r.claimed_at,
+            run_id: r.run_id,
+            error: r.error,
         }
     }
 }
@@ -1243,7 +1311,7 @@ pub struct NewScheduleReq {
     pub name: String,
     pub target: RunTargetDto,
     /// `null` schedules a run with no target environment. Renamed from
-    /// `environment_id` (Task 25) — see [`RunDto::environment_id`]'s doc for why.
+    /// `platform_id` (Task 25) — see [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// `null` resolves the branch at launch time, as a manual launch does.
     pub branch: Option<String>,
@@ -1478,7 +1546,7 @@ pub const QUEUE_LIMIT_MIN: u32 = 1;
 pub struct QueueQuery {
     /// Absent spans every environment in the same window.
     ///
-    /// Renamed from `environment_id` (Task 25) — see
+    /// Renamed from `platform_id` (Task 25) — see
     /// [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// Absent means [`QUEUE_LIMIT_DEFAULT`]. Out-of-range values are **clamped,
@@ -2717,7 +2785,10 @@ mod tests {
         // The same schedule, replaced by a caller who sent only what they meant
         // to change. Every one of the five is gone.
         let cleared = parse_schedule(&schedule_body()).expect("the fixture parses");
-        assert_eq!(cleared.environment_id, None, "a replace detaches the platform");
+        assert_eq!(
+            cleared.environment_id, None,
+            "a replace detaches the platform"
+        );
         assert_eq!(cleared.branch, None);
         assert!(cleared.include_tags.is_empty());
         assert!(cleared.exclude_tags.is_empty());

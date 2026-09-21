@@ -480,6 +480,7 @@ impl Default for RecordingSecretObserver {
 impl RunnerSecretWriter for RecordingSecretObserver {
     async fn ensure_runner_secret(
         &self,
+        _tenant_id: Uuid,
         credstore_ref: &str,
         material: &SecretValue,
     ) -> Result<(), String> {
@@ -512,6 +513,7 @@ impl FailingSecretObserver {
 impl RunnerSecretWriter for FailingSecretObserver {
     async fn ensure_runner_secret(
         &self,
+        _tenant_id: Uuid,
         _credstore_ref: &str,
         _material: &SecretValue,
     ) -> Result<(), String> {
@@ -557,6 +559,7 @@ impl SelectivelyFailingSecretObserver {
 impl RunnerSecretWriter for SelectivelyFailingSecretObserver {
     async fn ensure_runner_secret(
         &self,
+        _tenant_id: Uuid,
         credstore_ref: &str,
         _material: &SecretValue,
     ) -> Result<(), String> {
@@ -617,6 +620,7 @@ impl TruncatingSecretObserver {
 impl RunnerSecretWriter for TruncatingSecretObserver {
     async fn ensure_runner_secret(
         &self,
+        _tenant_id: Uuid,
         credstore_ref: &str,
         _material: &SecretValue,
     ) -> Result<(), String> {
@@ -624,7 +628,15 @@ impl RunnerSecretWriter for TruncatingSecretObserver {
         Ok(())
     }
 
-    fn derived_secret_name(&self, credstore_ref: &str) -> String {
+    /// `tenant_id` is deliberately ignored: this double exists to reproduce
+    /// the *reference* collision
+    /// (`two_long_path_style_references_now_derive_distinct_names` pins that
+    /// the real writer no longer has it), which is orthogonal to the tenant
+    /// -- every credential the service loop asks this about belongs to the
+    /// one environment under test, so a real writer's tenant contribution
+    /// would be identical for all of them and could not itself be what
+    /// distinguishes -- or fails to distinguish -- two names here.
+    fn derived_secret_name(&self, _tenant_id: Uuid, credstore_ref: &str) -> String {
         credstore_ref.chars().take(self.keep).collect()
     }
 }
@@ -1481,7 +1493,7 @@ pub fn plugin_detection_failed(remote: &str) -> PluginObservation {
 }
 
 /// Write the `config` column directly, the way
-/// `m20260903_000011_environment_plugin_columns`' backfill left it.
+/// `m20260903_000011_environment_plugin_columns`'s (folded into `migrations::m20260812_000001_initial` by the docs squash) backfill left it.
 ///
 /// Through the entity rather than raw SQL, so the column name stays
 /// compiler-checked, and under a tenant-bound scope rather than

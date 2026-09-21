@@ -32,8 +32,8 @@ use toolkit::api::canonical_prelude::IntoResponse;
 use uuid::Uuid;
 
 use super::{
-    create_schedule, delete_schedule, get_schedule, list_schedules, replace_schedule,
-    update_schedule_notifications,
+    create_schedule, delete_schedule, get_schedule, list_schedule_ticks, list_schedules,
+    replace_schedule, update_schedule_notifications,
 };
 use crate::api::rest::dto::{NewScheduleReq, RunTargetDto, UpdateScheduleNotificationsReq};
 use crate::domain::service::test_support::{Fleet, ctx};
@@ -522,4 +522,71 @@ async fn an_unknown_event_is_a_400_attributed_to_the_schedule() {
         !body.contains("cf.qa.runs.run.v1~"),
         "and must not name the run: {body}"
     );
+}
+
+/// `GET /qa/v1/schedules/{id}/ticks`, driven over a real fired-and-failed
+/// claim: the wiring this task adds, not the outcome logic `schedules_tests`
+/// already covers at the service.
+#[tokio::test]
+async fn the_ticks_handler_returns_the_fire_history_newest_first() {
+    let fleet = Fleet::new().await;
+    let services = fleet.instance();
+
+    let (_, _, created) = rendered(
+        create_schedule(
+            Uri::from_static("/qa/v1/schedules"),
+            Extension(ctx(TENANT)),
+            Extension(Arc::clone(&services)),
+            Json(payload("nightly")),
+        )
+        .await
+        .into_response(),
+    )
+    .await;
+    let id: Uuid = serde_json::from_str::<serde_json::Value>(&created).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let earlier = time::macros::datetime!(2026-08-13 03:00 UTC);
+    let later = time::macros::datetime!(2026-08-13 04:00 UTC);
+    let run_id = Uuid::new_v4();
+    fleet
+        .seed_tick(TENANT, id, earlier, Some(run_id), None)
+        .await;
+    fleet
+        .seed_tick(TENANT, id, later, None, Some("launch refused"))
+        .await;
+
+    let response = list_schedule_ticks(
+        Extension(ctx(TENANT)),
+        Extension(Arc::clone(&services)),
+        Path(id),
+    )
+    .await
+    .into_response();
+    let (status, _, body) = rendered(response).await;
+    assert_eq!(status, 200, "{body}");
+
+    let ticks: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ticks = ticks.as_array().expect("the body is an array");
+    assert_eq!(ticks.len(), 2, "{body}");
+    assert_eq!(
+        ticks[0]["error"], "launch refused",
+        "newest due_at first: {body}"
+    );
+    assert_eq!(ticks[0]["run_id"], serde_json::Value::Null, "{body}");
+    assert_eq!(ticks[1]["run_id"], run_id.to_string(), "{body}");
+    assert_eq!(ticks[1]["error"], serde_json::Value::Null, "{body}");
+
+    // Another tenant gets the same 404 as `get_schedule` for this id.
+    let denied = list_schedule_ticks(
+        Extension(ctx(Uuid::from_u128(0xBAD))),
+        Extension(services),
+        Path(id),
+    )
+    .await
+    .into_response();
+    assert_eq!(denied.status(), 404);
 }

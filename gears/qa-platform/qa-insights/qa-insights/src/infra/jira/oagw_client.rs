@@ -131,6 +131,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use oagw_sdk::api::ServiceGatewayClientV1;
@@ -139,7 +140,7 @@ use oagw_sdk::{
     HTTP_PROTOCOL_ID, HttpMatch, HttpMethod, ListQuery, MatchRules, PathSuffixMode, Scheme, Server,
     SharingMode,
 };
-use qa_insights_sdk::JiraConfig;
+use qa_insights_sdk::{JIRA_SUMMARY_MAX_CHARS, JiraConfig};
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::SecurityContext;
 use tracing::{debug, warn};
@@ -181,6 +182,10 @@ const MAX_LOG_CHARS: usize = 2000;
 /// request header.
 pub struct OagwJiraClient {
     gateway: Arc<dyn ServiceGatewayClientV1>,
+    /// The bound [`Self::send`] applies to one proxied request —
+    /// [`Self::REQUEST_TIMEOUT`] in production, always. See that constant's
+    /// own doc for why this adapter had none until this task.
+    timeout: Duration,
     /// The `(tenant_id, alias, base_path)` triples this process has already
     /// ensured **both** an upstream *and* a route for.
     ///
@@ -259,10 +264,47 @@ impl JiraEgress {
 }
 
 impl OagwJiraClient {
+    /// The fixed bound [`Self::send`] applies to one proxied request.
+    ///
+    /// # Ported reasoning, not a guess — this task closes the gap between
+    /// # this adapter and its Slack sibling
+    ///
+    /// `infra::notify::slack_oagw::SlackOagwClient::REQUEST_TIMEOUT` carries
+    /// legacy's own 10-second bound
+    /// (`manager/src/services/notifications.rs:58-59`, "10s is generous for
+    /// a webhook - Slack's own guidance is ~3s") and this adapter had no
+    /// timeout of its own at all: the only bound on one call was `oagw`'s own
+    /// 30-second default (`gears/system/oagw/oagw/src/infra/proxy/service.rs:48`),
+    /// and `domain::service::jira_poller`'s `run_pass` awaits **one
+    /// `check_status` call per open bug, sequentially, inside one
+    /// leader-claimed tick** (`crate::infra::leader::ROLE_JIRA_POLLER`) — so
+    /// a single slow or black-holing JIRA instance could stall that whole
+    /// tick for 30 seconds times however many bugs are open, rather than
+    /// losing just the one lookup. The same "bound the one call rather than
+    /// the whole loop" reasoning Slack's own module header records, applied
+    /// here.
+    pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
     #[must_use]
     pub fn new(gateway: Arc<dyn ServiceGatewayClientV1>) -> Self {
         Self {
             gateway,
+            timeout: Self::REQUEST_TIMEOUT,
+            provisioned: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Test-only escape hatch: a client whose bound is *not*
+    /// [`Self::REQUEST_TIMEOUT`], so a test can exercise the bound with a
+    /// duration measured in milliseconds rather than the real ten seconds —
+    /// `SlackOagwClient::with_timeout`'s own reason, mirrored here.
+    /// Production code has exactly one way to build this type —
+    /// [`Self::new`] — and always gets the real bound.
+    #[cfg(test)]
+    fn with_timeout(gateway: Arc<dyn ServiceGatewayClientV1>, timeout: Duration) -> Self {
+        Self {
+            gateway,
+            timeout,
             provisioned: Mutex::new(HashSet::new()),
         }
     }
@@ -535,11 +577,21 @@ impl OagwJiraClient {
             .body(body)
             .map_err(|e| DomainError::Internal(format!("could not build the JIRA request: {e}")))?;
 
-        let response = self
-            .gateway
-            .proxy_request(ctx.clone(), request)
-            .await
-            .map_err(|e| DomainError::Internal(format!("the JIRA request failed: {e}")))?;
+        // This task's timeout bound — see `Self::REQUEST_TIMEOUT`'s own doc
+        // for why this call had none until now. Slack's adapter wraps its
+        // one proxy call the same way, for the same reason.
+        let response = tokio::time::timeout(
+            self.timeout,
+            self.gateway.proxy_request(ctx.clone(), request),
+        )
+        .await
+        .map_err(|_| {
+            DomainError::Internal(format!(
+                "the JIRA request did not complete within {:?}",
+                self.timeout
+            ))
+        })?
+        .map_err(|e| DomainError::Internal(format!("the JIRA request failed: {e}")))?;
 
         let status = response.status();
         let bytes =
@@ -789,15 +841,37 @@ fn upstream_request(config: &JiraConfig, egress: &JiraEgress) -> CreateUpstreamR
     .build()
 }
 
-/// The issue summary. Legacy's format string, verbatim (`jira.rs:113`).
+/// The issue summary. Legacy's format string, verbatim (`jira.rs:113`), now
+/// bounded to [`JIRA_SUMMARY_MAX_CHARS`] — this task's fix.
+///
+/// Without this, a `test_name` near the top of its `VARCHAR(512)` column
+/// produces a summary past JIRA's 255-character field limit, which JIRA
+/// answers with a 400; [`crate::domain::service::jira`]'s `file_bugs` calls
+/// `file_one` per failing test and, on an `Err`, logs it at error and moves
+/// on to the next one rather than propagating — so the failing test whose
+/// name was too long never gets a bug at all, silently as far as the caller
+/// of `file_bugs` is concerned. Truncating the whole formatted string,
+/// prefix included, the same way
+/// [`truncate_logs`] truncates its field: a character count taken directly,
+/// with no separate over-length check needed because `.take()` is already a
+/// no-op on a summary shorter than the bound.
 ///
 /// `pub(crate)` rather than private so this module's own tests can pin it
 /// against [`crate::domain::service::jira::bug_summary`] — Task 33's
 /// duplicate of this exact literal, kept in agreement by
-/// `the_stored_summary_matches_the_one_sent_to_jira` rather than by a shared
-/// `const`, because the domain layer must not depend on this adapter.
+/// `the_stored_summary_matches_the_one_sent_to_jira` (and, past the
+/// truncation boundary, `the_stored_summary_matches_the_one_sent_to_jira_past_the_truncation_boundary`)
+/// rather than compile-time sharing, because the domain layer must not
+/// depend on this adapter. The truncation *bound* itself, unlike the format
+/// string, is shared: both this function and `bug_summary` take
+/// [`JIRA_SUMMARY_MAX_CHARS`] from `qa_insights_sdk`, the one crate both
+/// layers already legitimately depend on — so there is exactly one `255`,
+/// not two bare copies for the pinning test to reconcile after the fact.
 pub(crate) fn summary_for(test_name: &str) -> String {
     format!("[VHP] Test Failed: {test_name}")
+        .chars()
+        .take(JIRA_SUMMARY_MAX_CHARS)
+        .collect()
 }
 
 /// The dedupe JQL. Legacy's, verbatim (`jira.rs:70-74`).

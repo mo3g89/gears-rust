@@ -329,7 +329,12 @@ static METRICS_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 /// The OTLP metric exporter cannot be constructed.
 #[cfg(feature = "otel")]
 pub fn init_metrics_provider(otel_cfg: &OpenTelemetryConfig) -> anyhow::Result<()> {
-    if !otel_cfg.metrics.enabled {
+    // TWO INDEPENDENT READERS, ONE PROVIDER. `metrics.enabled` governs OTLP
+    // push; `metrics.scrape.enabled` governs the pull endpoint. Either one is
+    // reason enough to build a real meter provider, and neither implies the
+    // other — see `telemetry::scrape` for why push is the one that stays off
+    // by default.
+    if !otel_cfg.metrics.enabled && !otel_cfg.metrics.scrape.enabled {
         // Do NOT cache the disabled path in METRICS_INIT — a later call with
         // metrics enabled must still be able to initialise the real provider.
         tracing::info!(
@@ -353,6 +358,57 @@ pub fn init_metrics_provider(otel_cfg: &OpenTelemetryConfig) -> anyhow::Result<(
 
 #[cfg(feature = "otel")]
 fn do_init_metrics_provider(otel_cfg: &OpenTelemetryConfig) -> anyhow::Result<()> {
+    // Build resource with service name and attributes
+    let resource = build_resource(&otel_cfg.resource);
+
+    let mut builder =
+        opentelemetry_sdk::metrics::SdkMeterProvider::builder().with_resource(resource);
+
+    if otel_cfg.metrics.enabled {
+        builder = builder.with_periodic_exporter(build_metric_exporter(otel_cfg)?);
+    }
+
+    // The pull half. Attached before the provider is built so the very first
+    // scrape after startup already sees every instrument the gears created.
+    if otel_cfg.metrics.scrape.enabled {
+        builder = builder.with_reader(crate::telemetry::scrape::reader());
+    }
+
+    // Apply a global cardinality limit when configured
+    if let Some(limit) = otel_cfg.metrics.cardinality_limit {
+        builder = builder.with_view(move |_: &opentelemetry_sdk::metrics::Instrument| {
+            opentelemetry_sdk::metrics::Stream::builder()
+                .with_cardinality_limit(limit)
+                .build()
+                .ok()
+        });
+    }
+
+    let provider = builder.build();
+
+    global::set_meter_provider(provider);
+
+    // LAST, and after `builder.build()` in particular: that is what registers
+    // the scrape reader against the provider's pipeline. Binding the socket
+    // before then would open a window in which a scraper connects, `render`
+    // finds a reader with no pipeline, and the endpoint answers 503 to a
+    // process that is in fact healthy.
+    crate::telemetry::scrape::spawn(&otel_cfg.metrics.scrape);
+
+    tracing::info!(
+        push = otel_cfg.metrics.enabled,
+        scrape = otel_cfg.metrics.scrape.enabled,
+        "OpenTelemetry metrics initialized successfully"
+    );
+
+    Ok(())
+}
+
+/// Build the OTLP metric exporter for the push half of the pipeline.
+#[cfg(feature = "otel")]
+fn build_metric_exporter(
+    otel_cfg: &OpenTelemetryConfig,
+) -> anyhow::Result<opentelemetry_otlp::MetricExporter> {
     let resolved_exporter = otel_cfg.metrics_exporter();
 
     let (kind, endpoint, timeout) = extract_exporter_config(resolved_exporter);
@@ -383,30 +439,7 @@ fn do_init_metrics_provider(otel_cfg: &OpenTelemetryConfig) -> anyhow::Result<()
         b.build().context("build OTLP gRPC metric exporter")?
     };
 
-    // Build resource with service name and attributes
-    let resource = build_resource(&otel_cfg.resource);
-
-    // Build the SdkMeterProvider with periodic exporter
-    let mut builder = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-        .with_periodic_exporter(exporter)
-        .with_resource(resource);
-
-    // Apply a global cardinality limit when configured
-    if let Some(limit) = otel_cfg.metrics.cardinality_limit {
-        builder = builder.with_view(move |_: &opentelemetry_sdk::metrics::Instrument| {
-            opentelemetry_sdk::metrics::Stream::builder()
-                .with_cardinality_limit(limit)
-                .build()
-                .ok()
-        });
-    }
-
-    let provider = builder.build();
-
-    global::set_meter_provider(provider);
-    tracing::info!("OpenTelemetry metrics initialized successfully");
-
-    Ok(())
+    Ok(exporter)
 }
 
 /// No-op when the `otel` feature is disabled.

@@ -15,7 +15,7 @@
 
 use super::{
     MAX_LINE_BYTES, TRUNCATION_MARKER_MAX, WRITE_SIDE_MAX_LINE_BYTES, sanitize_line,
-    sanitize_line_for_archive,
+    sanitize_line_for_archive, split_kubelet_timestamp,
 };
 
 /// The forgery this module exists to prevent. A payload carrying a blank
@@ -149,4 +149,36 @@ fn a_write_side_truncated_line_survives_the_read_side_without_a_second_cut() {
         "the marker must report the true ~2 MB drop, not a re-truncation's much \
          smaller one: {write_side}"
     );
+}
+
+/// **Task 2 (WS5): the parser the deleted per-node suppression counter's
+/// removal needs.** A real kubelet
+/// line with `LogParams { timestamps: true, .. }` on: an RFC 3339 instant
+/// (nanosecond precision, as kubelet emits), a single space, then the
+/// content exactly as the container wrote it.
+#[test]
+fn a_kubelet_timestamped_line_splits_into_instant_and_content() {
+    let (when, rest) = split_kubelet_timestamp("2026-09-18T10:00:00.123456789Z hello\n")
+        .expect("a well-formed kubelet-prefixed line must parse");
+    assert_eq!(rest, "hello\n");
+    assert_eq!(when.unix_timestamp(), 1_789_725_600);
+    assert_eq!(when.nanosecond(), 123_456_789);
+}
+
+/// A line with no timestamp prefix at all — defensive only, since every
+/// line this crate's own producer hands the parser came from a stream
+/// opened with `timestamps: true` — must answer `None`, not panic or
+/// misparse the whole line as an instant.
+#[test]
+fn a_line_with_no_timestamp_prefix_answers_none() {
+    assert!(split_kubelet_timestamp("hello, no prefix here\n").is_none());
+    assert!(split_kubelet_timestamp("").is_none());
+}
+
+/// A line whose first word merely looks numeric, but is not a valid RFC 3339
+/// instant, must not be swallowed as content-with-a-lost-first-word — the
+/// whole line is content, unsplit.
+#[test]
+fn a_line_whose_first_word_is_not_a_valid_instant_answers_none() {
+    assert!(split_kubelet_timestamp("not-a-timestamp rest of the line\n").is_none());
 }

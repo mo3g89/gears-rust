@@ -18,10 +18,11 @@ use toolkit_db::{ConnectOpts, DBProvider, Db, connect_db};
 use uuid::Uuid;
 
 use crate::config::PostgresCredStorePluginConfig;
-use crate::domain::Service;
+use crate::domain::{Service, ValueStore};
 use crate::infra::storage::error::StoreError;
 use crate::infra::storage::migrations::Migrator;
 use crate::infra::storage::repo::ValueRepo;
+use crate::infra::storage::store::PgValueStore;
 
 /// DSN for a fresh, isolated in-memory `SQLite` database.
 pub fn memory_dsn() -> String {
@@ -76,10 +77,16 @@ pub fn repo_over(db: Db) -> ValueRepo {
     ValueRepo::new(provider_over(db))
 }
 
+/// Wrap a connected database in the plugin's `ValueStore` adapter — the port
+/// the domain service is built over.
+pub fn store_over(db: Db) -> Arc<dyn ValueStore> {
+    Arc::new(PgValueStore::new(repo_over(db)))
+}
+
 /// A service with no configured seeds, over a freshly migrated `dsn`.
 pub async fn service_over(dsn: &str) -> Service {
     let db = connect_migrated(dsn).await;
-    Service::from_config(repo_over(db), &PostgresCredStorePluginConfig::default())
+    Service::from_config(store_over(db), &PostgresCredStorePluginConfig::default())
         .expect("empty config builds")
 }
 

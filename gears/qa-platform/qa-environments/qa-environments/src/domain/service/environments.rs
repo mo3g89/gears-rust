@@ -139,10 +139,13 @@ pub(super) const GENERATED_CREDENTIAL_REF_PREFIX: &str = "qa-environments-creden
 
 /// Maximum `default_branch` length, **in characters**, matching both
 /// `qa_environments.default_branch VARCHAR(512)` and the
-/// `qa_runs.test_version VARCHAR(512)` column this value is resolved into — see
-/// `validate_default_branch`, and `m20260814_000006_platform_default_branch`'s
-/// module doc for why the sink's width is the anchor rather than any convention
-/// in this table.
+/// `qa_runs.test_version VARCHAR(512)` column this value is resolved into —
+/// see `validate_default_branch`. Why the sink's width is the anchor rather
+/// than any convention in this table was recorded in the module doc of
+/// `m20260814_000006_platform_default_branch`, one of the migrations folded
+/// into `migrations::m20260812_000001_initial` by the docs squash; that
+/// text did not survive the fold, and neither the current migration nor
+/// `qa_runs`' own DDL restates it.
 const MAX_DEFAULT_BRANCH_CHARS: usize = 512;
 
 /// Target environments (systems under test) service.
@@ -887,7 +890,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             // Verbatim, per ruling D-9. Synthesising this from the variables
             // table would put one product's variable name in the gear whose
             // whole purpose is to stop naming that product; the one-time
-            // backfill in `m20260903_000011_environment_plugin_columns` is
+            // backfill in `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash) is
             // where that mapping lives instead.
             config: &environment.config,
             observed,
@@ -959,7 +962,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// # Two sources, and the plugin-shaped one wins (ruling F-2)
     ///
     /// `Environment::credentials` — the plugin-shaped column
-    /// `m20260903_000011_environment_plugin_columns` added — is **preferred
+    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash) added — is **preferred
     /// when non-empty**, and the pre-plugin `kubeconfig_credstore_ref` is the
     /// fallback when it is empty. Which is which changed at Task 18b, and the
     /// reason it was the other way round until then is worth keeping, because
@@ -1436,6 +1439,20 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// function under clippy's cognitive-complexity gate: Task 19 added a third
     /// early exit there (an environment that stores no credential at all), and
     /// three log-and-return arms in one function is over the line.
+    ///
+    /// **The gate is load-bearing, not incidental.** A later revision briefly
+    /// added a fourth decision to that same loop -- whether a name was
+    /// derivable at all, ahead of whether a derived name was already claimed
+    /// -- which retripped the gate at 26/20 and needed a second split
+    /// (`derive_or_report_secret_name`, since removed) to undo. That decision
+    /// went away entirely once `runner_secret_writer::secret_name` stopped
+    /// having a case where no name is derivable at all (see its own doc), so
+    /// the loop is back to the two decisions this split was originally for.
+    /// The point still stands: `materialise_runner_secret` is meant to stay
+    /// a loop over self-contained per-credential decisions, and clippy is
+    /// what notices when one of those decisions grows a log line and an
+    /// early exit of its own and stops being self-contained. The next one
+    /// that does belongs beside this split, not inlined back into the loop.
     async fn runner_secret_material(
         &self,
         ctx: &SecurityContext,
@@ -1547,6 +1564,17 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// compares strings and nothing else; the rule that produced them stays in
     /// the writer, which is what keeps ADR-0001's condition (that `domain/`
     /// never learns Kubernetes exists) true.
+    ///
+    /// The name now also carries the environment's tenant, ahead of the
+    /// reference, so this same cross-*credential* collision cannot become a
+    /// cross-*tenant* one. The name ends in a fixed-width digest of the
+    /// whole `(prefix, tenant, reference)` tuple precisely so that holds
+    /// even after truncation -- see `runner_secret_writer::secret_name`'s own
+    /// doc for the construction and for the collision an earlier,
+    /// truncation-only version of this rule let through in production. That
+    /// digest makes a *second* collision -- one this loop's own `claimed`
+    /// check still exists to catch -- vanishingly unlikely rather than
+    /// impossible; the check stays as defense in depth.
     async fn materialise_runner_secret(
         &self,
         ctx: &SecurityContext,
@@ -1563,11 +1591,19 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             return;
         }
 
+        // The tenant this environment's runner Secrets are named under.
+        // Asked once, not per credential: every credential in this loop
+        // belongs to this one environment, which has exactly one tenant, and
+        // `ctx` is the tenant-bound context this method's every caller
+        // (create, update, the observation ticker's self-heal) already holds
+        // for exactly this environment.
+        let tenant_id = ctx.subject_tenant_id();
+
         let mut claimed: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
         for credential in &environment.credentials {
             let credstore_ref = credential.credstore_ref.clone();
-            let name = self.observer.derived_secret_name(&credstore_ref);
+            let name = self.observer.derived_secret_name(tenant_id, &credstore_ref);
             if let Some(claimed_by) = claimed.get(&name) {
                 error!(
                     environment_id = %environment.id,
@@ -1585,7 +1621,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                 continue;
             }
             claimed.insert(name, credstore_ref.clone());
-            self.write_one_runner_secret(ctx, environment, &credstore_ref, origin)
+            self.write_one_runner_secret(ctx, tenant_id, environment, &credstore_ref, origin)
                 .await;
         }
     }
@@ -1603,6 +1639,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     async fn write_one_runner_secret(
         &self,
         ctx: &SecurityContext,
+        tenant_id: Uuid,
         environment: &Environment,
         credstore_ref: &str,
         origin: &'static str,
@@ -1615,7 +1652,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         };
         if let Err(message) = self
             .observer
-            .ensure_runner_secret(credstore_ref, &material)
+            .ensure_runner_secret(tenant_id, credstore_ref, &material)
             .await
         {
             warn!(
@@ -1774,7 +1811,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// landing in `qa_runs.test_version VARCHAR(512)`. So an override wider than
     /// 512 would be accepted here and then break **every launch that used it**,
     /// on an insert this gear never sees.
-    /// `m20260814_000006_platform_default_branch` declares this column
+    /// `m20260814_000006_platform_default_branch` (folded into `migrations::m20260812_000001_initial` by the docs squash) declares this column
     /// `VARCHAR(512)` for the same reason, and its module doc records why the
     /// sink's width is the anchor. (An earlier version of both used 255,
     /// justified by a claimed `qa_environments` "convention" that does not exist:

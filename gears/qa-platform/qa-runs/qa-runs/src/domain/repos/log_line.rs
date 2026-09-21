@@ -17,9 +17,11 @@
 //! `domain::repos` rather than somewhere else in `domain`, because the second
 //! role these numbers acquired is a **storage** role:
 //! [`WRITE_SIDE_MAX_LINE_BYTES`] is what `argo::watch::handle_line` truncates
-//! to *before the line is archived*, so it decides what the archive holds and
-//! therefore what every `first_line`/`last_line` resume anchor
-//! ([`LogResume`](super::LogResume)) contains. That puts it beside
+//! to *before the line is archived*, so it decides what the archive holds.
+//! (It also decided what every `first_line`/`last_line` resume anchor
+//! contained, back when [`LogResume`](super::LogResume) carried one —
+//! `189f93f5f` deleted that mechanism; see [`MAX_LINE_BYTES`]'s own doc for
+//! what still makes this number worth care today.) That puts it beside
 //! [`flatten_log_char`](super::flatten_log_char), the other rule the archived
 //! text obeys — and the two flattening definitions that had drifted apart are
 //! now one function calling the other.
@@ -56,65 +58,64 @@
 /// this line is in the archived log'"*. The sanitizers here can say it, which is
 /// what makes the cap acceptable at this seam and not at that one.
 ///
-/// # It is no longer only a read-side number, and changing it is not only a
-/// bandwidth decision
+/// # It is still not only a bandwidth decision — but not for the reason this
+/// used to say
 ///
-/// Whole-branch review I2. Everything above describes what this constant does
-/// for the SSE endpoint, and that was the whole of it when it was written. It
-/// is now also the input to [`WRITE_SIDE_MAX_LINE_BYTES`], which is what
-/// `argo::watch::handle_line` truncates to **before the line is archived** — so
-/// this number decides what is written to the database, and therefore what
-/// every `first_line`/`last_line` resume anchor ([`super::LogResume`])
-/// contains.
+/// Whole-branch review I2 (original) explained this as the input to
+/// [`WRITE_SIDE_MAX_LINE_BYTES`], which `argo::watch::handle_line` truncates
+/// to **before the line is archived** — true then and true now. What
+/// followed it does not hold any more: it reasoned at length about every
+/// `first_line`/`last_line` resume anchor a [`super::LogResume`] used to
+/// carry, and `189f93f5f` deleted that whole mechanism. [`super::LogPosition`]
+/// is now `{ last_emitted_at }` — kubelet's own per-line emission timestamp,
+/// handed back to Kubernetes as `LogParams::since_time` on re-attach — and
+/// nothing on the resume path compares archived *text* to anything any more;
+/// Kubernetes decides what "at or before that instant" means, server-side,
+/// unconditioned on how long any archived line is. This section is
+/// corrected (whole-branch review fix round, item 3) rather than deleted,
+/// because the constant genuinely still deserves care — for two reasons
+/// that hold in today's mechanism, neither of them the deleted one.
 ///
-/// **Lowering it is a one-way migration for the runs already on disk, and it
-/// fails quietly.** An anchor archived under the old value holds text longer
-/// than a post-deploy re-read of the same line produces, so a node whose
-/// **first or last** archived line was itself truncated cannot match its own
-/// anchor again. Only those two lines are anchors — [`super::LogPosition`], the
-/// per-node value inside a [`LogResume`](super::LogResume), holds exactly
-/// `first_line` and `last_line` — so a truncated line between them is not
-/// compared to anything, which is what the next paragraph works out position by
-/// position. Corrected 2026-09-07, final review finding 5: this said *"a node
-/// whose archived text was ever truncated"*, which the paragraph immediately
-/// below refutes in its own second sentence.
+/// **First: `qa_run_logs` is durable, per-tenant data, and this number
+/// decides how much of an over-long line survives into it.** Lowering
+/// [`MAX_LINE_BYTES`] discards more of every future over-long line,
+/// permanently, for every line archived after the change — visibly, via the
+/// truncation marker (this constant's own top-level doc), but not
+/// recoverably. That is a retention trade-off an operator should choose
+/// deliberately, not a side effect of a bandwidth tweak.
 ///
-/// **What that costs depends on where the over-long line sits, and this
-/// paragraph used to overstate it.** It read *"`LineSkip`'s first-line guard
-/// mismatches for every affected node, suppression is disabled for that node
-/// for the rest of the run, and review finding #50's unbounded `CONCAT` growth
-/// returns for every live run at the moment of the deploy"*. Traced against
-/// `argo::watch::handle_line` — whose own "A residual this change accepts"
-/// section had already worked the three positions out, in the file this
-/// constant did not then live beside — only the **first** archived line for a
-/// node produces that outcome. A **middle** line diverges not at all:
-/// suppression between the anchors is purely count-based, so a stale middle
-/// line changes what one re-read line's bytes look like and nothing else. The
-/// **last** line trips the other guard, which logs an `error!` blaming
-/// pre-fix duplicate rows — a false alarm with no data effect. So the real
-/// exposure is "every node whose *first* archived line was over-long, on a run
-/// re-attached after the deploy", not every live run, and the signal for it is
-/// a `debug!` that attributes the mismatch to log rotation, which is the other
-/// thing that produces it.
+/// **Second: [`WRITE_SIDE_MAX_LINE_BYTES`] is derived from this constant by
+/// subtraction**, not chosen independently:
+/// `MAX_LINE_BYTES - ASSUMED_ARCHIVE_PREFIX_BYTES - TRUNCATION_MARKER_MAX`.
+/// That subtraction is evaluated at compile time, so lowering
+/// [`MAX_LINE_BYTES`] below the other two constants' sum is not a silent
+/// runtime hazard — the build fails the moment it happens, loudly — but it
+/// is a real ceiling on how low this may go without revisiting those two
+/// constants alongside it.
 ///
-/// Raising it is safe in that direction (a longer cap cannot shorten an
-/// existing anchor) but widens what a single line may cost the broadcaster and
-/// the archive row.
+/// **What is no longer a reason at all: resume correctness, at any scale.**
+/// A re-attach no longer matches archived text against an anchor, truncated
+/// or not, so there is no anchor to fail to match, no per-node suppression
+/// to disable, and no "only when no run is live" caveat this constant used
+/// to carry. Changing this value mid-run changes what gets archived going
+/// forward and nothing about how a live run resumes.
 ///
-/// So: change this for SSE framing reasons alone only when no run is live, or
-/// accept one run's worth of duplicated archive text.
+/// Raising it is safe in the sense that it cannot shrink or corrupt anything
+/// already on disk; it only widens what a single line may cost the
+/// broadcaster and the archive row.
 ///
-/// **It lives in `domain::repos` for that second role.** It was declared in
-/// `api::rest::sse` until Task 21, which is what made
-/// `domain::service::ingest` and `infra::executor::argo::watch` — a domain
-/// module and an infra module — import the transport layer to get at it and
-/// its siblings. The write-side cap that decides what the archive holds is a
-/// repository-shaped decision, so it now sits beside
+/// **It lives in `domain::repos` for the storage role, not the deleted
+/// resume role.** It was declared in `api::rest::sse` until Task 21, which is
+/// what made `domain::service::ingest` and `infra::executor::argo::watch` —
+/// a domain module and an infra module — import the transport layer to get
+/// at it and its siblings. The write-side cap that decides what the archive
+/// holds is a repository-shaped decision, so it now sits beside
 /// [`flatten_log_char`](super::flatten_log_char), the other rule the archived
 /// text obeys, and `api::rest::sse` re-exports what the endpoint needs.
 /// **The value did not change in that move, and must not change casually:**
-/// this paragraph is the only thing standing between a bandwidth tweak and the
-/// outcome above.
+/// this paragraph and the two reasons above are what stands between a
+/// bandwidth tweak and a permanent, undocumented change to what this gear's
+/// archive durably holds.
 pub const MAX_LINE_BYTES: usize = 8 * 1024;
 
 /// Marker appended to a line one of these sanitizers truncated.
@@ -168,11 +169,15 @@ pub const TRUNCATION_MARKER_MAX: usize =
 /// deliberately not normalised to a DNS-1123 label (`fan_out_log`'s own
 /// doc), so nothing here guarantees a name never exceeds this. It is,
 /// today, generous by roughly 6x: the one production source is
-/// `format!("repo-{repo_id}")` over a UUID, ~41 bytes once wrapped —
-/// `LogResume::from_archived_text` already carries the matching residual
-/// for a node name containing `']'`, on the same unreachable-today,
-/// not-unsound-if-it-happened terms. If a future producer ever grows node
-/// names past this, the failure this constant exists to prevent
+/// `format!("repo-{repo_id}")` over a UUID, ~41 bytes once wrapped. The
+/// deleted `LogResume::from_archived_text` used to carry a matching residual
+/// for a node name containing `']'` — it parsed a `"[{node}] "` prefix back
+/// out of archived text to recover a per-node position, and a bracket inside
+/// the name itself could break that parse. `189f93f5f` deleted the whole
+/// read path: nothing parses this prefix back out of archived text any
+/// more, so there is no matching residual left to carry for that case. If a
+/// future producer ever grows node names past this, the failure this
+/// constant exists to prevent
 /// reappears: a write-side truncation marker gets re-cut on read,
 /// reporting a dropped-byte count two orders of magnitude short of the
 /// truth — not a panic, not data loss, a misdiagnosis.
@@ -232,7 +237,7 @@ pub const ASSUMED_ARCHIVE_PREFIX_BYTES: usize = 256;
 ///
 /// # A fixed number, not `MAX_LINE_BYTES - node.len()`
 ///
-/// `LineSkip::consume`'s anchor is derived from this exact write-side
+/// The deleted per-node counter's anchor was derived from this exact write-side
 /// output, so if the truncation point depended on the runtime length of
 /// `node`, the archived text for a byte-identical over-long line would
 /// differ depending on which node emitted it — a coupling between "how
@@ -310,7 +315,7 @@ pub fn sanitize_line_for_archive(line: &str) -> String {
 /// rule in two modules, which is precisely what `flatten_log_char`'s own doc
 /// calls *"the one definition of how a log line is flattened for storage this
 /// crate has"* and what its bug history is about: `fan_out_log` and
-/// `LineSkip`'s copies of that rule drifted once and silently disabled a
+/// the deleted per-node counter's copies of that rule drifted once and silently disabled a
 /// node's rotation guard. Task 21 brought the second copy into the same module
 /// as the first and there is now one.
 fn flatten(line: &str) -> String {
@@ -342,6 +347,33 @@ fn truncate(flattened: String, cap: usize) -> String {
     out.push_str(&dropped.to_string());
     out.push_str(TRUNCATION_SUFFIX);
     out
+}
+
+/// Split kubelet's `LogParams { timestamps: true, .. }` prefix off one raw
+/// pod-log line: an RFC 3339 instant, a single space, then the line exactly
+/// as the container wrote it.
+///
+/// `None` for a line kubelet did not prefix — defensive only, not a case
+/// this crate's own producer creates: every line `infra::executor::argo::
+/// watch::Watcher::follow` reads reaches here through a stream opened with
+/// `LogParams { timestamps: true, .. }`, so kubelet itself guarantees the
+/// prefix. A malformed or absent prefix is treated as "no timestamp for
+/// this line" rather than an error, which is what lets a defensive caller
+/// fall back to archiving the line with `emitted_at: None` instead of
+/// dropping it.
+///
+/// Task 2 (WS5): the replacement for the per-node suppression
+/// counter this task deletes — see `infra::executor::argo::watch`'s module
+/// doc and `domain::repos::run_logs_repo::LogPosition`'s former "Why this is
+/// a count, and not a timestamp" section (removed with this change) for what
+/// this replaces and why the count-based mechanism could not simply be kept
+/// alongside it.
+#[must_use]
+pub fn split_kubelet_timestamp(raw: &str) -> Option<(time::OffsetDateTime, &str)> {
+    let (ts, rest) = raw.split_once(' ')?;
+    let when =
+        time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339).ok()?;
+    Some((when, rest))
 }
 
 /// Every test that pins a cap in this module, in the shape ADR

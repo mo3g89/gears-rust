@@ -14,14 +14,20 @@ workspace = true
 qa-product-sdk = { path = "../../qa-product-sdk" }
 credstore-sdk = { workspace = true }
 tracing = { workspace = true }
+# The tenant a runner Secret's name is derived under (`secret_writer`). Not
+# Kubernetes-shaped and not covered by ADR-0001's containment note above --
+# every qa-platform crate already names this type.
+uuid = { workspace = true }
 
 # ── Kubernetes, and why there is no feature gate ──────────────────────────────
 #
-# ADR-0001 forbids `kube`/`k8s-openapi` in any qa-platform crate. Its
-# 2026-08-28 waiver amendment permitted `qa-environments`' observer behind a
-# non-default feature (`platform-observation`, renamed `runner-secret` when
-# Task 19b deleted the observer half); PRODUCT-PLUGINS-DESIGN.md §4.1
-# amends it again, and ADR-0001's 2026-09-04 amendment records what that did.
+# ADR-0001 forbids `kube`/`k8s-openapi` in a default build of any qa-platform
+# gear. Its Amendments section permits `qa-environments`' Secret writer behind
+# a non-default feature (`platform-observation`, renamed `runner-secret` when
+# Task 19b deleted the observer half). (`PRODUCT-PLUGINS-DESIGN.md` §4.1 and a
+# further "2026-09-04 amendment" were cited here previously; neither exists --
+# `PRODUCT-PLUGINS-DESIGN.md` is not in this repository, and ADR-0001's
+# Amendments section is the only amendment there is.)
 # The containment here is structural rather than conventional, so the feature
 # gate has nothing left to buy — a build that does not want Kubernetes simply
 # does not depend on this crate. (The `test-support` feature further down gates
@@ -34,8 +40,8 @@ tracing = { workspace = true }
 # a cluster. It is not the only crate that names them. `qa-environments` still
 # does behind `runner-secret` -- Task 19b renamed it and cut it down to
 # decision D4's runner-`Secret` writer -- and `qa-runs` still does
-# behind `argo` (which nothing in the plan removes — it is the subject of the
-# 2026-08-27 waiver and stays until the serverless runtime exists). Outside
+# behind `argo` (which nothing in the plan removes — it is the ADR's own
+# Decision Outcome and stays until the serverless runtime exists). Outside
 # qa-platform and outside that ADR's scope, `libs/toolkit-k8s-auth` names them
 # unconditionally and `chat-engine`/`mini-chat` name them behind their own
 # `k8s` features.

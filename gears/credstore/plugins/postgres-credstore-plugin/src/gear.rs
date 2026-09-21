@@ -15,6 +15,7 @@ use crate::config::PostgresCredStorePluginConfig;
 use crate::domain::Service;
 use crate::infra::storage::error::StoreError;
 use crate::infra::storage::repo::ValueRepo;
+use crate::infra::storage::store::PgValueStore;
 
 /// Database-backed credstore plugin gear.
 ///
@@ -69,9 +70,10 @@ impl Gear for PostgresCredStorePlugin {
         // failure it exists to end.
         let db_raw = ctx.db_required()?;
         let repo = ValueRepo::new(Arc::new(DBProvider::<StoreError>::new(db_raw.db())));
+        let store = Arc::new(PgValueStore::new(repo));
 
         // Validate the config before anything is registered.
-        let service = Arc::new(Service::from_config(repo, &cfg)?);
+        let service = Arc::new(Service::from_config(store, &cfg)?);
         let seeded = service.seed().await?;
 
         // Build registration payload and instance id for this plugin.

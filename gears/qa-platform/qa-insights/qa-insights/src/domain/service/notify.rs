@@ -131,8 +131,8 @@ use crate::domain::error::DomainError;
 use crate::domain::notify::render::{self, RunCompletedRenderContext, ScheduledRunRenderContext};
 use crate::domain::notify::routing::{self, Event, NotificationKind};
 use crate::domain::ports::{
-    MailClient, MailMessage, RunsReader, SendOutcome, SlackBlock, SlackClient, SlackMessage,
-    validate_credstore_ref,
+    MailClient, MailCredentials, MailMessage, RunsReader, SendOutcome, SlackBlock, SlackClient,
+    SlackMessage, validate_credstore_ref,
 };
 use crate::domain::repos::{NewLogEntry, NotifyRepository};
 use crate::domain::service::{DbProvider, actions, resources};
@@ -148,9 +148,21 @@ const OUTCOME_SKIPPED: &str = "skipped";
 /// which pins the string verbatim in
 /// `a_failed_send_is_logged_with_its_detail`.
 const OUTCOME_FAILED: &str = "failed";
-/// `outcome = "unsupported_egress"` — **added by this task.** The prior
-/// vocabulary, enumerated above so the addition is visibly one: `"sent"`,
-/// `"skipped"`, `"failed"`.
+/// `outcome = "unsupported_egress"` — a send that was never attempted because
+/// this deployment has no adapter for the channel. The prior vocabulary, so the
+/// addition is visibly one: `"sent"`, `"skipped"`, `"failed"`.
+///
+/// # This is written from the `Err` arm now, not from a `SendOutcome`
+///
+/// It used to be the string for [`SendOutcome`]'s second variant, which the
+/// inert mail adapter returned as an `Ok`. The SMTP follow-up made that adapter
+/// fail instead ([`crate::domain::ports::mail_client`]'s header carries why),
+/// so the variant is gone and this string is now chosen by inspecting the
+/// error: [`DomainError::UnsupportedEgress`] gets it, every other failure gets
+/// [`OUTCOME_FAILED`]. **Deliberately kept rather than folded into
+/// `"failed"`** — "this deployment cannot send email at all" and "the relay
+/// refused this message" are different problems with different fixes, and the
+/// audit log is the only place an operator sees either.
 const OUTCOME_UNSUPPORTED_EGRESS: &str = "unsupported_egress";
 
 /// The settings page's generic test message, verbatim from legacy
@@ -159,16 +171,32 @@ const GENERIC_TEST_MESSAGE: &str = "VHP Test Manager: test notification from Set
 
 /// The R102 seam: [`SendOutcome`] to this audit log's `outcome` string.
 ///
-/// **This is the one place that maps the variant to the string.** Task 39's
-/// tests pin the variant (`UnsupportedMailClient` returns it); this crate's
-/// own tests pin the string (the log's `outcome` column); nothing but this
-/// function connects the two, so it is named and tested directly rather than
-/// left implicit inside a `match` arm at the call site.
+/// **This is the one place that maps the variant to the string.** The two
+/// egress adapters' tests pin the variant; this crate's own tests pin the
+/// string (the log's `outcome` column); nothing but this function connects the
+/// two, so it is named and tested directly rather than left implicit inside a
+/// `match` arm at the call site.
+///
+/// One arm, since the SMTP follow-up removed `SendOutcome::UnsupportedEgress`.
+/// Kept as a function rather than inlined to `OUTCOME_SENT` at its one call
+/// site: the seam is the point, and a second variant added later must not be
+/// able to reach the log without passing through here.
 #[must_use]
 pub(crate) fn outcome_str(outcome: SendOutcome) -> &'static str {
     match outcome {
         SendOutcome::Sent => OUTCOME_SENT,
-        SendOutcome::UnsupportedEgress => OUTCOME_UNSUPPORTED_EGRESS,
+    }
+}
+
+/// The audit `outcome` string for a send that failed —
+/// [`OUTCOME_UNSUPPORTED_EGRESS`] when the deployment has no adapter for the
+/// channel, [`OUTCOME_FAILED`] for everything else. See
+/// [`OUTCOME_UNSUPPORTED_EGRESS`] for why the two are not one string.
+#[must_use]
+pub(crate) fn failure_outcome_str(error: &DomainError) -> &'static str {
+    match error {
+        DomainError::UnsupportedEgress { .. } => OUTCOME_UNSUPPORTED_EGRESS,
+        _ => OUTCOME_FAILED,
     }
 }
 
@@ -365,6 +393,27 @@ fn slack_capable(config: &NotificationConfig) -> bool {
 /// is what an operator can act on.
 const SLACK_REF_FIELD: &str = "slack_webhook_credstore_ref";
 
+/// The [`DomainError::Validation`] field [`NotifyService::send_test`]'s
+/// [`TestSend::Generic`] arm names when neither channel is both enabled and
+/// capable, so nothing would be attempted at all.
+///
+/// Not a single `qa_notification_config` column — unlike [`SLACK_REF_FIELD`] —
+/// because the condition spans both `slack_enabled`/`slack_webhook_credstore_ref`
+/// and `email_enabled`/the three SMTP columns; naming one of the four would
+/// mis-attribute the refusal to whichever field happened to be checked first.
+/// Reused as a `Validation` rather than a new [`DomainError`] variant:
+/// [`DomainError::UnsupportedEgress`] already means something more specific
+/// and maps to `501` ("this deployment has no adapter for this channel"),
+/// which is false here — the deployment's adapters are fine; the *tenant's*
+/// settings enable none of them. `Validation` already flows through
+/// `api::rest::error::as_notification_error` to
+/// [`crate::domain::error::NotificationResourceError::invalid_argument`] (a
+/// `400`) for this same method's `event`/`slack_enabled`/
+/// `slack_webhook_credstore_ref` refusals, so this reuses that path rather
+/// than adding a variant and its own exhaustive-match/boundary-mapping
+/// surface for one more shape of "the caller's input needs to change."
+const NO_CHANNEL_ENABLED_FIELD: &str = "notification_channels";
+
 /// Refuse a Slack webhook reference the credential store could not resolve.
 ///
 /// # Phase C's final review, Important 1: the column had no check at all
@@ -410,6 +459,76 @@ fn email_capable(config: &NotificationConfig) -> bool {
     !config.email_smtp_host.trim().is_empty()
         && !config.email_from.trim().is_empty()
         && !config.email_recipients.trim().is_empty()
+}
+
+/// The field name every refusal about the SMTP credential pair carries.
+///
+/// The *reference* rather than the username, for the reason [`SLACK_REF_FIELD`]
+/// exists: a refusal names the field an operator has to change, and of this
+/// pair the reference is the one with syntax rules to get wrong.
+const SMTP_REF_FIELD: &str = "email_smtp_credstore_ref";
+
+/// Refuse a half-filled SMTP credential, and a reference the credential store
+/// could not resolve.
+///
+/// Two checks, both on the write path, for the two ways this pair goes wrong:
+///
+/// * **Half-filled.** A username with no reference would make the adapter
+///   authenticate as nobody; a reference with no username has nothing to
+///   authenticate as. Either alone is a configuration an operator meant to
+///   finish, and silently treating it as "unauthenticated" would send the mail
+///   in a way they did not ask for. [`mail_credentials`] reads a half-filled
+///   pair as `None`, so without this check the failure would be invisible.
+/// * **Syntax**, by exactly [`validate_slack_ref`]'s rule and function. A
+///   reference `SecretRef::new` rejects can never resolve, and refusing it at
+///   the `PUT` is the difference between an operator seeing the problem on the
+///   settings page and seeing a failed notification in the audit log hours
+///   later.
+///
+/// An empty *pair* is accepted and means unauthenticated submission — the
+/// normal shape for an in-cluster or IP-allow-listed relay, and the state every
+/// row written before `m20260921_000002_smtp_credentials` is in.
+///
+/// # Errors
+///
+/// [`DomainError::Validation`] naming [`SMTP_REF_FIELD`].
+fn validate_smtp_credentials(config: &NotificationConfig) -> Result<(), DomainError> {
+    let username = config.email_smtp_username.trim();
+    let reference = config.email_smtp_credstore_ref.trim();
+
+    if username.is_empty() != reference.is_empty() {
+        return Err(DomainError::Validation {
+            field: SMTP_REF_FIELD.to_owned(),
+            message: "set both the SMTP username and its credential-store reference, or neither:                       a username without a reference cannot authenticate, and a reference without                       a username has no account to authenticate as"
+                .to_owned(),
+        });
+    }
+    if reference.is_empty() {
+        return Ok(());
+    }
+    validate_credstore_ref(SMTP_REF_FIELD, reference)
+}
+
+/// The SMTP AUTH credential a config carries, or `None` for a relay that takes
+/// unauthenticated submission.
+///
+/// **Both halves or neither**, which is why this returns one `Option` rather
+/// than two: a username with no reference would authenticate as nobody, and a
+/// reference with no username has nothing to authenticate as.
+/// [`NotifyService::save_config`] refuses a half-filled pair on the write path,
+/// so a stored row cannot reach here in that state; this function is
+/// nevertheless total, because `TestSend::ScheduledRun`-style caller-supplied
+/// configs do not go through that path.
+fn mail_credentials(config: &NotificationConfig) -> Option<MailCredentials> {
+    let username = config.email_smtp_username.trim();
+    let password_credstore_ref = config.email_smtp_credstore_ref.trim();
+    if username.is_empty() || password_credstore_ref.is_empty() {
+        return None;
+    }
+    Some(MailCredentials {
+        username: username.to_owned(),
+        password_credstore_ref: password_credstore_ref.to_owned(),
+    })
 }
 
 /// `run.target`'s plan identity, as a plain string —
@@ -583,6 +702,7 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     ) -> Result<NotificationConfig, DomainError> {
         let access = self.scope(ctx, actions::UPDATE).await?;
         validate_slack_ref(&config.slack_webhook_credstore_ref)?;
+        validate_smtp_credentials(&config)?;
         let conn = self.db.conn()?;
         self.repo
             .save_config(&conn, &access, ctx.subject_tenant_id(), config.clone())
@@ -694,7 +814,11 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     /// override config has Slack disabled or an empty webhook reference
     /// (legacy's own two checks, `notifications.rs:412-417`), when that
     /// reference is one the credential store could not resolve, or when `event`
-    /// is not a valid token.
+    /// is not a valid token; naming [`NO_CHANNEL_ENABLED_FIELD`] for
+    /// [`TestSend::Generic`] when neither Slack nor email is both enabled and
+    /// capable, so nothing would be attempted — this method never reports
+    /// success for a test that sent nothing, a fresh tenant's default config
+    /// being the common way to reach it.
     /// [`DomainError::UnsupportedEgress`] when [`TestSend::Generic`] is asked
     /// to test a channel this deployment cannot send over — **the one place
     /// [`SendOutcome::UnsupportedEgress`] surfaces as an error rather than a
@@ -713,7 +837,30 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
             TestSend::Generic => {
                 let config = self.get_config(ctx).await?;
 
-                if config.slack_enabled && slack_capable(&config) {
+                // WS2 data-correctness remediation, Task 4: neither channel
+                // below is *attempted* unless its own enabled flag and
+                // capability gate both hold — see
+                // `slack_capable`/`email_capable`. Falling through both
+                // `if`s to this arm's final `Ok(())` used to report success
+                // to an operator for whom nothing was sent at all, which
+                // this method's own doc contradicts: "an operator explicitly
+                // testing a channel deserves to be told it does not work,
+                // not a silent success." A fresh tenant (both gates default
+                // `false`) is the common case, but a tenant with a channel
+                // enabled and no webhook/SMTP configured falls through the
+                // same way and gets the same fix.
+                let slack_will_send = config.slack_enabled && slack_capable(&config);
+                let email_will_send = config.email_enabled && email_capable(&config);
+                if !slack_will_send && !email_will_send {
+                    return Err(DomainError::Validation {
+                        field: NO_CHANNEL_ENABLED_FIELD.to_owned(),
+                        message: "No notification channel is enabled and configured to send a \
+                                  test; enable Slack or email in settings first"
+                            .to_owned(),
+                    });
+                }
+
+                if slack_will_send {
                     let outcome = self
                         .slack
                         .send(
@@ -726,13 +873,9 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                             },
                         )
                         .await?;
-                    if outcome == SendOutcome::UnsupportedEgress {
-                        return Err(DomainError::UnsupportedEgress {
-                            channel: "slack".to_owned(),
-                        });
-                    }
+                    debug_assert_eq!(outcome, SendOutcome::Sent);
                 }
-                if config.email_enabled && email_capable(&config) {
+                if email_will_send {
                     let outcome = self
                         .mail
                         .send(
@@ -740,6 +883,7 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                             &MailMessage {
                                 smtp_host: config.email_smtp_host.clone(),
                                 smtp_port: config.email_smtp_port,
+                                credentials: mail_credentials(&config),
                                 from: config.email_from.clone(),
                                 recipients: config.email_recipients.clone(),
                                 subject: "VHP test notification".to_owned(),
@@ -747,11 +891,7 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                             },
                         )
                         .await?;
-                    if outcome == SendOutcome::UnsupportedEgress {
-                        return Err(DomainError::UnsupportedEgress {
-                            channel: "email".to_owned(),
-                        });
-                    }
+                    debug_assert_eq!(outcome, SendOutcome::Sent);
                 }
                 Ok(())
             }
@@ -798,11 +938,7 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                         },
                     )
                     .await?;
-                if outcome == SendOutcome::UnsupportedEgress {
-                    return Err(DomainError::UnsupportedEgress {
-                        channel: "slack".to_owned(),
-                    });
-                }
+                debug_assert_eq!(outcome, SendOutcome::Sent);
                 Ok(())
             }
         }
@@ -988,6 +1124,7 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                 channel: RunCompletedChannel::Mail {
                     smtp_host: config.email_smtp_host.clone(),
                     smtp_port: config.email_smtp_port,
+                    credentials: mail_credentials(&config),
                     from: config.email_from.clone(),
                     recipients: config.email_recipients.clone(),
                 },
@@ -1086,28 +1223,8 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                     Some(run_id),
                     channel.name(),
                     &key.event,
-                    OUTCOME_SENT,
+                    outcome_str(SendOutcome::Sent),
                     "Run-completed notification",
-                )
-                .await;
-            }
-            Ok(SendOutcome::UnsupportedEgress) => {
-                // Fix round 3, Important 2: nothing was sent, so the claim
-                // must not survive either — the same "a claim that was
-                // never sent should not be held forever" reasoning as the
-                // `Err` arm below. Without this, the slot stays taken
-                // permanently the moment a working adapter replaces the
-                // inert one, which is R100's own failure mode turned inside
-                // out.
-                self.release_claim_ignoring_failure(&conn, &access, tenant_id, run_id, &key)
-                    .await;
-                self.log(
-                    tenant_id,
-                    Some(run_id),
-                    channel.name(),
-                    &key.event,
-                    outcome_str(SendOutcome::UnsupportedEgress),
-                    "This deployment has no adapter for this channel (D10)",
                 )
                 .await;
             }
@@ -1128,7 +1245,13 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                     Some(run_id),
                     channel.name(),
                     &key.event,
-                    OUTCOME_FAILED,
+                    // Fix round 3's Important 2 used to live in a separate
+                    // `Ok(SendOutcome::UnsupportedEgress)` arm above: nothing
+                    // was sent, so the claim must not survive either. That arm
+                    // is gone because the outcome is gone; the reasoning is
+                    // unchanged and this arm already did the release, which is
+                    // why folding the two cost nothing.
+                    failure_outcome_str(&error),
                     &error.to_string(),
                 )
                 .await;
@@ -1140,9 +1263,11 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     /// [`NotifyRepository::release_notification`], with its own failure
     /// swallowed into a `tracing::warn!` — legacy's `let _ =
     /// self.release_run_notification(...)` (`notifications.rs:515-517`).
-    /// Shared by both of [`Self::send_run_completed_channel`]'s
-    /// claim-was-never-sent arms (`UnsupportedEgress` and `Err`, fix round 3
-    /// Important 2/3) so the swallow-and-warn behaviour exists in one place.
+    /// Called from [`Self::send_run_completed_channel`]'s one
+    /// claim-was-never-sent arm (fix round 3, Important 2/3). There were two
+    /// until the SMTP follow-up removed `SendOutcome::UnsupportedEgress`; both
+    /// did exactly this, which is why they folded into one without changing
+    /// what happens to the claim.
     async fn release_claim_ignoring_failure(
         &self,
         conn: &toolkit_db::secure::DbConn<'_>,
@@ -1242,6 +1367,9 @@ enum RunCompletedChannel {
     Mail {
         smtp_host: String,
         smtp_port: u16,
+        /// Resolved once, where the config is read, rather than re-derived at
+        /// send time — see [`mail_credentials`].
+        credentials: Option<MailCredentials>,
         from: String,
         recipients: String,
     },
@@ -1282,6 +1410,7 @@ impl RunCompletedChannel {
             Self::Mail {
                 smtp_host,
                 smtp_port,
+                credentials,
                 from,
                 recipients,
             } => {
@@ -1292,6 +1421,7 @@ impl RunCompletedChannel {
                         &MailMessage {
                             smtp_host: smtp_host.clone(),
                             smtp_port: *smtp_port,
+                            credentials: credentials.clone(),
                             from: from.clone(),
                             recipients: recipients.clone(),
                             subject: rendered.email_subject.clone(),

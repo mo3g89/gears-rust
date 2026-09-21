@@ -21,9 +21,10 @@ default = []
 # nothing else. A feature named for work it no longer does is this branch's
 # signature defect in cargo form.
 #
-# Off by default. ADR-0001 forbids `kube`/`k8s-openapi` in any qa-platform
-# crate; the waiver amendment of 2026-08-28 permits this adapter only behind a
-# non-default feature, so a default build still has no Kubernetes in its tree.
+# Off by default. ADR-0001 forbids `kube`/`k8s-openapi` in a default build of
+# any qa-platform gear; its Amendments section permits this adapter only
+# behind a non-default feature, so a default build still has no Kubernetes in
+# its tree.
 # Verify with:
 #   cargo tree -p qa-environments -i kube                    # errors
 #   cargo tree -p qa-environments --all-features -i kube     # kube <- this crate
@@ -106,13 +107,18 @@ toolkit-odata = { workspace = true, features = ["with-utoipa"] }
 toolkit-security = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
 toolkit-macros = { workspace = true }
-# Link-time GTS permission catalog (`src/gts/permissions.rs`): declares
-# AuthzPermissionV1 instances into the toolkit-gts inventory the
-# types-registry aggregates at boot.
+# Link-time GTS content: the permission catalog (`src/gts/permissions.rs`)
+# declares AuthzPermissionV1 instances, and `src/gts/authz_types.rs` declares
+# the stub `#[gts_type_schema]` types for this gear's authz labels, into the
+# toolkit-gts inventory the types-registry aggregates at boot.
 toolkit-gts = { workspace = true }
 # `gts_id!`'s upstream validation (`GtsIdPattern`) and `GTS_ID_PREFIX`, which
 # `toolkit-gts`'s macros delegate to.
 gts = { workspace = true }
+# The runtime JSON-Schema reflection backend `#[gts_type_schema]` generates
+# code against (`src/gts/authz_types.rs`). Same pairing account-management-sdk
+# and qa-product-sdk's Cargo.toml carry alongside `toolkit-gts`.
+schemars = { workspace = true }
 
 # ── The `runner-secret` feature's dependencies, all optional ──────────────────
 kube = { workspace = true, features = ["client", "rustls-tls", "aws-lc-rs"], optional = true }

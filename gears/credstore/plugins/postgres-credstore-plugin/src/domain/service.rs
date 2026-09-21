@@ -31,8 +31,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::config::PostgresCredStorePluginConfig;
-use crate::infra::storage::error::StoreError;
-use crate::infra::storage::repo::{ValueDbProvider, ValueRepo};
+use crate::domain::ports::{StoreFault, ValueStore};
 
 /// A config-seeded entry belonging to a persisted key class.
 struct Seed {
@@ -49,21 +48,19 @@ struct Seed {
 /// tenant key class. Sharing, hierarchy, policy, TTL and type validation live
 /// in the credstore gear, not here.
 ///
-/// Not marked `#[domain_model]`: it owns its storage adapter directly, the way
-/// the in-memory plugin's `Service` owns its `HashMap`s. A three-method value
-/// store has no domain logic worth a port trait, and the tests exercise the
-/// real `SeaORM` repository against `SQLite` rather than a double, so an
-/// abstraction here would only add indirection.
+/// Not marked `#[domain_model]`, and it holds no database of its own: the
+/// persisted key classes sit behind [`ValueStore`], whose shipped
+/// implementation is
+/// [`PgValueStore`](crate::infra::storage::store::PgValueStore). That
+/// indirection is what DE0301 asks for — a domain module may not name
+/// `crate::infra` — and it is also where the transaction composition belongs,
+/// since `ValueRepo`'s methods each take an explicit runner (review finding
+/// #14) precisely so *some* caller can compose them. The tests still exercise
+/// the real `SeaORM` repository against `SQLite` through that adapter rather
+/// than a double.
 pub struct Service {
-    /// This service's own handle for opening connections and transactions.
-    ///
-    /// `ValueRepo`'s methods each take an explicit `runner: &C where C:
-    /// DBRunner` (review finding #14) rather than reaching for one
-    /// internally, so composing them into a transaction is this service's
-    /// job, the same way every other service in this workspace holds its own
-    /// `DBProvider` alongside a stateless-per-call repository.
-    db: Arc<ValueDbProvider>,
-    repo: ValueRepo,
+    /// The persisted `tenant`/`private` key classes.
+    store: Arc<dyn ValueStore>,
     /// Config-seeded `shared` secrets — read fallback for the tenant class.
     shared: HashMap<(TenantId, SecretRef), SecretValue>,
     /// Config-seeded global secrets — final read fallback for the tenant class.
@@ -73,7 +70,7 @@ pub struct Service {
 }
 
 /// Log a storage fault in full, then hand the caller a curated SPI error.
-fn map_store_err(op: &'static str, err: StoreError) -> CredStoreError {
+fn map_store_err(op: &'static str, err: StoreFault) -> CredStoreError {
     warn!(
         target: "postgres_credstore_plugin",
         operation = op,
@@ -84,7 +81,7 @@ fn map_store_err(op: &'static str, err: StoreError) -> CredStoreError {
 }
 
 impl Service {
-    /// Create a service over `repo`, validating and classifying `cfg.secrets`.
+    /// Create a service over `store`, validating and classifying `cfg.secrets`.
     ///
     /// Validation is identical to the in-memory plugin's, so a config that
     /// loads there loads here.
@@ -98,10 +95,9 @@ impl Service {
     /// - `tenant_id` or `owner_id` is an explicit nil UUID
     /// - `owner_id` is set without `tenant_id`
     pub fn from_config(
-        repo: ValueRepo,
+        store: Arc<dyn ValueStore>,
         cfg: &PostgresCredStorePluginConfig,
     ) -> anyhow::Result<Self> {
-        let db = repo.provider();
         let mut shared: HashMap<(TenantId, SecretRef), SecretValue> = HashMap::new();
         let mut global: HashMap<SecretRef, SecretValue> = HashMap::new();
         let mut seeds: Vec<Seed> = Vec::new();
@@ -155,8 +151,7 @@ impl Service {
         }
 
         Ok(Self {
-            db,
-            repo,
+            store,
             shared,
             global,
             seeds,
@@ -182,29 +177,16 @@ impl Service {
     pub async fn seed(&self) -> anyhow::Result<usize> {
         let mut created = 0usize;
         for seed in &self.seeds {
-            // One transaction per seed: `insert_if_absent`'s probe-then-insert
-            // must stay atomic against a concurrent writer, and it now takes
-            // an explicit runner instead of opening its own transaction.
-            //
-            // The closure passed to `transaction` must be usable for *any*
-            // lifetime of the transaction it is handed (`DBProvider::transaction`'s
-            // `for<'a> FnOnce(&'a DbTx<'a>) -> ... + 'a` bound), which only a
-            // `'static` capture can satisfy -- hence cloning `repo` (an `Arc`
-            // bump) and copying the seed's fields out before the closure,
-            // rather than capturing `&self`/`&seed`.
-            let repo = self.repo.clone();
-            let tenant_id = seed.tenant_id;
-            let key = seed.key.clone();
-            let owner_id = seed.owner_id;
-            let bytes = seed.value.as_bytes().to_vec();
+            // `insert_if_absent` is atomic per seed by contract; how that is
+            // achieved (one transaction per seed) is the adapter's business.
             let inserted = self
-                .db
-                .transaction(move |tx| {
-                    Box::pin(async move {
-                        repo.insert_if_absent(tx, &tenant_id, &key, owner_id.as_ref(), &bytes)
-                            .await
-                    })
-                })
+                .store
+                .insert_if_absent(
+                    &seed.tenant_id,
+                    &seed.key,
+                    seed.owner_id.as_ref(),
+                    seed.value.as_bytes(),
+                )
                 .await?;
             if inserted {
                 created += 1;
@@ -236,10 +218,9 @@ impl Service {
         key: &SecretRef,
         owner_id: Option<&OwnerId>,
     ) -> Result<Option<SecretValue>, CredStoreError> {
-        let conn = self.db.conn().map_err(|e| map_store_err("get", e))?;
         if let Some(bytes) = self
-            .repo
-            .find(&conn, tenant_id, key, owner_id)
+            .store
+            .find(tenant_id, key, owner_id)
             .await
             .map_err(|e| map_store_err("get", e))?
         {
@@ -271,21 +252,10 @@ impl Service {
         value: SecretValue,
         owner_id: Option<&OwnerId>,
     ) -> Result<(), CredStoreError> {
-        // One transaction: `upsert`'s update-then-insert must stay atomic
-        // with itself, and it now takes an explicit runner instead of opening
-        // its own transaction. See `seed`'s comment for why the capture must
-        // be owned rather than borrowed from `&self`/the parameters.
-        let repo = self.repo.clone();
-        let tenant_id = *tenant_id;
-        let key = key.clone();
-        let owner_id = owner_id.copied();
-        self.db
-            .transaction(move |tx| {
-                Box::pin(async move {
-                    repo.upsert(tx, &tenant_id, &key, owner_id.as_ref(), value.as_bytes())
-                        .await
-                })
-            })
+        // `upsert` is atomic with itself by contract (its update-then-insert
+        // must be); the transaction that makes it so is the adapter's.
+        self.store
+            .upsert(tenant_id, key, owner_id, value.as_bytes())
             .await
             .map_err(|e| map_store_err("put", e))
     }
@@ -306,9 +276,8 @@ impl Service {
         key: &SecretRef,
         owner_id: Option<&OwnerId>,
     ) -> Result<(), CredStoreError> {
-        let conn = self.db.conn().map_err(|e| map_store_err("delete", e))?;
-        self.repo
-            .delete(&conn, tenant_id, key, owner_id)
+        self.store
+            .delete(tenant_id, key, owner_id)
             .await
             .map_err(|e| map_store_err("delete", e))
     }

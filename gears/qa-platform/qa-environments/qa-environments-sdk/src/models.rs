@@ -181,8 +181,13 @@ pub struct Environment {
     ///
     /// **At most one environment per (tenant, product) has this set.**
     /// `EnvironmentsService` enforces it by clearing the previous holder in the same
-    /// transaction, rather than a database constraint — see
-    /// `m20260831_000009_platform_is_default`'s module doc for why.
+    /// transaction, rather than a database constraint, because `MySQL` has no
+    /// partial unique indexes and a schema-level rule would hold on only two
+    /// of three dialects — see `environments_repo`'s
+    /// `OrmEnvironmentsRepository::clear_default_for_product` doc (the
+    /// rationale originally lived in `m20260831_000009_platform_is_default`'s
+    /// module doc, folded into `migrations::m20260812_000001_initial` by the
+    /// docs squash without carrying the prose over).
     ///
     /// Operator-set, like [`Self::default_branch`], so it appears in
     /// [`NewEnvironment`], [`EnvironmentPatch`] and the REST request types.
@@ -206,7 +211,7 @@ pub struct Environment {
     ///
     /// Populated by the plugin path; the single-reference column beside it
     /// ([`Self::kubeconfig_credstore_ref`]) is still authoritative until the
-    /// contract migration. `m20260903_000011_environment_plugin_columns`
+    /// contract migration. `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash)
     /// backfills this from that field, so the two agree from the moment the
     /// migration runs.
     ///
@@ -242,7 +247,7 @@ pub struct Environment {
     /// may correct.
     ///
     /// Populated by the plugin path;
-    /// `m20260903_000011_environment_plugin_columns` backfills it from each
+    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash) backfills it from each
     /// environment's `VPADM_NAMESPACE` variable, which stays authoritative
     /// for the existing observer until the contract migration.
     pub config: serde_json::Value,
@@ -618,9 +623,11 @@ pub struct NewVariable {
 /// Environment-variable names the test runner owns. No pipeline or environment
 /// variable may take one, compared **case-insensitively**.
 ///
-/// The list is frozen: it is part of the runner contract
-/// (`cpt-cf-qa-fr-runner-contract`), so a name may not be added or removed
-/// without changing every existing test repository.
+/// Eleven of these are frozen: they are part of the runner contract
+/// (`cpt-cf-qa-fr-runner-contract`), so none of the eleven may be added or
+/// removed without changing every existing test repository. The twelfth,
+/// `QA_RUNNER_PYTEST_ARGS`, is not part of that legacy contract — it is a
+/// platform reservation added by WS2 Task 3, see below.
 ///
 /// # Why this is enforced, and why it lives in the SDK
 ///
@@ -649,12 +656,22 @@ pub struct NewVariable {
 /// **Added 2026-08-13** (qa-runs Task 11b, user decision) after Task 11's spec
 /// review found this gear enforced charset and length only, leaving the
 /// premise broken on two of the three paths.
-pub const RESERVED_VARIABLE_NAMES: [&str; 11] = [
+///
+/// **`QA_RUNNER_PYTEST_ARGS` added by WS2 Task 3.** It expands unquoted into
+/// `deploy/runner/entrypoint.sh`'s pytest invocation, so a pipeline or
+/// platform variable of that name reaches the runner pod's environment the
+/// same way a run parameter does (`qa-runs::domain::runvars`'s merge order)
+/// and could just as well pass `-k`/`-x`/`--deselect`/`--ignore` to drop
+/// failing tests. See `qa_runs::domain::params::RESERVED_NAMES` for the full
+/// rationale; it must stay a member here too, or
+/// `the_two_reserved_name_lists_must_stay_identical` fails.
+pub const RESERVED_VARIABLE_NAMES: [&str; 12] = [
     "APP_BUILD",
     "APP_VERSION",
     "E2E_K8S_NAMESPACE",
     "KUBECONFIG",
     "PRODUCT_KEY",
+    "QA_RUNNER_PYTEST_ARGS",
     "RP_API_KEY",
     "RP_PROJECT",
     "SKIP_TESTS_WITH_BUGS",
@@ -690,7 +707,34 @@ pub enum LeaseState {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AcquireOutcome {
     /// The lease was granted; the run may start.
-    Acquired,
+    Acquired {
+        /// The instant the environment transitioned **to free**, when this
+        /// acquisition is the one that took it out of [`LeaseState::Free`].
+        ///
+        /// This is the start endpoint of `cpt-cf-qa-nfr-dispatch-latency`
+        /// ("a queued run MUST start within 10 s at p95 of its environment
+        /// becoming free"), handed to the acquirer because the acquirer is the
+        /// only party that can pair it with a run: at most one acquisition can
+        /// take an environment out of `Free`, so the free instant belongs to
+        /// exactly that run.
+        ///
+        /// `None`, and **not** a measurement, in three distinct cases:
+        ///
+        /// * the acquisition **joined an existing hold** — a parallel run
+        ///   admitted alongside other parallel holders. The environment was
+        ///   not free, so no free transition admitted this run and the last
+        ///   recorded one belongs to whoever took it out of `Free` earlier.
+        /// * the acquisition was an **idempotent re-acquire** by a run that
+        ///   already holds the lease. Nothing transitioned.
+        /// * the environment **has no recorded free transition** — it was
+        ///   never held, or it was last freed before the column that records
+        ///   this existed.
+        ///
+        /// A caller measuring the NFR must drop the sample rather than
+        /// substitute a clock read: a fabricated anchor is indistinguishable
+        /// from a real one in a histogram.
+        became_free_at: Option<OffsetDateTime>,
+    },
     /// The environment is occupied in a conflicting mode; the caller should queue.
     Busy { current: LeaseState },
 }

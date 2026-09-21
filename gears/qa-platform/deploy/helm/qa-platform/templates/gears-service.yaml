@@ -13,9 +13,25 @@ metadata:
     app.kubernetes.io/component: gears
 spec:
   selector:
-    app.kubernetes.io/name: qa-platform
-    app.kubernetes.io/component: gears
+    {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "gears") | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.gears.port }}
       targetPort: http
+{{/* The metrics port is published on this Service and NOWHERE ELSE. This
+     Service is ClusterIP with no NodePort and no LoadBalancer (see the header
+     above), and the ingress in front of the stack routes only `http`, so
+     adding this port does not make the scrape endpoint reachable from outside
+     the cluster -- it makes it reachable from a scraper Pod, and from
+     `kubectl port-forward svc/qa-platform-gears 9464:9464`.
+
+     `targetPort: metrics` by NAME, matching gears-deployment.yaml's
+     containerPort name, so the two cannot disagree about the number even
+     though both read the same value. Gated on the same switch as the
+     containerPort: a Service port whose named targetPort does not exist on
+     the pod is an endpoint that never becomes ready, silently. */}}
+{{- if .Values.opentelemetry.metrics.scrape.enabled }}
+    - name: metrics
+      port: {{ .Values.gears.metricsPort }}
+      targetPort: metrics
+{{- end }}

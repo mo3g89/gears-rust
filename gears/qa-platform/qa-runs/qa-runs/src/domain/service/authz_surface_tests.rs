@@ -71,6 +71,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use toolkit_gts::GTS_ID_PREFIX;
+
 use super::{ENFORCED, EXPECTED_ACCESS_SCOPE_SITES, RESOURCE_TYPES};
 
 /// One `(resource_type, action)` pair the scan measured, and where from.
@@ -362,7 +364,15 @@ fn strip_tokens<'a>(text: &'a str, tokens: &[&str]) -> Option<&'a str> {
 /// name -> the set of values declared under that name.
 ///
 /// Whitespace-tolerant rather than line-based, so a declaration rustfmt wraps
-/// onto a second line still resolves.
+/// onto a second line still resolves. The value may also be spelled
+/// `gts_id!("<suffix>")` rather than a bare literal (WS0: the three
+/// `resources` `*_NAME` consts became concrete GTS type ids), which this scan
+/// unwraps -- but `gts_id!` is not a source-level identity over its argument:
+/// it prepends the registry's [`GTS_ID_PREFIX`] at compile time unless the
+/// suffix already carries it (`toolkit-gts-macros`'s `PREFIX_MACRO`
+/// expansion), so a value read off that spelling gets the same prefix
+/// stitched on here, to still be the string the PDP is handed at runtime
+/// rather than the bare source literal.
 ///
 /// **A set, not one value, because the key is a bare const name with no module
 /// qualification and this crate already declares some names twice.** Keeping
@@ -380,13 +390,23 @@ fn str_consts(files: &[Source]) -> BTreeMap<String, BTreeSet<String>> {
             let Some((name, rest)) = file.code.get(start + 6..).and_then(split_ident) else {
                 continue;
             };
-            let Some(rest) = strip_tokens(rest, &[":", "&str", "=", "\""]) else {
+            let Some(rest) = strip_tokens(rest, &[":", "&str", "="]) else {
                 continue;
             };
-            found
-                .entry(name)
-                .or_default()
-                .insert(rest.chars().take_while(|ch| *ch != '"').collect());
+            let (rest, via_gts_id_macro) = match strip_tokens(rest, &["gts_id!", "(", "\""]) {
+                Some(rest) => (rest, true),
+                None => match strip_tokens(rest, &["\""]) {
+                    Some(rest) => (rest, false),
+                    None => continue,
+                },
+            };
+            let literal: String = rest.chars().take_while(|ch| *ch != '"').collect();
+            let value = if via_gts_id_macro && !literal.starts_with(GTS_ID_PREFIX) {
+                format!("{GTS_ID_PREFIX}{literal}")
+            } else {
+                literal
+            };
+            found.entry(name).or_default().insert(value);
         }
     }
     found
@@ -865,5 +885,45 @@ fn the_enforced_list_declares_each_pair_once() {
         "ENFORCED has {} entries but only {} distinct pairs",
         ENFORCED.len(),
         distinct.len(),
+    );
+}
+
+/// `RESOURCE_TYPES` is the distinct resource types in `ENFORCED`, and every
+/// one of them must have a registered stub type-schema. The list was written
+/// to drive exactly that registration and sat `dead_code` while none existed
+/// (review finding 1); this is the consumer that makes it live.
+#[test]
+fn every_enforced_resource_type_has_a_registered_type_schema() {
+    let registered: Vec<String> = toolkit_gts::all_inventory_type_schemas()
+        .expect("inventory type schemas are well-formed JSON")
+        .iter()
+        .filter_map(|schema| schema["$id"].as_str().map(str::to_owned))
+        .collect();
+
+    for resource_type in super::RESOURCE_TYPES {
+        let wanted = format!("gts://{resource_type}");
+        assert!(
+            registered.iter().any(|id| id == &wanted),
+            "enforced resource type {resource_type} has no registered type \
+             schema, so no role definition can target it"
+        );
+    }
+}
+
+/// `RESOURCE_TYPES` must hold exactly the distinct resource types in
+/// `ENFORCED` — the drift guard `ledger` carries for the same list.
+#[test]
+fn resource_types_are_exactly_the_distinct_enforced_types() {
+    use std::collections::BTreeSet;
+
+    let from_enforced: BTreeSet<&str> = super::ENFORCED
+        .iter()
+        .map(|(resource, _action)| *resource)
+        .collect();
+    let declared: BTreeSet<&str> = super::RESOURCE_TYPES.iter().copied().collect();
+
+    assert_eq!(
+        declared, from_enforced,
+        "RESOURCE_TYPES has drifted from the distinct resource types in ENFORCED"
     );
 }

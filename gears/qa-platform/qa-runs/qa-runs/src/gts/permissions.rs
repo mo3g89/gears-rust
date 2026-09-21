@@ -12,13 +12,15 @@
 //! `permissions_tests` pins them to each other in both directions. Every
 //! `(resource_type, action)` pair below is taken verbatim from
 //! [`crate::domain::service::authz_surface::ENFORCED`] — the measured
-//! enforcement surface (18 pairs over the 3 resource types this gear
+//! enforcement surface (19 pairs over the 3 resource types this gear
 //! declares), not from a reader's memory of the service code.
 //!
 //! Instance id layout (the suffix needs ≥5 dot-separated tokens):
 //! `gts.cf.toolkit.authz.permission.v1~cf.qa.runs.<pep_entity>_<action>.v1`,
-//! where `pep_entity` is the `resource_type` string with its `qa.` prefix
-//! stripped (e.g. `qa.queue_entry` → `queue_entry`). This reuses qa-runs' own
+//! where `pep_entity` is the entity token of the resource type's GTS id:
+//! strip the registry's `GTS_ID_PREFIX` (`gts.`), then this gear's own
+//! `cf.qa.runs.` prefix, then the trailing `.v1~` suffix (e.g.
+//! `gts.cf.qa.runs.queue_entry.v1~` → `queue_entry`). This reuses qa-runs' own
 //! GTS namespace (`cf.qa.runs.*`, the same one its RFC-9457 error surface
 //! uses — `cf.qa.runs.run.v1~`, `.queue_entry.v1~`, `.schedule.v1~`), not
 //! `cf.core.*` — that namespace belongs to the system gears, and qa-runs is
@@ -36,12 +38,13 @@
 //! (dropping its still-queued row). A deployment can therefore grant one
 //! without the other, and the two `display_name`s say which side each one is.
 //!
-//! # Three actions exist only to gate an operator override separately
+//! # Four actions exist only to gate an operator override, or a background
+//! # sweep, separately
 //!
-//! `force_start`, `rerun` and `fire` are not folded into `dispatch` or
-//! `create` even though each ultimately drives the same write path, because
-//! each is a distinct authority a deployment must be able to grant or
-//! withhold on its own:
+//! `force_start`, `rerun`, `fire` and `check` are not folded into `dispatch`
+//! or `create` even though each ultimately drives the same write path (or,
+//! for `check`, no write path most of the time), because each is a distinct
+//! authority a deployment must be able to grant or withhold on its own:
 //!
 //! * `qa.queue_entry`/`force_start` lets an operator start a queued entry
 //!   **now**, bypassing the platform's occupancy check — including an
@@ -61,6 +64,10 @@
 //! * `qa.schedule`/`fire` lets the background firing ticker trigger a
 //!   schedule's due run out of band, so a deployment can grant the sweep
 //!   without granting schedule edits (`update`/`delete`).
+//! * `qa.schedule`/`check` lets the background referential-check ticker
+//!   re-probe a schedule's target and record a finding when it has gone
+//!   dangling, independently of `fire`: a deployment can grant one sweep
+//!   without the other, or neither, without touching schedule edits either.
 //!
 //! **This catalog ships no grants.** Which role holds which permission is a
 //! policy decision for the deployment's realm; what was missing was any way
@@ -191,8 +198,21 @@ gts_instance! {
 }
 
 // ── schedule (gts.cf.qa.runs.schedule_*.v1) — full CRUD plus the firing ────
-// ticker's own `fire`, over `qa_schedules` and `qa_schedule_ticks`.
+// ticker's own `fire` and the referential-check ticker's own `check`, over
+// `qa_schedules` and `qa_schedule_ticks`.
 
+gts_instance! {
+    AuthzPermissionV1 {
+        id: gts_id!("cf.toolkit.authz.permission.v1~cf.qa.runs.schedule_check.v1"),
+        resource_type: resources::SCHEDULE_NAME.to_owned(),
+        action: actions::CHECK.to_owned(),
+        display_name:
+            "Re-check a schedule's target for a plan, repository or environment that has \
+             gone dangling since it was written -- the background referential-check \
+             ticker's own action, separate from editing the schedule"
+                .to_owned(),
+    }
+}
 gts_instance! {
     AuthzPermissionV1 {
         id: gts_id!("cf.toolkit.authz.permission.v1~cf.qa.runs.schedule_create.v1"),

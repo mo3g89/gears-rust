@@ -41,14 +41,18 @@ use qa_runs_sdk::RunKind;
 ///   (`manager/src/services/argo.rs:746`).
 /// * `RunKind::CustomPlan` — `self.default_timeout_seconds(3600)`
 ///   (`manager/src/services/argo.rs:1065`).
-/// * `RunKind::Collect` — **600, and it is not a fallback: it is the whole
-///   chain.** The collect job synthesizes its own `TestPlanInfo` with
-///   `timeout_seconds: 600` (`manager/src/services/collect.rs:106`) and submits
-///   it through the plan path, which forwards a plan's own value verbatim
-///   (`argo.rs:539`). So the source system reaches 600 by way of a constant it
-///   wrote one line earlier, never by consulting
-///   `runner_defaults.default_timeout_seconds`. [`resolve_timeout_seconds`]'s
-///   arm reproduces that by consulting nothing.
+/// * `RunKind::Collect` — 600, the value the source system reaches by way of a
+///   constant it wrote one line earlier: the collect job synthesizes its own
+///   `TestPlanInfo` with `timeout_seconds: 600`
+///   (`manager/src/services/collect.rs:106`) and submits it through the plan
+///   path, which forwards a plan's own value verbatim (`argo.rs:539`), so
+///   legacy never consults `runner_defaults.default_timeout_seconds` here.
+///   **This port diverges: 600 is the fallback, not the whole chain.**
+///   [`resolve_timeout_seconds`]'s collect arm honours a configured
+///   `default_timeout_seconds` and falls back to this constant — a deliberate
+///   parity divergence, stated at the arm itself and argued in
+///   `docs/DESIGN.md` §3.13, "The collect deadline diverges from the source
+///   system".
 #[must_use]
 pub const fn kind_timeout_fallback(kind: RunKind) -> u64 {
     match kind {
@@ -174,21 +178,34 @@ pub fn resolve_timeout_seconds(
         RunKind::CustomPlan => plan_seconds
             .unwrap_or(0)
             .max(configured.unwrap_or_else(|| kind_timeout_fallback(kind))),
-        // Neither input is consulted, and both omissions are the source
-        // system's. There is no plan: a collect run enumerates whatever the
+        // `plan_seconds` is not consulted, and that omission is the source
+        // system's: there is no plan: a collect run enumerates whatever the
         // branch holds rather than a named `plan.yaml`, and the `TestPlanInfo`
         // the collect job builds is a synthetic wrapper whose `timeout_seconds`
-        // is the literal 600 (`manager/src/services/collect.rs:106`). And the
-        // configured default is never reached, because that wrapper's value is
-        // forwarded verbatim by the plan submit path (`argo.rs:539`) — the
+        // is the literal 600 (`manager/src/services/collect.rs:106`).
+        //
+        // `configured` **is** consulted, and 600 is the fallback under it. This
+        // reverses an earlier decision in this file, which had the arm consult
+        // nothing on the grounds that legacy's collect path never reaches
+        // `runner_defaults.default_timeout_seconds` — the wrapper's value is
+        // forwarded verbatim by the plan submit path (`argo.rs:539`), and the
         // `default_timeout_seconds` lookup belongs to the single-test and
         // custom-plan paths (`:746`, `:1065`), which collect does not take.
         //
-        // `configured` is therefore deliberately unused here. Threading it in
-        // "for consistency" would let an operator's global default silently
-        // lengthen or shorten the hourly cycle's deadline, which the source
-        // system does not permit.
-        RunKind::Collect => kind_timeout_fallback(kind),
+        // So this is a deliberate parity divergence, and the trade-off the old
+        // comment argued against was accepted rather than overlooked: an
+        // operator's global `qa-runs.default_timeout_seconds` now does reach
+        // the hourly cycle's deadline, lengthening or shortening it. It was
+        // accepted because a collect suite that legitimately needs longer than
+        // 600 seconds otherwise had no knob at all and failed in a way that
+        // read as a platform defect. A deployment that sets nothing is
+        // unchanged: `configured` is `None` when the knob is zero or unset, and
+        // the fallback is still 600. `docs/DESIGN.md` §3.13, "The collect
+        // deadline diverges from the source system", records the reversal and
+        // its reasoning, including why a dedicated `collect_timeout_seconds`
+        // knob is the answer if the shortening ever bites rather than a return
+        // to the constant.
+        RunKind::Collect => configured.unwrap_or_else(|| kind_timeout_fallback(kind)),
     }
 }
 
@@ -410,33 +427,41 @@ mod tests {
         );
     }
 
-    /// A collect run's deadline is legacy's synthetic 600 and consults nothing
-    /// else.
+    /// A collect run honours the configured default and falls back to legacy's
+    /// synthetic 600; the plan is still never consulted.
     ///
     /// The collect job builds its own `TestPlanInfo` with
     /// `timeout_seconds: 600` (`manager/src/services/collect.rs:106`) and hands
     /// it to the plan submit path, which forwards a plan's value verbatim
-    /// (`manager/src/services/argo.rs:539`) — so neither
+    /// (`manager/src/services/argo.rs:539`) — so in the source system neither
     /// `runner_defaults.default_timeout_seconds` nor any plan the caller could
     /// name is ever consulted.
     ///
-    /// Both non-override inputs are varied here rather than passed as `None`,
-    /// because passing `None` would make the assertion true for an arm that
-    /// *did* consult them. The launch override is checked separately: it wins
-    /// for every kind, including this one, in
-    /// `an_explicit_timeout_override_wins`.
+    /// **The configured-default half of that is a deliberate divergence**, and
+    /// `docs/DESIGN.md` §3.13, "The collect deadline diverges from the source
+    /// system", is where it is argued. What the test pins
+    /// is that the divergence is bounded: 600 survives as the fallback, so a
+    /// deployment that sets nothing (or sets zero, which `argo.rs:174` reads as
+    /// "unset") sees exactly legacy's number, and only a deployment that sets
+    /// the knob moves the deadline.
+    ///
+    /// `plan_seconds` is varied rather than passed as `None`, because passing
+    /// `None` would make the assertion true for an arm that *did* consult it.
+    /// The launch override is checked separately: it wins for every kind,
+    /// including this one, in `an_explicit_timeout_override_wins`.
     #[test]
-    fn a_collect_run_takes_the_legacy_constant_and_ignores_both_other_inputs() {
-        for (plan_seconds, configured) in [
-            (None, 0),
-            (None, 900),
-            (Some(7200), 0),
-            (Some(7200), 900),
-            (Some(1), 1),
+    fn a_collect_run_honours_the_configured_default_over_the_legacy_constant() {
+        for (plan_seconds, configured, expected) in [
+            (None, 0, 600),
+            (Some(7200), 0, 600),
+            (None, 900, 900),
+            (Some(7200), 900, 900),
+            (Some(7200), 60, 60),
+            (Some(1), 1, 1),
         ] {
             assert_eq!(
                 resolve_timeout_seconds(None, plan_seconds, configured, RunKind::Collect),
-                600,
+                expected,
                 "plan_seconds={plan_seconds:?} configured={configured}"
             );
         }

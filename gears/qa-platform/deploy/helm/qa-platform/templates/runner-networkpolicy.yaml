@@ -1,0 +1,237 @@
+{{/* Default-deny ingress AND egress for the runner pod -- the pod that
+     executes TENANT-WRITTEN TEST CODE and, before this file, could reach
+     anything else on the pod network: the gears' own APIs, Postgres,
+     Keycloak, and another tenant's running pod. `grep -rn NetworkPolicy
+     deploy/` returned nothing until this file. One policy closes it; a
+     namespace split was never needed (every runner pod, across every
+     tenant, already lands in one namespace -- `.Values.argo.namespace` --
+     so a namespace-scoped default-deny plus a narrow allow-list reaches all
+     of them without splitting anything).
+
+     SELECTS ON THE SAME LABEL qa-runs' argo/workflow.rs STAMPS ON EVERY
+     RUNNER POD TEMPLATE: `NETWORK_ISOLATION_LABEL` /
+     `NETWORK_ISOLATION_LABEL_VALUE` in
+     qa-runs/qa-runs/src/infra/executor/argo/workflow.rs. THE LITERAL
+     `qa-platform/network-isolated: "true"` BELOW MUST MATCH THOSE TWO
+     CONSTANTS EXACTLY.
+
+     A NetworkPolicy whose podSelector matches nothing fails open and looks
+     installed -- it renders, `helm lint`s clean, and shows up in
+     `kubectl get netpol`, while protecting nothing. So this pair is
+     asserted from BOTH sides rather than trusted to stay in sync by
+     inspection: workflow.rs's own
+     `every_template_carries_the_network_isolation_label` test on the Rust
+     side, and `deploy/helm/tests/check_runner_networkpolicy.py` on this
+     side, which reads this file's rendered `podSelector` AND greps
+     workflow.rs for those two constants, and fails if they ever disagree.
+     Editing the literal here without editing workflow.rs, or the reverse,
+     fails that guard rather than silently installing a policy that selects
+     nothing.
+
+     LIVES IN .Values.argo.namespace, NOT .Release.Namespace -- the runner
+     pod's own namespace, same reasoning argo-runner-serviceaccount.yaml's
+     header comment gives for why that ServiceAccount needs an explicit
+     `namespace:` rather than inheriting the release's. A NetworkPolicy
+     created in the wrong namespace selects no pods at all (silently, same
+     failure shape as the label mismatch above) because `podSelector` is
+     scoped to the NetworkPolicy object's own namespace.
+
+     EGRESS ALLOW-LIST, and what each rule is for -- ingress is not
+     allow-listed at all (no rule in `ingress:` below, and it is
+     deliberately present as an empty list rather than omitted, so a reader
+     does not mistake the absence for an oversight). FOUR destinations: DNS,
+     the gears Service (the bundle route and the collect endpoint, one
+     Service for both), the run's target environment, and the Kubernetes API
+     server.
+
+     IT WAS FIVE, AND KEYCLOAK IS THE ONE THAT WENT. Fix round 3 added a
+     fifth rule for Keycloak's token endpoint after a real workflow run on a
+     live cluster failed on it: `deploy/runner/fetch_bundle.py` performed a
+     `client_credentials` exchange IN-POD, against Keycloak, before it could
+     call the authenticated bundle route at all. That exchange is gone. The
+     credential it used was a deployment-wide, unexpiring, fullScopeAllowed
+     client secret sitting in the environment of a pod whose whole job is to
+     execute TENANT-AUTHORED pytest -- and this very rule, together with rule
+     2, is what made it usable: both destinations the credential needed were
+     allow-listed here on purpose. qa-catalog's bundle route is anonymous now
+     and authorised by a per-bundle HMAC tag carried in TEST_BUNDLE_URL's
+     query string, so a runner pod has no reason to reach Keycloak and no
+     credential to present if it did.
+
+     `tests/check_runner_networkpolicy.py` asserts the ABSENCE of a Keycloak
+     egress rule now, where it used to assert its presence -- so re-adding one
+     here fails that guard rather than quietly restoring the path.
+
+       1. DNS -- any pod in kube-system, ports 53 UDP and TCP. Every other
+          rule below needs a resolvable name before it can dial anything.
+
+       2. qa-platform-gears, in the RELEASE namespace
+          (`kubernetes.io/metadata.name`, the label every namespace carries
+          automatically since Kubernetes 1.21), on `.Values.gears.port`.
+          ONE rule covers BOTH allow-list items the brief names separately
+          -- qa-catalog's bundle route (`GET /qa/v1/test-bundles/{id}`) and
+          qa-insights' collect endpoint (`POST /qa/v1/collect/{repo_id}`) --
+          because all four qa-platform gears run in the single `gears`
+          container behind the single `qa-platform-gears` Service (see
+          gears-deployment.yaml's own header comment: "One container running
+          all four qa-platform gears"). There is no second Service to write
+          a second rule for.
+
+       3. THE RUN'S TARGET ENVIRONMENT -- NOT STATICALLY EXPRESSIBLE, and
+          said so rather than faked. The target is a tenant-supplied address
+          (an environment's `kubeconfig` server, resolved out of credstore
+          per run -- qa-environments' domain, not this chart's) that does
+          not exist until a run starts and is never known to this chart at
+          chart-render time. There is no field this template could read it
+          from, and inventing a controller that rewrote this policy per run
+          was explicitly out of scope for this task.
+
+          What follows is the NARROWEST STATIC SUPERSET this task could
+          justify, not a faithful expression of "the target and nothing
+          else": egress to 0.0.0.0/0 EXCEPT the cluster's OWN pod and
+          Service CIDRs (`.Values.argo.podCidr` / `.Values.argo.serviceCidr`
+          -- fix round 6), plus loopback and link-local. Full reasoning is
+          in task-8-report.md.
+
+          FIX ROUND 6, REPLACING A WRONG FIRST CUT: the original except list
+          excluded ALL of RFC1918 (every private address), reasoned as "the
+          narrowest defensible superset". It was not narrow enough in the
+          direction that matters and too narrow in the direction that
+          doesn't: the finding this task closes is that the runner pod could
+          reach the gears' own API, Postgres, Keycloak and another tenant's
+          pod -- all four live in the cluster's OWN pod/Service CIDRs, not
+          in every private range that exists -- and VHI/VHP are ON-PREMISES
+          products whose management nodes are routinely private addresses
+          too. Excluding all of RFC1918 blocked the cluster and silently
+          made every on-prem target environment unreachable in the same
+          stroke: a pod carrying this same label could reach an arbitrary
+          public address but not a private one this platform exists to
+          test against -- measured directly on a live cluster, not
+          assumed. See task-8-report.md for the measurement; it does not
+          belong in this file, which states the property the fix
+          establishes, not the specific addresses that proved the prior
+          rule wrong.
+
+          WHAT THIS RULE NOW PERMITS, STATED PLAINLY RATHER THAN LEFT FOR A
+          READER TO INFER: the runner pod may reach ANY address outside the
+          cluster's own pod and Service networks, on any port --
+          **including private ones**, because that is where the products
+          under test actually live. A compromised runner's reach on the
+          CUSTOMER's own network is wider for it. That is a real trade, and
+          it is the right one here: the alternative is a platform that
+          cannot do the one thing it exists to do. What it does NOT permit:
+          the cluster's own pods or Services, except through the three
+          explicit rules above this one (DNS, the gears Service, and --
+          below -- the API server and Keycloak) -- another tenant's runner
+          pod (this identical label, a pod-CIDR address on every real
+          cluster) and Postgres (a pod-CIDR address, never Service-exposed
+          to this pod at all) stay blocked regardless.
+          169.254.169.254 (a common cloud metadata endpoint) is inside the
+          excluded link-local block and has nothing to do with the CIDR
+          question above -- still excluded, unconditionally. IPv6 is out of
+          scope: nothing else in this chart provisions dual-stack, and this
+          rule only excludes IPv4 ranges.
+
+       4. THE KUBERNETES API SERVER -- fix round 1. This was flagged in the
+          first cut of this file's report rather than fixed, which was
+          wrong: without it, every run breaks. Argo's own executor (the
+          workflow pod's `wait` container, not `main`) authenticates to the
+          API server over the pod network to write `workflowtaskresults`
+          per step, and rule 3's own `except` list above blocks it by
+          construction -- the API server's ClusterIP sits in the cluster's
+          own Service CIDR, which that rule excludes on purpose, to keep
+          Postgres/Keycloak/another tenant's pod out. So it needs its own
+          rule, to a cluster-specific address this chart cannot know any
+          more safely than it knows `clusterDns` -- `.Values.argo.
+          apiServerClusterIP`, whose own doc in values.yaml names the exact
+          failure (exit code 64, AFTER the run has already produced all of
+          its output) an operator gets for leaving this unset on the wrong
+          cluster. A ClusterIP, not a pod, so only an `ipBlock` reaches it --
+          `podSelector`/`namespaceSelector` match pods, and the "kubernetes"
+          Service's endpoints are the control plane's own address, never a
+          labelled pod.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: qa-platform-runner-isolation
+  namespace: {{ .Values.argo.namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: argo-runner
+spec:
+  podSelector:
+    matchLabels:
+      # MUST equal qa-runs' NETWORK_ISOLATION_LABEL / NETWORK_ISOLATION_LABEL_VALUE
+      # (qa-runs/qa-runs/src/infra/executor/argo/workflow.rs) -- see this
+      # file's header comment.
+      qa-platform/network-isolated: "true"
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress rule at all: the brief is explicit ("Ingress: none"), and an
+  # empty list under a policyType that IS declared denies all ingress -- it
+  # is not the same as omitting `ingress` entirely, which would ALSO deny
+  # all ingress here, but less legibly.
+  ingress: []
+  egress:
+    # 1. DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # 2. qa-platform-gears: qa-catalog's bundle route AND qa-insights'
+    #    collect endpoint, one Service for both.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: qa-platform
+              app.kubernetes.io/component: gears
+      ports:
+        - protocol: TCP
+          port: {{ .Values.gears.port }}
+    # 3. The run's target environment -- the narrowest static superset
+    #    justified above: everything except the cluster's own pod and
+    #    Service networks. Fix round 6: this used to except all of RFC1918,
+    #    which blocked every on-prem (private-address) target environment
+    #    along with the cluster -- see this file's header comment.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              # The cluster's own pod and Service CIDRs -- what keeps
+              # Postgres, Keycloak, the gears API (beyond rule 2's one port)
+              # and another tenant's runner pod out of this rule
+              # specifically, without also excluding every private address
+              # a real target environment might have.
+              - {{ .Values.argo.podCidr | quote }}
+              - {{ .Values.argo.serviceCidr | quote }}
+              # Loopback.
+              - 127.0.0.0/8
+              # Link-local, including the 169.254.169.254 cloud metadata
+              # endpoint several providers serve from this block -- nothing
+              # to do with the pod/Service CIDRs above, excluded
+              # unconditionally.
+              - 169.254.0.0/16
+    # 4. The Kubernetes API server -- fix round 1. MUST be set correctly for
+    #    THIS cluster (values.yaml's argo.apiServerClusterIP), or Argo's
+    #    `wait` container cannot report a run's result: see that value's own
+    #    doc for the exact failure (exit code 64, after the run has already
+    #    produced all of its output).
+    - to:
+        - ipBlock:
+            cidr: {{ printf "%s/32" .Values.argo.apiServerClusterIP | quote }}
+      ports:
+        - protocol: TCP
+          port: 443
+    # NO RULE 5. Keycloak is deliberately unreachable from a runner pod: the
+    # in-pod client_credentials exchange this rule existed for is gone, and so
+    # is the credential it used. See this file's header.

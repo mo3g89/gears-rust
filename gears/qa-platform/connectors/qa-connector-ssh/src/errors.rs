@@ -188,8 +188,13 @@ pub fn classify(failure: &SshFailure) -> PluginFailure {
         }
         SshFailure::Timeout => PluginFailure::classified(FailureClass::Timeout, TIMED_OUT),
         // Reached, ran, and refused. `qa-connector-k8s` calls the same
-        // situation `AuthRejected` on a 401/403, and the design spec's §5
-        // asks for it by name on the `vinfra` step; anything else non-zero
+        // situation `AuthRejected` on a 401/403, and this classification
+        // was asked for by name on the `vinfra` step in
+        // `PRODUCT-PLUGINS-DESIGN.md` §5, which is not in the repository
+        // any more (its successor,
+        // `gears/qa-platform/docs/features/product-plugins.md`, states the
+        // product-agnostic contract and does not go down to this plugin's
+        // own commands); anything else non-zero
         // stays `Internal`, which is the honest reading of "a command we
         // expected to work did not".
         SshFailure::CommandFailed { stderr, .. } => {

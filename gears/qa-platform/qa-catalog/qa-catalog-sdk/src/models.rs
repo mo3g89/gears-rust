@@ -18,6 +18,15 @@ pub struct TestRepository {
     /// credstore reference for the access credential (SSH key or token). None = public repo.
     pub credential_ref: Option<String>,
     pub last_synced_at: Option<OffsetDateTime>,
+    /// Commit id the last successful sync materialized; `None` when the
+    /// repository has never synced.
+    ///
+    /// **The content revision, where `last_synced_at` is only the attempt
+    /// instant.** Two syncs a day apart that find the same upstream tip
+    /// produce two different `last_synced_at` values and one `head_commit`,
+    /// which is what makes this the right key for anything that caches work
+    /// derived from the working copy.
+    pub head_commit: Option<String>,
     pub sync_error: Option<String>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
@@ -339,7 +348,7 @@ pub struct Product {
     /// `gts.cf.toolkit.plugins.plugin.v1~cf.core.qa_product.plugin.v1~cf.core._.vhp_product.v1`.
     ///
     /// **A plain `String` since Task 20**, which completed the expand/contract
-    /// pair: `m20260903_000004_plugin_instance_id_not_null` tightened the
+    /// pair: `m20260903_000004_plugin_instance_id_not_null` (folded into `migrations::m20260812_000002_initial` by the docs squash) tightened the
     /// column, so "this product names no plugin" is no longer a state the type
     /// can hold. It was a misconfiguration rather than a mode — nothing about
     /// such a product could be observed or dispatched — and **D6** says every
@@ -440,6 +449,33 @@ pub struct TestBundle {
     pub size_bytes: u64,
     pub expires_at: OffsetDateTime,
     pub created_at: OffsetDateTime,
+    /// The hex-encoded HMAC tag that authorises
+    /// `GET /qa/v1/test-bundles/{id}?sig=...` for exactly this bundle, for as
+    /// long as [`Self::expires_at`] says the bundle exists.
+    ///
+    /// # A transport field, never a stored one
+    ///
+    /// There is no `download_sig` column and there never will be: the tag is a
+    /// pure function of `(id, tenant_id, qa-catalog's signing secret)`,
+    /// recomputed on every verification the way qa-insights recomputes its
+    /// collect-report `sig`. **It is populated only by
+    /// `BundlesService::create_bundle`'s return value** — a `TestBundle` read
+    /// back out of the descriptor table (the GC sweep, the download path's own
+    /// row read) carries an empty string here, because a row has no signature
+    /// in it to map.
+    ///
+    /// # Why it rides the model at all
+    ///
+    /// qa-runs' dispatcher is the only consumer: it puts the tag on
+    /// `ExecutionNode::bundle_token`, and the Argo adapter renders it into
+    /// `TEST_BUNDLE_URL`'s query string. That is the whole journey, and
+    /// `create_bundle`'s return value is the one place where the bundle id, the
+    /// owning tenant and the signing secret are all in hand at once.
+    ///
+    /// **Do not log it, and do not put it in `RunSpec::env`.** A run's
+    /// parameters are readable back over the runs API; the node-derived
+    /// environment is not. See `qa-runs`' `ExecutionNode::bundle_token`.
+    pub download_sig: String,
 }
 
 /// What a bundle should contain — resolved by qa-runs at launch time.

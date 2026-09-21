@@ -39,12 +39,17 @@ impl LeasesRepository for OrmLeasesRepository {
             Some(m) => Ok(VersionedLease {
                 state: lease_to_state(&m)?,
                 version: m.version,
+                freed_at: m.freed_at,
             }),
             // Missing row: no lease has ever been written for this environment.
-            // This is a legitimate Free state, not corruption.
+            // This is a legitimate Free state, not corruption. It is also an
+            // environment nothing has ever freed, so it carries no anchor —
+            // `None` rather than a clock read, which would date the free
+            // transition to whenever this read happened to run.
             None => Ok(VersionedLease {
                 state: LeaseState::Free,
                 version: 0,
+                freed_at: None,
             }),
         }
     }
@@ -61,6 +66,19 @@ impl LeasesRepository for OrmLeasesRepository {
         let (mode, holders) = state_to_columns(new_state);
         let now = OffsetDateTime::now_utc();
 
+        // **The anchor.** A `Free` write is a transition to free and nothing
+        // else: the service writes only when the state actually changes, and
+        // no acquisition can produce `Free` — `domain::lease`'s
+        // `no_acquisition_can_produce_a_free_state` pins that invariant, which
+        // is what lets this be an unconditional test on the new state rather
+        // than a flag the caller has to remember to pass.
+        //
+        // Every other write leaves the column alone. It is deliberately *not*
+        // cleared on acquisition: a held row keeps the instant its current
+        // holder consumed, which costs nothing and means a reader never sees a
+        // half-written anchor.
+        let freed_at = matches!(new_state, LeaseState::Free).then_some(now);
+
         if expected_version == 0 {
             // No row expected yet — insert. A peer racing us between the
             // caller's read and this insert loses on the primary-key
@@ -73,6 +91,7 @@ impl LeasesRepository for OrmLeasesRepository {
                 holders: ActiveValue::Set(holders),
                 version: ActiveValue::Set(1),
                 updated_at: ActiveValue::Set(now),
+                freed_at: ActiveValue::Set(freed_at),
             };
 
             return match secure_insert::<LeaseEntity>(am, scope, runner).await {
@@ -82,7 +101,7 @@ impl LeasesRepository for OrmLeasesRepository {
             };
         }
 
-        let result = LeaseEntity::update_many()
+        let mut update = LeaseEntity::update_many()
             .filter(
                 sea_orm::Condition::all()
                     .add(LeaseColumn::EnvironmentId.eq(environment_id))
@@ -93,10 +112,12 @@ impl LeasesRepository for OrmLeasesRepository {
             .col_expr(LeaseColumn::Mode, Expr::value(mode))
             .col_expr(LeaseColumn::Holders, Expr::value(holders))
             .col_expr(LeaseColumn::Version, Expr::value(expected_version + 1))
-            .col_expr(LeaseColumn::UpdatedAt, Expr::value(now))
-            .exec(runner)
-            .await
-            .map_err(db_err)?;
+            .col_expr(LeaseColumn::UpdatedAt, Expr::value(now));
+        if let Some(at) = freed_at {
+            update = update.col_expr(LeaseColumn::FreedAt, Expr::value(at));
+        }
+
+        let result = update.exec(runner).await.map_err(db_err)?;
 
         if result.rows_affected == 0 {
             return Err(DomainError::LeaseConflict);

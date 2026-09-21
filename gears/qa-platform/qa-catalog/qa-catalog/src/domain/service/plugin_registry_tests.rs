@@ -346,7 +346,7 @@ async fn plugin_for_reports_the_id_of_an_unregistered_plugin() {
 //
 // It covered a product with a NULL `plugin_instance_id`, distinguished from
 // the case above by `instance_id: None`. That column is `NOT NULL` since
-// `m20260903_000004_plugin_instance_id_not_null` and the model followed, so
+// `m20260903_000004_plugin_instance_id_not_null` (folded into `migrations::m20260812_000002_initial` by the docs squash) and the model followed, so
 // the state is **unrepresentable** — `product()` cannot build it, and the
 // `else` branch in `plugin_for` that answered it is gone.
 //

@@ -152,11 +152,17 @@
 //! this module rather than beside a service of its own because it is the sweep's
 //! algorithm minus two steps: it does not read the watermark to find its floor
 //! (the operator supplies both bounds) and it does not write one at the end.
-//! Everything else — the listing, the per-run transaction, the projection it
-//! goes through, the stop-at-the-first-failure rule — is shared code, which is
-//! the property that matters: an operator reaching for a rebuild is already
-//! having a bad day, and a second projection path would be the thing that
-//! diverged.
+//! Everything else — the keyset page walk, the listing, the per-run
+//! transaction, the projection it goes through, the stop-at-the-first-failure
+//! rule — is shared code or the same shape, which is the property that matters:
+//! an operator reaching for a rebuild is already having a bad day, and a second
+//! projection path would be the thing that diverged.
+//!
+//! The page walk is the most recent thing to become shared, and it was the last
+//! divergence in this module: until 2026-09-21 the rebuild read **one** page and
+//! truncated, which the sweep's own fix had just established as the shape that
+//! strands data permanently. See [`ReconcileService::rebuild`] for what that
+//! cost and for the budget that replaced it.
 //!
 //! Four decisions it carries, each with what was rejected:
 //!
@@ -283,7 +289,7 @@
 use std::sync::Arc;
 
 use authz_resolver_sdk::PolicyEnforcer;
-use qa_runs_sdk::Run;
+use qa_runs_sdk::{FinishedRunCursor, Run};
 use time::{Duration, OffsetDateTime};
 use toolkit_db::DBProvider;
 use toolkit_security::{AccessScope, SecurityContext};
@@ -304,13 +310,59 @@ use crate::domain::system_actor::{self, SystemActorSite, TenantBound};
 /// header: over-wide is free, under-wide re-projects the newest run forever.
 const DIFF_UPPER_SLACK: Duration = Duration::seconds(1);
 
+/// How many pages one sweep will walk before leaving the rest for the next tick.
+///
+/// The sweep pages forward until it catches up (see [`ReconcileService::sweep`]
+/// for why it must), and "until it catches up" over a gear that has been wedged
+/// for days is unbounded work on a 5-minute ticker. This bounds it: at the
+/// default `reconcile_page_size` of 200 a single pass still walks 10,000 runs,
+/// far more than any real backlog between two ticks, and a pass that spends the
+/// whole budget still leaves the mark further forward than it found it — so the
+/// next tick resumes rather than repeating.
+const MAX_PAGES_PER_SWEEP: u32 = 50;
+
+/// How many pages one [`ReconcileService::rebuild`] will walk before answering
+/// that it did not finish.
+///
+/// The rebuild pages on the same keyset cursor the sweep does, so its bound is
+/// a *budget* rather than a wall: whatever it does not reach is named in
+/// [`ReconcileOutcome::resume_from`] and the next request starts there. It is
+/// deliberately smaller than [`MAX_PAGES_PER_SWEEP`] and for a reason the sweep
+/// does not have — a rebuild is a synchronous operator request, and a walk long
+/// enough to hit a gateway timeout hands back no answer at all, which is the
+/// silent partial this endpoint exists to stop being. Ten pages is 2,000 runs
+/// at the default `reconcile_page_size`, ten times the reach of the single page
+/// this used to truncate at.
+const MAX_PAGES_PER_REBUILD: u32 = 10;
+
 /// What one sweep did. Returned rather than only logged, because Task 16's
 /// rebuild endpoint answers with it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReconcileOutcome {
     /// Runs in the page the sweep examined.
     pub scanned: usize,
-    /// Runs whose projection this pass wrote.
+    /// Runs this pass re-projected — **attempts, not writes**.
+    ///
+    /// # It counts attempts, and the three-day outage is why that is spelled out
+    ///
+    /// A run is counted here once [`ReconcileService::reproject`] returns `Ok`,
+    /// and `Ok` includes the two cases that write nothing: a run qa-runs no
+    /// longer has (`read_run_projection` answers `None`) and a run with no
+    /// per-test rows at all (the projection is empty and the delete-then-insert
+    /// inserts nothing). Neither leaves a row in `qa_test_results`, and
+    /// [`ResultsRepository::ingested_run_ids_between`] answers *from that
+    /// table* — so such a run is never "already ingested", is re-projected on
+    /// every single pass, and is counted here every time.
+    ///
+    /// That is not hypothetical: through the 2026-09-18 outage this field read
+    /// `116` on every pass for three days while `qa_test_results` did not grow
+    /// by a row. A reader who takes it for "work that landed" reads a treadmill
+    /// as health. [`Self::result_rows_written`] is the number that answers the
+    /// question this one looks like it answers, and it is why that field was
+    /// added rather than this one's meaning quietly changed: `replayed` on
+    /// `api::rest::dto::RebuildOutcomeDto` is this field on the wire, with a
+    /// documented `replayed == scanned unless it stopped early` invariant that
+    /// only holds for attempts.
     ///
     /// **What that means differs between the two callers, deliberately.** For
     /// [`ReconcileService::reconcile_once`] it is the runs that had *no*
@@ -322,8 +374,79 @@ pub struct ReconcileOutcome {
     /// a second outcome type for one differing field is what the plan's Task 16
     /// explicitly rules out.
     pub backfilled: usize,
-    /// Where the watermark ended up, if it moved.
-    pub watermark_advanced_to: Option<OffsetDateTime>,
+    /// Rows this pass actually wrote into `qa_test_results`.
+    ///
+    /// The honest counterpart to [`Self::backfilled`], which counts attempts —
+    /// read that field's doc for the outage this pair exists to make legible.
+    /// A pass with `backfilled > 0` and `result_rows_written == 0` is
+    /// re-projecting runs that have nothing to project, forever.
+    ///
+    /// Counted from the projection the write was handed, so it is rows
+    /// *offered* to an idempotent delete-then-insert rather than rows the
+    /// database reports as new: a re-projection of an unchanged run rewrites
+    /// the same rows and counts them again. That is the right number for the
+    /// question here ("did this pass carry any content at all"), and it is not
+    /// a row delta.
+    pub result_rows_written: usize,
+    /// Where this tenant's reconcile mark stands **after** this pass, whether
+    /// or not this pass is what put it there.
+    ///
+    /// # This replaced `watermark_advanced_to`, which was the mis-wired alarm
+    ///
+    /// The old field was documented as "where the watermark ended up, if it
+    /// moved" and was set from `Walk::advance_to` — the newest instant the walk
+    /// *fully accounted for*, handed to [`WatermarkRepository::advance`]. That
+    /// advance is monotonic, so handing it an instant at or behind the stored
+    /// mark is a **successful no-op**, and the field was `Some(...)` all the
+    /// same. It therefore reported "there was something to advance to", never
+    /// "the stored row moved" — which is precisely the distinction the
+    /// 2026-09-18 outage turned on, and precisely the one
+    /// `crate::gear::report_reconcile_outcome` needed and could not get.
+    ///
+    /// This one is the stored value: `max(mark before the pass, whatever this
+    /// pass advanced to)`, which is what monotonicity makes the row hold. Two
+    /// consecutive passes reporting the same instant is therefore evidence
+    /// about the row, not about the walk. `None` means this tenant has no mark
+    /// at all — the gear has never swept it, or (for
+    /// [`ReconcileService::rebuild`]) the pass deliberately neither read nor
+    /// wrote one.
+    pub watermark_at: Option<OffsetDateTime>,
+    /// Whether the walk ended because qa-runs had **nothing further** past the
+    /// cursor.
+    ///
+    /// `true` is the ordinary end of a sweep that has caught up: the last page
+    /// came back short or empty, so every finished run this tenant has is
+    /// accounted for. `false` means the walk stopped with more to read — a gap,
+    /// a spent page budget, or a cursor that could not step — and is what
+    /// separates "this tenant's mark has not moved because there is nothing to
+    /// move it to" from "this tenant's mark has not moved and there is".
+    ///
+    /// From [`ReconcileService::rebuild`] it is the same fact about the
+    /// operator's window rather than about the tenant: `true` means every run
+    /// that finished in `[from, to)` was reached. It was `false` unconditionally
+    /// until the rebuild learned to page, because a rebuild that read one page
+    /// had no walk to finish.
+    pub caught_up: bool,
+    /// Where the next request must start to finish what this pass did not.
+    ///
+    /// `Some(at)` exactly when [`Self::caught_up`] is `false` on a
+    /// [`ReconcileService::rebuild`] — the pass ran out of its page budget, or
+    /// stopped on a gap — and it is the `from` of the request that continues it.
+    /// The instant is the one of the last run this pass *consumed*, so the
+    /// continuation re-replays that run and anything tied with it; a rebuild is
+    /// idempotent, so re-replaying is free and a strict bound that skipped a tie
+    /// group would not be.
+    ///
+    /// **This is on the wire** (`api::rest::dto::RebuildOutcomeDto`), and that is
+    /// the whole point of the field. The truncation it reports used to be a
+    /// `WARN` in a log, which the 2026-09-18 outage established is
+    /// indistinguishable from success to everyone who is not reading the log at
+    /// that moment.
+    ///
+    /// Always `None` from [`ReconcileService::reconcile_once`]: the sweep
+    /// records where it got to in the watermark, which is a durable resume point
+    /// rather than one a caller has to carry.
+    pub resume_from: Option<OffsetDateTime>,
     /// Whether the sweep stopped early on a failed backfill. `true` means the
     /// page was not fully consumed and the next sweep resumes at the gap.
     pub stopped_at_gap: bool,
@@ -344,6 +467,102 @@ pub struct ReconcileOutcome {
     /// port's rather than the run's: a run returned with no `finished_at` from a
     /// finished-since listing. It is still the run to look at.
     pub stopped_at_run: Option<Uuid>,
+}
+
+impl ReconcileOutcome {
+    /// Fold one page's counters into a walk's running total.
+    ///
+    /// The three counters and nothing else: every other field is a decision
+    /// about where the walk *ended*, which only the walk can make. Shared by
+    /// [`Walk::absorb`] and by [`ReconcileService::replay_window`] so that the
+    /// sweep's arithmetic and the rebuild's cannot drift apart.
+    fn add_counts(&mut self, page: &Self) {
+        self.scanned += page.scanned;
+        self.backfilled += page.backfilled;
+        self.result_rows_written += page.result_rows_written;
+    }
+}
+
+// `Cursor` used to be defined here, as a private `(finished_at, id)` pair with
+// `floor`/`after` constructors. It is `qa_runs_sdk::FinishedRunCursor` now, and
+// the move was the point rather than a tidy-up: the instant and the id used to
+// travel as two positional parameters through four layers of delegation, where
+// keeping the first and dropping the second compiled, read like a legitimate
+// first page, and silently restored the bound that stranded three days of
+// results. That type's own doc carries the argument; this module's use of it is
+// unchanged — `starting_at` for the first page of a walk, `after` for every
+// resume.
+
+/// One page of [`ReconcileService::sweep`]'s walk, and where it leaves the walk.
+///
+/// Not public and not [`ReconcileOutcome`]: `outcome` here is *this page's*
+/// contribution, which the caller accumulates, and `next_cursor` is loop control
+/// that no caller of the sweep has any use for.
+struct PageStep {
+    /// What this page scanned and backfilled.
+    outcome: ReconcileOutcome,
+    /// The newest instant this page fully accounted for, if any.
+    advance_to: Option<OffsetDateTime>,
+    /// Where the next page starts, or `None` to end the walk.
+    next_cursor: Option<FinishedRunCursor>,
+    /// This page came back short of `page_size` with no gap in it: qa-runs has
+    /// nothing further past the cursor. See [`ReconcileOutcome::caught_up`].
+    caught_up: bool,
+}
+
+/// The running state of one sweep's walk across pages.
+#[derive(Default)]
+struct Walk {
+    /// Every page's contribution so far.
+    outcome: ReconcileOutcome,
+    /// The newest instant any page fully accounted for. Separate from
+    /// [`ReconcileOutcome::watermark_at`], which is where the stored mark
+    /// *ends up* — the two differ whenever this one is at or behind the mark,
+    /// since [`WatermarkRepository::advance`] is monotonic.
+    advance_to: Option<OffsetDateTime>,
+}
+
+impl Walk {
+    /// Fold one page in, and answer where the walk goes next.
+    fn absorb(&mut self, step: &PageStep) -> Option<FinishedRunCursor> {
+        self.outcome.add_counts(&step.outcome);
+        // The *last* page decides, not any page: a walk that read four full
+        // pages and then a short one has caught up.
+        self.outcome.caught_up = step.caught_up;
+        if step.outcome.stopped_at_gap {
+            self.outcome.stopped_at_gap = true;
+            self.outcome.stopped_at_run = step.outcome.stopped_at_run;
+        }
+        // Pages walk forward, so a later page's instant is the later one.
+        if step.advance_to.is_some() {
+            self.advance_to = step.advance_to;
+        }
+        step.next_cursor
+    }
+}
+
+/// The page budget is spent and the walk is ending short of caught up.
+///
+/// A WARN rather than an error: the mark still moved as far as this pass got,
+/// so the next tick resumes rather than repeating — which is exactly the
+/// property the single-page sweep did not have.
+fn warn_if_budget_spent(
+    tenant: TenantBound,
+    page_number: u32,
+    scanned: usize,
+    cursor: OffsetDateTime,
+) {
+    if page_number < MAX_PAGES_PER_SWEEP {
+        return;
+    }
+    warn!(
+        tenant_id = %tenant.get(),
+        pages = MAX_PAGES_PER_SWEEP,
+        scanned,
+        %cursor,
+        "the sweep spent its page budget before catching up; the mark advances as far as this \
+         pass got and the next tick resumes from there",
+    );
 }
 
 /// The reconcile sweep.
@@ -444,7 +663,14 @@ where
             tenant_id = %tenant.get(),
             scanned = outcome.scanned,
             backfilled = outcome.backfilled,
+            // Beside `backfilled` rather than instead of it, and that pairing
+            // is the point: `backfilled=116 result_rows_written=0` is a
+            // treadmill and reads as one, where `backfilled=116` alone read as
+            // health for three days. See `ReconcileOutcome::backfilled`.
+            result_rows_written = outcome.result_rows_written,
             stopped_at_gap = outcome.stopped_at_gap,
+            caught_up = outcome.caught_up,
+            watermark_at = ?outcome.watermark_at,
             // `Debug`, not `Display`: the field is an `Option` and a `None`
             // rendered as an empty string is indistinguishable from a missing
             // field in a structured sink.
@@ -510,15 +736,44 @@ where
     /// qa-runs that can fail or lag — the same reason [`Self::reconcile_once`]
     /// does.
     ///
-    /// # The window is one page, and a truncated one is logged rather than
-    /// # silently halved
+    /// # The window is walked in pages, under a budget the answer names
     ///
-    /// `page_size` bounds the listing, as it does for the sweep — an operator
-    /// typing a year-wide window must not be able to ask this gear to
-    /// materialise every run in it. When the listing comes back full, the window
-    /// may hold more, and the answer is to narrow it and repeat; that is a WARN
-    /// rather than an error because the runs that *were* replayed were replayed
-    /// correctly.
+    /// **Until 2026-09-21 this read one page and stopped**, with a `WARN` and a
+    /// `scanned` an operator had to compare against a `page_size` the response
+    /// does not carry. It was the last page boundary in this module that was a
+    /// wall rather than a step, and it was the same shape as the outage in two
+    /// separate ways:
+    ///
+    /// * A window holding more than `page_size` runs replayed its oldest page
+    ///   and reported plain success. The remedy the log line named — narrow the
+    ///   window and repeat — worked, as long as an operator read the log.
+    /// * A window whose first `page_size` runs shared **one** `finished_at`
+    ///   could not be replayed at all, by any narrowing. Narrowing to that
+    ///   single instant returns the same `page_size` runs, so the runs behind
+    ///   them were unreachable through this endpoint — and a tie group that wide
+    ///   is what the 2026-09-18 burst was made of.
+    ///
+    /// It now walks [`FinishedRunCursor`], the same `(finished_at, id)` keyset the sweep
+    /// walks, so a tie group is a step rather than a wall and `page_size` is
+    /// what it says it is: the size of a page, not the size of the job.
+    ///
+    /// **The cap stays, and it is a budget rather than a bound on the window.**
+    /// [`MAX_PAGES_PER_REBUILD`] pages, after which the pass stops and reports
+    /// [`ReconcileOutcome::resume_from`] — the `from` of the request that
+    /// continues it. An unbounded walk was the rejected alternative: this is a
+    /// synchronous request, an operator can type a year-wide window, and a walk
+    /// that outlives the gateway's timeout returns *nothing at all*, which is
+    /// the silent partial in its worst form. What makes a cap acceptable here
+    /// and not before is that exceeding it is now in the answer rather than in
+    /// a log line: `caught_up` is `false` and `resume_from` says where to pick
+    /// up, both on the wire as `complete` and `resume_from`.
+    ///
+    /// The one shape a resume still cannot step over is a single instant
+    /// holding more than `MAX_PAGES_PER_REBUILD * page_size` runs — 2,000 at
+    /// the defaults, against the 54 the outage burst's widest tie group held —
+    /// because `resume_from` carries the instant and not the whole key. That
+    /// would report the same `resume_from` twice in a row, which is visible;
+    /// the wall it replaces was not.
     ///
     /// # Errors
     ///
@@ -578,8 +833,7 @@ where
         // `refuse_scope_beyond_tenant`.
         refuse_scope_beyond_tenant(&scope, resources::TEST_RESULT_NAME)?;
 
-        let window = self.window(ctx, tenant, from, to).await?;
-        let outcome = self.replay(tenant, &scope, window).await;
+        let outcome = self.replay_window(ctx, tenant, &scope, from, to).await?;
 
         info!(
             tenant_id = %tenant.get(),
@@ -587,100 +841,232 @@ where
             %to,
             scanned = outcome.scanned,
             replayed = outcome.backfilled,
+            result_rows_written = outcome.result_rows_written,
+            complete = outcome.caught_up,
+            resume_from = ?outcome.resume_from,
             stopped_at_gap = outcome.stopped_at_gap,
             stopped_at_run = ?outcome.stopped_at_run,
             "operator rebuild finished",
         );
 
-        // `watermark_advanced_to` is `None`, and it is meaningful: this pass did
-        // not move the mark, by construction.
+        // `watermark_at` is `None`, and that is meaningful: this pass neither
+        // read nor wrote the mark, by construction.
         Ok(outcome)
     }
 
-    /// The runs a rebuild will replay: one page from qa-runs, cut to `[from, to)`.
+    /// Walk `[from, to)` page by page, replaying every run in it.
     ///
     /// Split out of [`Self::rebuild`] for the same reason [`Self::sweep`] is
     /// split out of [`Self::reconcile_once`] — so the shape of the operation is
     /// the body of the function rather than something to reconstruct from it.
-    async fn window(
+    /// The two walks are deliberately close to each other and deliberately not
+    /// one function: this one has no watermark to read or advance, no diff
+    /// against what is already projected, and an upper bound the sweep has no
+    /// counterpart for. What they *do* share — the cursor, the page budget, the
+    /// per-run projection, the stop-at-the-first-failure rule — is shared code.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::Internal`] when qa-runs cannot be listed, on any page.
+    /// A listing that fails on page three discards the report of pages one and
+    /// two rather than answering a partial success, exactly as [`Self::sweep`]
+    /// does: re-running the same window is idempotent and total, so the operator
+    /// loses nothing but a number.
+    async fn replay_window(
         &self,
         ctx: &SecurityContext,
         tenant: TenantBound,
+        scope: &AccessScope,
         from: OffsetDateTime,
         to: OffsetDateTime,
-    ) -> Result<Vec<Run>, DomainError> {
-        // The caller's own context, not a system actor: see decision 4 in this
-        // module's header.
-        let page = self
-            .runs
-            .list_runs_finished_since(ctx, from, self.page_size)
-            .await?;
+    ) -> Result<ReconcileOutcome, DomainError> {
+        let mut cursor = FinishedRunCursor::starting_at(from);
+        let mut outcome = ReconcileOutcome::default();
 
-        // Measured on the *unfiltered* page: it is the listing that was capped,
-        // and the filter below can leave a truncated page looking short.
-        if page.len() >= self.page_size as usize {
-            warn!(
-                tenant_id = %tenant.get(),
-                %from,
-                %to,
-                page_size = self.page_size,
-                "the rebuild window filled a whole page; runs past the page boundary were not \
-                 replayed. Narrow the window and repeat.",
-            );
+        for _ in 1..=MAX_PAGES_PER_REBUILD {
+            // The caller's own context, not a system actor: see decision 4 in
+            // this module's header.
+            let page = self
+                .runs
+                .list_runs_finished_since(ctx, cursor, self.page_size)
+                .await?;
+
+            // Measured on the page *as listed*: it is the listing that was
+            // capped, and the upper-bound cut below can leave a full page
+            // looking short.
+            let saturated = page.len() >= self.page_size as usize;
+            // The listing is oldest-first, so one run at or past the upper bound
+            // means the window holds nothing further whatever the cap says.
+            let crossed_upper_bound = page
+                .iter()
+                .any(|run| run.finished_at.is_some_and(|at| at >= to));
+
+            // The port guarantees the lower bound (`finished_at >= cursor`) and
+            // that a run with no finish instant is never returned. The upper
+            // bound is this walk's, and it is exclusive.
+            let window: Vec<Run> = page
+                .into_iter()
+                .filter(|run| run.finished_at.is_some_and(|at| at < to))
+                .collect();
+
+            let (page_outcome, consumed) = self.replay(tenant, scope, window).await;
+            outcome.add_counts(&page_outcome);
+
+            if page_outcome.stopped_at_gap {
+                outcome.stopped_at_gap = true;
+                outcome.stopped_at_run = page_outcome.stopped_at_run;
+                // The run before the failure, or the page's own start when the
+                // failure was the first run on it. Either way the continuation
+                // re-reaches the run that failed rather than stepping past it.
+                outcome.resume_from = Some(consumed.map_or(cursor.at(), FinishedRunCursor::at));
+                return Ok(outcome);
+            }
+
+            if crossed_upper_bound || !saturated {
+                outcome.caught_up = true;
+                return Ok(outcome);
+            }
+
+            let Some(next) = consumed else {
+                // A full page that yielded no cursor at all. Unreachable with a
+                // sane `reconcile_page_size` — a saturated page that did not
+                // cross the upper bound is non-empty and every run on it carries
+                // an instant — but a configured `0` makes every page "saturated"
+                // and empty, and a walk that answered that with another
+                // identical listing would be the spin this whole change is
+                // about.
+                outcome.resume_from = Some(cursor.at());
+                return Ok(outcome);
+            };
+            cursor = next;
         }
 
-        // The port guarantees the lower bound (`finished_at >= from`) and that a
-        // run with no finish instant is never returned. The upper bound is this
-        // function's, and it is exclusive.
-        Ok(page
-            .into_iter()
-            .filter(|run| run.finished_at.is_some_and(|at| at < to))
-            .collect())
+        // The budget is spent with the window not exhausted. `caught_up` stays
+        // `false` and the answer carries the resume point; see this type's
+        // `resume_from` for why that is a field and not a `WARN`.
+        outcome.resume_from = Some(cursor.at());
+        warn!(
+            tenant_id = %tenant.get(),
+            pages = MAX_PAGES_PER_REBUILD,
+            scanned = outcome.scanned,
+            resume_from = %cursor.at(),
+            "the rebuild spent its page budget before reaching the end of the window; the \
+             response carries the instant to resume from",
+        );
+        Ok(outcome)
     }
 
-    /// Re-project every run in `window`, stopping at the first that fails.
+    /// Re-project every run in `window`, stopping at the first that fails, and
+    /// report the last run it fully accounted for.
     ///
     /// No watermark and no diff, which is the whole difference from
     /// [`Self::consume_page`]: every run in the window is replayed, because the
     /// premise of a rebuild is that the existing projection is what is wrong.
+    ///
+    /// The returned [`FinishedRunCursor`] is where the walk resumes, and it is the last run
+    /// *consumed* rather than the last run listed — a page that stopped at a gap
+    /// must not hand the walk a cursor past it.
     async fn replay(
         &self,
         tenant: TenantBound,
         scope: &AccessScope,
         window: Vec<Run>,
-    ) -> ReconcileOutcome {
+    ) -> (ReconcileOutcome, Option<FinishedRunCursor>) {
         let mut outcome = ReconcileOutcome {
             scanned: window.len(),
             ..ReconcileOutcome::default()
         };
+        let mut consumed = None;
 
         for run in window {
-            if let Err(err) = self
+            match self
                 .reproject(SystemActorSite::OperatorRebuild, tenant, scope, run.id)
                 .await
             {
-                warn!(
-                    run_id = %run.id,
-                    tenant_id = %tenant.get(),
-                    error = %err,
-                    "rebuild failed on a run; stopping here rather than reporting a partial \
-                     success. Re-running the same window is idempotent.",
-                );
-                outcome.stopped_at_gap = true;
-                outcome.stopped_at_run = Some(run.id);
-                break;
+                Ok(rows) => {
+                    outcome.backfilled += 1;
+                    outcome.result_rows_written += rows;
+                }
+                Err(err) => {
+                    warn!(
+                        run_id = %run.id,
+                        tenant_id = %tenant.get(),
+                        error = %err,
+                        "rebuild failed on a run; stopping here rather than reporting a partial \
+                         success. Re-running the same window is idempotent.",
+                    );
+                    outcome.stopped_at_gap = true;
+                    outcome.stopped_at_run = Some(run.id);
+                    break;
+                }
             }
-            outcome.backfilled += 1;
+            // `map`/`or` rather than an `else` arm: the caller's filter already
+            // dropped every run without an instant, and a run that somehow has
+            // none simply does not move the cursor.
+            consumed = run
+                .finished_at
+                .map(|at| FinishedRunCursor::after(at, run.id))
+                .or(consumed);
         }
 
-        outcome
+        (outcome, consumed)
     }
 
     /// The sweep itself, with the summary log lifted out to its caller.
     ///
-    /// Split for no reason other than readability: every step below is one
-    /// line, so the shape of the algorithm is the body of the function rather
-    /// than something to be reconstructed from it.
+    /// # Why this pages, and what happened for three days when it did not
+    ///
+    /// Until 2026-09-21 this read **one** page per tick and advanced the mark
+    /// to the last run in it. That is correct only while the lookback window
+    /// holds fewer than `page_size` runs, and it wedges *permanently* the
+    /// moment it does not:
+    ///
+    /// * [`Self::floor`] starts the read at `mark - lookback`, deliberately
+    ///   **behind** the mark, so a run written after an earlier pass' cutoff is
+    ///   still picked up.
+    /// * The listing is capped at `page_size` and ordered oldest-first.
+    /// * So when `page_size` runs finished inside `[mark - lookback, mark]`,
+    ///   the page ends at or before the mark — and
+    ///   [`WatermarkRepository::advance`] is monotonic by construction, so the
+    ///   advance is a *successful no-op*.
+    /// * The next tick computes the same floor from the same mark, reads the
+    ///   same page, and makes the same no-op. Forever.
+    ///
+    /// Nothing about that is observable from the outside: no error, no
+    /// `stopped_at_gap`, and a healthy-looking `scanned`/`backfilled` on every
+    /// tick, while the projection stops dead at the instant it wedged. The mark
+    /// re-derives the same floor after a restart, so redeploying does not clear
+    /// it either.
+    ///
+    /// Observed on the dev stand: a 1700-run load test on 2026-09-18 put
+    /// exactly 200 runs — `page_size` — into the hour behind the mark, freezing
+    /// `last_reconciled_finished_at` at `2026-09-18T14:04:16.391692Z` for three
+    /// days and across five redeploys. The wedging window is *historical* data,
+    /// so it never drains and the sweep never recovers on its own.
+    ///
+    /// The fix is to keep reading: each page advances a cursor to its own
+    /// newest instant, the next page starts there, and the loop ends when a
+    /// page comes back short (caught up), a backfill fails (a gap — the mark
+    /// must not move past it), or [`MAX_PAGES_PER_SWEEP`] is spent. The mark
+    /// then lands on the newest run this pass fully accounted for, which is
+    /// ahead of where it started whenever any run is.
+    ///
+    /// # The cursor is a keyset one, and the residual window is closed
+    ///
+    /// The first version of this walk carried a bare instant and relied on the
+    /// port's inclusive `>=` bound, which left one window it still could not
+    /// walk: `page_size` runs sharing a single identical `finished_at`. The
+    /// page's newest instant is that instant, so the next page is the same
+    /// page — the walk stopped, the mark stopped with it, and the best that
+    /// shape could do was log an `ERROR` instead of spinning. The data stayed
+    /// stranded, and the burst that caused the 2026-09-18 outage contains
+    /// single instants shared by 54, 40, 31 and 29 runs.
+    ///
+    /// [`FinishedRunCursor`] is `(finished_at, id)` — the total order qa-runs already
+    /// sorts this listing by — so a resume is strictly after the last run
+    /// *consumed*, and a page always steps. Two consequences fall out: there is
+    /// no de-duplication left to do, because no run is listed twice in a walk,
+    /// and there is no un-pageable window left to report.
     async fn sweep(&self, tenant: TenantBound) -> Result<ReconcileOutcome, DomainError> {
         // `for_reconcile_sweep`, not `for_event_ingest`: the `site` on the audit
         // line is the whole reason `system_actor` has one factory per flow, and
@@ -689,43 +1075,129 @@ where
         let ctx = system_actor::for_reconcile_sweep(tenant);
         let scope = AccessScope::for_tenant(tenant.get());
 
-        let floor = self.floor(&scope).await?;
-        let page = self
-            .runs
-            .list_runs_finished_since(&ctx, floor, self.page_size)
-            .await?;
+        // Kept, not just turned into a floor: it is half of
+        // `ReconcileOutcome::watermark_at`, and the whole point of that field
+        // is that "where the mark stands" must be a value this pass observed
+        // rather than one inferred from the walk.
+        let mark_before = self.mark(&scope).await?;
+        let floor = mark_before.map_or(OffsetDateTime::UNIX_EPOCH, |mark| mark - self.lookback);
+        // The first page takes the inclusive instant bound: the mark names a
+        // run this gear has already consumed once, and re-reading it is how a
+        // run written after an earlier pass' cutoff is still picked up. Every
+        // page after it resumes strictly after the last run consumed.
+        let mut cursor = FinishedRunCursor::starting_at(floor);
+        let mut walk = Walk::default();
 
-        if page.is_empty() {
+        for page_number in 1..=MAX_PAGES_PER_SWEEP {
+            let Some(step) = self.sweep_page(&ctx, tenant, &scope, cursor).await? else {
+                // An empty listing carries the same fact a short page does:
+                // qa-runs has nothing past the cursor.
+                walk.outcome.caught_up = true;
+                break;
+            };
+            let Some(next) = walk.absorb(&step) else {
+                break;
+            };
+            cursor = next;
+            warn_if_budget_spent(tenant, page_number, walk.outcome.scanned, cursor.at());
+        }
+
+        let mut outcome = walk.outcome;
+        if outcome.scanned == 0 {
             debug!(tenant_id = %tenant.get(), %floor, "reconcile sweep found no runs in the window");
-            return Ok(ReconcileOutcome::default());
         }
 
-        let already = self.already_ingested(&scope, floor, &page).await?;
-        let (mut outcome, advance_to) = self.consume_page(tenant, &scope, page, &already).await;
-
-        if let Some(at) = advance_to {
+        if let Some(at) = walk.advance_to {
             self.advance_watermark(tenant, at).await?;
-            outcome.watermark_advanced_to = Some(at);
         }
+
+        // `max`, because `WatermarkRepository::advance` is monotonic: handing
+        // it an instant at or behind the stored mark succeeds and changes
+        // nothing. This is therefore the value the row holds now, which is the
+        // only thing a caller comparing consecutive passes can reason from.
+        // `None` orders below every `Some`, so an unset mark and a first
+        // advance both come out right.
+        outcome.watermark_at = walk.advance_to.max(mark_before);
 
         Ok(outcome)
     }
 
-    /// Where this sweep starts reading qa-runs from.
+    /// One page of [`Self::sweep`]'s walk: list, diff, consume, and say where
+    /// the walk goes next.
     ///
-    /// An unset mark means this gear has never swept, and the floor is the
-    /// beginning of time — `page_size` is what keeps that first pass finite.
-    /// Legacy reads every workflow on every cycle, so starting from the
+    /// `Ok(None)` is an empty listing — the walk is over and nothing was
+    /// consumed. Split out of `sweep` so that the loop reads as the walk and
+    /// this reads as the page; they were one function until clippy's
+    /// cognitive-complexity lint made the case that they are two things.
+    async fn sweep_page(
+        &self,
+        ctx: &SecurityContext,
+        tenant: TenantBound,
+        scope: &AccessScope,
+        cursor: FinishedRunCursor,
+    ) -> Result<Option<PageStep>, DomainError> {
+        let page = self
+            .runs
+            .list_runs_finished_since(ctx, cursor, self.page_size)
+            .await?;
+
+        if page.is_empty() {
+            // Caught up, and the caller records it: `sweep` treats `None` as
+            // "the walk is over with nothing further to read", which is exactly
+            // `caught_up`.
+            return Ok(None);
+        }
+
+        // Measured on the page as listed: it is the listing that was capped,
+        // and "is there more after this" is a question about the cap.
+        let saturated = page.len() >= self.page_size as usize;
+
+        let already = self.already_ingested(scope, cursor.at(), &page).await?;
+
+        // No `seen` set and no de-duplication. Under an instant-only cursor
+        // every page re-listed its predecessor's boundary ties and those had to
+        // be filtered out here; under the keyset cursor the bound is strict on
+        // the whole key, so a run is listed once per walk by construction.
+        let (outcome, consumed) = self.consume_page(tenant, scope, page, &already).await;
+
+        // Resume after the last run this page *consumed*, never merely listed:
+        // a page that stopped at a gap must not hand the walk a cursor past it.
+        let next_cursor = (!outcome.stopped_at_gap && saturated)
+            .then_some(consumed)
+            .flatten();
+
+        let caught_up = !saturated && !outcome.stopped_at_gap;
+
+        Ok(Some(PageStep {
+            outcome,
+            advance_to: consumed.map(FinishedRunCursor::at),
+            next_cursor,
+            caught_up,
+        }))
+    }
+
+    /// This tenant's reconcile mark as it stands before the sweep runs.
+    ///
+    /// `None` means this gear has never swept this tenant, and
+    /// [`Self::sweep`] turns that into a floor at the beginning of time —
+    /// `page_size` and [`MAX_PAGES_PER_SWEEP`] are what keep that first pass
+    /// finite. Legacy reads every workflow on every cycle, so starting from the
     /// beginning *once* is not the aggressive choice; it is the one that makes
     /// the projection complete.
-    async fn floor(&self, scope: &AccessScope) -> Result<OffsetDateTime, DomainError> {
-        let marks = {
-            let conn = self.db.conn()?;
-            self.watermarks.get(&conn, scope).await?
-        };
-        Ok(marks
-            .last_reconciled_finished_at
-            .map_or(OffsetDateTime::UNIX_EPOCH, |mark| mark - self.lookback))
+    ///
+    /// **This used to be `floor()` and return the subtracted instant.** The
+    /// mark itself is now the return value because the sweep needs it twice —
+    /// once to derive the floor and once as the "before" half of
+    /// [`ReconcileOutcome::watermark_at`] — and re-deriving a mark from a floor
+    /// by adding the lookback back on would be a second, silently divergent
+    /// spelling of the same value.
+    async fn mark(&self, scope: &AccessScope) -> Result<Option<OffsetDateTime>, DomainError> {
+        let conn = self.db.conn()?;
+        Ok(self
+            .watermarks
+            .get(&conn, scope)
+            .await?
+            .last_reconciled_finished_at)
     }
 
     /// The run ids in this window that already have a projection.
@@ -754,25 +1226,27 @@ where
             .await
     }
 
-    /// Walk the page in order, backfilling what is missing, and report how far
-    /// the watermark may move.
+    /// Walk the page in order, backfilling what is missing, and report the last
+    /// run it fully accounted for.
     ///
-    /// Returns the outcome and the newest instant that was fully accounted for.
-    /// **It stops at the first failure**, because the page is oldest-first and
-    /// everything after a gap is newer: advancing past one would put the next
-    /// sweep's floor beyond a run that was never ingested.
+    /// That run is two things at once and both are load-bearing: its instant is
+    /// how far the watermark may move, and its whole `(finished_at, id)` key is
+    /// where the next page resumes. **It stops at the first failure**, because
+    /// the page is oldest-first and everything after a gap is newer: advancing
+    /// past one would put the next sweep's floor beyond a run that was never
+    /// ingested, and resuming past one would do the same to the walk.
     async fn consume_page(
         &self,
         tenant: TenantBound,
         scope: &AccessScope,
         page: Vec<Run>,
         already: &[Uuid],
-    ) -> (ReconcileOutcome, Option<OffsetDateTime>) {
+    ) -> (ReconcileOutcome, Option<FinishedRunCursor>) {
         let mut outcome = ReconcileOutcome {
             scanned: page.len(),
             ..ReconcileOutcome::default()
         };
-        let mut advance_to = None;
+        let mut consumed = None;
 
         for run in page {
             let Some(finished_at) = run.finished_at else {
@@ -791,27 +1265,32 @@ where
             };
 
             if !already.contains(&run.id) {
-                if let Err(err) = self
+                match self
                     .reproject(SystemActorSite::ReconcileSweep, tenant, scope, run.id)
                     .await
                 {
-                    warn!(
-                        run_id = %run.id,
-                        tenant_id = %tenant.get(),
-                        error = %err,
-                        "reconcile backfill failed; stopping the sweep short of the gap",
-                    );
-                    outcome.stopped_at_gap = true;
-                    outcome.stopped_at_run = Some(run.id);
-                    break;
+                    Ok(rows) => {
+                        outcome.backfilled += 1;
+                        outcome.result_rows_written += rows;
+                    }
+                    Err(err) => {
+                        warn!(
+                            run_id = %run.id,
+                            tenant_id = %tenant.get(),
+                            error = %err,
+                            "reconcile backfill failed; stopping the sweep short of the gap",
+                        );
+                        outcome.stopped_at_gap = true;
+                        outcome.stopped_at_run = Some(run.id);
+                        break;
+                    }
                 }
-                outcome.backfilled += 1;
             }
 
-            advance_to = Some(finished_at);
+            consumed = Some(FinishedRunCursor::after(finished_at, run.id));
         }
 
-        (outcome, advance_to)
+        (outcome, consumed)
     }
 
     /// Move the reconcile mark, in its own transaction.
@@ -930,7 +1409,7 @@ where
         tenant: TenantBound,
         scope: &AccessScope,
         run_id: Uuid,
-    ) -> Result<(), DomainError> {
+    ) -> Result<usize, DomainError> {
         // Before any transaction opens: see this function's own doc for why
         // a cross-gear read nested inside one trips `toolkit_db`'s
         // transaction-bypass guard in a single-binary deployment.
@@ -939,7 +1418,11 @@ where
             .read_run_projection(site, tenant, run_id)
             .await?
         else {
-            return Ok(());
+            // A run qa-runs no longer has. `Ok`, because there is nothing to
+            // project and nothing is wrong — and **zero**, because nothing was
+            // written. `ReconcileOutcome::backfilled` counts this pass all the
+            // same; `result_rows_written` is what does not.
+            return Ok(0);
         };
 
         let ingest = Arc::clone(&self.ingest);

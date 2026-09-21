@@ -416,6 +416,22 @@ impl<R: ResultsRepository> IngestService<R> {
     /// it by construction, and putting it here would run a PDP-shaped check on
     /// every event of a 500-test run to no effect.
     ///
+    /// # It answers with the number of `qa_test_results` rows it wrote
+    ///
+    /// Zero is a legitimate answer and a meaningful one: a run whose per-test
+    /// listing came back empty projects to no rows, the delete-then-insert
+    /// inserts nothing, and
+    /// [`ResultsRepository::ingested_run_ids_between`](crate::domain::repos::ResultsRepository::ingested_run_ids_between)
+    /// — which reads *that table* — will not report the run as ingested on any
+    /// later pass either. So such a run is re-projected forever at no cost and
+    /// to no effect, and this count is the only thing that distinguishes it
+    /// from one that landed. See
+    /// [`ReconcileOutcome::result_rows_written`](crate::domain::service::reconcile::ReconcileOutcome::result_rows_written).
+    ///
+    /// Case rows are deliberately not included: `qa_test_results` is the table
+    /// the projection's completeness is measured against, and one number that
+    /// answers one question beats a sum of two that answers neither.
+    ///
     /// # Errors
     ///
     /// [`DomainError::Database`] from the repository write. The caller's own
@@ -428,7 +444,14 @@ impl<R: ResultsRepository> IngestService<R> {
         tenant: TenantBound,
         run_id: Uuid,
         projection: RunProjection,
-    ) -> Result<(), DomainError> {
+    ) -> Result<usize, DomainError> {
+        // Read before the move, and returned so the caller can tell a
+        // projection that carried content from one that carried none. The two
+        // are indistinguishable from the `Ok(())` this used to answer, and
+        // `ReconcileOutcome::backfilled` counts both — which is how 116 runs
+        // "backfilled" on every pass for three days while `qa_test_results`
+        // did not grow. See `ReconcileOutcome::result_rows_written`.
+        let rows = projection.files.len();
         self.results
             .upsert_run_results(
                 runner,
@@ -438,7 +461,8 @@ impl<R: ResultsRepository> IngestService<R> {
                 projection.files,
                 projection.cases,
             )
-            .await
+            .await?;
+        Ok(rows)
     }
 
     // `reproject_run` — `read_run_projection` followed by `write_run_projection`

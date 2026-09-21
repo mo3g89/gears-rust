@@ -216,7 +216,7 @@ fn register_overview(router: Router, openapi: &dyn OpenApiRegistry) -> Router {
              environment_id and an environment name resolved from qa-environments; the name is \
              null for an environment the caller cannot see, and those bars sort last. Run identities \
              are ids rather than names - there is no bulk run-name lookup to make one \
-             without a request per row. Requires the qa.test_result/list grant, the same one \
+             without a request per row. Requires the gts.cf.qa.insights.test_result.v1~/list grant, the same one \
              the dashboard and the test-result collections need, plus whatever qa-catalog \
              requires to list a universe.",
         )
@@ -273,7 +273,7 @@ fn register_build_tests(router: Router, openapi: &dyn OpenApiRegistry) -> Router
              then everything else - and then by test name. The status here is the runner's \
              own, so a test the overview lists as not_run because it was skipped appears \
              with SKIPPED. Takes seven of the overview's nine parameters and neither day \
-             count, because it draws no chart. Requires the qa.test_result/list grant.",
+             count, because it draws no chart. Requires the gts.cf.qa.insights.test_result.v1~/list grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -392,7 +392,7 @@ fn register_export(router: Router, openapi: &dyn OpenApiRegistry) -> Router {
              quoting trigger and a value starting with =, +, - or @ is not escaped - this is \
              not a CSV-injection guard. The response carries a content-disposition header \
              naming analytics-export.csv or analytics-export.json. Requires the \
-             qa.test_result/list grant, the same one the overview requires.",
+             gts.cf.qa.insights.test_result.v1~/list grant, the same one the overview requires.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -465,7 +465,7 @@ fn register_plan_tests(router: Router, openapi: &dyn OpenApiRegistry) -> Router 
              GET /qa/v1/analytics/build-tests uses, because the system being replaced reads \
              this table with no window at all and this one is sized in the millions of rows. \
              Ordered by test name. A plan_id naming nothing is an empty array rather than a \
-             404. Requires the qa.test_result/list grant.",
+             404. Requires the gts.cf.qa.insights.test_result.v1~/list grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -503,7 +503,7 @@ fn register_plan_builds(router: Router, openapi: &dyn OpenApiRegistry) -> Router
              execution of the group; passed, failed and skipped match the runner's literal \
              PASSED/FAILED/SKIPPED status and nothing else, so total can exceed their sum. A \
              version no execution named renders as the build unknown, sorted after every named \
-             version. Requires the qa.test_result/list grant.",
+             version. Requires the gts.cf.qa.insights.test_result.v1~/list grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -543,7 +543,7 @@ fn register_plan_test_history(router: Router, openapi: &dyn OpenApiRegistry) -> 
              GET /qa/v1/analytics/plan/builds, nothing here substitutes a label for a missing \
              version. The array itself is ordered by test name, which is this gear's own \
              choice: the system being replaced folds its rows into a hash map first and its \
-             own array order is consequently unspecified. Requires the qa.test_result/list \
+             own array order is consequently unspecified. Requires the gts.cf.qa.insights.test_result.v1~/list \
              grant.",
         )
         .tag(API_TAG)

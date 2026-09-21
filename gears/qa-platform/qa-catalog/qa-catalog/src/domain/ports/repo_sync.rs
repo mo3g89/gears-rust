@@ -10,19 +10,18 @@ pub struct SyncResult {
     pub branches: Vec<String>,
     /// Commit id of the checked-out branch head.
     ///
-    /// No *service* reads it yet (qa-runs will, for bundle provenance: which
-    /// commit a run's content came from), but it is not speculative — it is
-    /// the only observable that distinguishes "checked out the branch we asked
-    /// for, at its current tip" from "checked out something else", and the gix
-    /// integration test asserts exactly that on both the clone and fetch
-    /// paths. Dropping it would silently weaken those assertions to "some
-    /// worktree appeared", so it stays.
-    #[allow(
-        dead_code,
-        reason = "read by tests/gix_sync_integration.rs (a separate crate, so the lib \
-                  build still sees it as unread); the checkout-correctness assertion \
-                  in that suite is what this field is for"
-    )]
+    /// **Persisted since `m20260921_000003_repo_head_commit`.**
+    /// `ReposService::record_sync_success` writes it onto
+    /// `qa_test_repositories.head_commit`, where it becomes the repository's
+    /// content revision: the discovery cache keys on it, and the REST surface
+    /// publishes it. The `dead_code` allowance this field used to carry is
+    /// gone with the reason for it — it now has a production reader, not only
+    /// the gix integration test.
+    ///
+    /// It remains the only observable that distinguishes "checked out the
+    /// branch we asked for, at its current tip" from "checked out something
+    /// else", which is what that integration test asserts on both the clone
+    /// and the fetch path.
     pub head_commit: String,
 }
 

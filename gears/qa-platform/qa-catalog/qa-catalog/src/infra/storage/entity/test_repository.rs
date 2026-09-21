@@ -23,6 +23,11 @@ pub struct Model {
     /// credstore reference for the access credential (SSH key or token). `None` = public repo.
     pub credential_ref: Option<String>,
     pub last_synced_at: Option<OffsetDateTime>,
+    /// Commit id the last successful sync materialized, or `None` when the
+    /// repository has never synced (or last synced before
+    /// `m20260921_000003_repo_head_commit` existed). This is the content
+    /// revision — `last_synced_at` is only when the attempt happened.
+    pub head_commit: Option<String>,
     pub sync_error: Option<String>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,

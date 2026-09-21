@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use aws_lc_rs::digest::{SHA256, digest};
 use uuid::Uuid;
 
 /// Directory holding the repository's single clone (objects + refs).
@@ -51,8 +51,11 @@ pub fn branch_dir_name(branch: &str) -> String {
         .collect::<String>();
     let base = normalized.trim_matches('-').to_owned();
 
-    let digest = format!("{:x}", Sha256::digest(trimmed.as_bytes()));
-    let suffix = &digest[..8];
+    // `aws-lc-rs`, the FIPS-validated provider, and not `sha2`, which Dylint's
+    // `DE0708` bans. Same algorithm and the same bytes, so a branch directory
+    // created before this swap keeps its name and is still found.
+    let digest_hex = hex::encode(digest(&SHA256, trimmed.as_bytes()));
+    let suffix = &digest_hex[..8];
 
     if base.is_empty() {
         suffix.to_owned()

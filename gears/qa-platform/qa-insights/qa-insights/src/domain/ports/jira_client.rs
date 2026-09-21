@@ -99,7 +99,16 @@ pub const MAX_CREDSTORE_REF_LEN: usize = 255;
 pub fn validate_credstore_ref(field: &str, reference: &str) -> Result<(), DomainError> {
     let invalid = |why: &str| DomainError::Validation {
         field: field.to_owned(),
-        message: format!("the credential-store reference is not one oagw can resolve: {why}"),
+        // "the credential store" rather than "oagw": this function had one
+        // caller when it was written (the JIRA token, which oagw resolves and
+        // injects) and now has three, one of which is
+        // `email_smtp_credstore_ref` -- resolved by qa-insights itself against
+        // `credstore_sdk`, because SMTP cannot traverse an HTTP proxy
+        // (ADR-0011). The *rule* was always `SecretRef`'s own syntax and never
+        // anything of oagw's, so only the wording was ever wrong.
+        message: format!(
+            "the credential-store reference is not one the credential store can resolve: {why}"
+        ),
     };
 
     let name = reference

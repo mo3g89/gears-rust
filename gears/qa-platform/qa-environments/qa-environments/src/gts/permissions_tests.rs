@@ -14,7 +14,7 @@
 //! authorizes nothing, which is worse than absent, because it reads as
 //! coverage. Review finding #1.
 
-use toolkit_gts::{InventoryInstance, gts_id};
+use toolkit_gts::{GTS_ID_PREFIX, InventoryInstance, gts_id};
 
 const PERMISSION_TYPE_ID: &str = gts_id!("cf.toolkit.authz.permission.v1~");
 const INSTANCE_SUFFIX_PREFIX: &str = "cf.qa.environments.";
@@ -69,11 +69,26 @@ fn payload_pair(entry: &InventoryInstance) -> (String, String) {
 }
 
 /// The id the naming rule in `permissions.rs`'s header derives from a
-/// `(resource_type, action)` pair: `pep_entity` is `resource_type` with its
-/// `qa.` prefix stripped, joined to `action` with `_`.
+/// `(resource_type, action)` pair: `pep_entity` is the entity token of the
+/// resource type's GTS id — `cf.qa.environments.lease.v1~` → `lease`.
+///
+/// Two strips, not one: `gts_id!` prepends `GTS_ID_PREFIX` (`"gts."`) at
+/// compile time, so the constant holds `gts.cf.qa.environments.<entity>.v1~`. It is
+/// stripped first and **not** re-added in the `format!`, because
+/// `PERMISSION_TYPE_ID` already carries its own single copy of it.
+///
+/// Was a bare `qa.` prefix strip until the labels became GTS type ids (WS0). The
+/// rule's **output is unchanged** — `cf.qa.environments.platform_create.v1`
+/// and its siblings are the ids this still derives.
 fn derive_instance_id(resource_type: &str, action: &str) -> String {
-    let pep_entity = resource_type.strip_prefix("qa.").unwrap_or(resource_type);
-    format!("{PERMISSION_TYPE_ID}cf.qa.environments.{pep_entity}_{action}.v1")
+    let pep_entity = resource_type
+        .strip_prefix(GTS_ID_PREFIX)
+        .and_then(|rest| rest.strip_prefix(INSTANCE_SUFFIX_PREFIX))
+        .and_then(|rest| rest.strip_suffix(".v1~"))
+        .unwrap_or_else(|| {
+            panic!("resource type {resource_type} is not a cf.qa.environments.<entity>.v1~ id")
+        });
+    format!("{PERMISSION_TYPE_ID}{INSTANCE_SUFFIX_PREFIX}{pep_entity}_{action}.v1")
 }
 
 #[test]
@@ -191,13 +206,49 @@ fn the_catalog_names_qa_platform_not_qa_environment() {
         .iter()
         .map(|e| payload_pair(e).0)
         .collect();
+    let expected = format!("{GTS_ID_PREFIX}cf.qa.environments.platform.v1~");
     assert!(
-        types.contains("qa.platform"),
-        "the environments resource type on the wire to the PDP is qa.platform; \
-         found {types:?}"
+        types.contains(&expected),
+        "the environments resource type on the wire to the PDP is {expected}; found {types:?}"
     );
+    let forbidden = format!("{GTS_ID_PREFIX}cf.qa.environments.environment.v1~");
     assert!(
-        !types.contains("qa.environment"),
-        "qa.environment matches no policy in any deployment; found {types:?}"
+        !types.contains(&forbidden),
+        "{forbidden} matches no policy in any deployment; found {types:?}"
     );
+}
+
+/// Every authz label must be a structurally valid, concrete GTS **type** id
+/// (type ids end `~`) and must have a stub type-schema in the inventory
+/// `types-registry::init()` registers at boot. A label that is neither is a
+/// permission no role definition can name (review finding 1).
+#[test]
+fn every_authz_label_is_a_registrable_gts_type() {
+    use crate::domain::service::resources;
+
+    let registered: Vec<String> = toolkit_gts::all_inventory_type_schemas()
+        .expect("inventory type schemas are well-formed JSON")
+        .iter()
+        .filter_map(|schema| schema["$id"].as_str().map(str::to_owned))
+        .collect();
+
+    for label in [
+        resources::PLATFORM_NAME,
+        resources::VARIABLE_NAME,
+        resources::LEASE_NAME,
+    ] {
+        assert!(
+            ::gts::GtsId::try_new(label).is_ok(),
+            "label {label} is not a structurally valid GTS id"
+        );
+        assert!(
+            label.ends_with('~'),
+            "label {label} must be a concrete type id, not a bare string"
+        );
+        let wanted = format!("gts://{label}");
+        assert!(
+            registered.iter().any(|id| id == &wanted),
+            "label {label} has no registered type schema; registered: {registered:?}"
+        );
+    }
 }

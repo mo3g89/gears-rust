@@ -80,16 +80,23 @@ pub trait TestReposRepository: Send + Sync {
         id: Uuid,
     ) -> Result<bool, DomainError>;
 
-    /// Record the outcome of a sync attempt: both `last_synced_at` and
-    /// `sync_error` are written exactly as passed (so a successful sync clears
-    /// the error by passing `None`), and `updated_at` is refreshed. Returns
-    /// `Ok(None)` when no row with `id` is visible in `scope`.
+    /// Record the outcome of a sync attempt: `last_synced_at`, `head_commit`
+    /// and `sync_error` are each written exactly as passed (so a successful
+    /// sync clears the error by passing `None`), and `updated_at` is
+    /// refreshed. Returns `Ok(None)` when no row with `id` is visible in
+    /// `scope`.
+    ///
+    /// **All three are written, never merged**, which is what makes a failure
+    /// path's obligation explicit: `record_sync_failure` must pass the
+    /// repository's *existing* `last_synced_at` and `head_commit` back, or a
+    /// failed attempt would erase the record of the last good one.
     async fn update_sync_state<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
         id: Uuid,
         last_synced_at: Option<OffsetDateTime>,
+        head_commit: Option<String>,
         sync_error: Option<String>,
     ) -> Result<Option<TestRepository>, DomainError>;
 

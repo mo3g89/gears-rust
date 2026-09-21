@@ -1,7 +1,7 @@
 //! Composition root: `#[toolkit::gear]` bootstrap, `Gear::init`, the
 //! `DatabaseCapability`/`RestApiCapability` implementations, and the stateful
-//! lifecycle entry (`serve`) hosting the two tickers — the dispatcher and the
-//! schedule firing pass.
+//! lifecycle entry (`serve`) hosting the three tickers — the dispatcher, the
+//! schedule firing pass and the schedule referential-check.
 
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
@@ -82,6 +82,14 @@ const DISPATCHER_ROLE: &str = "qa-runs-dispatcher";
 /// make "run the scheduler here but not the dispatcher" unexpressible to any
 /// real elector, and a leadership term for one would silently gate the other.
 const SCHEDULER_ROLE: &str = "qa-runs-scheduler";
+
+/// The role name the schedule referential-check ticker holds.
+///
+/// A third, independent role, for the same reason [`SCHEDULER_ROLE`] is not
+/// shared with [`DISPATCHER_ROLE`]: this ticker is switched on and off by its
+/// own knob (`QaRunsConfig::schedule_target_check_interval_seconds`),
+/// unrelated to whether the firing tick itself is enabled.
+const SCHEDULE_TARGET_CHECK_ROLE: &str = "qa-runs-schedule-target-check";
 
 /// The one log broadcaster, in the two shapes its two consumers need.
 ///
@@ -202,6 +210,20 @@ impl Cadence {
             interval_seconds,
         }
     }
+
+    /// The same, for the referential-check ticker's one knob.
+    ///
+    /// Unlike [`Self::dispatcher`]/[`Self::scheduler`] there is no second,
+    /// `_enabled` flag to combine — see
+    /// `QaRunsConfig::schedule_target_check_interval_seconds`'s own doc for
+    /// why. `runs` is simply whether the clamped interval is non-zero.
+    fn schedule_target_check(cfg: &QaRunsConfig) -> Self {
+        let interval_seconds = cfg.effective_schedule_target_check_interval_seconds();
+        Self {
+            runs: interval_seconds != 0,
+            interval_seconds,
+        }
+    }
 }
 
 /// Everything `serve` needs beyond the gear struct: the wired services, the
@@ -232,6 +254,8 @@ struct QaRunsRuntime {
     /// Both already clamped and both folded, so `serve` asks the config nothing.
     dispatcher: Cadence,
     scheduler: Cadence,
+    /// The referential-check ticker's own cadence, clamped the same way.
+    schedule_target_check: Cadence,
     /// The gear's own shutdown signal, handed to `AppServices::new` (via
     /// `ServiceDeps::cancel`) so the production result watcher can be built
     /// with it — see `domain::service::watch::SpawningRunWatcher`'s header on
@@ -297,6 +321,7 @@ impl Gear for QaRuns {
             dispatcher_interval_seconds = cfg.dispatcher_interval_seconds,
             scheduler_enabled = cfg.scheduler_enabled,
             schedule_interval_seconds = cfg.schedule_interval_seconds,
+            schedule_target_check_interval_seconds = cfg.schedule_target_check_interval_seconds,
             orphan_timeout_seconds = cfg.orphan_timeout_seconds,
             queue_ttl_seconds = cfg.queue_ttl_seconds,
             queue_max_depth = cfg.queue_max_depth,
@@ -329,6 +354,7 @@ impl Gear for QaRuns {
         // the serve loop, where the clamp warning would repeat every tick.
         let dispatcher = Cadence::dispatcher(&cfg);
         let scheduler = Cadence::scheduler(&cfg);
+        let schedule_target_check = Cadence::schedule_target_check(&cfg);
 
         // Minted here rather than borrowed from `serve`'s own token, because
         // `serve` (and the framework-supplied `CancellationToken` it receives)
@@ -435,6 +461,7 @@ impl Gear for QaRuns {
                 elector: elector(),
                 dispatcher,
                 scheduler,
+                schedule_target_check,
                 shutdown,
             }))
             .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
@@ -459,9 +486,10 @@ impl QaRuns {
     /// # Errors
     /// When the API server cannot be reached, the `argoproj.io` CRDs are absent,
     /// this process' credentials do not allow listing `Workflow`, or
-    /// `qa-runs.argo.runner_image` is unset. All four are boot failures on
-    /// purpose: an executor that constructs happily and fails on first dispatch
-    /// turns a misconfiguration into a failed run hours later.
+    /// `qa-runs.argo.runner_image` or `qa-runs.argo.workflow_service_account`
+    /// is unset. All are boot failures on purpose: an executor that constructs
+    /// happily and fails on first dispatch turns a misconfiguration into a
+    /// failed run hours later.
     #[cfg(feature = "argo")]
     async fn argo_executor(
         cfg: &ArgoExecutorConfig,
@@ -472,8 +500,8 @@ impl QaRuns {
             namespace = %cfg.namespace,
             runner_image = %cfg.runner_image,
             "wiring the Argo Workflows executor: this deployment has a Kubernetes \
-             dependency, which ADR-0001 removes from the product and its \
-             2026-08-27 waiver permits only behind this non-default feature"
+             dependency, which ADR-0001 removes from the product by default and \
+             permits only behind this non-default feature"
         );
         Ok(Arc::new(
             crate::infra::executor::argo::ArgoRunExecutor::connect(cfg.clone(), cancel).await?,
@@ -541,7 +569,8 @@ impl RestApiCapability for QaRuns {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle (stateful capability): the dispatcher and scheduler tickers
+// Lifecycle (stateful capability): the dispatcher, scheduler and schedule
+// referential-check tickers
 // ---------------------------------------------------------------------------
 
 impl QaRuns {
@@ -630,6 +659,21 @@ impl QaRuns {
                 "qa-runs: scheduler disabled; no schedule fires on this replica. Stored \
                  schedules are untouched and their fired-through cursors do not advance, so \
                  the occurrences missed while it is off are skipped rather than caught up"
+            );
+        }
+
+        if rt.schedule_target_check.runs {
+            let role = tickers.spawn(Self::schedule_target_check_ticker(&rt, &tasks));
+            info!(
+                interval_seconds = rt.schedule_target_check.interval_seconds,
+                role, "qa-runs schedule referential-check ticker started"
+            );
+        } else {
+            info!(
+                schedule_target_check_interval_seconds = rt.schedule_target_check.interval_seconds,
+                "qa-runs: referential check disabled; a schedule's plan, repository or \
+                 environment going dangling after it is written will not be detected until \
+                 the schedule actually fires"
             );
         }
 
@@ -780,11 +824,14 @@ impl QaRuns {
     /// `idx_qa_schedule_ticks_claim`, not by this gate:
     /// `SchedulesRepository::claim_tick` is an `INSERT` against a unique index,
     /// so **the guarantee holds with every replica evaluating every schedule**.
-    /// That ordering is not a footnote — it is what makes the NFR's stated
-    /// verification method ("integration tests with multiple concurrent
-    /// scheduler instances", PRD §5.2) something a test can actually do:
+    /// That ordering is what makes the guarantee testable without an elector:
     /// `domain::service::schedules_tests` drives two services against one store
-    /// with no elector in sight, and exactly one run comes out.
+    /// with no elector in sight, and exactly one run comes out. PRD §6's
+    /// `cpt-cf-qa-nfr-scheduler-exactly-once` states the requirement and its
+    /// five documented skip vectors; it names no verification method of its
+    /// own — the phrase this comment used to attribute to "PRD §5.2" (which is
+    /// the test catalog, not schedules) was this crate's own paraphrase, not a
+    /// quotation, and is stated as such now.
     ///
     /// What the gate buys is the same thing it buys the dispatcher — one replica
     /// doing the work instead of N, so the fleet-wide enumeration
@@ -844,6 +891,66 @@ impl QaRuns {
 
             if let Err(error) = elector.run_role(role, cancel, work).await {
                 error!(%error, "qa-runs scheduler exited with an error");
+            }
+        };
+        Ticker { role, run }
+    }
+
+    /// Spawn the leader-gated schedule referential-check ticker.
+    ///
+    /// Follows [`Self::scheduler_ticker`]'s shape exactly: enumerate under
+    /// the system actor, per-schedule scoped resolve, no admission — the
+    /// leader gate here is the same defence-in-depth it is there, not a
+    /// correctness requirement, since a referential check has no exactly-once
+    /// property to protect. Under
+    /// [`crate::infra::leader::NoopLeaderElector`] every replica runs this
+    /// too, and the worst that buys a fleet is the same finding recorded more
+    /// than once, at different timestamps — not a double fire.
+    fn schedule_target_check_ticker(
+        rt: &Arc<QaRunsRuntime>,
+        tasks: &CancellationToken,
+    ) -> Ticker<impl Future<Output = ()> + Send + 'static> {
+        let role = SCHEDULE_TARGET_CHECK_ROLE;
+        let elector = Arc::clone(&rt.elector);
+        let services = Arc::clone(&rt.services);
+        let period = Duration::from_secs(rt.schedule_target_check.interval_seconds);
+        let cancel = tasks.clone();
+
+        let run = async move {
+            let work = work_fn(move |cancel| {
+                let services = Arc::clone(&services);
+                async move {
+                    let mut ticker = tokio::time::interval(period);
+                    // `Delay`, matching the dispatcher and the scheduler: a
+                    // tick missed because the previous pass ran long must not
+                    // be made up in a burst that re-enumerates the fleet
+                    // several times over.
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        tokio::select! {
+                            () = cancel.cancelled() => {
+                                info!(
+                                    "qa-runs schedule referential check stopping (leadership \
+                                     lost or shutdown)"
+                                );
+                                return Ok(());
+                            }
+                            _ = ticker.tick() => {
+                                let report = services.schedules.check_schedule_targets().await;
+                                debug!(
+                                    evaluated = report.evaluated,
+                                    dangling = report.dangling,
+                                    failed = report.failed,
+                                    "qa-runs schedule referential-check tick"
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+
+            if let Err(error) = elector.run_role(role, cancel, work).await {
+                error!(%error, "qa-runs schedule referential check exited with an error");
             }
         };
         Ticker { role, run }

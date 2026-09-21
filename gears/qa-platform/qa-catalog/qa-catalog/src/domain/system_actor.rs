@@ -15,6 +15,16 @@
 //! to system?" stays grep-able and auditable. A new background flow must
 //! add a new factory here — a deliberate review-magnet.
 //!
+//! # One of these runs on a request, not on a ticker
+//!
+//! [`for_bundle_download`] is the exception to the sentence above: it backs
+//! `GET /qa/v1/test-bundles/{id}?sig=...`, which is registered
+//! `.anonymous().exposed()` because its caller is a workflow pod with no user
+//! to borrow a session from. It is tenant-bound to the tenant the descriptor
+//! row names — recovered from the row, never asserted by the caller — and it
+//! is only reached after the caller's HMAC tag has verified against that
+//! tenant's derived key. See its own doc.
+//!
 //! # The nil/tenant-bound split
 //!
 //! [`for_branch_refresh_enumeration`] and [`for_bundle_gc`] are nil-tenant:
@@ -153,6 +163,42 @@ pub fn for_bundle_delete(tenant_id: Uuid) -> SecurityContext {
     build_inner(Some(tenant_id))
 }
 
+/// The anonymous bundle-download route, after its signature verified:
+/// `GET /qa/v1/test-bundles/{id}?sig=...`. Tenant-bound to the tenant the
+/// **descriptor row** names, never to anything the caller asserted.
+///
+/// # The one inbound, request-driven factory in this module
+///
+/// Every other factory here backs a lifecycle ticker. This one runs on a
+/// request, from a caller with no session at all — a workflow pod fetching the
+/// test content it is about to execute. It is the structural twin of
+/// qa-insights' `system_actor::for_collect_report`, which exists for exactly
+/// the same reason on exactly the same kind of route.
+///
+/// **What makes that safe is the order of operations, not this function.**
+/// `BundlesService::get_bundle_content_signed` reads the descriptor's tenant
+/// first (elevated, cross-tenant, read-only — `crate::domain::elevated`),
+/// verifies the caller's tag against *that* tenant's derived key, and only
+/// then calls this. So the tenant on the returned context is the bundle's own,
+/// and a caller that could not produce the right tag never reaches this line.
+///
+/// **It does not bypass the PEP.** The read that follows
+/// (`BundlesService::get_bundle_content`) still asks the PDP for
+/// `qa.bundle`/`GET` under this tenant and still applies the `expires_at`
+/// check, which is what keeps a tag unable to reach past the one bundle it
+/// names even if the derivation were wrong. A deployment whose policy denies
+/// the `qa_catalog.system` subject that read fails the download closed.
+#[must_use]
+pub fn for_bundle_download(tenant_id: Uuid) -> SecurityContext {
+    tracing::info!(
+        target: "qa_catalog.system_actor",
+        site = "bundle_download",
+        tenant_id = %tenant_id,
+        "qa-catalog system actor constructed",
+    );
+    build_inner(Some(tenant_id))
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -190,6 +236,27 @@ mod tests {
             ctx.subject_tenant_id(),
             tenant,
             "branch rows must be written under the repository's own tenant"
+        );
+    }
+
+    #[test]
+    fn bundle_download_factory_carries_the_bundles_own_tenant() {
+        let tenant = Uuid::from_u128(0x0BAD_C0DE_F00D_BEEF);
+        let ctx = for_bundle_download(tenant);
+        assert_eq!(ctx.subject_id(), QA_CATALOG_SYSTEM_ACTOR_UUID);
+        assert_eq!(ctx.subject_type(), Some(QA_CATALOG_SYSTEM_SUBJECT_TYPE));
+        assert_eq!(
+            ctx.subject_tenant_id(),
+            tenant,
+            "the anonymous download must run under the tenant the DESCRIPTOR names -- a \
+             nil or caller-supplied tenant here would either become the platform-root \
+             sentinel or let a caller pick its own scope"
+        );
+        assert_ne!(
+            ctx.subject_tenant_id(),
+            Uuid::nil(),
+            "a nil tenant here is the platform-root sentinel; this context authorises a \
+             read and must never be platform-scoped"
         );
     }
 

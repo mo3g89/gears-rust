@@ -95,6 +95,8 @@ pub(in crate::domain::service) mod fakes {
     use toolkit_canonical_errors::CanonicalError;
     use toolkit_security::PlatformSecurityContext;
 
+    use crate::domain::service::resources;
+
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
@@ -114,7 +116,8 @@ pub(in crate::domain::service) mod fakes {
         NewVariable, QaEnvironmentsClientV1, QaEnvironmentsError, Variable,
     };
     use qa_runs_sdk::{
-        ExclusiveTier, QueueState, Run, RunKind, RunResult, RunSource, RunState, RunTarget,
+        ExclusiveTier, FinishedRunCursor, QueueState, Run, RunKind, RunResult, RunSource, RunState,
+        RunTarget,
     };
     use time::OffsetDateTime;
     use toolkit_db::secure::DBRunner;
@@ -340,8 +343,8 @@ pub(in crate::domain::service) mod fakes {
     /// trip through `InPredicate`, which carries `Uuid`s and not strings.
     pub(in crate::domain::service) fn resource_marker(resource_type: &str) -> Uuid {
         match resource_type {
-            "qa.run" => Uuid::from_u128(0x0A11_0000_0000_0AAA),
-            "qa.queue_entry" => Uuid::from_u128(0x0A11_0000_0000_0BBB),
+            resources::RUN_NAME => Uuid::from_u128(0x0A11_0000_0000_0AAA),
+            resources::QUEUE_ENTRY_NAME => Uuid::from_u128(0x0A11_0000_0000_0BBB),
             // A resource type these tests do not know about. Distinct from both, so
             // an added type fails the assertions rather than aliasing one of them.
             _ => Uuid::from_u128(0x0A11_0000_0000_0FFF),
@@ -879,6 +882,8 @@ pub(in crate::domain::service) mod fakes {
             entry.failed = bump(entry.failed, delta.failed);
             entry.skipped = bump(entry.skipped, delta.skipped);
             entry.in_progress = bump(entry.in_progress, delta.in_progress);
+            entry.xfail = bump(entry.xfail, delta.xfail);
+            entry.xpass = bump(entry.xpass, delta.xpass);
             entry.total = bump(entry.total, delta.total);
         }
 
@@ -930,7 +935,7 @@ pub(in crate::domain::service) mod fakes {
             tenant_id: Uuid,
             new: NewRun,
         ) -> Result<Run, DomainError> {
-            assert_scope_is_for(scope, "qa.run", "create");
+            assert_scope_is_for(scope, resources::RUN_NAME, "create");
             let mut rows = self.rows.lock().unwrap();
             if rows
                 .iter()
@@ -977,7 +982,7 @@ pub(in crate::domain::service) mod fakes {
             scope: &AccessScope,
             id: Uuid,
         ) -> Result<Option<Run>, DomainError> {
-            assert_scope_is_for(scope, "qa.run", "get");
+            assert_scope_is_for(scope, resources::RUN_NAME, "get");
             // Which tenants this scope admits, recorded before the row is
             // looked up: a read issued under the enumeration identity and one
             // issued under the row's own tenant return the same row, so the
@@ -1030,7 +1035,7 @@ pub(in crate::domain::service) mod fakes {
             _runner: &C,
             scope: &AccessScope,
         ) -> Result<Vec<Run>, DomainError> {
-            assert_scope_is_for(scope, "qa.run", "list");
+            assert_scope_is_for(scope, resources::RUN_NAME, "list");
             Ok(self
                 .rows
                 .lock()
@@ -1075,10 +1080,11 @@ pub(in crate::domain::service) mod fakes {
             &self,
             _runner: &C,
             scope: &AccessScope,
-            since: OffsetDateTime,
+            cursor: FinishedRunCursor,
             limit: u32,
         ) -> Result<Vec<Run>, DomainError> {
-            assert_scope_is_for(scope, "qa.run", "list_finished_since");
+            assert_scope_is_for(scope, resources::RUN_NAME, "list_finished_since");
+            let since = cursor.at();
             let mut found: Vec<Run> = self
                 .rows
                 .lock()
@@ -1086,7 +1092,12 @@ pub(in crate::domain::service) mod fakes {
                 .iter()
                 .filter(|(tenant_id, run)| {
                     scope.contains_uuid(OWNER_TENANT_ID, *tenant_id)
-                        && run.finished_at.is_some_and(|at| at >= since)
+                        && run.finished_at.is_some_and(|at| match cursor.after_id() {
+                            // The keyset bound, restated in the same total
+                            // order the sort below imposes.
+                            None => at >= since,
+                            Some(id) => (at, run.id) > (since, id),
+                        })
                 })
                 .map(|(_, run)| run.clone())
                 .collect();
@@ -1104,7 +1115,7 @@ pub(in crate::domain::service) mod fakes {
             to: RunState,
             patch: RunStatePatch,
         ) -> Result<bool, DomainError> {
-            assert_scope_is_for(scope, "qa.run", "update_state");
+            assert_scope_is_for(scope, resources::RUN_NAME, "update_state");
             let mut rows = self.rows.lock().unwrap();
             let Some((_, run)) = rows.iter_mut().find(|(tenant_id, run)| {
                 run.id == id && scope.contains_uuid(OWNER_TENANT_ID, *tenant_id)
@@ -1135,7 +1146,7 @@ pub(in crate::domain::service) mod fakes {
             id: Uuid,
             execution_ref: &str,
         ) -> Result<bool, DomainError> {
-            assert_scope_is_for(scope, "qa.run", "set_execution_ref");
+            assert_scope_is_for(scope, resources::RUN_NAME, "set_execution_ref");
             if *self.fail_execution_ref.lock().unwrap() {
                 return Err(DomainError::database(
                     "the execution reference could not be written",
@@ -1162,7 +1173,7 @@ pub(in crate::domain::service) mod fakes {
             id: Uuid,
             bundle_ids: &[Uuid],
         ) -> Result<bool, DomainError> {
-            assert_scope_is_for(scope, "qa.run", "set_bundle_ids");
+            assert_scope_is_for(scope, resources::RUN_NAME, "set_bundle_ids");
             let mut rows = self.rows.lock().unwrap();
             let Some((_, run)) = rows.iter_mut().find(|(tenant_id, run)| {
                 run.id == id && scope.contains_uuid(OWNER_TENANT_ID, *tenant_id)
@@ -1189,7 +1200,7 @@ pub(in crate::domain::service) mod fakes {
             id: Uuid,
             delta: RunResultDelta,
         ) -> Result<bool, DomainError> {
-            assert_scope_is_for(scope, "qa.run", "add_result_counts");
+            assert_scope_is_for(scope, resources::RUN_NAME, "add_result_counts");
             if !self.visible(scope, id) {
                 return Ok(false);
             }
@@ -1207,6 +1218,8 @@ pub(in crate::domain::service) mod fakes {
             entry.failed = bump(entry.failed, delta.failed);
             entry.skipped = bump(entry.skipped, delta.skipped);
             entry.in_progress = bump(entry.in_progress, delta.in_progress);
+            entry.xfail = bump(entry.xfail, delta.xfail);
+            entry.xpass = bump(entry.xpass, delta.xpass);
             entry.total = bump(entry.total, delta.total);
             Ok(true)
         }
@@ -1217,7 +1230,7 @@ pub(in crate::domain::service) mod fakes {
             scope: &AccessScope,
             id: Uuid,
         ) -> Result<Option<RunResult>, DomainError> {
-            assert_scope_is_for(scope, "qa.run", "get_result");
+            assert_scope_is_for(scope, resources::RUN_NAME, "get_result");
             if !self.visible(scope, id) {
                 return Ok(None);
             }
@@ -1326,7 +1339,7 @@ pub(in crate::domain::service) mod fakes {
             run: OwnedRunId,
             result: NewTestResult,
         ) -> Result<TestResultRow, DomainError> {
-            assert_scope_is_for(results_scope, "qa.run", "upsert_test_result");
+            assert_scope_is_for(results_scope, resources::RUN_NAME, "upsert_test_result");
             self.new_results.lock().unwrap().push(result.clone());
             let stamp = now();
             let row = TestResultRow {
@@ -1363,7 +1376,7 @@ pub(in crate::domain::service) mod fakes {
             results_scope: &AccessScope,
             run: OwnedRunId,
         ) -> Result<Vec<TestResultRow>, DomainError> {
-            assert_scope_is_for(results_scope, "qa.run", "list_test_results");
+            assert_scope_is_for(results_scope, resources::RUN_NAME, "list_test_results");
             Ok(self
                 .results
                 .lock()
@@ -1521,7 +1534,7 @@ pub(in crate::domain::service) mod fakes {
             tenant_id: Uuid,
             row: NewQueueRow,
         ) -> Result<QueueRowRecord, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "insert");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "insert");
             if let Some(error) = self.fail_insert_once.lock().unwrap().take() {
                 return Err(error);
             }
@@ -1590,11 +1603,13 @@ pub(in crate::domain::service) mod fakes {
             scope: &AccessScope,
             environment_id: Uuid,
         ) -> Result<usize, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "queued_depth");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "queued_depth");
             let depth = self
                 .visible(scope)
                 .iter()
-                .filter(|row| row.environment_id == environment_id && row.state == QueueState::Queued)
+                .filter(|row| {
+                    row.environment_id == environment_id && row.state == QueueState::Queued
+                })
                 .count();
             tokio::task::yield_now().await;
             Ok(depth)
@@ -1606,11 +1621,13 @@ pub(in crate::domain::service) mod fakes {
             scope: &AccessScope,
             environment_id: Uuid,
         ) -> Result<Vec<QueuedRow>, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "queued_rows");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "queued_rows");
             let mut rows: Vec<QueueRowRecord> = self
                 .visible(scope)
                 .into_iter()
-                .filter(|row| row.environment_id == environment_id && row.state == QueueState::Queued)
+                .filter(|row| {
+                    row.environment_id == environment_id && row.state == QueueState::Queued
+                })
                 .collect();
             // `ORDER BY enqueued_at ASC, id ASC` (`run_queue.rs:243-257`).
             rows.sort_by(|a, b| a.enqueued_at.cmp(&b.enqueued_at).then(a.id.cmp(&b.id)));
@@ -1630,7 +1647,7 @@ pub(in crate::domain::service) mod fakes {
             scope: &AccessScope,
             environment_id: Uuid,
         ) -> Result<Vec<ClaimRow>, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "claims_for_platform");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "claims_for_platform");
             if *self.hide_claims.lock().unwrap() {
                 return Ok(Vec::new());
             }
@@ -1688,7 +1705,7 @@ pub(in crate::domain::service) mod fakes {
             scope: &AccessScope,
             id: Uuid,
         ) -> Result<bool, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "mark_dispatching");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "mark_dispatching");
             Ok(self.set_state(
                 scope,
                 id,
@@ -1706,7 +1723,7 @@ pub(in crate::domain::service) mod fakes {
             scope: &AccessScope,
             id: Uuid,
         ) -> Result<bool, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "requeue");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "requeue");
             let requeued = self.set_state(
                 scope,
                 id,
@@ -1729,7 +1746,7 @@ pub(in crate::domain::service) mod fakes {
             scope: &AccessScope,
             id: Uuid,
         ) -> Result<bool, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "mark_running");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "mark_running");
             Ok(self.set_state(scope, id, QueueState::Running, None, None))
         }
 
@@ -1740,7 +1757,7 @@ pub(in crate::domain::service) mod fakes {
             id: Uuid,
             error: &str,
         ) -> Result<bool, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "mark_failed");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "mark_failed");
             Ok(self.set_state(scope, id, QueueState::Failed, None, Some(error)))
         }
 
@@ -1750,7 +1767,7 @@ pub(in crate::domain::service) mod fakes {
             scope: &AccessScope,
             id: Uuid,
         ) -> Result<bool, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "mark_done");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "mark_done");
             Ok(self.set_state(scope, id, QueueState::Done, None, None))
         }
 
@@ -1761,7 +1778,7 @@ pub(in crate::domain::service) mod fakes {
             id: Uuid,
             reason: &str,
         ) -> Result<bool, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "cancel_queued");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "cancel_queued");
             Ok(self.set_state(
                 scope,
                 id,
@@ -1780,7 +1797,7 @@ pub(in crate::domain::service) mod fakes {
             environment_id: Option<Uuid>,
             _query: &ODataQuery,
         ) -> Result<Page<QueueRowRecord>, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "list_page");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "list_page");
             let mut rows: Vec<QueueRowRecord> = self
                 .visible(scope)
                 .into_iter()
@@ -1832,7 +1849,7 @@ pub(in crate::domain::service) mod fakes {
             cutoff: OffsetDateTime,
             reason: &str,
         ) -> Result<Vec<ExpiredRow>, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "expire_queued_before");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "expire_queued_before");
             let mut expired = Vec::new();
             let mut rows = self.rows.lock().unwrap();
             for row in rows.iter_mut() {
@@ -1865,7 +1882,11 @@ pub(in crate::domain::service) mod fakes {
             ids: &[Uuid],
             reason: &str,
         ) -> Result<u64, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "fail_orphaned_dispatching");
+            assert_scope_is_for(
+                scope,
+                resources::QUEUE_ENTRY_NAME,
+                "fail_orphaned_dispatching",
+            );
             let mut failed = 0u64;
             for id in ids {
                 // `AND state = 'dispatching'` is the half only SQL can enforce.
@@ -1894,7 +1915,7 @@ pub(in crate::domain::service) mod fakes {
             environment_id: Option<Uuid>,
             limit: u64,
         ) -> Result<Vec<QueueRowRecord>, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "list_for_read");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "list_for_read");
             let mut rows: Vec<QueueRowRecord> = self
                 .visible(scope)
                 .into_iter()
@@ -1913,7 +1934,7 @@ pub(in crate::domain::service) mod fakes {
             scope: &AccessScope,
             id: Uuid,
         ) -> Result<Option<RowStatus>, DomainError> {
-            assert_scope_is_for(scope, "qa.queue_entry", "row_status");
+            assert_scope_is_for(scope, resources::QUEUE_ENTRY_NAME, "row_status");
             Ok(self
                 .visible(scope)
                 .into_iter()
@@ -1951,6 +1972,12 @@ pub(in crate::domain::service) mod fakes {
         /// What `list_variables` answers. Empty for every test that does not
         /// care.
         variables: Vec<Variable>,
+        /// `qa_environment_leases.freed_at`, modelled. Stamped by a release
+        /// that actually frees the environment and reported to the acquisition
+        /// that takes it back out of `Free` — the same rule the real writer
+        /// and `decide_acquire` follow, because the dispatch-latency tests
+        /// rest on this double getting it right.
+        pub(in crate::domain::service) freed_at: Mutex<Option<OffsetDateTime>>,
     }
 
     impl FakeEnvironments {
@@ -1979,6 +2006,15 @@ pub(in crate::domain::service) mod fakes {
             Self {
                 environment: Some(environment),
                 variables,
+                ..Self::free()
+            }
+        }
+
+        /// [`Self::free`] on an environment that already carries a recorded
+        /// transition to free at `at` — the anchor an acquisition consumes.
+        pub(in crate::domain::service) fn freed_at(at: OffsetDateTime) -> Self {
+            Self {
+                freed_at: Mutex::new(Some(at)),
                 ..Self::free()
             }
         }
@@ -2260,9 +2296,16 @@ pub(in crate::domain::service) mod fakes {
                     },
                 },
             };
+            // Only an acquisition *out of* `Free` consumed a free transition,
+            // so only it may report one. Mirrors `decide_acquire`.
+            let became_free_at = if matches!(current, LeaseState::Free) {
+                *self.freed_at.lock().unwrap()
+            } else {
+                None
+            };
             leases.retain(|(id, _)| *id != environment_id);
             leases.push((environment_id, state));
-            Ok(AcquireOutcome::Acquired)
+            Ok(AcquireOutcome::Acquired { became_free_at })
         }
 
         async fn release_lease(
@@ -2306,6 +2349,12 @@ pub(in crate::domain::service) mod fakes {
             leases.retain(|(id, _)| *id != environment_id);
             if next != LeaseState::Free {
                 leases.push((environment_id, next.clone()));
+            } else if current != LeaseState::Free {
+                // The transition, not the call. A parallel holder leaving while
+                // others remain takes the branch above and stamps nothing; a
+                // release of an already-free environment changed nothing and
+                // stamps nothing either.
+                *self.freed_at.lock().unwrap() = Some(OffsetDateTime::now_utc());
             }
             Ok(next)
         }
@@ -2611,7 +2660,14 @@ pub(in crate::domain::service) mod fakes {
         pub(in crate::domain::service) listed_branches: Mutex<Vec<(Uuid, String)>>,
         pub(in crate::domain::service) bundle_requests: Mutex<Vec<BundleRequest>>,
         /// See [`FakeCatalog::refusing_custom_plans`].
-        refuse_custom_plans: bool,
+        ///
+        /// A `Mutex`, not a plain `bool`, so
+        /// [`FakeCatalog::set_refuse_custom_plans`] can flip it after
+        /// construction through a shared `&FakeCatalog` — the schedule
+        /// referential-check test needs a custom plan that resolves at
+        /// `create` and stops resolving afterward, simulating "the owning
+        /// gear's own service deleted it" without a second gear to call.
+        refuse_custom_plans: Mutex<bool>,
     }
 
     /// The resource type qa-catalog raises a custom-plan not-found against
@@ -2647,9 +2703,19 @@ pub(in crate::domain::service) mod fakes {
         /// launch path that ignored the refusal entirely.
         pub(in crate::domain::service) fn refusing_custom_plans() -> Self {
             Self {
-                refuse_custom_plans: true,
+                refuse_custom_plans: Mutex::new(true),
                 ..Self::serving(&["tests/a.py"])
             }
+        }
+
+        /// Flip [`Self::refuse_custom_plans`] after construction.
+        ///
+        /// Exists for one caller: a test proving a schedule's target can go
+        /// dangling **after** it was validated on write, where the fixture's
+        /// custom plan must resolve at `create` and stop resolving before the
+        /// background referential check runs.
+        pub(in crate::domain::service) fn set_refuse_custom_plans(&self, refuse: bool) {
+            *self.refuse_custom_plans.lock().unwrap() = refuse;
         }
 
         pub(in crate::domain::service) fn serving(files: &[&str]) -> Self {
@@ -2716,6 +2782,7 @@ pub(in crate::domain::service) mod fakes {
                 content_root: String::new(),
                 credential_ref: None,
                 last_synced_at: Some(stamp),
+                head_commit: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
                 sync_error: None,
                 created_at: stamp,
                 updated_at: stamp,
@@ -2764,6 +2831,7 @@ pub(in crate::domain::service) mod fakes {
                 content_root: String::new(),
                 credential_ref: None,
                 last_synced_at: Some(stamp),
+                head_commit: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
                 sync_error: None,
                 created_at: stamp,
                 updated_at: stamp,
@@ -2860,7 +2928,7 @@ pub(in crate::domain::service) mod fakes {
             _ctx: &SecurityContext,
             id: Uuid,
         ) -> Result<CustomPlan, QaCatalogError> {
-            if self.refuse_custom_plans {
+            if *self.refuse_custom_plans.lock().unwrap() {
                 return Err(CatalogCustomPlanError::not_found(format!(
                     "custom plan {id} was not found"
                 ))
@@ -2991,6 +3059,7 @@ pub(in crate::domain::service) mod fakes {
                 size_bytes: 1024,
                 expires_at: stamp,
                 created_at: stamp,
+                download_sig: "0".repeat(64),
             })
         }
 
@@ -3034,10 +3103,13 @@ pub(in crate::domain::service) mod fakes {
         pub(in crate::domain::service) async fn seed_active(&self, run_id: Uuid) -> ExecutionRef {
             let spec = RunSpec {
                 run_id,
+                tenant_id: Uuid::new_v4(),
                 run_name: "seeded".to_owned(),
                 nodes: vec![crate::domain::ports::run_executor::ExecutionNode {
                     name: "repo-a".to_owned(),
                     bundle_ref: "bundle://x".to_owned(),
+                    bundle_id: Uuid::new_v4(),
+                    bundle_token: String::new(),
                     test_files: vec!["tests/a.py".to_owned()],
                 }],
                 env: crate::domain::ports::run_executor::RunEnv::default(),
@@ -3405,10 +3477,13 @@ async fn a_platformless_launch_is_still_refused_by_the_concurrency_cap() {
     let executor = Arc::new(crate::infra::executor::mock::MockRunExecutor::new());
     let spec = crate::domain::ports::run_executor::RunSpec {
         run_id: Uuid::from_u128(0x77),
+        tenant_id: Uuid::new_v4(),
         run_name: "other-1".to_owned(),
         nodes: vec![crate::domain::ports::run_executor::ExecutionNode {
             name: "repo-a".to_owned(),
             bundle_ref: "bundle://x".to_owned(),
+            bundle_id: Uuid::new_v4(),
+            bundle_token: String::new(),
             test_files: vec!["tests/a.py".to_owned()],
         }],
         env: crate::domain::ports::run_executor::RunEnv::default(),
@@ -3583,10 +3658,13 @@ async fn a_reached_concurrency_cap_refuses_the_launch_before_the_lock() {
     // One live execution against a cap of one.
     let spec = crate::domain::ports::run_executor::RunSpec {
         run_id: Uuid::from_u128(0x77),
+        tenant_id: Uuid::new_v4(),
         run_name: "other-1".to_owned(),
         nodes: vec![crate::domain::ports::run_executor::ExecutionNode {
             name: "repo-a".to_owned(),
             bundle_ref: "bundle://x".to_owned(),
+            bundle_id: Uuid::new_v4(),
+            bundle_token: String::new(),
             test_files: vec!["tests/a.py".to_owned()],
         }],
         env: crate::domain::ports::run_executor::RunEnv::default(),

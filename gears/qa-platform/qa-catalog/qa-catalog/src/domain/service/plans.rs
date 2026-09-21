@@ -49,7 +49,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use authz_resolver_sdk::PolicyEnforcer;
 use qa_catalog_sdk::{Exclusivity, Plan, SOURCE_REPO, TestFileMeta, TestRepository, UniverseTest};
@@ -65,6 +65,11 @@ use crate::domain::parsing::plan_yaml::{ParsedPlan, normalize_test_path, parse_p
 use crate::domain::parsing::test_meta::{ParsedTestMeta, parse_test_meta};
 use crate::domain::repos::TestReposRepository;
 
+/// One discovery-cache entry: the `head_commit`, `product_id` and
+/// `content_root` it was populated under, and the discovered plans
+/// themselves. See [`PlansService::discovery_cache`].
+type DiscoveryCacheEntry = (Option<String>, Uuid, String, Arc<Vec<Plan>>);
+
 /// Discovered-plan read service (plans are never persisted — they are
 /// materialized from the synced working copy on every read).
 #[domain_model]
@@ -73,6 +78,58 @@ pub struct PlansService<R: TestReposRepository> {
     repos_repo: Arc<R>,
     repos_dir: PathBuf,
     policy_enforcer: PolicyEnforcer,
+    /// Discovery is a filesystem walk over the synced working copy — see
+    /// this module's header. Cached per `(repo_id, branch)`, invalidated by
+    /// the **content revision**: `head_commit` is the commit the last
+    /// successful sync materialized, so an unchanged one means the working
+    /// copy this walks is byte-for-byte what it was. This is NOT
+    /// `sync_cache::SyncCache` — that cache decides whether to *fetch*; this
+    /// one decides whether to *re-walk what was fetched*. Unbounded by
+    /// design, matching `list_schedules`' own "no cap" precedent for an
+    /// operator-curated set: the number of distinct `(repo_id, branch)`
+    /// pairs a tenant discovers is bounded by how many branches an operator
+    /// actually reads, not by anything that grows on its own.
+    ///
+    /// # Why the revision and not `last_synced_at`
+    ///
+    /// The timestamp advances on *every* successful sync, so a re-sync that
+    /// found no new commit threw the walk away for content that had not
+    /// moved. The revision is what the spec asked to key on and what the
+    /// working copy actually is. `None` — never synced, or last synced before
+    /// `m20260921_000003_repo_head_commit` — is a safe key rather than a
+    /// special case: content only changes when a sync runs, and a sync always
+    /// writes a non-`None` revision, so a `None` key is stable exactly as long
+    /// as the content it describes is.
+    ///
+    /// # Two things the revision does not cover, and both are in the key
+    ///
+    /// A cached `Plan` bakes in more than the commit, and each of these is a
+    /// field `update_repo` can change *without* the revision moving:
+    ///
+    /// * **`product_id`.** `to_sdk_plan` stamps it onto every cached `Plan`
+    ///   (`PlansService::list_plans`, below), and `RepoService::update_repo`
+    ///   writes a reassignment unconditionally while only `url`/`content_root`
+    ///   changes clear the synced state (`domain/service/repos.rs`,
+    ///   `update_repo`'s `invalidate` flag). A product reassignment alone
+    ///   moves no commit, so without this the cache would serve the old
+    ///   `product_id` until the next sync or a restart, while the uncached
+    ///   [`Self::get_plan`] already reflected the new one. That was a real
+    ///   defect, fixed once already; re-keying on the revision must not
+    ///   reintroduce it.
+    ///
+    /// * **`content_root`.** This is the one the revision makes *worse* than
+    ///   the timestamp did, which is why it is called out rather than merely
+    ///   listed. The walk is rooted at `content_root`, so it selects which
+    ///   plans exist and what their paths are — but it is a column, not
+    ///   content, and moving it does not move the commit. Under
+    ///   `last_synced_at` the change was covered for an incidental reason:
+    ///   `invalidate` cleared the timestamp, and the re-sync that followed
+    ///   minted a *new* one. Under the revision the re-sync of an unchanged
+    ///   branch restores the *same* commit, so a key of the revision alone
+    ///   would match a pre-change entry and serve plans discovered under the
+    ///   old root. Comparing `content_root` closes that directly, rather than
+    ///   relying on a timestamp's incidental churn.
+    discovery_cache: Mutex<HashMap<(Uuid, String), DiscoveryCacheEntry>>,
 }
 
 impl<R: TestReposRepository> PlansService<R> {
@@ -87,18 +144,27 @@ impl<R: TestReposRepository> PlansService<R> {
             repos_repo,
             repos_dir,
             policy_enforcer,
+            discovery_cache: Mutex::new(HashMap::new()),
         }
     }
 
     /// Resolve the repository (tenancy precheck under its own `TEST_REPO/GET`
-    /// scope), require it synced for `branch`, and return the owning product
-    /// plus the canonicalized content-root directory.
+    /// scope), require it synced for `branch`, and return the three fields the
+    /// discovery cache keys on — the owning product, the content revision and
+    /// the content root (see [`Self::discovery_cache`]) — along with the
+    /// canonicalized content-root directory.
+    ///
+    /// The `content_root` is returned as the stored *column*, not derived back
+    /// out of the canonicalized `PathBuf`: the path is absolute and
+    /// symlink-resolved, so two different column values can canonicalize to
+    /// one path and comparing those would miss the change the key is here to
+    /// catch.
     async fn synced_content_root(
         &self,
         ctx: &SecurityContext,
         repo_id: Uuid,
         branch: &str,
-    ) -> Result<(Uuid, PathBuf), DomainError> {
+    ) -> Result<(Uuid, Option<String>, String, PathBuf), DomainError> {
         let repo_scope = self
             .policy_enforcer
             .access_scope(ctx, &resources::TEST_REPO, actions::GET, Some(repo_id))
@@ -113,7 +179,7 @@ impl<R: TestReposRepository> PlansService<R> {
 
         require_synced(&repo, branch)?;
         let root = content_root_dir(&self.repos_dir, &repo, branch)?;
-        Ok((repo.product_id, root))
+        Ok((repo.product_id, repo.head_commit, repo.content_root, root))
     }
 }
 
@@ -138,7 +204,22 @@ impl<R: TestReposRepository> PlansService<R> {
             .access_scope(ctx, &resources::PLAN, actions::LIST, None)
             .await?;
 
-        let (product_id, root) = self.synced_content_root(ctx, repo_id, branch).await?;
+        let (product_id, head_commit, content_root, root) =
+            self.synced_content_root(ctx, repo_id, branch).await?;
+
+        let key = (repo_id, branch.to_owned());
+        if let Some((cached_commit, cached_product, cached_root, plans)) = self
+            .discovery_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            && *cached_commit == head_commit
+            && *cached_product == product_id
+            && *cached_root == content_root
+        {
+            debug!("Discovery cache hit; skipping filesystem walk");
+            return Ok((**plans).clone());
+        }
 
         let discovered = tokio::task::spawn_blocking(move || discover_plans(&root))
             .await
@@ -150,6 +231,13 @@ impl<R: TestReposRepository> PlansService<R> {
             .collect::<Vec<_>>();
 
         debug!("Discovered {} plans", plans.len());
+        self.discovery_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                key,
+                (head_commit, product_id, content_root, Arc::new(plans.clone())),
+            );
         Ok(plans)
     }
 
@@ -169,7 +257,8 @@ impl<R: TestReposRepository> PlansService<R> {
             .access_scope(ctx, &resources::PLAN, actions::GET, None)
             .await?;
 
-        let (product_id, root) = self.synced_content_root(ctx, repo_id, branch).await?;
+        let (product_id, _head_commit, _content_root, root) =
+            self.synced_content_root(ctx, repo_id, branch).await?;
 
         let file = resolve_under_root(&root, path)?.ok_or_else(|| DomainError::PlanNotFound {
             repo_id,
@@ -232,7 +321,7 @@ impl<R: TestReposRepository> PlansService<R> {
             validate_rel_path("files", file)?;
         }
 
-        let (_, root) = self.synced_content_root(ctx, repo_id, branch).await?;
+        let (_, _head_commit, _content_root, root) = self.synced_content_root(ctx, repo_id, branch).await?;
 
         let mut metas = Vec::with_capacity(files.len());
         for file in files {
@@ -1003,6 +1092,17 @@ fn collect_test_files(root: &Path, current: &Path, prefix: &str, files: &mut Vec
 /// absent directory (never materialized) stays a silent empty result;
 /// anything else is warned with the error so an unreadable *directory* does
 /// not read as "nothing here".
+///
+/// **`DE0301` is allowed here, and the lint is not wrong.** A domain module
+/// naming `std::fs::ReadDir` *is* infrastructure in the domain. It is
+/// pervasive rather than local in this service: plan discovery walks the
+/// synced working tree from the domain by design (see this module's header),
+/// so `read_dir` is not the leak -- it is the one place the existing leak is
+/// named. Moving it behind a port means moving the whole discovery walk, which
+/// is a restructure of this service and not a lint fix. Allowed at the single
+/// function rather than the module, so the next `std::fs` type to arrive in
+/// this file still has to argue for itself.
+#[allow(unknown_lints, de0301_no_infra_in_domain)]
 fn read_dir_or_warn(dir: &Path) -> Option<std::fs::ReadDir> {
     match std::fs::read_dir(dir) {
         Ok(entries) => Some(entries),

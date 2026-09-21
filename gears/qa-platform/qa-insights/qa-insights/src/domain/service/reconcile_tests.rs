@@ -17,6 +17,7 @@ use std::sync::Arc;
 use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use time::{Duration, OffsetDateTime};
 use toolkit_db::DBProvider;
+use toolkit_gts::GTS_ID_PREFIX;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -268,6 +269,170 @@ async fn a_run_older_than_the_lookback_window_is_left_alone() {
     assert_eq!(outcome.scanned, 0);
 }
 
+/// **The wedge that stopped three days of ingest, and the only assertion that
+/// sees it.** `page_size` runs inside the lookback window must not be able to
+/// pin the watermark to where it already is.
+///
+/// The floor is `mark - lookback`, *behind* the mark, and the listing is capped
+/// at `page_size` and oldest-first. So when `page_size` runs finished inside
+/// `[mark - lookback, mark]`, the page ends on the mark, `advance` is monotonic
+/// and no-ops, and the next sweep computes the identical floor and reads the
+/// identical page — forever, with no error and a healthy-looking `scanned`.
+///
+/// Here that is four runs in the hour behind a mark of 12:00 with
+/// `page_size = 4`. Against the single-page sweep this reproduces the stand
+/// exactly: the watermark stays at 12:00 and the two runs after it are never
+/// ingested, on this pass or on any later one. What makes it a *silent* failure
+/// — and so what makes this test necessary — is that the sweep still returns
+/// `Ok`, still reports `stopped_at_gap: false`, and still counts a page's worth
+/// of `scanned`.
+#[tokio::test]
+async fn a_lookback_window_holding_a_full_page_does_not_pin_the_watermark() {
+    let f = Fixture::with_lookback(Duration::hours(1), 4).await;
+    f.set_watermark(at("2026-08-18T12:00:00Z")).await;
+
+    // Exactly `page_size` runs in `[mark - lookback, mark]`: the page the sweep
+    // reads first cannot reach past the mark.
+    for instant in [
+        "2026-08-18T11:15:00Z",
+        "2026-08-18T11:30:00Z",
+        "2026-08-18T11:45:00Z",
+        "2026-08-18T12:00:00Z",
+    ] {
+        f.runs.add_finished_run_with_results(at(instant), 1);
+    }
+
+    // The runs the wedge strands. On the stand these were three days of them.
+    let after_a = f
+        .runs
+        .add_finished_run_with_results(at("2026-08-18T12:10:00Z"), 1);
+    let after_b = f
+        .runs
+        .add_finished_run_with_results(at("2026-08-18T12:20:00Z"), 1);
+
+    let outcome = f
+        .service
+        .reconcile_once(tenant())
+        .await
+        .expect("sweep succeeds");
+
+    assert!(
+        !outcome.stopped_at_gap,
+        "the wedge is not a gap; a sweep that reports one is failing a different way"
+    );
+    assert_eq!(
+        f.results_for(after_a).await.len(),
+        1,
+        "a run past a saturated lookback window must still be ingested"
+    );
+    assert_eq!(
+        f.results_for(after_b).await.len(),
+        1,
+        "and so must the one after it"
+    );
+    assert_eq!(
+        f.watermark().await,
+        Some(at("2026-08-18T12:20:00Z")),
+        "the mark must land on the newest run this pass accounted for, not stay \
+         where a full lookback window pinned it"
+    );
+}
+
+/// **The window the paging fix could only shout about, drained.**
+///
+/// `page_size` runs — more than `page_size`, here — sharing one identical
+/// `finished_at`. Under the instant-only cursor this was the sweep's one
+/// remaining un-walkable shape: the page's newest instant is that instant, so
+/// the next page is the same page, the walk stops, and everything newer is
+/// stranded for good. The sweep logged an `ERROR` and gave up, which was an
+/// improvement on spinning and no help at all to the data.
+///
+/// The fixture is the real burst's shape at test scale: six runs on one
+/// instant with a page size of four, so the tie group is strictly wider than a
+/// page and cannot be drained by luck. (The 2026-09-18 burst held single
+/// instants shared by 54, 40, 31 and 29 runs against a `page_size` of 200; the
+/// ratio is what matters, not the size.)
+///
+/// Three assertions, and the third is the one the outage is about: every tied
+/// run is consumed, the run *after* the tie group is projected, and the mark
+/// lands past the whole group.
+#[tokio::test]
+async fn a_tie_group_larger_than_a_page_is_drained_rather_than_stranding_what_follows() {
+    let f = Fixture::with_lookback(Duration::hours(1), 4).await;
+    let tied = at("2026-08-18T12:00:00Z");
+    let tie_group: Vec<_> = (0..6)
+        .map(|_| f.runs.add_finished_run_with_results(tied, 1))
+        .collect();
+    let after_the_group = f
+        .runs
+        .add_finished_run_with_results(at("2026-08-18T12:30:00Z"), 1);
+
+    let outcome = f
+        .service
+        .reconcile_once(tenant())
+        .await
+        .expect("sweep succeeds");
+
+    assert_eq!(
+        outcome.backfilled, 7,
+        "six runs on one instant plus the one behind them, all in one pass"
+    );
+    for run in tie_group {
+        assert_eq!(
+            f.results_for(run).await.len(),
+            1,
+            "every run in a tie group wider than the page must be projected"
+        );
+    }
+    assert_eq!(
+        f.results_for(after_the_group).await.len(),
+        1,
+        "and so must the run behind it: under an instant-only cursor this one was \
+         unreachable at this page size, by any number of passes"
+    );
+    assert_eq!(
+        f.watermark().await,
+        Some(at("2026-08-18T12:30:00Z")),
+        "the mark must step over the whole tie group, not stop on it"
+    );
+    assert!(
+        outcome.caught_up,
+        "and the walk ended because qa-runs had nothing further, not because it \
+         could not step"
+    );
+}
+
+/// The tie group is walked **one page at a time**, not by quietly asking for a
+/// bigger page.
+///
+/// The operational escape the old `ERROR` suggested was raising
+/// `reconcile_page_size` above the group's size. This pins that the fix is the
+/// cursor instead: seven runs at a page size of four is two full pages and a
+/// short one, so three listings — and a sweep that had started ignoring
+/// `page_size` would show one.
+#[tokio::test]
+async fn draining_a_tie_group_still_respects_the_page_size() {
+    let f = Fixture::with_lookback(Duration::hours(1), 4).await;
+    let tied = at("2026-08-18T12:00:00Z");
+    for _ in 0..6 {
+        f.runs.add_finished_run_with_results(tied, 1);
+    }
+    f.runs
+        .add_finished_run_with_results(at("2026-08-18T12:30:00Z"), 1);
+
+    f.service
+        .reconcile_once(tenant())
+        .await
+        .expect("sweep succeeds");
+
+    assert_eq!(
+        f.runs.listings(),
+        2,
+        "seven runs at a page size of four is one full page and a short second that \
+         ends the walk, and no run is listed twice, because a keyset resume is strict"
+    );
+}
+
 /// **The stop-at-the-gap rule, and the only test that can see it.** The page is
 /// oldest-first; a failure in the middle must stop the sweep rather than skip
 /// the run and carry on.
@@ -393,13 +558,28 @@ async fn a_second_sweep_over_the_same_window_backfills_nothing_and_changes_nothi
     );
 }
 
-/// A page is a page: `page_size` bounds the work, and the watermark carries the
-/// sweep forward so the next one continues rather than restarting.
+/// A sweep pages forward until it catches up, and *both* halves of that are
+/// properties under test: it catches up **in one pass**, and the work is still
+/// bounded — by `MAX_PAGES_PER_SWEEP` pages rather than by a single one.
 ///
-/// This is what makes the first-ever sweep — whose floor is the epoch —
-/// terminate instead of reading the whole history in one pass.
+/// **This test used to assert the opposite**, and the assertion it used to make
+/// was the bug. It read `scanned == 2` ("the page size is the bound") and
+/// expected four ticks to walk five runs, on the reasoning that one page per
+/// tick is what keeps the first-ever sweep — whose floor is the epoch — from
+/// reading all of history at once. The bound was real; stopping *unconditionally*
+/// after one page was not, because the floor is `mark - lookback` and so a page
+/// that fills up before it reaches the mark leaves the mark exactly where it
+/// was. See [`super::ReconcileService::sweep`] for the three days of silent
+/// stall that followed from it, and
+/// `a_lookback_window_holding_a_full_page_does_not_pin_the_watermark` for the
+/// direct reproduction.
+///
+/// The first-ever-sweep concern the old assertion was protecting is still
+/// protected, and still by `page_size` — just at
+/// `MAX_PAGES_PER_SWEEP * page_size` per tick instead of `page_size`, which the
+/// listing count below pins as a paged walk rather than one unbounded read.
 #[tokio::test]
-async fn a_bounded_page_advances_the_watermark_so_the_next_sweep_continues() {
+async fn a_sweep_pages_forward_until_it_catches_up() {
     let f = Fixture::with_lookback(Duration::ZERO, 2).await;
     for hour in 10..15 {
         f.runs
@@ -407,17 +587,31 @@ async fn a_bounded_page_advances_the_watermark_so_the_next_sweep_continues() {
     }
 
     let first = f.service.reconcile_once(tenant()).await.unwrap();
-    assert_eq!(first.scanned, 2, "the page size is the bound");
-    assert_eq!(first.backfilled, 2);
-    assert_eq!(f.watermark().await, Some(at("2026-08-18T11:00:00Z")));
 
+    assert_eq!(first.scanned, 5, "every run behind the mark, in one pass");
+    assert_eq!(first.backfilled, 5);
+    assert_eq!(
+        f.watermark().await,
+        Some(at("2026-08-18T14:00:00Z")),
+        "the mark lands on the newest run the pass accounted for"
+    );
+    assert_eq!(
+        f.runs.listings(),
+        3,
+        "a paged walk, not one unbounded read: two full pages of two and a short \
+         third that ends it. This was FIVE while the cursor was a bare instant and \
+         the port's bound was inclusive, so every page re-read its predecessor's \
+         last run; a keyset resume is strict, so it does not"
+    );
+
+    // Caught up. The next tick is one short page that moves nothing.
     let second = f.service.reconcile_once(tenant()).await.unwrap();
     assert_eq!(
-        second.backfilled, 1,
+        second.backfilled, 0,
         "the second sweep re-examines the watermark run (inclusive lower bound) and \
-         backfills the one new one"
+         finds it already ingested"
     );
-    assert_eq!(f.watermark().await, Some(at("2026-08-18T12:00:00Z")));
+    assert_eq!(f.watermark().await, Some(at("2026-08-18T14:00:00Z")));
 }
 
 /// An empty window is a successful no-op that moves nothing. The ticker runs
@@ -429,7 +623,19 @@ async fn an_empty_window_is_a_no_op() {
 
     let outcome = f.service.reconcile_once(tenant()).await.unwrap();
 
-    assert_eq!(outcome, ReconcileOutcome::default());
+    assert_eq!(
+        outcome,
+        ReconcileOutcome {
+            // **Not `default()`.** An empty listing is the sweep having read
+            // everything there is, and `caught_up` is the field
+            // `crate::gear::report_reconcile_outcome` uses to tell that from a
+            // walk that stopped with more to read. A sweep over an empty window
+            // reporting `caught_up: false` would put every idle tenant one
+            // comparison away from the stall alarm.
+            caught_up: true,
+            ..ReconcileOutcome::default()
+        }
+    );
     assert_eq!(f.watermark().await, None, "no runs means no mark");
 }
 
@@ -676,7 +882,7 @@ async fn a_rebuild_never_creates_a_watermark() {
 
     assert_eq!(f.watermark().await, None, "a rebuild writes no mark at all");
     assert_eq!(
-        outcome.watermark_advanced_to, None,
+        outcome.watermark_at, None,
         "`None` here is the endpoint's contract, not a placeholder"
     );
     assert_eq!(outcome.backfilled, 1);
@@ -832,7 +1038,17 @@ async fn a_rebuild_over_an_empty_window_deletes_nothing() {
         .await
         .expect("an empty window is a successful no-op");
 
-    assert_eq!(outcome, ReconcileOutcome::default());
+    assert_eq!(
+        outcome,
+        ReconcileOutcome {
+            // **Not `default()`.** An empty window is a window the rebuild
+            // walked to its end, and `caught_up` — `complete` on the wire — is
+            // the field an operator branches on. A no-op that reported itself
+            // incomplete would send them round the resume loop forever.
+            caught_up: true,
+            ..ReconcileOutcome::default()
+        }
+    );
     assert_eq!(
         f.results_for(run).await.len(),
         2,
@@ -865,7 +1081,10 @@ async fn a_rebuild_asks_the_pdp_for_rebuild_on_the_test_result_resource() {
 
     assert_eq!(
         authz.asked(),
-        vec![("qa.test_result".to_owned(), "rebuild".to_owned())],
+        vec![(
+            format!("{GTS_ID_PREFIX}cf.qa.insights.test_result.v1~"),
+            "rebuild".to_owned()
+        )],
         "one decision, for the action actually being performed"
     );
 }
@@ -1001,6 +1220,16 @@ async fn a_failure_part_way_through_stops_the_rebuild() {
     );
     assert_eq!(outcome.backfilled, 1);
     assert_eq!(outcome.scanned, 3);
+    assert!(
+        !outcome.caught_up,
+        "a rebuild that stopped on a run did not reach the end of its window"
+    );
+    assert_eq!(
+        outcome.resume_from,
+        Some(at("2026-08-18T09:00:00Z")),
+        "the last run consumed, so the continuation reaches the failure again rather than \
+         stepping over it"
+    );
 }
 
 /// qa-runs being unreachable is an error, exactly as it is for the sweep: an
@@ -1026,13 +1255,111 @@ async fn a_listing_failure_makes_the_rebuild_an_error() {
     assert!(matches!(err, DomainError::Internal(_)));
 }
 
-/// `page_size` bounds a rebuild the same way it bounds a sweep, so a year-wide
-/// window cannot ask this gear to materialise every run in it. The operator
-/// narrows and repeats; `scanned` is what tells them the page was full.
+/// **`page_size` is the size of a page, not the size of the job.** A window
+/// holding more runs than one page is replayed in full, in pages, and says it
+/// is complete.
+///
+/// This test shipped inverted — as
+/// `the_rebuild_window_is_bounded_by_the_page_size`, asserting `scanned == 2`
+/// out of four runs — and it was pinning the last page boundary in this module
+/// that was a wall. The old remedy was a `WARN` telling the operator to narrow
+/// the window; nothing in the response said the job was half done.
 #[tokio::test]
-async fn the_rebuild_window_is_bounded_by_the_page_size() {
+async fn a_rebuild_window_wider_than_a_page_is_replayed_in_full() {
     let f = Fixture::with_lookback(Duration::ZERO, 2).await;
-    for minute in [0, 10, 20, 30] {
+    let runs: Vec<_> = [0, 10, 20, 30]
+        .into_iter()
+        .map(|minute| {
+            f.runs
+                .add_finished_run_with_results(at(&format!("2026-08-18T09:{minute:02}:00Z")), 1)
+        })
+        .collect();
+
+    let outcome = f
+        .service
+        .rebuild(
+            &f.ctx,
+            at("2026-08-18T08:00:00Z"),
+            at("2026-08-18T10:00:00Z"),
+        )
+        .await
+        .expect("rebuild succeeds");
+
+    assert_eq!(outcome.scanned, 4, "two full pages, not the first one");
+    assert_eq!(outcome.backfilled, 4);
+    for run in runs {
+        assert_eq!(f.results_for(run).await.len(), 1);
+    }
+    assert!(outcome.caught_up, "the whole window was reached");
+    assert_eq!(
+        outcome.resume_from, None,
+        "nothing left to resume from once the window is walked out"
+    );
+}
+
+/// **The same wall the sweep's fix removed, on the endpoint an operator reaches
+/// for when the sweep has already let them down.**
+///
+/// `page_size` runs sharing one `finished_at` was not merely a truncation here:
+/// it was a region of history the endpoint could not reach *by any window an
+/// operator could type*. Narrowing the window to that single instant returns
+/// the same full page, so the advice the old `WARN` gave — "narrow the window
+/// and repeat" — was unfollowable, and the runs behind the group were
+/// unreachable for good. The 2026-09-18 burst contained single instants shared
+/// by 54, 40, 31 and 29 runs.
+///
+/// Six runs on one instant at a page size of four, plus the run behind them.
+#[tokio::test]
+async fn a_rebuild_drains_a_tie_group_wider_than_its_page() {
+    let f = Fixture::with_lookback(Duration::ZERO, 4).await;
+    let tied = at("2026-08-18T09:00:00Z");
+    let tie_group: Vec<_> = (0..6)
+        .map(|_| f.runs.add_finished_run_with_results(tied, 1))
+        .collect();
+    let after_the_group = f
+        .runs
+        .add_finished_run_with_results(at("2026-08-18T09:30:00Z"), 1);
+
+    let outcome = f
+        .service
+        .rebuild(
+            &f.ctx,
+            at("2026-08-18T08:00:00Z"),
+            at("2026-08-18T10:00:00Z"),
+        )
+        .await
+        .expect("rebuild succeeds");
+
+    assert_eq!(outcome.scanned, 7);
+    assert_eq!(outcome.backfilled, 7);
+    for run in tie_group {
+        assert_eq!(
+            f.results_for(run).await.len(),
+            1,
+            "every run of a tie group wider than the page must be replayed"
+        );
+    }
+    assert_eq!(
+        f.results_for(after_the_group).await.len(),
+        1,
+        "and so must the run behind it: under the one-page rebuild this run was \
+         unreachable at this page size, by any window"
+    );
+    assert!(outcome.caught_up);
+}
+
+/// The cap that remains is a **budget**, and spending it is in the answer
+/// rather than in a log line.
+///
+/// A page size of one against `MAX_PAGES_PER_REBUILD` pages puts the ceiling at
+/// ten runs; eleven runs in the window is one past it. The assertions that
+/// matter are the last two: a truncated rebuild must not report itself
+/// complete, and it must hand back the instant to continue from — the outage
+/// established that a `WARN` nobody reads is indistinguishable from success.
+#[tokio::test]
+async fn a_rebuild_that_spends_its_page_budget_says_so_in_the_outcome() {
+    let f = Fixture::with_lookback(Duration::ZERO, 1).await;
+    for minute in 0..11 {
         f.runs
             .add_finished_run_with_results(at(&format!("2026-08-18T09:{minute:02}:00Z")), 1);
     }
@@ -1047,8 +1374,34 @@ async fn the_rebuild_window_is_bounded_by_the_page_size() {
         .await
         .expect("rebuild succeeds");
 
-    assert_eq!(outcome.scanned, 2, "the page size is the bound");
-    assert_eq!(outcome.backfilled, 2);
+    assert_eq!(outcome.scanned, 10, "ten pages of one run each");
+    assert_eq!(outcome.backfilled, 10);
+    assert!(
+        !outcome.caught_up,
+        "the eleventh run was never reached, and the outcome must not claim otherwise"
+    );
+    assert_eq!(
+        outcome.resume_from,
+        Some(at("2026-08-18T09:09:00Z")),
+        "the last run consumed, inclusive: posting it back as `from` re-replays that run \
+         and reaches the eleventh"
+    );
+    assert!(!outcome.stopped_at_gap, "a budget is not a gap");
+
+    // And the continuation finishes the job, which is what makes the field an
+    // instruction rather than a diagnostic.
+    let rest = f
+        .service
+        .rebuild(
+            &f.ctx,
+            outcome.resume_from.expect("a truncated pass resumes"),
+            at("2026-08-18T10:00:00Z"),
+        )
+        .await
+        .expect("rebuild succeeds");
+
+    assert!(rest.caught_up);
+    assert_eq!(rest.resume_from, None);
 }
 
 /// The PDP-compiled scope is applied against the real database, not merely
@@ -1123,7 +1476,8 @@ async fn a_scope_carrying_more_than_the_tenant_is_refused_and_writes_nothing() {
         .expect_err("a scope this write path cannot execute must be refused");
 
     assert!(
-        matches!(err, DomainError::UnsupportedScope { resource } if resource == "qa.test_result"),
+        matches!(err, DomainError::UnsupportedScope { resource }
+            if resource == format!("{GTS_ID_PREFIX}cf.qa.insights.test_result.v1~")),
         "got {err:?}"
     );
     assert_eq!(

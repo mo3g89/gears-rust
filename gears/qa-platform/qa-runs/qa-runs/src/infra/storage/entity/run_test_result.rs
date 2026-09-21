@@ -64,8 +64,8 @@ pub struct Model {
     pub ticket: Option<String>,
     pub created_at: OffsetDateTime,
     /// Equal to `created_at` in practice: delete-then-insert replaces a row
-    /// rather than updating it. Present because DESIGN §3.7 requires it
-    /// ("Every table carries ...").
+    /// rather than updating it. Present as one of the house-style audit
+    /// columns most tables carry, not because DESIGN mandates it centrally.
     pub updated_at: OffsetDateTime,
 }
 

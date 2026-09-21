@@ -103,6 +103,7 @@ members = [
     "gears/qa-platform/qa-runs/qa-runs",
     "gears/qa-platform/qa-insights/qa-insights-sdk",
     "gears/qa-platform/qa-insights/qa-insights",
+    "gears/qa-platform/qa-platform-openapi",
     "gears/qa-platform/connectors/qa-connector-k8s",
     "gears/qa-platform/connectors/qa-connector-ssh",
     "gears/qa-platform/plugins/qa-vhp-product-plugin",
@@ -482,7 +483,19 @@ tracing-opentelemetry = "0.33"
 tracing-appender = "0.2"
 tracing-test = "0.2"
 opentelemetry = { version = "0.32", features = ["trace", "metrics"] }
-opentelemetry_sdk = { version = "0.32", features = ["trace", "rt-tokio", "metrics"] }
+# `experimental_metrics_custom_reader` is a VISIBILITY flag, not a behaviour
+# one: without it `opentelemetry_sdk::metrics::{reader::MetricReader,
+# ManualReader, Pipeline}` are `pub(crate)` and there is no supported way to
+# pull metrics out of an `SdkMeterProvider` on demand — only to push them at an
+# OTLP collector. `libs/toolkit/src/telemetry/scrape.rs` needs exactly that pull
+# to serve a Prometheus scrape endpoint. Nothing in the built artifact changes
+# for a crate that does not name those types.
+opentelemetry_sdk = { version = "0.32", features = [
+    "trace",
+    "rt-tokio",
+    "metrics",
+    "experimental_metrics_custom_reader",
+] }
 opentelemetry-otlp = { version = "0.32", features = [
     "grpc-tonic",
     "http-proto",
@@ -533,6 +546,44 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 http-body-util = "0.1"
 http-body = "1"
+
+# SMTP client (qa-insights' notification egress).
+#
+# `default-features = false` is MANDATORY: lettre's `default` is
+# `["smtp-transport", "pool", "native-tls", "hostname", "builder"]`, and
+# `native-tls` drags OpenSSL into a workspace that has none.
+#
+# The feature line is picked so the FIPS story holds. `tokio1-rustls` gives the
+# tokio+rustls transport; `aws-lc-rs` forwards to `rustls?/aws-lc-rs`, this
+# workspace's mandated provider. The trap is next door: `tokio1-rustls-tls`
+# additionally enables `rustls-tls = ["webpki-roots", "rustls", "ring"]`, so the
+# `-tls` spelling would pull `ring` in beside `aws-lc-rs`. It is not enabled
+# here and `make fips-policy` is what keeps it that way.
+#
+# Dodging `rustls-tls` also drops lettre's only *explicit* root-certificate
+# feature (`webpki-roots`), which would leave `RootCertStore::empty()` and a
+# transport that cannot verify any relay. `rustls-native-certs` is lettre's
+# other root source — an implicit feature from its optional dependency of the
+# same name, which `CertificateStore::Default` prefers over `webpki-roots` when
+# enabled (lettre `transport/smtp/client/tls.rs`, `build_rustls`) — and it is
+# `rustls-native-certs` 0.8, the exact crate and major this workspace already
+# declares below for its HTTP stack. So the roots come from the container's own
+# trust store, the same place every other TLS client in this workspace gets
+# them, rather than from a second, Mozilla-shaped copy compiled into the binary.
+#
+# `pool` is deliberately absent. It only adds lettre's connection pool, and a
+# notification mailer opens a connection every few minutes at most; without it
+# `AsyncSmtpTransport::build()` yields the unpooled transport, which is the
+# shape whose failures are easiest to reason about.
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "builder",
+    "hostname",
+    "tokio1",
+    "tokio1-rustls",
+    "aws-lc-rs",
+    "rustls-native-certs",
+] }
 
 # HTTP client (default-tls = rustls + aws-lc-rs in 0.13)
 reqwest = { version = "0.13", features = ["stream"] }
@@ -604,6 +655,11 @@ chrono = { version = "0.4", default-features = false, features = ["serde"] }
 # Kubernetes client (optional, for k8s feature gate)
 kube = { version = "3.0", default-features = false }
 k8s-openapi = { version = "0.27", default-features = false }
+# `kube-core`'s own `LogParams::since_time` type (`jiff::Timestamp`), not
+# `time::OffsetDateTime` — pulled in only where a caller builds that field
+# directly (`qa-runs`'s `argo` feature). Matches the `std` feature
+# `kube-core` itself enables.
+jiff = { version = "0.2.16", default-features = false, features = ["std"] }
 
 # DSN parsing
 dsn = "1.1.1"

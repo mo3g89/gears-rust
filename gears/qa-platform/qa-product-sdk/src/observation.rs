@@ -90,11 +90,13 @@ pub enum FailureClass {
 ///
 /// # Why `detail` is `&'static str`
 ///
-/// This is the enforcement point for the rule in
-/// `PRODUCT-PLUGINS-DESIGN.md` §9, which exists because a measured leak on
-/// 2026-08-28 put a PEM private key on the platform page: a serde error
-/// quoted the whole offending scalar, and for a document that *is* one scalar
-/// the offending scalar is the whole document.
+/// This is the enforcement point for the "Credential containment" rule in
+/// `gears/qa-platform/docs/features/product-plugins.md` (no section
+/// numbers in that document; `PRODUCT-PLUGINS-DESIGN.md`, cited here before
+/// the docs squash, no longer exists). The rule exists because a measured
+/// leak on 2026-08-28 put a PEM private key on the platform page: a serde
+/// error quoted the whole offending scalar, and for a document that *is* one
+/// scalar the offending scalar is the whole document.
 ///
 /// A `String` here would let a plugin author write
 /// `format!("{upstream_error}")` and reproduce that leak from inside a crate

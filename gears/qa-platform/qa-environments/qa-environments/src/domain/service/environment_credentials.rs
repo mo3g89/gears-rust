@@ -752,9 +752,12 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                 // the plugin was handed the submitted plaintext in
                 // `CredentialInput`. This is the one place in this file where
                 // a plugin-controlled runtime string is interpolated into an
-                // operator-facing message, and spec §9 layer 1 exists to make
-                // exactly that inexpressible for *failure* text
-                // (`PluginFailure::detail` is `&'static str`).
+                // operator-facing message, and the "Credential containment"
+                // rule's layer 1 (`PRODUCT-PLUGINS-DESIGN.md` §9, cited here
+                // before the docs squash, no longer exists; the rule itself
+                // is unchanged) exists to make exactly that inexpressible
+                // for *failure* text (`PluginFailure::detail` is
+                // `&'static str`).
                 //
                 // It is bounded by layer 3 rather than by layer 1: the
                 // leak-conformance harness plants a canary in the submitted

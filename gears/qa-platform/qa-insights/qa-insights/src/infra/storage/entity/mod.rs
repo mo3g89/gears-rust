@@ -441,6 +441,8 @@ mod tests {
             run_queue_queued_slack_enabled: ActiveValue::Set(false),
             email_smtp_host: ActiveValue::Set("smtp.example.com".to_owned()),
             email_smtp_port: ActiveValue::Set(587),
+            email_smtp_username: ActiveValue::Set("qa@example.com".to_owned()),
+            email_smtp_credstore_ref: ActiveValue::Set("qa-smtp-password".to_owned()),
             email_from: ActiveValue::Set("qa@example.com".to_owned()),
             email_recipients: ActiveValue::Set("a@example.com, b@example.com".to_owned()),
             email_enabled: ActiveValue::Set(true),

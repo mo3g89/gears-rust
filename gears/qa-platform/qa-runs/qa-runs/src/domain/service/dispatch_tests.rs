@@ -21,7 +21,8 @@ use uuid::Uuid;
 
 use super::*;
 use crate::domain::metrics::{
-    QA_RUNS_DISPATCH, QA_RUNS_DISPATCH_DURATION, QA_RUNS_QUEUE_WAIT, QA_RUNS_QUEUE_WAIT_DURATION,
+    QA_RUNS_DISPATCH, QA_RUNS_DISPATCH_DURATION, QA_RUNS_FREE_TO_START_DURATION,
+    QA_RUNS_FREE_TO_START_UNANCHORED, QA_RUNS_QUEUE_WAIT, QA_RUNS_QUEUE_WAIT_DURATION,
 };
 use crate::domain::ports::run_executor::MountSpec;
 use crate::domain::service::admission::tests::fakes::{
@@ -907,10 +908,13 @@ async fn the_global_budget_is_threaded_across_platforms() {
     for n in 0..4u128 {
         let spec = crate::domain::ports::run_executor::RunSpec {
             run_id: Uuid::from_u128(0x9000 + n),
+            tenant_id: Uuid::new_v4(),
             run_name: format!("other-{n}"),
             nodes: vec![crate::domain::ports::run_executor::ExecutionNode {
                 name: "repo-a".to_owned(),
                 bundle_ref: "bundle://x".to_owned(),
+                bundle_id: Uuid::new_v4(),
+                bundle_token: String::new(),
                 test_files: vec!["tests/a.py".to_owned()],
             }],
             env: crate::domain::ports::run_executor::RunEnv::default(),
@@ -1547,7 +1551,7 @@ async fn a_created_run_is_expired_through_queued_rather_than_stranded() {
             (RUN_1, RunState::Queued, RunState::Expired),
         ],
         "through the edge the launch should have taken, not by widening the state \
-         machine (DESIGN §3.1's run state machine is a user decision)"
+         machine (DESIGN \u{a7}3.1's run state machine is a user decision)"
     );
 }
 
@@ -3436,6 +3440,17 @@ impl crate::domain::ports::metrics::DispatchMetrics for PanickingMeter {
     fn queue_wait(&self, _waited: std::time::Duration) {
         panic!("a metrics adapter must never be able to fail the path it measures");
     }
+
+    fn free_to_start(&self, _waited: std::time::Duration) {
+        panic!("a metrics adapter must never be able to fail the path it measures");
+    }
+
+    fn free_to_start_unanchored(
+        &self,
+        _reason: crate::domain::ports::metrics::UnanchoredReason,
+    ) {
+        panic!("a metrics adapter must never be able to fail the path it measures");
+    }
 }
 
 /// **A dispatch pass emits exactly one counter increment and one duration.**
@@ -3801,6 +3816,12 @@ async fn a_persistently_panicking_adapter_is_called_once_and_then_never_again() 
 
         fn dispatch_decision(&self, _decision: crate::domain::ports::metrics::DispatchDecision) {}
         fn queue_wait(&self, _waited: std::time::Duration) {}
+        fn free_to_start(&self, _waited: std::time::Duration) {}
+        fn free_to_start_unanchored(
+            &self,
+            _reason: crate::domain::ports::metrics::UnanchoredReason,
+        ) {
+        }
     }
 
     let meter = Arc::new(CountingPanickingMeter(std::sync::atomic::AtomicUsize::new(
@@ -3929,5 +3950,285 @@ async fn the_recorded_cycle_duration_tracks_the_cycle_it_measures() {
         "and it cannot have taken between five and ten seconds either: an in-memory \
          fixture does not, so a sample there is a fabricated or stale duration rather \
          than a measured one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry: the dispatch-latency window itself
+//
+// `cpt-cf-qa-nfr-dispatch-latency` is stated over *the environment becomes
+// free → the queued run starts*. These tests are about which two instants the
+// number is between, because that is precisely what the retracted 2026-09-18
+// measurement got wrong: it reported queue residency — which starts at
+// `enqueued_at` and so carries the predecessor's remaining runtime — and
+// called it this. `docs/DESIGN.md` §3.11, "The dispatch-latency window, and
+// the measurement that was retracted".
+// ---------------------------------------------------------------------------
+
+/// **The two families measure different intervals, and this proves it on one
+/// drain.**
+///
+/// The fixture separates them by construction: the row was enqueued an hour
+/// ago, and its environment became free two seconds ago. Queue residency is
+/// therefore an hour — above the 60 s top boundary, so it lands in the
+/// overflow bucket — and the NFR's window is about two seconds, which cannot.
+/// A dispatch-latency series that had quietly been defined over `enqueued_at`
+/// would put its sample in the overflow bucket too, and this fails.
+///
+/// That is the whole of the retracted measurement's defect expressed as an
+/// assertion: the old number contained the predecessor's remaining runtime,
+/// and the new one starts after it.
+#[tokio::test]
+async fn a_drained_run_reports_the_window_since_its_environment_became_free() {
+    let waiting = row_aged(
+        ROW_1,
+        OWNER_TENANT,
+        RUN_1,
+        PLATFORM_A,
+        false,
+        QueueState::Queued,
+        3_600,
+    );
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(
+            OWNER_TENANT,
+            run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Queued),
+        )])))
+        .queue(Arc::new(FakeQueue::with(vec![waiting])))
+        .environments(Arc::new(FakeEnvironments::freed_at(
+            time::OffsetDateTime::now_utc() - TimeDuration::seconds(2),
+        )))
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(report.claimed, 1, "premise: the tick must drain the row");
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count(QA_RUNS_FREE_TO_START_DURATION),
+        1,
+        "the run was queued when its environment freed, so it has a window"
+    );
+    assert_eq!(
+        series.counter(QA_RUNS_FREE_TO_START_UNANCHORED),
+        0,
+        "a measured row must not also be counted as unmeasurable -- the two \
+         families partition the drain"
+    );
+    assert_eq!(
+        series.histogram_bucket_of(QA_RUNS_FREE_TO_START_DURATION, 3_600.0),
+        Some(0),
+        "nothing may sit in the bucket above the 60 s top boundary: the window \
+         started when the environment freed, two seconds ago, not when the run \
+         enqueued an hour ago"
+    );
+    assert_eq!(
+        series.histogram_bucket_of(QA_RUNS_QUEUE_WAIT_DURATION, 3_600.0),
+        Some(1),
+        "premise, and the contrast: queue residency for the same drain *is* above \
+         a minute, so the two families are genuinely measuring different intervals \
+         rather than agreeing by accident"
+    );
+}
+
+/// **A run that was not yet queued when its environment freed is counted, not
+/// measured.**
+///
+/// The environment freed an hour ago and the row joined the queue a minute
+/// ago — so nothing about that free transition delayed this run, and the
+/// interval between the two instants is the environment's idle time. Measuring
+/// it would report 3 600 s of "dispatch latency" for a run the dispatcher
+/// picked up promptly, which is the same class of error as the retraction but
+/// pointing the other way.
+///
+/// It is counted rather than dropped: the population that yields no sample has
+/// to be visible beside the one that does, or a quantile over four runs out of
+/// four hundred reads exactly like a quantile over all of them.
+#[tokio::test]
+async fn a_run_enqueued_after_its_environment_freed_is_counted_not_measured() {
+    let waiting = row_aged(
+        ROW_1,
+        OWNER_TENANT,
+        RUN_1,
+        PLATFORM_A,
+        false,
+        QueueState::Queued,
+        60,
+    );
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(
+            OWNER_TENANT,
+            run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Queued),
+        )])))
+        .queue(Arc::new(FakeQueue::with(vec![waiting])))
+        .environments(Arc::new(FakeEnvironments::freed_at(
+            time::OffsetDateTime::now_utc() - TimeDuration::seconds(3_600),
+        )))
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(report.claimed, 1, "premise: the tick must drain the row");
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count(QA_RUNS_FREE_TO_START_DURATION),
+        0,
+        "this run has no free-to-start window; an hour-long sample here would be \
+         the environment's idle time, not the dispatcher's latency"
+    );
+    assert_eq!(
+        series.counter_with(
+            QA_RUNS_FREE_TO_START_UNANCHORED,
+            &[("reason", "not_waiting_at_free")]
+        ),
+        1,
+        "and it must be counted, with the reason, so the histogram's coverage of \
+         the drain is readable"
+    );
+    assert_eq!(
+        series.counter(QA_RUNS_QUEUE_WAIT),
+        1,
+        "premise: the row really was drained -- queue residency still has it"
+    );
+}
+
+/// **An environment with no recorded transition to free yields no sample, and
+/// says so.**
+///
+/// The ordinary case for a never-leased environment, and for every environment
+/// in a database that was migrated while runs were in flight. The anchor is
+/// absent rather than wrong, and the only honest answers are "no measurement"
+/// and "here is why".
+#[tokio::test]
+async fn a_run_whose_environment_has_no_recorded_free_instant_is_counted_not_measured() {
+    let waiting = row_aged(
+        ROW_1,
+        OWNER_TENANT,
+        RUN_1,
+        PLATFORM_A,
+        false,
+        QueueState::Queued,
+        3_600,
+    );
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(
+            OWNER_TENANT,
+            run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Queued),
+        )])))
+        .queue(Arc::new(FakeQueue::with(vec![waiting])))
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(report.claimed, 1, "premise: the tick must drain the row");
+    let series = probe.collect();
+    assert_eq!(series.histogram_count(QA_RUNS_FREE_TO_START_DURATION), 0);
+    assert_eq!(
+        series.counter_with(
+            QA_RUNS_FREE_TO_START_UNANCHORED,
+            &[("reason", "no_free_instant")]
+        ),
+        1,
+    );
+}
+
+/// **Both runs of a parallel batch are measured, not just the one that won the
+/// `Free` state.**
+///
+/// Two parallel rows drained in one tick against a free environment: the first
+/// acquisition takes the environment out of `LeaseState::Free` and is handed
+/// the instant, the second joins a parallel hold and is correctly told `None`
+/// by the lease. They were nevertheless admitted by the same transition, in the
+/// same tick, under the same platform lock — so the drain carries the anchor
+/// across the batch.
+///
+/// Without that, a parallel-tier platform would report a sample for one run in
+/// every batch and count the rest as unanchored, and the NFR's coverage would
+/// collapse to the exclusive tier — which is exactly the narrowing the previous
+/// measurement had to apologise for.
+#[tokio::test]
+async fn every_run_in_a_parallel_batch_shares_the_free_instant_that_admitted_it() {
+    let first = row_aged(
+        ROW_1,
+        OWNER_TENANT,
+        RUN_1,
+        PLATFORM_A,
+        false,
+        QueueState::Queued,
+        3_600,
+    );
+    let second = row_aged(
+        ROW_2,
+        OWNER_TENANT,
+        RUN_2,
+        PLATFORM_A,
+        false,
+        QueueState::Queued,
+        3_600,
+    );
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![
+            (
+                OWNER_TENANT,
+                run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Queued),
+            ),
+            (
+                OWNER_TENANT,
+                run_fixture(RUN_2, Some(PLATFORM_A), false, RunState::Queued),
+            ),
+        ])))
+        .queue(Arc::new(FakeQueue::with(vec![first, second])))
+        .environments(Arc::new(FakeEnvironments::freed_at(
+            time::OffsetDateTime::now_utc() - TimeDuration::seconds(2),
+        )))
+        .metrics(probe.adapter())
+        .build()
+        .await;
+
+    let report = fakes.dispatch.run_tick().await;
+
+    assert_eq!(report.claimed, 2, "premise: both rows must drain in one tick");
+    let series = probe.collect();
+    assert_eq!(
+        series.histogram_count(QA_RUNS_FREE_TO_START_DURATION),
+        2,
+        "both runs were admitted by the same free transition, so both are measured"
+    );
+    assert_eq!(series.counter(QA_RUNS_FREE_TO_START_UNANCHORED), 0);
+    assert_eq!(
+        series.histogram_bucket_of(QA_RUNS_FREE_TO_START_DURATION, 3_600.0),
+        Some(0),
+        "and neither sample is the hour they spent in the queue"
+    );
+}
+
+/// **A tick that drains nothing records neither family.** The partition is
+/// over *drained* rows; an empty drain must not manufacture a zero-valued
+/// observation, which a quantile query cannot tell from a real window of zero.
+#[tokio::test]
+async fn a_tick_that_drains_nothing_records_no_free_to_start_window() {
+    let probe = MetricsProbe::new();
+    let fakes = Builder::new().metrics(probe.adapter()).build().await;
+
+    fakes.dispatch.run_tick().await;
+
+    let series = probe.collect();
+    assert_eq!(series.histogram_count(QA_RUNS_FREE_TO_START_DURATION), 0);
+    assert_eq!(series.counter(QA_RUNS_FREE_TO_START_UNANCHORED), 0);
+    assert_eq!(
+        series.counter(QA_RUNS_DISPATCH),
+        1,
+        "premise: the cycle itself was still counted, so this is the two families \
+         being empty rather than the adapter being uninstalled"
     );
 }

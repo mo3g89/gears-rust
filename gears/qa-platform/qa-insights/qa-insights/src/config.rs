@@ -114,8 +114,41 @@ pub struct QaInsightsConfig {
     ///
     /// Covers a run that finished before an earlier sweep's cutoff but was
     /// written after it. Also new; same reason as above.
+    ///
+    /// **Read this together with [`Self::reconcile_page_size`]**: the pair has a
+    /// relationship, and until 2026-09-21 it was the one that wedged the sweep.
+    /// A sweep starts at `watermark - lookback`, *behind* its own mark, so this
+    /// window is re-read on every pass. Widening it is not free — it is more
+    /// runs inside the page bound on every tick.
     pub reconcile_lookback_seconds: u64,
     /// Rows per reconciler page.
+    ///
+    /// **This must comfortably exceed the number of runs that finish within
+    /// [`Self::reconcile_lookback_seconds`]**, and that is a correctness
+    /// constraint rather than a tuning preference. At the defaults — 200 rows
+    /// against a one-hour lookback — that means a sustained rate well under 200
+    /// finished runs per hour.
+    ///
+    /// The sweep pages forward until it catches up
+    /// (`domain::service::reconcile::ReconcileService::sweep`, whose doc carries
+    /// the full history), so exceeding the rate no longer *stalls* ingest the
+    /// way it did for three days on the dev stand. What it still costs is work:
+    /// every tick re-walks the whole lookback window in pages of this size, and
+    /// one tick will walk at most `MAX_PAGES_PER_SWEEP * reconcile_page_size`
+    /// runs before leaving the rest to the next one.
+    ///
+    /// **Every shape is walkable, including a tie group wider than a page.**
+    /// This paragraph said the opposite until 2026-09-21 — that
+    /// `reconcile_page_size` runs sharing one identical `finished_at` could not
+    /// be stepped over and that raising this value was the operational escape.
+    /// That was true of the instant-only cursor the sweep shipped with and is
+    /// not true of the `(finished_at, id)` keyset one that replaced it, which
+    /// steps over a tie group of any width at any page size. Raising this value
+    /// is a throughput knob and nothing more.
+    ///
+    /// It bounds `POST /qa/v1/insights/rebuild` too, the same way and no longer
+    /// any harder: that endpoint pages on the same cursor under its own
+    /// `MAX_PAGES_PER_REBUILD` budget and reports where to resume.
     pub reconcile_page_size: u32,
     /// Legacy's `DEFAULT_COLLECT_BRANCH` (`manager/src/services/collect.rs:19`).
     ///
@@ -323,6 +356,42 @@ pub struct QaInsightsConfig {
     /// rather than decided in this wave, so this field stays unwired and
     /// pagination is **not** being added here.
     pub max_page_size: u32,
+    /// The SMTP relay hostnames this **deployment** permits qa-insights to
+    /// dial. Empty — the default — means no SMTP egress at all.
+    ///
+    /// # One knob doing two jobs, and the second one is why it is a list
+    ///
+    /// 1. **It is the binding switch.** `gear::init` binds
+    ///    `infra::notify::SmtpMailClient` when this list is non-empty and
+    ///    `infra::notify::UnsupportedMailClient` when it is empty. A deployment
+    ///    that never sets it behaves exactly as this gear did before SMTP
+    ///    existed, except that a send now *fails* instead of reporting an
+    ///    outcome — which is the point of the change.
+    /// 2. **It is the egress control**, because the network layer cannot be
+    ///    one. The relay address is `qa_notification_config.email_smtp_host`, a
+    ///    per-tenant column typed into the settings page at runtime; a
+    ///    Kubernetes `NetworkPolicy` matches CIDRs and pod labels and never DNS
+    ///    names, and all four qa-platform gears share one pod whose egress set
+    ///    already has to include arbitrary git remotes and arbitrary tenant
+    ///    management nodes. ADR-0011 (`cpt-cf-qa-adr-smtp-egress`) carries that
+    ///    argument in full. The consequence is that the *only* place a
+    ///    deployment can say which relays it is willing to reach is here, in
+    ///    the application, and `SmtpMailClient` enforces it per send.
+    ///
+    /// Hostnames, matched ASCII-case-insensitively against the tenant's
+    /// `email_smtp_host` exactly as stored — **not** CIDRs, not patterns, and
+    /// deliberately not resolved: comparing a configured name to a typed name
+    /// is a decision an operator can audit by reading two strings, where
+    /// resolving both to addresses makes the answer depend on what DNS said at
+    /// that moment.
+    ///
+    /// # No wildcard, and that is the whole value of the field
+    ///
+    /// There is no `["*"]`. A deployment that wants any relay has to name the
+    /// ones it wants; this is the only thing standing between a tenant's
+    /// settings page and an outbound TCP connection to an address of that
+    /// tenant's choosing, and a wildcard would make it decorative.
+    pub smtp_allowed_hosts: Vec<String>,
 }
 
 /// Legacy's floor on the collect poller's interval: five minutes.
@@ -386,6 +455,8 @@ impl Default for QaInsightsConfig {
             jira_poller_interval_seconds: 300,
             enable_tickers: true,
             max_page_size: 200,
+            // Empty: no SMTP egress unless a deployment asks for it by name.
+            smtp_allowed_hosts: Vec::new(),
         }
     }
 }

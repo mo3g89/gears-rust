@@ -71,11 +71,13 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 
 use crate::domain::metrics::{
-    QA_RUNS_DISPATCH, QA_RUNS_DISPATCH_DECISION, QA_RUNS_DISPATCH_DURATION, QA_RUNS_INGEST,
+    QA_RUNS_DISPATCH, QA_RUNS_DISPATCH_DECISION, QA_RUNS_DISPATCH_DURATION,
+    QA_RUNS_FREE_TO_START_DURATION, QA_RUNS_FREE_TO_START_UNANCHORED, QA_RUNS_INGEST,
     QA_RUNS_INGEST_DURATION, QA_RUNS_QUEUE_WAIT, QA_RUNS_QUEUE_WAIT_DURATION,
 };
 use crate::domain::ports::metrics::{
     DispatchDecision, DispatchMetrics, DispatchOutcome, IngestMetrics, IngestOutcome,
+    UnanchoredReason,
 };
 
 /// The `outcome` label key, shared by both counter families and both
@@ -87,6 +89,11 @@ const OUTCOME: &str = "outcome";
 /// rather than a second value of [`OUTCOME`], because the two answer different
 /// questions — see [`crate::domain::metrics::QA_RUNS_DISPATCH_DECISION`].
 const DECISION: &str = "decision";
+
+/// The `reason` label key on the unanchored-dispatch counter. A third key,
+/// again because it answers its own question: *why was this run not
+/// measurable*, which is neither an outcome nor a decision.
+const REASON: &str = "reason";
 
 /// Explicit second boundaries for every duration histogram.
 ///
@@ -133,6 +140,30 @@ const DECISION: &str = "decision";
 /// nothing more — whether either series actually measures its NFR is settled in
 /// [`QA_RUNS_QUEUE_WAIT_DURATION`]'s and [`QA_RUNS_DISPATCH_DURATION`]'s own
 /// docs, and for the dispatch duration the answer is no.
+///
+/// **What the retracted 2026-09-18 measurement did and did not establish
+/// about the "healthy dispatch below 5 s" claim above: nothing, either
+/// way.** It measured end-to-end exclusive-tier queue residency under a
+/// synthetic 20-environment permanent backlog (p95 ≈ 41.3 s) — a different
+/// quantity than the *post-free dispatch window* this design argument and
+/// `cpt-cf-qa-nfr-dispatch-latency` both name, so it neither confirms nor
+/// refutes whether a healthy dispatch lands below 5 s, only how deep a
+/// permanently-backlogged queue gets. This paragraph's design argument,
+/// `QaRunsConfig`'s `dispatcher_interval_seconds` doc,
+/// `DispatchService::run_tick`'s interval doc and this module's own
+/// boundary-membership test
+/// (`the_declared_boundaries_put_the_nfr_thresholds_on_bucket_edges`) all
+/// state the 5 s/10 s figures unchanged by it, because nothing in it bears
+/// on them. `docs/DESIGN.md` §3.11, "The dispatch-latency window, and the
+/// measurement that was retracted", has that account.
+///
+/// **The window has since been measured over its own two instants**
+/// (2026-09-21, p95 4.21 s / 4.51 s — same section), and the boundaries here
+/// are the one thing it names as unfinished: 5 → 10 → 30 cannot place a p95
+/// more precisely than a bucket, so those quantiles come from per-sample SQL
+/// and an alert written against this histogram wants a boundary nearer the
+/// requirement's own threshold. Adding one is a change to make with the
+/// alert in hand.
 const DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];
@@ -153,6 +184,8 @@ pub struct QaRunsMetricsMeter {
     dispatch_duration: Histogram<f64>,
     queue_wait: Counter<u64>,
     queue_wait_duration: Histogram<f64>,
+    free_to_start_duration: Histogram<f64>,
+    free_to_start_unanchored: Counter<u64>,
     ingest: Counter<u64>,
     ingest_duration: Histogram<f64>,
 }
@@ -196,6 +229,22 @@ impl QaRunsMetricsMeter {
                 )
                 .with_boundaries(DURATION_BUCKETS.to_vec())
                 .build(),
+            free_to_start_duration: meter
+                .f64_histogram(QA_RUNS_FREE_TO_START_DURATION)
+                .with_description(
+                    "Seconds between a queued run's environment becoming free and its \
+                     execution being requested; the dispatch-latency NFR's own quantity",
+                )
+                .with_boundaries(DURATION_BUCKETS.to_vec())
+                .build(),
+            free_to_start_unanchored: meter
+                .u64_counter(QA_RUNS_FREE_TO_START_UNANCHORED)
+                .with_description(
+                    "Drained runs that yielded no dispatch-latency sample, by why \
+                     (no_free_instant / not_waiting_at_free / no_enqueue_instant / \
+                     negative_span)",
+                )
+                .build(),
             ingest: meter
                 .u64_counter(QA_RUNS_INGEST)
                 .with_description(
@@ -233,6 +282,20 @@ impl DispatchMetrics for QaRunsMetricsMeter {
         // fixed label set after dashboards key on it.
         self.queue_wait.add(1, &[]);
         self.queue_wait_duration.record(waited.as_secs_f64(), &[]);
+    }
+
+    fn free_to_start(&self, waited: Duration) {
+        // No attributes, for the reason `queue_wait` gives above — and one
+        // more that is specific to this family: it is read as a single p95
+        // against a single stated requirement, so a dimension that split the
+        // series would split the number the requirement is checked against.
+        self.free_to_start_duration
+            .record(waited.as_secs_f64(), &[]);
+    }
+
+    fn free_to_start_unanchored(&self, reason: UnanchoredReason) {
+        self.free_to_start_unanchored
+            .add(1, &[KeyValue::new(REASON, reason.as_str())]);
     }
 }
 

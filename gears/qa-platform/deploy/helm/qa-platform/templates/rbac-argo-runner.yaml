@@ -1,0 +1,73 @@
+{{/* The runner pod's own permissions -- exactly what Argo's executor
+     (the `wait` container, not `main`) needs to report a run's result at
+     all, and nothing else.
+
+     WHY THIS EXISTS, AND WHY IT ALMOST DIDN'T: `argo-runner-serviceaccount.yaml`
+     first shipped this account with NO Role at all, on the reasoning that an
+     identity with no permissions was the point. That broke every run: `wait`
+     writes a `workflowtaskresults` object per step by calling the API server
+     AS THIS SERVICE ACCOUNT, and with nothing bound to it every such call is
+     `forbidden` -- the run still executes and still produces output, but
+     fails at the very end with `exit code 64`, which is exactly the failure
+     `ArgoExecutorConfig::workflow_service_account`'s own doc describes
+     measuring against the namespace `default` account on 2026-08-27. Swapping
+     `default` for an equally toothless account of our own moved WHICH
+     account failed, not whether one did. The finding this task exists to
+     fix -- a declared, reviewed identity instead of whatever `default`
+     happens to be -- survives; "reviewed" has to include reviewing it can
+     actually do the one thing it must.
+
+     EXACTLY TWO VERBS, on ONE resource, and both are read off a live cluster
+     rather than assumed: `kubectl get role argo-workflows-workflow -n argo -o
+     yaml` (the Role the argo-workflows Helm chart itself installs for its
+     OWN executor identity, in this same `argo` namespace) carries precisely
+
+       apiGroups: [argoproj.io]
+       resources: [workflowtaskresults]
+       verbs: [create, patch]
+
+     `create` is the verb the measured `exit code 64` failure names. `patch`
+     is granted alongside it on that same evidence, not defensively: the
+     executor's own Role needs it and workflowtaskresults objects are known to
+     be written once and then updated in place as a step's output arrives, not
+     recreated per update, and this Role grants nothing this cluster's own
+     Argo installation does not also grant its executor for the identical
+     object. NOT granted: `get`/`list`/`watch`/`delete` on the same resource
+     -- the executor's own Role does not carry them either, and the object is
+     read back and reaped by the WORKFLOW CONTROLLER, a different identity
+     entirely, not by anything running as this account. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: qa-platform-runner
+  namespace: {{ .Values.argo.namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: argo-runner
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflowtaskresults"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: qa-platform-runner
+  namespace: {{ .Values.argo.namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: argo-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: qa-platform-runner
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.argo.workflowServiceAccount }}
+    # This Role/RoleBinding and the ServiceAccount they grant access to are
+    # ALL provisioned in .Values.argo.namespace (unlike rbac-argo.yaml's
+    # RoleBinding, whose subject lives in the release namespace instead) --
+    # so an explicit `namespace:` is not load-bearing the way it is there,
+    # but it is written anyway: the two RBAC files read the same regardless
+    # of which namespace a subject happens to share with its binding.
+    namespace: {{ .Values.argo.namespace }}

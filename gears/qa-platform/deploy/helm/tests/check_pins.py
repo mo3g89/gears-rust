@@ -21,7 +21,15 @@ HOST = "example-pin-test.invalid"
 def render(origin):
     out = subprocess.run(
         ["helm", "template", "qa-platform", str(CHART),
-         "--namespace", "qa-platform", "--set", f"publicOrigin={origin}"],
+         "--namespace", "qa-platform", "--set", f"publicOrigin={origin}",
+         # keycloak.adminPassword has no default (WS3 Task 3) -- any value
+         # that is not the literal "admin" satisfies the render.
+         "--set", "keycloak.adminPassword=guard-fixture-not-a-real-password",
+         # Both signing secrets have no default either (2026-09-21): the
+         # per-render `randAlphaNum` fallback became a pod roll on every
+         # upgrade once the gears Deployment started hashing the ConfigMap.
+         "--set", "bundleDownloadSigningSecret=guard-fixture-not-a-real-bundle-key",
+         "--set", "collectReportSigningSecret=guard-fixture-not-a-real-collect-key"],
         capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     return [d for d in yaml.safe_load_all(out.stdout) if d]

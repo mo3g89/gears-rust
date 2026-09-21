@@ -513,6 +513,7 @@ fn synced_repo_fixture(default_branch: &str) -> qa_catalog_sdk::TestRepository {
         content_root: String::new(),
         credential_ref: None,
         last_synced_at: Some(now),
+        head_commit: Some(super::test_support::SYNCED_HEAD_COMMIT.to_owned()),
         sync_error: None,
         created_at: now,
         updated_at: now,
@@ -1307,5 +1308,249 @@ async fn a_file_directly_under_tests_infers_its_own_filename_as_the_component() 
         universe[0].component.as_deref(),
         Some("test_flat.py"),
         "legacy quirk, ported verbatim: the inference does not check for a directory"
+    );
+}
+
+/// Proves the discovery cache is actually consulted, not merely present and
+/// coincidentally correct. A test that just calls `list_plans` twice without
+/// changing anything would pass even with no cache at all — the walk would
+/// simply run twice and produce the same answer. So this test changes the
+/// working copy *between* the two calls, without advancing `last_synced_at`
+/// (mirroring "no sync happened yet"), and asserts the second call still
+/// returns the FIRST call's answer. If discovery re-walked, it would see the
+/// new file and the assertion would fail for the right reason.
+#[tokio::test]
+async fn list_plans_serves_a_second_call_from_cache_without_rewalking() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, workdir) = synced_fixture(repo_id);
+
+    write(&workdir, "plans/smoke.yaml", VALID_PLAN_A);
+
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+    let first = svc
+        .list_plans(&ctx(tenant_id), repo_id, "main")
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1, "sanity: one plan discovered on the first walk");
+
+    // The working copy changes (a plan is added) but `last_synced_at` does
+    // not move — nothing analogous to a sync happened. A correct cache must
+    // not notice this.
+    write(&workdir, "plans/upgrade.yaml", VALID_PLAN_B);
+
+    let second = svc
+        .list_plans(&ctx(tenant_id), repo_id, "main")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        second, first,
+        "unchanged last_synced_at must serve the cached answer, not a re-walk that would \
+         have picked up the newly written plans/upgrade.yaml"
+    );
+}
+
+/// The other half of the same claim: when the **revision** advances (a sync
+/// landed that actually moved the branch), the cache must invalidate and the
+/// new file must be picked up. Without this, a cache that never re-walks
+/// (e.g. one keyed only on `(repo_id, branch)`, ignoring the revision
+/// entirely) would also pass the test above.
+///
+/// This used to advance `last_synced_at` alone and assert a re-walk. That is
+/// now the *opposite* of the contract — a timestamp that moves while the
+/// revision does not is precisely the re-sync-found-nothing case the key
+/// exists to serve from cache — so the trigger moved to `head_commit` rather
+/// than the assertion being relaxed.
+#[tokio::test]
+async fn list_plans_rewalks_once_the_revision_advances() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, workdir) = synced_fixture(repo_id);
+    let repos_for_touch = Arc::clone(&repos);
+
+    write(&workdir, "plans/smoke.yaml", VALID_PLAN_A);
+
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+    let first = svc
+        .list_plans(&ctx(tenant_id), repo_id, "main")
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+
+    write(&workdir, "plans/upgrade.yaml", VALID_PLAN_B);
+    repos_for_touch.touch_head_commit(
+        time::OffsetDateTime::now_utc() + time::Duration::seconds(1),
+        "fedcba9876543210fedcba9876543210fedcba98",
+    );
+
+    let second = svc
+        .list_plans(&ctx(tenant_id), repo_id, "main")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        second.len(),
+        2,
+        "a new head_commit must invalidate the cache and pick up the new plan file"
+    );
+}
+
+/// The saving this re-key exists for, asserted directly: a sync that finds
+/// nothing new advances `last_synced_at` and leaves `head_commit` alone, and
+/// the walk must be served from cache.
+///
+/// Under the old timestamp key this re-walked every time — which is the
+/// defect, and it is invisible to the two tests above because both of them
+/// hold the timestamp still or move both fields together.
+#[tokio::test]
+async fn a_sync_that_found_nothing_new_does_not_rewalk() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, workdir) = synced_fixture(repo_id);
+    let repos_for_touch = Arc::clone(&repos);
+
+    write(&workdir, "plans/smoke.yaml", VALID_PLAN_A);
+
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+    let first = svc
+        .list_plans(&ctx(tenant_id), repo_id, "main")
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1, "sanity: one plan discovered on the first walk");
+
+    // A new plan file appears on disk, and the sync timestamp advances — but
+    // the revision does not, which is what a fetch that found the same tip
+    // leaves behind. The cached answer must stand: if the revision is
+    // unchanged the working copy is unchanged, and anything that appeared
+    // under it did not arrive through a sync.
+    write(&workdir, "plans/upgrade.yaml", VALID_PLAN_B);
+    repos_for_touch.touch_synced_at(time::OffsetDateTime::now_utc() + time::Duration::seconds(1));
+
+    let second = svc
+        .list_plans(&ctx(tenant_id), repo_id, "main")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        second, first,
+        "an unchanged head_commit must serve the cached answer even though \
+         last_synced_at advanced -- that saving is the whole point of the re-key"
+    );
+}
+
+/// The regression the re-key could have introduced, and the reason
+/// `content_root` is in the cache key.
+///
+/// `update_repo` clears the synced state when `content_root` changes, and the
+/// re-sync that follows restores the **same** `head_commit` — the column
+/// moved, the commit did not. A cache keyed on the revision alone would match
+/// its pre-change entry and keep serving plans discovered under the old root.
+/// The old timestamp key survived this only incidentally, because the re-sync
+/// minted a fresh timestamp.
+#[tokio::test]
+async fn a_content_root_change_invalidates_even_though_the_revision_is_unchanged() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, workdir) = synced_fixture(repo_id);
+    let repos_for_touch = Arc::clone(&repos);
+
+    // Discovery is `<root>/plans/*.yaml`, flat and non-recursive, so these two
+    // files are reachable only from their own content root: `smoke` from the
+    // repository root, `upgrade` from `suites`. That makes the two roots
+    // distinguishable by *which* plan comes back, which is a sharper assertion
+    // than a count.
+    write(&workdir, "plans/smoke.yaml", VALID_PLAN_A);
+    write(&workdir, "suites/plans/upgrade.yaml", VALID_PLAN_B);
+
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+    let first = svc
+        .list_plans(&ctx(tenant_id), repo_id, "main")
+        .await
+        .unwrap();
+    let first_paths: Vec<_> = first.iter().map(|p| p.path.clone()).collect();
+    assert_eq!(
+        first_paths,
+        vec!["plans/smoke.yaml".to_owned()],
+        "sanity: the root walk sees only the root's own plan"
+    );
+
+    repos_for_touch.set_content_root("suites");
+
+    let second = svc
+        .list_plans(&ctx(tenant_id), repo_id, "main")
+        .await
+        .unwrap();
+    let second_paths: Vec<_> = second.iter().map(|p| p.path.clone()).collect();
+
+    assert_eq!(
+        second_paths,
+        vec!["plans/upgrade.yaml".to_owned()],
+        "a content_root change must invalidate the cache even though head_commit \
+         never moved; serving the old root's plans here is the 842273c07 defect \
+         class returning by another door"
+    );
+}
+
+/// `RepoService::update_repo` (`domain/service/repos.rs`) writes a
+/// `product_id` reassignment unconditionally, but only clears
+/// `last_synced_at` when `url`/`content_root` changed. A discovery cache
+/// keyed only on `last_synced_at` — as this one was before this fix — would
+/// keep serving the OLD `product_id` baked into its cached `Plan`s until the
+/// next sync or a process restart, while the uncached [`PlansService::get_plan`]
+/// already reflects the new one: the two endpoints would disagree about the
+/// very same plan. This test mutates only `product_id`, exactly as a
+/// reassignment would (the existing cache tests above only mutate the
+/// working copy or `last_synced_at`), and asserts `list_plans` and
+/// `get_plan` report the same, NEW product id.
+#[tokio::test]
+async fn list_plans_and_get_plan_agree_after_a_product_reassignment() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, workdir) = synced_fixture(repo_id);
+    let repos_for_reassign = Arc::clone(&repos);
+
+    write(&workdir, "plans/smoke.yaml", VALID_PLAN_A);
+
+    let svc = build_service(repos, tmp.path().to_path_buf()).await;
+
+    // Populate the discovery cache under the OLD product id.
+    let before = svc
+        .list_plans(&ctx(tenant_id), repo_id, "main")
+        .await
+        .unwrap();
+    assert_eq!(before.len(), 1, "sanity: one plan discovered on the first walk");
+
+    // Reassign the repository to a new product, without a sync landing —
+    // `last_synced_at` does not move, exactly as `update_repo` leaves it for
+    // a `product_id`-only change.
+    let new_product_id = Uuid::new_v4();
+    assert_ne!(
+        before[0].product_id, new_product_id,
+        "sanity: the fixture's product id must differ from the reassigned one"
+    );
+    repos_for_reassign.set_product_id(new_product_id);
+
+    let listed = svc
+        .list_plans(&ctx(tenant_id), repo_id, "main")
+        .await
+        .unwrap();
+    let got = svc
+        .get_plan(&ctx(tenant_id), repo_id, "main", "plans/smoke.yaml")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        got.product_id, new_product_id,
+        "get_plan is uncached and must already reflect the reassignment"
+    );
+    assert_eq!(
+        listed[0].product_id, new_product_id,
+        "list_plans must invalidate its cache on a product_id change alone, not only on a \
+         new last_synced_at, or it keeps serving the plan under its old, now-wrong product"
+    );
+    assert_eq!(
+        listed[0].product_id, got.product_id,
+        "list_plans and get_plan must agree about the same plan's product id"
     );
 }

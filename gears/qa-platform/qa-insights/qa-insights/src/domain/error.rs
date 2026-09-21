@@ -187,12 +187,12 @@ pub enum DomainError {
     /// constructor, and that repository method's own header.
     ///
     /// `resource` is the PEP resource type whose policy produced the scope
-    /// (`"qa.test_result"`), and it is `&'static str` for the same reason
-    /// [`Self::CorruptState`]'s `what` is: it is chosen at the call site from a
-    /// declared constant, never caller-controlled text. The offending predicate
-    /// *names* are logged at WARN and deliberately not carried here — a caller
-    /// needs to know their policy's shape is unusable, not which properties this
-    /// gear's tables happen to map.
+    /// (`"gts.cf.qa.insights.test_result.v1~"`), and it is `&'static str` for
+    /// the same reason [`Self::CorruptState`]'s `what` is: it is chosen at the
+    /// call site from a declared constant, never caller-controlled text. The
+    /// offending predicate *names* are logged at WARN and deliberately not
+    /// carried here — a caller needs to know their policy's shape is
+    /// unusable, not which properties this gear's tables happen to map.
     #[error("the authorization policy for {resource} yields a scope this operation cannot honour")]
     UnsupportedScope { resource: &'static str },
 
@@ -380,9 +380,22 @@ impl DomainError {
 
 /// Review finding #25: the source is boxed into [`DomainError::Database`]
 /// rather than flattened to `e.to_string()`, so `.source()` reaches the
-/// original `DbError` and its own cause chain. See that variant's doc; the
-/// TODO(DE1302) comment and its lint allowance, which named exactly this fix,
-/// are gone with it.
+/// original `DbError` and its own cause chain. See that variant's doc.
+///
+/// **The `DE1302` allowance is deliberate and is NOT the defect that lint
+/// exists to catch.** `DE1302` fires on `.to_string()` inside a `From` impl
+/// because that is how an error chain gets destroyed -- the original type
+/// flattened to text, `.source()` answering `None`. Here the source is
+/// *also* boxed into the variant, so `.source()` reaches the original
+/// `DbError` and its own causes; the `String` is the display message
+/// alongside it, not instead of it. The lint cannot see the second field.
+///
+/// This doc previously claimed the allowance was "gone with" the fix. It was
+/// removed, and the lint went on firing -- nobody saw it, because the Dylint
+/// pass never reached this gear (it aborted on another gear's failures
+/// first). Restored, with the reason stated, rather than left as a violation
+/// that only stays quiet while the check does not run.
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<toolkit_db::DbError> for DomainError {
     fn from(e: toolkit_db::DbError) -> Self {
         DomainError::Database {

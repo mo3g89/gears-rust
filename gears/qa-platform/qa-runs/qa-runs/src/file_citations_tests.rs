@@ -1,5 +1,6 @@
-//! Every `path/to/file.rs:N` citation in this subsystem must name a file that
-//! exists.
+//! Two rules about file citations in this subsystem: every one must name a
+//! file that **exists**, and none that points into **Markdown** may carry a
+//! line number.
 //!
 //! # The defect class
 //!
@@ -17,15 +18,28 @@
 //!
 //! # What is checked, and what is deliberately not
 //!
-//! * **File existence only. Line numbers are never validated.** A citation is
-//!   read for its path; the `:N` is only what makes it recognisable as a
-//!   citation. Validating line numbers means every insertion above a cited line
-//!   is a test failure, which is noise rather than signal.
-//! * **Citing sites are `.rs`, `.ts`, `.tsx` and `.sh` under
-//!   `gears/qa-platform`.** Markdown is deliberately excluded: dated documents
-//!   legitimately cite files that no longer exist, and the exclusion list that
-//!   would be needed to carry them is the same enumerate-a-list method that
-//!   produced the misses this guard exists to catch.
+//! * **File existence only. Line numbers are never validated** — by
+//!   [`every_file_citation_in_this_subsystem_resolves`]. A citation is read for
+//!   its path; the `:N` is only what makes it recognisable as a citation.
+//!   Validating line numbers means every insertion above a cited line is a test
+//!   failure, which is noise rather than signal. For a citation into *code*
+//!   that trade still holds, and the line number stays allowed.
+//! * **Into Markdown, a line number is banned outright** — by
+//!   [`no_resolvable_markdown_citation_carries_a_line_number`], which is a rule
+//!   about the citation's *form* and needs no line to be read. See that test
+//!   for why Markdown is the case where the trade goes the other way.
+//! * **Citing sites are `.rs`, `.ts`, `.tsx`, `.sh` under `gears/qa-platform`,
+//!   plus the top-level `docs/*.md` files** — `DESIGN.md`, `PRD.md`,
+//!   `E2E-SCENARIOS.md` and any future direct child of `docs/`.
+//!   These three are this workstream's living design record, edited as often
+//!   as the code, and their file citations rot the exact way `.rs` citations
+//!   do — WS6b's own last commit left one dangling. **Nested Markdown stays
+//!   excluded**: `docs/ADR/**`, `docs/features/**` and `docs/.superpowers/**`
+//!   (dated planning notes and task reports, never committed) legitimately
+//!   cite a legacy tree or a past state of this repository, and the
+//!   exclusion list that would be needed to carry them safely is the same
+//!   enumerate-a-list method that produced the misses this guard exists to
+//!   catch.
 //! * **A citation is checked only when it is anchored at a real top-level
 //!   directory of `gears/qa-platform`** — which is read from the tree, not
 //!   listed here. That single rule is what keeps this guard allowlist-free.
@@ -64,8 +78,42 @@ const NOT_SOURCE: &[&str] = &[
     "target",
 ];
 
-/// Extensions this guard both scans and resolves.
+/// Extensions of the code files this guard scans wholesale and whose
+/// citations it resolves.
 const CODE_EXTENSIONS: &[&str] = &["rs", "tsx", "ts", "sh"];
+
+/// Extensions a citation's own path may end in to be recognised at all —
+/// [`CODE_EXTENSIONS`] plus `.md`, since a citation naming `docs/DESIGN.md`
+/// is exactly as real as one naming `gear.rs`. This is broader than
+/// [`CODE_EXTENSIONS`] on purpose: *scanning* every `.md` file for citations
+/// would pull in dated planning notes (see [`is_scanned_top_level_doc`]), but
+/// *recognising* a `.md` target when one is cited from a file this guard does
+/// scan is always safe to check.
+const CITATION_TARGET_EXTENSIONS: &[&str] = &["rs", "tsx", "ts", "sh", "md"];
+
+/// Is `file` one of the top-level `docs/*.md` files — `docs/DESIGN.md`,
+/// `docs/PRD.md`, and so on, but not anything under `docs/ADR/`,
+/// `docs/features/` or `docs/.superpowers/`?
+///
+/// This is the one Markdown carve-in, and it is a carve-*in* rather than an
+/// exemption list: it names a location (direct children of `docs/`), not a
+/// set of files, so a fourth top-level doc added later is covered without
+/// editing this function. Everything nested one directory deeper is a dated
+/// document by construction — an ADR records a decision as of its acceptance
+/// date, a feature doc a past shape, a `.superpowers/` plan or report a
+/// snapshot of a task that has since landed — and validating those would
+/// need exactly the curated exemption list this module's own header (above)
+/// already refuses to keep. `docs/DESIGN.md`, `docs/PRD.md` and
+/// `docs/E2E-SCENARIOS.md` are not dated: they are this
+/// workstream's living design record, edited as often as the code they describe, so a
+/// dangling citation in one of them is the same defect class as a dangling
+/// citation in a `.rs` file, not a legitimate historical reference.
+fn is_scanned_top_level_doc(file: &str) -> bool {
+    file.strip_prefix("docs/")
+        .is_some_and(|rest| {
+            !rest.contains('/') && Path::new(rest).extension().is_some_and(|ext| ext == "md")
+        })
+}
 
 /// `gears/qa-platform`, derived from this crate's own location.
 fn subsystem_root() -> PathBuf {
@@ -123,7 +171,7 @@ fn citations(text: &str) -> Vec<String> {
             start -= 1;
         }
         let candidate = &text[start..colon];
-        if CODE_EXTENSIONS
+        if CITATION_TARGET_EXTENSIONS
             .iter()
             .any(|ext| candidate.ends_with(&format!(".{ext}")))
         {
@@ -167,7 +215,7 @@ fn every_file_citation_in_this_subsystem_resolves() {
         let is_code = CODE_EXTENSIONS
             .iter()
             .any(|ext| file.ends_with(&format!(".{ext}")));
-        if !is_code {
+        if !is_code && !is_scanned_top_level_doc(file) {
             continue;
         }
         let Ok(text) = fs::read_to_string(root.join(file)) else {
@@ -199,5 +247,119 @@ fn every_file_citation_in_this_subsystem_resolves() {
          the file's new home; do not add an exemption.",
         dangling.len(),
         dangling.join("\n  "),
+    );
+}
+
+/// A citation that points **into Markdown** must name a heading, never a line.
+///
+/// # Why Markdown is the case the sibling guard's trade does not cover
+///
+/// [`every_file_citation_in_this_subsystem_resolves`] deliberately never
+/// validates a line number, because for code the cost of doing so is noise:
+/// every insertion above a cited line would fail the build. That reasoning is
+/// about *checking* the number. This test is about *writing* one, and for a
+/// Markdown target the two come apart:
+///
+/// * A prose document is reorganised far more often than a function moves, and
+///   a moved section takes every line below it with it. `DESIGN.md` §3.8 has
+///   been renumbered from §3.7 and shifted repeatedly during this gear's life;
+///   `m20260813_000003_initial`'s header records four such drifts and says what
+///   each one did — *"it silently repointed a citation at a different rule,
+///   which is worse than no citation"*.
+/// * A Markdown target has something to cite **instead**: a numbered section
+///   and a heading, which is greppable forever and survives every insertion
+///   above it. Code has no equivalent, which is why the line number stays
+///   allowed there.
+///
+/// So this is not the line-number validation the sibling guard refuses. It
+/// never opens the cited file and never asks what is at line N. It asks only
+/// whether the citation is written in a form that can rot, and a `:N` after a
+/// `.md` is exactly that form.
+///
+/// # Scope: resolvable targets only, and that is the whole rule
+///
+/// A citation is this test's business precisely when the cited document is
+/// **in this subsystem** — resolved the same way the sibling guard resolves
+/// one, by path-suffix match against the tree. That is not a convenience
+/// boundary, it is the boundary of what can be rewritten honestly: a heading
+/// citation is only writable by someone who can read the document and see what
+/// the heading says. The gear's own policy states the same limit from the
+/// other side — *"where a target has no heading, the line number is given
+/// together with enough quoted text to re-find it"*.
+///
+/// Left out by that rule, and each for the same reason:
+///
+/// * `../testrunner/docs/guides/run-parameters.md:37-43` — the legacy tree,
+///   which is not in this repository. The sibling guard excludes the whole of
+///   that tree from its own check on identical grounds.
+/// * `DECOMPOSITION.md:148`, `plans/2026-08-18-qa-insights-gear.md:330`,
+///   `exclusive-runs-and-the-queue.md:117` — documents that no longer exist
+///   here, or whose bare basename names several files in the wider repository
+///   and none in this subsystem.
+///
+/// Forcing those into heading form would mean inventing heading text for a
+/// document the author cannot open, and a citation that names the wrong
+/// heading is worse than the line number it replaced: the line number at least
+/// admits it may be stale, where a confident wrong heading does not.
+///
+/// This is an allowlist-free rule, in the same spirit as the sibling guard's
+/// anchor rule — it names a *property* (can this document be read from here?)
+/// rather than a list of files, so a Markdown document added later is covered
+/// without editing this test.
+#[test]
+fn no_resolvable_markdown_citation_carries_a_line_number() {
+    let root = subsystem_root();
+    let files = all_files(&root);
+    assert!(
+        files.len() > 300,
+        "the walk of {} found {} files, which cannot be right — a broken walk \
+         would make this whole test vacuous",
+        root.display(),
+        files.len(),
+    );
+
+    let index: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+
+    let mut offenders: Vec<String> = Vec::new();
+    for file in &files {
+        let is_code = CODE_EXTENSIONS
+            .iter()
+            .any(|ext| file.ends_with(&format!(".{ext}")));
+        if !is_code && !is_scanned_top_level_doc(file) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(root.join(file)) else {
+            continue;
+        };
+        for cited in citations(&text) {
+            if Path::new(cited.as_str())
+                .extension()
+                .is_none_or(|ext| ext != "md")
+            {
+                continue;
+            }
+            // Resolvable here, exactly as the sibling guard resolves: the
+            // cited document is one this repository can be read for its
+            // headings. Anything else is out of scope; see this test's doc.
+            let suffix = cited.rsplit_once(".../").map_or(cited.as_str(), |x| x.1);
+            let resolves = index
+                .iter()
+                .any(|known| *known == suffix || known.ends_with(&format!("/{suffix}")));
+            if resolves {
+                offenders.push(format!("{file}: `{cited}:N`"));
+            }
+        }
+    }
+    offenders.sort();
+    offenders.dedup();
+    assert!(
+        offenders.is_empty(),
+        "{} citation(s) into Markdown carry a line number:\n  {}\n\nCite the \
+         section number and heading text instead — `docs/DESIGN.md` §3.4, \
+         \"Execution events\" — never a line. A line number that is right today \
+         and wrong next week is a trap; a heading is greppable forever. Do not \
+         add an exemption, and do not \"helpfully\" restore the numbers.",
+        offenders.len(),
+        offenders.join("\n  "),
     );
 }

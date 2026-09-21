@@ -71,8 +71,7 @@
 //! The adapter is [`crate::infra::clients::QaRunsReader`].
 
 use async_trait::async_trait;
-use qa_runs_sdk::{Run, RunTestResult, ScheduleNotificationSettings};
-use time::OffsetDateTime;
+use qa_runs_sdk::{FinishedRunCursor, Run, RunTestResult, ScheduleNotificationSettings};
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -131,17 +130,32 @@ pub trait RunsReader: Send + Sync {
     /// a gap it never filled, which is the one outcome the watermark exists to
     /// prevent.
     ///
-    /// # The lower bound is inclusive, and a run still running is never
-    /// returned
+    /// # The lower bound, and the keyset half of it
     ///
-    /// `finished_at >= since`. An inclusive bound can re-deliver the run
-    /// sitting exactly on the watermark; re-delivering one run is the cheap
-    /// failure, because the backfill is idempotent. An exclusive bound would
-    /// drop a run that finished in the same clock tick as the watermark, which
-    /// is the expensive one. A run with a `NULL` `finished_at` — anything not
-    /// yet terminal — is never returned, which is why the sweep cannot
-    /// reconcile an in-progress run at all; see
+    /// [`FinishedRunCursor::starting_at`] is `finished_at >= at`, inclusive.
+    /// An inclusive bound can re-deliver the run sitting exactly on the
+    /// watermark; re-delivering one run is the cheap failure, because the
+    /// backfill is idempotent. An exclusive bound would drop a run that
+    /// finished in the same clock tick as the watermark, which is the
+    /// expensive one. A run with a `NULL` `finished_at` — anything not yet
+    /// terminal — is never returned, which is why the sweep cannot reconcile
+    /// an in-progress run at all; see
     /// [`crate::domain::service::reconcile`] for what that costs.
+    ///
+    /// [`FinishedRunCursor::after`] is `(finished_at, id) > (at, run_id)`,
+    /// strictly, under the very order this listing is sorted by. That is
+    /// what lets the sweep step over a group of runs sharing one instant that
+    /// is wider than its own page — the shape that stranded three days of
+    /// results on the dev stand, where single instants were shared by 54, 40,
+    /// 31 and 29 runs. See
+    /// [`ReconcileService::sweep`](crate::domain::service::reconcile::ReconcileService)
+    /// for the walk that uses it.
+    ///
+    /// The two halves are one parameter, and that is a guard rather than
+    /// tidiness: this listing is delegated through four layers, and at each of
+    /// them keeping the instant while dropping the id compiled, read like a
+    /// legitimate first page, and silently restored the bound that caused the
+    /// outage. [`FinishedRunCursor`] carries the whole argument.
     ///
     /// # Errors
     ///
@@ -150,7 +164,7 @@ pub trait RunsReader: Send + Sync {
     async fn list_runs_finished_since(
         &self,
         ctx: &SecurityContext,
-        since: OffsetDateTime,
+        cursor: FinishedRunCursor,
         limit: u32,
     ) -> Result<Vec<Run>, DomainError>;
 

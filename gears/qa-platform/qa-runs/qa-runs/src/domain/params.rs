@@ -124,17 +124,45 @@ use qa_runs_sdk::RunParameter;
 /// the floor, and `a_plugin_that_reserves_nothing_still_cannot_take_test_files`
 /// is what says so.
 ///
-/// `PRODUCT-PLUGINS-DESIGN.md` §7 once described that floor as including
-/// `COLLECT_ONLY` and the collect/progress URLs. It never did, and the spec now
-/// says so instead of the reverse — the SECURITY NOTE above is why, and closing
-/// the gap is a PRD amendment rather than an edit to this array (whole-branch
-/// review E-20/E-22, ruling F-23).
-pub const RESERVED_NAMES: [&str; 11] = [
+/// `PRODUCT-PLUGINS-DESIGN.md` §7 once claimed that floor included
+/// `COLLECT_ONLY` and the collect/progress URLs; it never did. That document
+/// is not in the repository any more, and its successor,
+/// `docs/features/product-plugins.md`, does not enumerate reserved names at
+/// all, so this array and the SECURITY NOTE above are the floor's only
+/// authoritative source now. Closing the gap is a PRD amendment rather than
+/// an edit to this array (whole-branch review E-20/E-22, ruling F-23).
+///
+/// # A twelfth name, added by WS2 Task 3: not a legacy port
+///
+/// `QA_RUNNER_PYTEST_ARGS` has no counterpart in the source system's eleven —
+/// it reserves control of `deploy/runner/entrypoint.sh`'s own pytest
+/// invocation, which did not exist in the ported process. Word-split
+/// unquoted into pytest's argv, it let a launch parameter of that name pass
+/// `-k`, `-x`, `--deselect` or `--ignore` and drop failing tests while the run
+/// still exited zero — the zero-results guard only catches *total*
+/// suppression, never a partial one. Reserving the name closes that escape
+/// hatch outright rather than raising it to a higher trust level: the runner
+/// pod's environment is built solely from `RunSpec.env` by the Argo adapter
+/// (`qa_runs::infra::executor::argo::workflow::node_env`,
+/// `infra/executor/argo/workflow.rs:364-370`) — there is no `envFrom`, no
+/// chart-level injection and no runner pod template — and all three
+/// environment write paths (run parameters here, plus pipeline and
+/// environment variables via `qa_environments_sdk::RESERVED_VARIABLE_NAMES`)
+/// now reject the name. No stand operator has a surviving path to set it.
+///
+/// It must also be reserved in `qa_environments_sdk::RESERVED_VARIABLE_NAMES`:
+/// pipeline and platform variables reach the same runner-pod environment a
+/// run parameter does (`domain::runvars`'s merge order), so leaving it off
+/// that list would just move a plan author's access from the run-parameter
+/// path to the platform-variable path. `the_two_reserved_name_lists_must_stay_identical`
+/// (`domain::ports::run_executor`) is what would have caught a one-sided edit.
+pub const RESERVED_NAMES: [&str; 12] = [
     "APP_BUILD",
     "APP_VERSION",
     "E2E_K8S_NAMESPACE",
     "KUBECONFIG",
     "PRODUCT_KEY",
+    "QA_RUNNER_PYTEST_ARGS",
     "RP_API_KEY",
     "RP_PROJECT",
     "SKIP_TESTS_WITH_BUGS",
@@ -474,15 +502,16 @@ mod tests {
         }
     }
 
-    /// The eleven reserved names, rejected case-insensitively. Enumerated in
-    /// full rather than sampled: the list is a frozen contract with the runner
-    /// (`routes/settings.rs:15-27`, matched at `:80-83`) and a missing entry is
-    /// a silent hole.
+    /// The twelve reserved names — eleven legacy, plus the platform's own
+    /// `QA_RUNNER_PYTEST_ARGS` — rejected case-insensitively. Enumerated in
+    /// full rather than sampled: the legacy eleven are a frozen contract with
+    /// the runner (`routes/settings.rs:15-27`, matched at `:80-83`) and a
+    /// missing entry is a silent hole.
     ///
     /// This test iterates [`RESERVED_NAMES`], so it cannot police the list's
     /// *contents* — shrink the constant and it still passes. That is
-    /// `the_reserved_list_is_the_eleven_legacy_names`'s job, and it writes the
-    /// literal.
+    /// `the_reserved_list_is_eleven_legacy_names_plus_one_platform_reservation`'s
+    /// job, and it writes the literal.
     #[test]
     fn every_reserved_name_is_rejected_case_insensitively() {
         for reserved in RESERVED_NAMES {
@@ -500,9 +529,17 @@ mod tests {
         }
     }
 
-    /// Exactly eleven, and exactly these, written as a literal so this test is
-    /// not its own oracle. Pins the list itself so a future addition is a
-    /// deliberate spec amendment rather than a quiet edit (decision D3).
+    /// Exactly these twelve, written as a literal so this test is not its own
+    /// oracle. Pins the list itself so a future addition is a deliberate spec
+    /// amendment rather than a quiet edit (decision D3).
+    ///
+    /// The floor used to be exactly the eleven legacy names ported from the
+    /// source system. `QA_RUNNER_PYTEST_ARGS` (WS2 Task 3) is the first name
+    /// added since: not a legacy port but a platform reservation, because it
+    /// expands unquoted into pytest's own argv and a launch parameter of that
+    /// name could drop failing tests while the run still exited zero. See
+    /// [`RESERVED_NAMES`]'s doc for the full rationale and why the same name
+    /// must be reserved in `qa_environments_sdk::RESERVED_VARIABLE_NAMES` too.
     ///
     /// The other half of the pair is
     /// `every_reserved_name_is_rejected_case_insensitively`, which iterates
@@ -511,7 +548,7 @@ mod tests {
     /// other: that one proves the rule is *applied*, this one proves the list
     /// is *right*.
     #[test]
-    fn the_reserved_list_is_the_eleven_legacy_names() {
+    fn the_reserved_list_is_eleven_legacy_names_plus_one_platform_reservation() {
         assert_eq!(
             RESERVED_NAMES,
             [
@@ -520,6 +557,7 @@ mod tests {
                 "E2E_K8S_NAMESPACE",
                 "KUBECONFIG",
                 "PRODUCT_KEY",
+                "QA_RUNNER_PYTEST_ARGS",
                 "RP_API_KEY",
                 "RP_PROJECT",
                 "SKIP_TESTS_WITH_BUGS",
@@ -527,6 +565,22 @@ mod tests {
                 "TEST_FILES",
                 "TEST_VERSION",
             ]
+        );
+    }
+
+    /// `QA_RUNNER_PYTEST_ARGS` specifically, named rather than left to
+    /// [`every_reserved_name_is_rejected_case_insensitively`]'s iteration over
+    /// [`RESERVED_NAMES`] — that test would silently stop covering this name
+    /// if it were ever dropped from the array, exactly the failure mode this
+    /// task exists to close. The value is a realistic attack: `-k` selects
+    /// only tests matching a substring, which is exactly how a plan author
+    /// could make a failing suite report a pass.
+    #[test]
+    fn qa_runner_pytest_args_is_reserved() {
+        let err = floor(&[p("QA_RUNNER_PYTEST_ARGS", "-k not_the_flaky_one")]).unwrap_err();
+        assert!(
+            matches!(err, ParamError::Reserved { .. }),
+            "QA_RUNNER_PYTEST_ARGS must be rejected as reserved, got {err:?}"
         );
     }
 

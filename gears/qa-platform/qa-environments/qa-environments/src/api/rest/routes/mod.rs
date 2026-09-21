@@ -40,14 +40,26 @@ impl LicenseFeature for License {}
 /// Register all routes for the `qa-environments` gear.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn register_routes(
-    mut router: Router,
+    router: Router,
     openapi: &dyn OpenApiRegistry,
     service: Arc<ConcreteAppServices>,
 ) -> Router {
-    router = environments::register_environment_routes(router, openapi);
-    router = variables::register_variable_routes(router, openapi);
+    register_operations(router, openapi).layer(axum::Extension(service))
+}
 
-    router.layer(axum::Extension(service))
+/// The route definitions alone, with nothing bound to them.
+///
+/// Split out of [`register_routes`] so registration can be driven by a caller
+/// that has no `AppServices`: this module's tests, and the
+/// `qa-platform-openapi` generator, which renders `docs/openapi.json` from
+/// this crate instead of from a running gateway. Public for the second of
+/// those — it binds nothing, so it cannot be mistaken for a way to mount the
+/// gear.
+///
+/// Same shape as qa-runs' and qa-insights' `register_operations`.
+pub fn register_operations(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
+    router = environments::register_environment_routes(router, openapi);
+    variables::register_variable_routes(router, openapi)
 }
 
 #[cfg(test)]

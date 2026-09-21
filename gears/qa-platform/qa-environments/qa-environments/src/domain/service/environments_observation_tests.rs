@@ -26,7 +26,7 @@
 //!
 //! What that costs is recorded rather than glossed over: editing the
 //! `VPADM_NAMESPACE` **variable** no longer changes where the plugin looks.
-//! `m20260903_000011_environment_plugin_columns` captured every override that
+//! `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash) captured every override that
 //! existed into `config`, and the credential form that makes `config`
 //! editable is Task 22's.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -468,7 +468,7 @@ async fn a_cycle_cancelled_before_it_starts_attempts_nothing() {
 //
 // The blank-override rule itself did not disappear either. It is enforced in
 // two places now, both tested:
-// `m20260903_000011_environment_plugin_columns`'s backfill (which skips a
+// `m20260903_000011_environment_plugin_columns`'s (folded into `migrations::m20260812_000001_initial` by the docs squash) backfill (which skips a
 // blank variable) and the plugin's own `observe::vpadm_namespace` (which
 // re-trims and re-filters whatever it finds in `config`).
 
@@ -1114,8 +1114,8 @@ async fn two_credentials_deriving_one_secret_name_do_not_overwrite_each_other() 
     // property of UUIDs -- see this test's own doc for the real shape.
     let colliding = Arc::new(TruncatingSecretObserver::truncating_at(0));
     assert_eq!(
-        colliding.derived_secret_name(&references[0]),
-        colliding.derived_secret_name(&references[1]),
+        colliding.derived_secret_name(Uuid::new_v4(), &references[0]),
+        colliding.derived_secret_name(Uuid::new_v4(), &references[1]),
         "the double must actually collide these two, or this test proves nothing"
     );
 

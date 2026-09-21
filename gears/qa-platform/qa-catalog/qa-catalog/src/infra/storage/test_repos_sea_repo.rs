@@ -78,6 +78,7 @@ impl TestReposRepository for OrmTestReposRepository {
             content_root: ActiveValue::Set(new.content_root),
             credential_ref: ActiveValue::Set(new.credential_ref),
             last_synced_at: ActiveValue::Set(None),
+            head_commit: ActiveValue::Set(None),
             sync_error: ActiveValue::Set(None),
             created_at: ActiveValue::Set(now),
             updated_at: ActiveValue::Set(now),
@@ -115,11 +116,20 @@ impl TestReposRepository for OrmTestReposRepository {
 
         // Invalidation and the field writes share one statement: the row can
         // never be observed advertising synced content for a new url.
-        let (last_synced_at, sync_error) = if invalidate_working_copy {
-            (ActiveValue::Set(None), ActiveValue::Set(None))
+        // `head_commit` is cleared with the rest: the working area is about to
+        // be wiped, so the revision it recorded describes content that no
+        // longer exists. Leaving it set would advertise a revision for a
+        // repository that is no longer synced at all.
+        let (last_synced_at, head_commit, sync_error) = if invalidate_working_copy {
+            (
+                ActiveValue::Set(None),
+                ActiveValue::Set(None),
+                ActiveValue::Set(None),
+            )
         } else {
             (
                 ActiveValue::Unchanged(existing.last_synced_at),
+                ActiveValue::Unchanged(existing.head_commit),
                 ActiveValue::Unchanged(existing.sync_error),
             )
         };
@@ -134,6 +144,7 @@ impl TestReposRepository for OrmTestReposRepository {
             content_root: ActiveValue::Set(update.content_root),
             credential_ref: ActiveValue::Set(update.credential_ref),
             last_synced_at,
+            head_commit,
             sync_error,
             created_at: ActiveValue::Unchanged(existing.created_at),
             updated_at: ActiveValue::Set(OffsetDateTime::now_utc()),
@@ -173,6 +184,7 @@ impl TestReposRepository for OrmTestReposRepository {
         scope: &AccessScope,
         id: Uuid,
         last_synced_at: Option<OffsetDateTime>,
+        head_commit: Option<String>,
         sync_error: Option<String>,
     ) -> Result<Option<TestRepository>, DomainError> {
         let existing = RepoEntity::find()
@@ -197,6 +209,7 @@ impl TestReposRepository for OrmTestReposRepository {
             content_root: ActiveValue::Unchanged(existing.content_root),
             credential_ref: ActiveValue::Unchanged(existing.credential_ref),
             last_synced_at: ActiveValue::Set(last_synced_at),
+            head_commit: ActiveValue::Set(head_commit),
             sync_error: ActiveValue::Set(sync_error),
             created_at: ActiveValue::Unchanged(existing.created_at),
             updated_at: ActiveValue::Set(OffsetDateTime::now_utc()),

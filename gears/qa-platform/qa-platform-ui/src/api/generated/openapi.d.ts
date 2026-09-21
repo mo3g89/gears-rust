@@ -4,194 +4,6 @@
  */
 
 export interface paths {
-    "/authz-resolver/v1/evaluate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["auth_z_resolver_api_rest_evaluate"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/credstore/v1/secrets": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Create a secret
-         * @description Create a new secret for the authenticated tenant.
-         */
-        post: operations["credstore.create_secret"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/credstore/v1/secrets/{ref}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get a secret by reference
-         * @description Retrieve a secret for the authenticated tenant, with walk-up resolution.
-         */
-        get: operations["credstore.get_secret"];
-        /**
-         * Update a secret by reference
-         * @description Update an existing secret for the authenticated tenant. Requires `If-Match` and never creates: a missing target fails the precondition (409); create via `POST /credstore/v1/secrets`.
-         */
-        put: operations["credstore.put_secret"];
-        post?: never;
-        /**
-         * Delete a secret by reference
-         * @description Delete a secret owned by the authenticated tenant.
-         */
-        delete: operations["credstore.delete_secret"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/gear-orchestrator/v1/gears": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List all registered gears
-         * @description Returns a list of all compiled-in and out-of-process gears with their capabilities, dependencies, running instances, and deployment mode.
-         */
-        get: operations["gear_orchestrator.list_gears"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/oagw/v1/routes": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List routes
-         * @description Retrieve routes with optional upstream_id filter
-         */
-        get: operations["oagw.list_routes"];
-        put?: never;
-        /**
-         * Create route
-         * @description Create a new route mapping for an upstream service
-         */
-        post: operations["oagw.create_route"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/oagw/v1/routes/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get route by ID
-         * @description Retrieve a specific route by its GTS identifier
-         */
-        get: operations["oagw.get_route"];
-        /**
-         * Update route
-         * @description Replace an existing route configuration
-         */
-        put: operations["oagw.update_route"];
-        post?: never;
-        /**
-         * Delete route
-         * @description Delete a route by its GTS identifier
-         */
-        delete: operations["oagw.delete_route"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/oagw/v1/upstreams": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List upstreams
-         * @description Retrieve a paginated list of upstream services
-         */
-        get: operations["oagw.list_upstreams"];
-        put?: never;
-        /**
-         * Create upstream
-         * @description Create a new upstream service configuration
-         */
-        post: operations["oagw.create_upstream"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/oagw/v1/upstreams/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get upstream by ID
-         * @description Retrieve a specific upstream by its GTS identifier
-         */
-        get: operations["oagw.get_upstream"];
-        /**
-         * Update upstream
-         * @description Replace an existing upstream service configuration
-         */
-        put: operations["oagw.update_upstream"];
-        post?: never;
-        /**
-         * Delete upstream
-         * @description Delete an upstream and cascade-delete its routes
-         */
-        delete: operations["oagw.delete_upstream"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/qa/v1/analytics/build-tests": {
         parameters: {
             query?: never;
@@ -201,7 +13,7 @@ export interface paths {
         };
         /**
          * Tests of one build
-         * @description The tests whose latest run executed against one build, with the status that run reported. The drill-down behind a bar of the overview's build distribution, sharing that endpoint's universe and its group filter. It does NOT share the overview's executions window: it takes neither day count, so its read is always bounded to the default 90 days - an overview asked for days_trend=365 can therefore draw a bar carrying tests this list does not return. build is required and non-blank, and is refused before every other parameter is looked at. It is matched case-insensitively, and the literal build unknown selects the tests whose latest run named no build at all. A build nothing ran against is an empty array rather than a 404. Ordering is by status - failures first, then passes, then everything else - and then by test name. The status here is the runner's own, so a test the overview lists as not_run because it was skipped appears with SKIPPED. Takes seven of the overview's nine parameters and neither day count, because it draws no chart. Requires the qa.test_result/list grant.
+         * @description The tests whose latest run executed against one build, with the status that run reported. The drill-down behind a bar of the overview's build distribution, sharing that endpoint's universe and its group filter. It does NOT share the overview's executions window: it takes neither day count, so its read is always bounded to the default 90 days - an overview asked for days_trend=365 can therefore draw a bar carrying tests this list does not return. build is required and non-blank, and is refused before every other parameter is looked at. It is matched case-insensitively, and the literal build unknown selects the tests whose latest run named no build at all. A build nothing ran against is an empty array rather than a 404. Ordering is by status - failures first, then passes, then everything else - and then by test name. The status here is the runner's own, so a test the overview lists as not_run because it was skipped appears with SKIPPED. Takes seven of the overview's nine parameters and neither day count, because it draws no chart. Requires the gts.cf.qa.insights.test_result.v1~/list grant.
          */
         get: operations["qa_insights.analytics_build_tests"];
         put?: never;
@@ -223,7 +35,7 @@ export interface paths {
         put?: never;
         /**
          * Launch the collect job on demand
-         * @description Launch a collect-only workflow for the given branch (or this deployment's default branch, when none is given) against every repository the caller's universe admits. A collect workflow enumerates exact test-case counts (pytest --collect-only, parametrize expanded) and reports them back, which is what lets the analytics overview's expected-cases number reflect parametrized tests exactly rather than as a static per-file estimate. A repository that fails to launch is skipped, not fatal to the request. launched counts launch calls this deployment's qa-runs accepted, not repositories confirmed to be collecting - branch existence is validated by qa-runs asynchronously, after this endpoint has already answered, so a repository lacking the requested branch can still be counted here and separately fail to ever report back. Requires the qa.test_result/collect grant, and that grant's compiled scope must constrain owner_tenant_id only - the same constraint POST /qa/v1/insights/rebuild requires and for the identical reason: this operation addresses no single row a narrower scope could express.
+         * @description Launch a collect-only workflow for the given branch (or this deployment's default branch, when none is given) against every repository the caller's universe admits. A collect workflow enumerates exact test-case counts (pytest --collect-only, parametrize expanded) and reports them back, which is what lets the analytics overview's expected-cases number reflect parametrized tests exactly rather than as a static per-file estimate. A repository that fails to launch is skipped, not fatal to the request. launched counts launch calls this deployment's qa-runs accepted, not repositories confirmed to be collecting - branch existence is validated by qa-runs asynchronously, after this endpoint has already answered, so a repository lacking the requested branch can still be counted here and separately fail to ever report back. Requires the gts.cf.qa.insights.test_result.v1~/collect grant, and that grant's compiled scope must constrain owner_tenant_id only - the same constraint POST /qa/v1/insights/rebuild requires and for the identical reason: this operation addresses no single row a narrower scope could express.
          */
         post: operations["qa_insights.trigger_collect"];
         delete?: never;
@@ -241,7 +53,7 @@ export interface paths {
         };
         /**
          * Export the analytics overview
-         * @description The overview's eight computed sections, reduced to one (or all of them) and rendered as JSON (default) or CSV. Shares the overview's nine parameters, its universe, its group filter and its executions window - see GET /qa/v1/analytics/overview for what each one does. format selects the body: the literal csv, case-insensitively, selects CSV; anything else, including an absent value, answers as JSON. There is no rejection for an unrecognized format. section selects the slice: summary, lists, heatmap, trend, flaky or all (default). On the JSON branch an unrecognized section is a 400 naming the six accepted spellings. On the CSV branch it is NOT rejected - it matches none of the five renderable blocks and the response is a 200 with an empty body, which is the system being replaced's own behaviour and is reproduced rather than corrected. build_distribution, quality_vectors and grouped have no section name of their own in either branch - all three are reachable only through section=all, exactly as in the system being replaced. The CSV summary block carries only total, passed, failed, not_run and their three percentages; the six per-case counters and case_expected (see GET /qa/v1/analytics/overview for what it computes) are on the JSON summary section and never on the CSV one. CSV field quoting matches the system being replaced exactly, including what it does NOT do: a bare carriage return is not a quoting trigger and a value starting with =, +, - or @ is not escaped - this is not a CSV-injection guard. The response carries a content-disposition header naming analytics-export.csv or analytics-export.json. Requires the qa.test_result/list grant, the same one the overview requires.
+         * @description The overview's eight computed sections, reduced to one (or all of them) and rendered as JSON (default) or CSV. Shares the overview's nine parameters, its universe, its group filter and its executions window - see GET /qa/v1/analytics/overview for what each one does. format selects the body: the literal csv, case-insensitively, selects CSV; anything else, including an absent value, answers as JSON. There is no rejection for an unrecognized format. section selects the slice: summary, lists, heatmap, trend, flaky or all (default). On the JSON branch an unrecognized section is a 400 naming the six accepted spellings. On the CSV branch it is NOT rejected - it matches none of the five renderable blocks and the response is a 200 with an empty body, which is the system being replaced's own behaviour and is reproduced rather than corrected. build_distribution, quality_vectors and grouped have no section name of their own in either branch - all three are reachable only through section=all, exactly as in the system being replaced. The CSV summary block carries only total, passed, failed, not_run and their three percentages; the six per-case counters and case_expected (see GET /qa/v1/analytics/overview for what it computes) are on the JSON summary section and never on the CSV one. CSV field quoting matches the system being replaced exactly, including what it does NOT do: a bare carriage return is not a quoting trigger and a value starting with =, +, - or @ is not escaped - this is not a CSV-injection guard. The response carries a content-disposition header naming analytics-export.csv or analytics-export.json. Requires the gts.cf.qa.insights.test_result.v1~/list grant, the same one the overview requires.
          */
         get: operations["qa_insights.analytics_export"];
         put?: never;
@@ -261,7 +73,7 @@ export interface paths {
         };
         /**
          * Analytics overview
-         * @description Eight computed sections over one product's test universe, in one payload: a pass/fail/not-run summary, the same universe as three sorted lists, a per-test day heatmap, a daily trend, the distribution of each test's latest build, the flaky tests, the Quality Vector breakdown and three group breakdowns. The universe is every test file qa-catalog resolves from the product's plans, and it is the denominator of every number here - a test with no execution row is not_run rather than absent, so total does not move with the data. product_id, version and scope are required; scope=plan additionally requires plan_id, which is the plan's path within its repository. An unknown product_id is an empty overview of zeros rather than a 404, because this gear reads the universe from qa-catalog and that read is not an existence oracle for a product. branch selects the branch whose plans define the universe AND narrows the executions to runs on that branch. Absent is the asymmetric case, and it is deliberate: the universe then comes from each repository's own default branch while every branch's executions stay in scope. days_heatmap defaults to 7 and is clamped to 1-30; days_trend defaults to 90 and is clamped to 7-365, and the flaky window is days_trend rather than a third setting. Both clamps are silent. The executions read is bounded to the wider of the two windows, so pass_count, fail_count, total_runs and the build distribution count that window rather than all of history, and widening days_trend widens them. group_by plus group_value narrow the summary, the lists, both charts, the build distribution and the flaky list to one component or tag; they deliberately do NOT narrow the three group breakdowns or the Quality Vector totals, which stay over the whole universe so the chart remains a comparison. group_by=environment narrows nothing at all, and a blank group_value narrows nothing, both of which are the behaviour of the system being replaced. summary.case_expected sums, per test file, the collect job's exact case count where the collect job has reported one for that file on this request's branch (branch, or the configured default collect branch - main unless overridden - when absent), and a static count parsed from the test source otherwise; the static count does not expand @pytest.mark.parametrize, so it is a lower bound wherever the exact count is not available, and a deployment that has never run a collect job still renders a non-zero total from the static counts alone. The environment breakdown carries an environment_id and an environment name resolved from qa-environments; the name is null for an environment the caller cannot see, and those bars sort last. Run identities are ids rather than names - there is no bulk run-name lookup to make one without a request per row. Requires the qa.test_result/list grant, the same one the dashboard and the test-result collections need, plus whatever qa-catalog requires to list a universe.
+         * @description Eight computed sections over one product's test universe, in one payload: a pass/fail/not-run summary, the same universe as three sorted lists, a per-test day heatmap, a daily trend, the distribution of each test's latest build, the flaky tests, the Quality Vector breakdown and three group breakdowns. The universe is every test file qa-catalog resolves from the product's plans, and it is the denominator of every number here - a test with no execution row is not_run rather than absent, so total does not move with the data. product_id, version and scope are required; scope=plan additionally requires plan_id, which is the plan's path within its repository. An unknown product_id is an empty overview of zeros rather than a 404, because this gear reads the universe from qa-catalog and that read is not an existence oracle for a product. branch selects the branch whose plans define the universe AND narrows the executions to runs on that branch. Absent is the asymmetric case, and it is deliberate: the universe then comes from each repository's own default branch while every branch's executions stay in scope. days_heatmap defaults to 7 and is clamped to 1-30; days_trend defaults to 90 and is clamped to 7-365, and the flaky window is days_trend rather than a third setting. Both clamps are silent. The executions read is bounded to the wider of the two windows, so pass_count, fail_count, total_runs and the build distribution count that window rather than all of history, and widening days_trend widens them. group_by plus group_value narrow the summary, the lists, both charts, the build distribution and the flaky list to one component or tag; they deliberately do NOT narrow the three group breakdowns or the Quality Vector totals, which stay over the whole universe so the chart remains a comparison. group_by=environment narrows nothing at all, and a blank group_value narrows nothing, both of which are the behaviour of the system being replaced. summary.case_expected sums, per test file, the collect job's exact case count where the collect job has reported one for that file on this request's branch (branch, or the configured default collect branch - main unless overridden - when absent), and a static count parsed from the test source otherwise; the static count does not expand @pytest.mark.parametrize, so it is a lower bound wherever the exact count is not available, and a deployment that has never run a collect job still renders a non-zero total from the static counts alone. The environment breakdown carries an environment_id and an environment name resolved from qa-environments; the name is null for an environment the caller cannot see, and those bars sort last. Run identities are ids rather than names - there is no bulk run-name lookup to make one without a request per row. Requires the gts.cf.qa.insights.test_result.v1~/list grant, the same one the dashboard and the test-result collections need, plus whatever qa-catalog requires to list a universe.
          */
         get: operations["qa_insights.analytics_overview"];
         put?: never;
@@ -281,7 +93,7 @@ export interface paths {
         };
         /**
          * Plan build distribution
-         * @description The plan's executions grouped by version, inside the same 90-day read window and the same plan_id matching as GET /qa/v1/analytics/plan/tests. total is every execution of the group; passed, failed and skipped match the runner's literal PASSED/FAILED/SKIPPED status and nothing else, so total can exceed their sum. A version no execution named renders as the build unknown, sorted after every named version. Requires the qa.test_result/list grant.
+         * @description The plan's executions grouped by version, inside the same 90-day read window and the same plan_id matching as GET /qa/v1/analytics/plan/tests. total is every execution of the group; passed, failed and skipped match the runner's literal PASSED/FAILED/SKIPPED status and nothing else, so total can exceed their sum. A version no execution named renders as the build unknown, sorted after every named version. Requires the gts.cf.qa.insights.test_result.v1~/list grant.
          */
         get: operations["qa_insights.analytics_plan_builds"];
         put?: never;
@@ -301,7 +113,7 @@ export interface paths {
         };
         /**
          * Plan test history
-         * @description Every test's execution history for one plan, inside the same 90-day read window and the same plan_id matching as GET /qa/v1/analytics/plan/tests. Each test's own results are newest first; build is the version that execution named, null rather than unknown when it named none - unlike GET /qa/v1/analytics/plan/builds, nothing here substitutes a label for a missing version. The array itself is ordered by test name, which is this gear's own choice: the system being replaced folds its rows into a hash map first and its own array order is consequently unspecified. Requires the qa.test_result/list grant.
+         * @description Every test's execution history for one plan, inside the same 90-day read window and the same plan_id matching as GET /qa/v1/analytics/plan/tests. Each test's own results are newest first; build is the version that execution named, null rather than unknown when it named none - unlike GET /qa/v1/analytics/plan/builds, nothing here substitutes a label for a missing version. The array itself is ordered by test name, which is this gear's own choice: the system being replaced folds its rows into a hash map first and its own array order is consequently unspecified. Requires the gts.cf.qa.insights.test_result.v1~/list grant.
          */
         get: operations["qa_insights.analytics_plan_test_history"];
         put?: never;
@@ -321,7 +133,7 @@ export interface paths {
         };
         /**
          * Plan test analytics
-         * @description Aggregated per-test analytics for one plan: the most recent execution's status, environment, version, run and JIRA reference, plus pass/fail/total counts over every execution inside the read window. plan_id is matched against the plan's path and, unlike scope=plan on GET /qa/v1/analytics/overview, against every repository the caller can see - there is no product_id here to fix one repository, and this is the same reading a caller's one plan_id string already gets from that endpoint: AnalyticsListItemDto ships repo_id too, but plan_id itself has only ever been the path half. pass_count and fail_count match the runner's literal PASSED/FAILED status and nothing else, so an ERROR execution counts toward the total but toward neither. The read is bounded to the trailing 90 days, the same NFR-driven default GET /qa/v1/analytics/build-tests uses, because the system being replaced reads this table with no window at all and this one is sized in the millions of rows. Ordered by test name. A plan_id naming nothing is an empty array rather than a 404. Requires the qa.test_result/list grant.
+         * @description Aggregated per-test analytics for one plan: the most recent execution's status, environment, version, run and JIRA reference, plus pass/fail/total counts over every execution inside the read window. plan_id is matched against the plan's path and, unlike scope=plan on GET /qa/v1/analytics/overview, against every repository the caller can see - there is no product_id here to fix one repository, and this is the same reading a caller's one plan_id string already gets from that endpoint: AnalyticsListItemDto ships repo_id too, but plan_id itself has only ever been the path half. pass_count and fail_count match the runner's literal PASSED/FAILED status and nothing else, so an ERROR execution counts toward the total but toward neither. The read is bounded to the trailing 90 days, the same NFR-driven default GET /qa/v1/analytics/build-tests uses, because the system being replaced reads this table with no window at all and this one is sized in the millions of rows. Ordered by test name. A plan_id naming nothing is an empty array rather than a 404. Requires the gts.cf.qa.insights.test_result.v1~/list grant.
          */
         get: operations["qa_insights.analytics_plan_tests"];
         put?: never;
@@ -341,13 +153,13 @@ export interface paths {
         };
         /**
          * List saved analytics views
-         * @description The caller's own saved analytics filter sets at one scope. scope is required and is all or plan, case-insensitively; scope=plan additionally requires repo_id and plan_path together, naming the plan the list is scoped to. plan_path is the same value GET /qa/v1/analytics/overview and its five siblings take as their plan_id query parameter; repo_id additionally disambiguates it across repositories, which those endpoints do not need to and this one does. A view is visible only to the caller who created it - two callers may hold a view of the same name at the same scope, and neither can see the other's. Ordered by most-recently-updated first. Requires the qa.saved_view/list grant.
+         * @description The caller's own saved analytics filter sets at one scope. scope is required and is all or plan, case-insensitively; scope=plan additionally requires repo_id and plan_path together, naming the plan the list is scoped to. plan_path is the same value GET /qa/v1/analytics/overview and its five siblings take as their plan_id query parameter; repo_id additionally disambiguates it across repositories, which those endpoints do not need to and this one does. A view is visible only to the caller who created it - two callers may hold a view of the same name at the same scope, and neither can see the other's. Ordered by most-recently-updated first. Requires the gts.cf.qa.insights.saved_view.v1~/list grant.
          */
         get: operations["qa_insights.list_saved_views"];
         put?: never;
         /**
          * Save a new analytics view
-         * @description Store a new analytics filter set owned by the caller. name is required and must be non-blank after trimming. scope is required and is all or plan; scope=plan additionally requires repo_id and plan_path together. plan_path is the same value the analytics endpoints (GET /qa/v1/analytics/overview and its siblings) take as plan_id; repo_id additionally disambiguates it across repositories. Note that query_json is opaque and may itself carry a plan_id belonging to that separate vocabulary - the two are not reconciled by this gear. A plan supplied alongside scope=all is accepted but not stored - it is a no-op on the plan half, not a rejection, matching the system being replaced's own permissiveness on this combination. query_json is an opaque JSON document this gear never inspects. 409 means a view of this name already exists at this owner, scope and plan. Requires the qa.saved_view/create grant.
+         * @description Store a new analytics filter set owned by the caller. name is required and must be non-blank after trimming. scope is required and is all or plan; scope=plan additionally requires repo_id and plan_path together. plan_path is the same value the analytics endpoints (GET /qa/v1/analytics/overview and its siblings) take as plan_id; repo_id additionally disambiguates it across repositories. Note that query_json is opaque and may itself carry a plan_id belonging to that separate vocabulary - the two are not reconciled by this gear. A plan supplied alongside scope=all is accepted but not stored - it is a no-op on the plan half, not a rejection, matching the system being replaced's own permissiveness on this combination. query_json is an opaque JSON document this gear never inspects. 409 means a view of this name already exists at this owner, scope and plan. Requires the gts.cf.qa.insights.saved_view.v1~/create grant.
          */
         post: operations["qa_insights.create_saved_view"];
         delete?: never;
@@ -366,13 +178,13 @@ export interface paths {
         get?: never;
         /**
          * Replace a saved analytics view
-         * @description A full replace of a saved view's scope, plan, name and query, taking the same body as the create. plan_path is the same value the analytics endpoints (GET /qa/v1/analytics/overview and its siblings) take as plan_id; repo_id additionally disambiguates it across repositories. Not a patch: every caller-decidable field is taken from the body. 404 covers both an id nobody owns and an id owned by a caller other than the caller making the request - the two are deliberately indistinguishable, so this endpoint cannot be used to learn whether an id exists for someone else. 409 means the new name collides with another view this caller already holds at the new scope and plan. Requires the qa.saved_view/update grant.
+         * @description A full replace of a saved view's scope, plan, name and query, taking the same body as the create. plan_path is the same value the analytics endpoints (GET /qa/v1/analytics/overview and its siblings) take as plan_id; repo_id additionally disambiguates it across repositories. Not a patch: every caller-decidable field is taken from the body. 404 covers both an id nobody owns and an id owned by a caller other than the caller making the request - the two are deliberately indistinguishable, so this endpoint cannot be used to learn whether an id exists for someone else. 409 means the new name collides with another view this caller already holds at the new scope and plan. Requires the gts.cf.qa.insights.saved_view.v1~/update grant.
          */
         put: operations["qa_insights.update_saved_view"];
         post?: never;
         /**
          * Delete a saved analytics view
-         * @description Delete a saved view by its own id - not by the (repo_id, plan_path) pair a plan-scoped view is keyed on; that pair identifies the plan the view is about, the same plan_path/plan_id an analytics endpoint would take, and is unrelated to which view is deleted here. Not idempotent: a second delete of the same id answers 404. 404 covers both an id nobody owns and one owned by another caller, for the same reason the replace endpoint's 404 does. Requires the qa.saved_view/delete grant.
+         * @description Delete a saved view by its own id - not by the (repo_id, plan_path) pair a plan-scoped view is keyed on; that pair identifies the plan the view is about, the same plan_path/plan_id an analytics endpoint would take, and is unrelated to which view is deleted here. Not idempotent: a second delete of the same id answers 404. 404 covers both an id nobody owns and one owned by another caller, for the same reason the replace endpoint's 404 does. Requires the gts.cf.qa.insights.saved_view.v1~/delete grant.
          */
         delete: operations["qa_insights.delete_saved_view"];
         options?: never;
@@ -461,7 +273,7 @@ export interface paths {
         };
         /**
          * Dashboard aggregate
-         * @description Run activity and the test counters behind it, in one payload. Live run state (active, queued, the recent list) is read from qa-runs on every request and is never cached here, because qa-runs owns it; the counters are computed over this gear's ingested results. days sets the length of the daily pass/fail trend: it defaults to 14 and is silently clamped to 3-90, so days=365 answers with 90 points rather than an error. Every day in the window is present, including days nothing ran. total_runs counts the runs this gear holds results for, which is not the same as every run ever launched - a run whose results have not been ingested yet is absent, and asynchronous ingest makes that a normal transient state. The recent list holds ten runs and the active list holds at most ten, using the same predicate as the active count, so a caller reading 23 active gets ten entries. The 24-hour block - failed_recent, failed_24h_count, failed_prev_24h_count, pass_rate_24h and pass_rate_prev_24h - has a window of its own and does not move with days; it counts a wider row set than the trends do, because a run that has not finished yet contributes to it. A pass rate is a ratio between 0 and 1 over passed-plus-failed rows, so skipped tests do not lower it, and it is null rather than 0 when the window held nothing to divide by. flaky_tests has a third window - seven days, also fixed - and holds at most ten tests that both passed and failed in it, flakiest first, where flakiest means the larger count of the smaller of the two status groups; a test that only passed or only failed is absent rather than listed with a zero, so an empty array is the ordinary answer on a healthy suite. quality_vectors_pass_rate has a fourth window, also seven days and also fixed, and holds one entry per Quality Vector declared by any test file with a row in that window, highest total first; a file declaring two vectors contributes its executions to both, so the totals across that array are not a row count, and an entry whose counters are all zero means every file carrying that vector was skipped. Three fields of the payload are deliberately absent rather than reported as zero, because nothing computes them yet: total_plans, total_schedules and environments_summary. product_id narrows every measured number on this payload to one product - the counts, both lists, the per-run trend, the daily trend, the 24-hour block, flaky_tests and quality_vectors_pass_rate all narrow with it, and none of them stays deployment-wide. The attribution is through the run's own target: a run naming a repository (directly, whether it is running a plan, a single test, or enumerating a repository's cases) is attributed to that repository's product; a run naming a custom plan spans repositories and is attributed to none. unattributable_runs is the one field product_id does not narrow, and it is not a measurement of the selected product: it counts the runs in the same window that belong to no product at all, whichever product they would otherwise have been under, so it is not the selected product's own dropped runs - there is no way to identify those, which is what makes the runs unattributable in the first place. It is 0 without product_id only because nothing was dropped then, not because those runs stop existing. Omitting product_id preserves today's deployment-wide behaviour exactly, and an unattributable run is included in that deployment-wide answer as it always was. Requires the qa.test_result/list grant every request needs, and a product-scoped request additionally requires qa.test_repo/list: resolving which repositories the selected product owns is a qa-catalog read of its own, refused independently of the first grant.
+         * @description Run activity and the test counters behind it, in one payload. Live run state (active, queued, the recent list) is read from qa-runs on every request and is never cached here, because qa-runs owns it; the counters are computed over this gear's ingested results. days sets the length of the daily pass/fail trend: it defaults to 14 and is silently clamped to 3-90, so days=365 answers with 90 points rather than an error. Every day in the window is present, including days nothing ran. total_runs counts the runs this gear holds results for, which is not the same as every run ever launched - a run whose results have not been ingested yet is absent, and asynchronous ingest makes that a normal transient state. The recent list holds ten runs and the active list holds at most ten, using the same predicate as the active count, so a caller reading 23 active gets ten entries. The 24-hour block - failed_recent, failed_24h_count, failed_prev_24h_count, pass_rate_24h and pass_rate_prev_24h - has a window of its own and does not move with days; it counts a wider row set than the trends do, because a run that has not finished yet contributes to it. A pass rate is a ratio between 0 and 1 over passed-plus-failed rows, so skipped tests do not lower it, and it is null rather than 0 when the window held nothing to divide by. flaky_tests has a third window - seven days, also fixed - and holds at most ten tests that both passed and failed in it, flakiest first, where flakiest means the larger count of the smaller of the two status groups; a test that only passed or only failed is absent rather than listed with a zero, so an empty array is the ordinary answer on a healthy suite. quality_vectors_pass_rate has a fourth window, also seven days and also fixed, and holds one entry per Quality Vector declared by any test file with a row in that window, highest total first; a file declaring two vectors contributes its executions to both, so the totals across that array are not a row count, and an entry whose counters are all zero means every file carrying that vector was skipped. Three fields of the payload are deliberately absent rather than reported as zero, because nothing computes them yet: total_plans, total_schedules and environments_summary. product_id narrows every measured number on this payload to one product - the counts, both lists, the per-run trend, the daily trend, the 24-hour block, flaky_tests and quality_vectors_pass_rate all narrow with it, and none of them stays deployment-wide. The attribution is through the run's own target: a run naming a repository (directly, whether it is running a plan, a single test, or enumerating a repository's cases) is attributed to that repository's product; a run naming a custom plan spans repositories and is attributed to none. unattributable_runs is the one field product_id does not narrow, and it is not a measurement of the selected product: it counts the runs in the same window that belong to no product at all, whichever product they would otherwise have been under, so it is not the selected product's own dropped runs - there is no way to identify those, which is what makes the runs unattributable in the first place. It is 0 without product_id only because nothing was dropped then, not because those runs stop existing. Omitting product_id preserves today's deployment-wide behaviour exactly, and an unattributable run is included in that deployment-wide answer as it always was. Requires the gts.cf.qa.insights.test_result.v1~/list grant every request needs, and a product-scoped request additionally requires gts.cf.qa.catalog.test_repo.v1~/list: resolving which repositories the selected product owns is a qa-catalog read of its own, refused independently of the first grant.
          */
         get: operations["qa_insights.dashboard"];
         put?: never;
@@ -481,7 +293,7 @@ export interface paths {
         };
         /**
          * Coverage per product build
-         * @description Code coverage per product: one point per product, from the latest completed run that reported coverage, carrying product_key, version, a build label of the two joined by a slash, and line, branch and function percentages. Takes no parameters. A build with no measured coverage is absent from the array rather than reported as zero. The array is empty in every deployment today, and not only where coverage collection is switched off: nothing in this system measures a coverage point yet, and no number is folded out of the ingested test results to fill the gap. Requires the qa.test_result/list grant, the same one the dashboard and the test-result collections need.
+         * @description Code coverage per product: one point per product, from the latest completed run that reported coverage, carrying product_key, version, a build label of the two joined by a slash, and line, branch and function percentages. Takes no parameters. A build with no measured coverage is absent from the array rather than reported as zero. The array is empty in every deployment today, and not only where coverage collection is switched off: nothing in this system measures a coverage point yet, and no number is folded out of the ingested test results to fill the gap. Requires the gts.cf.qa.insights.test_result.v1~/list grant, the same one the dashboard and the test-result collections need.
          */
         get: operations["qa_insights.dashboard_coverage"];
         put?: never;
@@ -595,7 +407,7 @@ export interface paths {
         put?: never;
         /**
          * Replay a time window from qa-runs
-         * @description Re-read every run that finished in [from, to) from qa-runs and rewrite this gear's projection of it, run by run. For a window whose results are known to be wrong or missing. Requires the qa.test_result/rebuild grant. The window is half-open, so adjoining windows neither skip a run nor replay one, and `to` must be strictly after `from`. It does not move the reconciler's watermark, in either direction: this is a repair for a known window, not a reset. It deletes nothing it does not immediately rewrite, so rows for runs qa-runs no longer has are left standing. The window is capped by the configured reconcile page size; a window holding more runs than that replays the oldest page and logs a warning, so narrow it and repeat.
+         * @description Re-read every run that finished in [from, to) from qa-runs and rewrite this gear's projection of it, run by run. For a window whose results are known to be wrong or missing. Requires the gts.cf.qa.insights.test_result.v1~/rebuild grant. The window is half-open, so adjoining windows neither skip a run nor replay one, and `to` must be strictly after `from`. It does not move the reconciler's watermark, in either direction: this is a repair for a known window, not a reset. It deletes nothing it does not immediately rewrite, so rows for runs qa-runs no longer has are left standing. The window is walked in pages under a fixed budget, so a window wider than one page is replayed in full rather than truncated: check `complete` on the response, and when it is false post `resume_from` back as `from` with the same `to` until it is true.
          */
         post: operations["qa_insights.rebuild"];
         delete?: never;
@@ -615,7 +427,7 @@ export interface paths {
         put?: never;
         /**
          * File or find JIRA bugs for a run's failed tests
-         * @description File a JIRA issue for every FAILED test of run_id, or - when test_name is given - for just that one test if it failed. A test already registered locally, or one JIRA's own search already tracks, is not re-filed: the entry for it carries created: false and the existing key. A test this call cannot file for (JIRA is not configured or disabled, the test has no plan identity in this run's projection, or the JIRA call itself failed) is silently dropped from the response rather than failing the whole request - a partial success is a 200 with fewer entries than failed tests, matching the system being replaced's own per-test error handling. 404 means run_id has no ingested results at all, which is distinct from a run with no failures (a 200 with an empty list). Requires three grants: qa.jira_bug/create for the registry write, qa.test_result/list to read the run's own results, and qa.jira_config/get to read the tenant's JIRA settings. Unlike the per-test failures above, a denial on any of the three refuses the whole request with a 403 rather than being swallowed - authorization is checked once, before any test is filed.
+         * @description File a JIRA issue for every FAILED test of run_id, or - when test_name is given - for just that one test if it failed. A test already registered locally, or one JIRA's own search already tracks, is not re-filed: the entry for it carries created: false and the existing key. A test this call cannot file for (JIRA is not configured or disabled, the test has no plan identity in this run's projection, or the JIRA call itself failed) is silently dropped from the response rather than failing the whole request - a partial success is a 200 with fewer entries than failed tests, matching the system being replaced's own per-test error handling. 404 means run_id has no ingested results at all, which is distinct from a run with no failures (a 200 with an empty list). Requires three grants: gts.cf.qa.insights.jira_bug.v1~/create for the registry write, gts.cf.qa.insights.test_result.v1~/list to read the run's own results, and gts.cf.qa.insights.jira_config.v1~/get to read the tenant's JIRA settings. Unlike the per-test failures above, a denial on any of the three refuses the whole request with a 403 rather than being swallowed - authorization is checked once, before any test is filed.
          */
         post: operations["qa_insights.file_jira_bugs"];
         delete?: never;
@@ -633,7 +445,7 @@ export interface paths {
         };
         /**
          * List open JIRA bugs
-         * @description Every bug this tenant's registry still considers open (status = 'Open'), or - when repo_id and plan_path are both supplied - only those filed against that plan. The two must be supplied together; one without the other is a 400. This is the same (repo_id, plan_path) identity the runner's skip list is built from: a bug that suppresses a test at launch is the same bug this endpoint lists, which is why the match is exact rather than the analytics drill-downs' single plan_path matched across every repository a caller's scope admits. A bug the poller has since resolved leaves this list even though POST /qa/v1/jira/bugs' local re-file dedupe may still recognise it - see that endpoint's own description. Requires the qa.jira_bug/list grant.
+         * @description Every bug this tenant's registry still considers open (status = 'Open'), or - when repo_id and plan_path are both supplied - only those filed against that plan. The two must be supplied together; one without the other is a 400. This is the same (repo_id, plan_path) identity the runner's skip list is built from: a bug that suppresses a test at launch is the same bug this endpoint lists, which is why the match is exact rather than the analytics drill-downs' single plan_path matched across every repository a caller's scope admits. A bug the poller has since resolved leaves this list even though POST /qa/v1/jira/bugs' local re-file dedupe may still recognise it - see that endpoint's own description. Requires the gts.cf.qa.insights.jira_bug.v1~/list grant.
          */
         get: operations["qa_insights.list_open_bugs"];
         put?: never;
@@ -988,6 +800,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/qa/v1/schedules/{id}/ticks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a schedule's fire history
+         * @description One schedule's fire history, most recent due_at first: what a real fire's fixed claim produced, or why it did not -- plus, unfiltered, any referential-check row (claimed_by == "referential-check"), which was never a claim and always carries a null run_id. Absent and another tenant's schedule are the same 404, matching every other read in this gear.
+         */
+        get: operations["qa_runs.list_schedule_ticks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/qa/v1/settings/jira": {
         parameters: {
             query?: never;
@@ -997,12 +829,12 @@ export interface paths {
         };
         /**
          * Get the tenant's JIRA integration settings
-         * @description The JIRA instance this tenant files bugs against. api_token_credstore_ref is a credential-store reference and never a token - this endpoint cannot return credential material, because the material is never stored here or held by this service. A tenant that has never configured JIRA gets a document with empty strings, issue_type Bug and enabled false, rather than a 404. Requires the qa.jira_config/get grant.
+         * @description The JIRA instance this tenant files bugs against. api_token_credstore_ref is a credential-store reference and never a token - this endpoint cannot return credential material, because the material is never stored here or held by this service. A tenant that has never configured JIRA gets a document with empty strings, issue_type Bug and enabled false, rather than a 404. Requires the gts.cf.qa.insights.jira_config.v1~/get grant.
          */
         get: operations["qa_insights.get_jira_settings"];
         /**
          * Replace the tenant's JIRA integration settings
-         * @description A full replace of the tenant's JIRA settings. api_token_credstore_ref is a credential-store reference, not a token, and it has two contracts. Its NAME must be letters, digits, underscores and dashes only, at most 255 characters, optionally prefixed with cred:// - slashes and colons are rejected by the credential store, so a URL-shaped value such as credstore://qa/jira/token is refused here with a 400 rather than failing later on the first JIRA call. Its CONTENTS must be the base64 encoding of email:api_token, because JIRA's REST API takes HTTP basic auth and the gateway's credential plugin prepends Basic to whatever the reference resolves to. Sending an empty api_token_credstore_ref keeps the reference already stored, so a form that does not resend it cannot blank the credential; the reference cannot be cleared through this endpoint, and turning enabled off is how a tenant stops using JIRA. A config with enabled true must name a reference. The url may carry a context path (https://host/jira, the usual shape for JIRA Data Center) and it is preserved. Every other field is taken from the body as sent. Requires the qa.jira_config/update grant.
+         * @description A full replace of the tenant's JIRA settings. api_token_credstore_ref is a credential-store reference, not a token, and it has two contracts. Its NAME must be letters, digits, underscores and dashes only, at most 255 characters, optionally prefixed with cred:// - slashes and colons are rejected by the credential store, so a URL-shaped value such as credstore://qa/jira/token is refused here with a 400 rather than failing later on the first JIRA call. Its CONTENTS must be the base64 encoding of email:api_token, because JIRA's REST API takes HTTP basic auth and the gateway's credential plugin prepends Basic to whatever the reference resolves to. Sending an empty api_token_credstore_ref keeps the reference already stored, so a form that does not resend it cannot blank the credential; the reference cannot be cleared through this endpoint, and turning enabled off is how a tenant stops using JIRA. A config with enabled true must name a reference. The url may carry a context path (https://host/jira, the usual shape for JIRA Data Center) and it is preserved. Every other field is taken from the body as sent. Requires the gts.cf.qa.insights.jira_config.v1~/update grant.
          */
         put: operations["qa_insights.update_jira_settings"];
         post?: never;
@@ -1021,12 +853,12 @@ export interface paths {
         };
         /**
          * Get the tenant's JIRA poller cadence and auto-rerun switch
-         * @description The interval between poller passes and whether a bug resolving in JIRA, plus a new build, triggers an automatic re-run. A tenant that has never saved this gets the defaults: 300 seconds and auto-rerun on. poll_interval_seconds is clamped to at least one on this read - a value the tenant saved as zero, which would otherwise be a hot loop against the poller's own cadence, is never returned as zero. Requires the qa.jira_config/get grant.
+         * @description The interval between poller passes and whether a bug resolving in JIRA, plus a new build, triggers an automatic re-run. A tenant that has never saved this gets the defaults: 300 seconds and auto-rerun on. poll_interval_seconds is clamped to at least one on this read - a value the tenant saved as zero, which would otherwise be a hot loop against the poller's own cadence, is never returned as zero. Requires the gts.cf.qa.insights.jira_config.v1~/get grant.
          */
         get: operations["qa_insights.get_jira_poller_settings"];
         /**
          * Replace the tenant's JIRA poller cadence and auto-rerun switch
-         * @description A full replace of the tenant's poller settings. poll_interval_seconds is stored as sent - the clamp to at least one applies only when this value is read back, not here, so the settings screen never shows a value the tenant did not save. auto_rerun_on_resolve gates only the automatic re-run: turning it off does not stop a resolved bug from being marked resolved on the next poll. Requires the qa.jira_config/update grant.
+         * @description A full replace of the tenant's poller settings. poll_interval_seconds is stored as sent - the clamp to at least one applies only when this value is read back, not here, so the settings screen never shows a value the tenant did not save. auto_rerun_on_resolve gates only the automatic re-run: turning it off does not stop a resolved bug from being marked resolved on the next poll. Requires the gts.cf.qa.insights.jira_config.v1~/update grant.
          */
         put: operations["qa_insights.update_jira_poller_settings"];
         post?: never;
@@ -1045,12 +877,12 @@ export interface paths {
         };
         /**
          * Get the tenant's notification settings
-         * @description Slack and email egress configuration, including the six per-status scheduled-run Slack templates. A tenant that has never saved this gets every field at its default (every gate off except notify_on_failure, SMTP port 587) rather than a 404. slack_webhook_credstore_ref is a credential-store reference, never a URL - possession of a Slack incoming-webhook URL is itself the authorization to post, so it is treated the same as a JIRA API token, and the PUT enforces the same syntax: letters, digits, underscores and dashes only, optionally prefixed with cred://. Requires the qa.notification_config/get grant.
+         * @description Slack and email egress configuration, including the six per-status scheduled-run Slack templates. A tenant that has never saved this gets every field at its default (every gate off except notify_on_failure, SMTP port 587) rather than a 404. slack_webhook_credstore_ref is a credential-store reference, never a URL - possession of a Slack incoming-webhook URL is itself the authorization to post, so it is treated the same as a JIRA API token, and the PUT enforces the same syntax: letters, digits, underscores and dashes only, optionally prefixed with cred://. Requires the gts.cf.qa.insights.notification_config.v1~/get grant.
          */
         get: operations["qa_insights.get_notification_settings"];
         /**
          * Replace the tenant's notification settings
-         * @description A full replace of the tenant's notification settings. slack_webhook_credstore_ref must be a credential-store reference and never a webhook URL - letters, digits, underscores and dashes only, at most 255 characters, optionally prefixed with cred://, exactly as the JIRA endpoint's api_token_credstore_ref. Slashes and colons are rejected by the credential store, so a URL-shaped value such as https://hooks.slack.com/services/T00/B00/XXX is refused here with a 400 naming that field rather than a row stored for the GET to hand back. Unlike the JIRA endpoint there is no keep-stored-value convention, so an empty slack_webhook_credstore_ref clears the reference rather than preserving it; that is a difference in how absence is treated, not a claim that the field is less sensitive. Every other field is stored exactly as sent. Requires the qa.notification_config/update grant.
+         * @description A full replace of the tenant's notification settings. slack_webhook_credstore_ref must be a credential-store reference and never a webhook URL - letters, digits, underscores and dashes only, at most 255 characters, optionally prefixed with cred://, exactly as the JIRA endpoint's api_token_credstore_ref. Slashes and colons are rejected by the credential store, so a URL-shaped value such as https://hooks.slack.com/services/T00/B00/XXX is refused here with a 400 naming that field rather than a row stored for the GET to hand back. Unlike the JIRA endpoint there is no keep-stored-value convention, so an empty slack_webhook_credstore_ref clears the reference rather than preserving it; that is a difference in how absence is treated, not a claim that the field is less sensitive. Every other field is stored exactly as sent. Requires the gts.cf.qa.insights.notification_config.v1~/update grant.
          */
         put: operations["qa_insights.update_notification_settings"];
         post?: never;
@@ -1069,7 +901,7 @@ export interface paths {
         };
         /**
          * Get the tenant's notification audit log
-         * @description The most recent notification delivery attempts, newest first, across every channel and every kind: automatic completion alerts, tests, and every skip and failure. limit defaults to 100 and is clamped to at most 500. run_id is null for an entry that belongs to no run, such as a settings-page test send. Requires the qa.notification_config/get grant.
+         * @description The most recent notification delivery attempts, newest first, across every channel and every kind: automatic completion alerts, tests, and every skip and failure. limit defaults to 100 and is clamped to at most 500. run_id is null for an entry that belongs to no run, such as a settings-page test send. Requires the gts.cf.qa.insights.notification_config.v1~/get grant.
          */
         get: operations["qa_insights.get_notification_log"];
         put?: never;
@@ -1091,7 +923,7 @@ export interface paths {
         put?: never;
         /**
          * Render a scheduled-run Slack preview
-         * @description Renders one scheduled-run Slack template against the given config override and a fixed sample run, without sending anything or touching the stored settings. event must be one of pending, in_progress, succeeded, failed, error, skipped. Requires the qa.notification_config/get grant.
+         * @description Renders one scheduled-run Slack template against the given config override and a fixed sample run, without sending anything or touching the stored settings. event must be one of pending, in_progress, succeeded, failed, error, skipped. Requires the gts.cf.qa.insights.notification_config.v1~/get grant.
          */
         post: operations["qa_insights.preview_notification"];
         delete?: never;
@@ -1111,7 +943,7 @@ export interface paths {
         put?: never;
         /**
          * Send a test notification
-         * @description Sends a real notification right now, over whichever channel(s) are enabled. With no request body, sends the settings page's generic test message using the tenant's stored settings. With a body, tests one scheduled-run Slack template against the given config override and event token (one of pending, in_progress, succeeded, failed, error, skipped) rather than the stored settings - the config override must have Slack enabled with a non-empty webhook reference, or this is refused with a 400 before anything is sent. Neither shape claims a dedupe slot or writes the audit log; both are pinned by qa_insights_sdk::SLACK_NOTIFICATION_EVENTS. Unlike the automatic completion path, a send failure here is returned rather than swallowed - an operator testing a channel deserves to know it does not work, including a 501 when the channel this deployment ships has no adapter at all (D10). This endpoint's OpenAPI schema shows the body as required; posting no body at all is also accepted. Requires the qa.notification_config/test grant.
+         * @description Sends a real notification right now, over whichever channel(s) are enabled. With no request body, sends the settings page's generic test message using the tenant's stored settings - refused with a 400 before anything is sent if neither stored channel is both enabled and configured to send, so a test never reports success for a send that was never attempted. With a body, tests one scheduled-run Slack template against the given config override and event token (one of pending, in_progress, succeeded, failed, error, skipped) rather than the stored settings - the config override must have Slack enabled with a non-empty webhook reference, or this is likewise refused with a 400 before anything is sent. Neither shape claims a dedupe slot or writes the audit log; both are pinned by qa_insights_sdk::SLACK_NOTIFICATION_EVENTS. Unlike the automatic completion path, a send failure here is returned rather than swallowed - an operator testing a channel deserves to know it does not work, including a 501 when the channel this deployment ships has no adapter at all (D10). This endpoint's OpenAPI schema shows the body as required; posting no body at all is also accepted. Requires the gts.cf.qa.insights.notification_config.v1~/test grant.
          */
         post: operations["qa_insights.test_notification"];
         delete?: never;
@@ -1173,7 +1005,7 @@ export interface paths {
         };
         /**
          * Download a test bundle
-         * @description Download the tar.gz bytes of an ephemeral test bundle; an expired bundle reads exactly like a missing one (404)
+         * @description Download the tar.gz bytes of an ephemeral test bundle. Anonymous: the required sig query parameter is the access control, not a bearer token - it is an HMAC-SHA256 tag over (bundle_id, tenant_id) this gear itself minted when the bundle was built, and the request is refused with 403 if it does not verify. Omitting sig entirely is a 400, not a 403: it is a required parameter, so the request is rejected before the handler runs. An expired bundle reads exactly like a missing one (404).
          */
         get: operations["qa_catalog.download_bundle"];
         put?: never;
@@ -1360,119 +1192,10 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/types-registry/v1/entities": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List GTS entities
-         * @description List registered GTS entities with optional filtering by pattern, kind, vendor, package, or namespace.
-         */
-        get: operations["types_registry.list"];
-        put?: never;
-        /**
-         * Register GTS entities
-         * @description Register one or more GTS entities (types or instances) in batch. Returns per-item results.
-         */
-        post: operations["types_registry.register"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/types-registry/v1/entities/{gts_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get GTS entity by ID
-         * @description Retrieve a single GTS entity by its identifier.
-         */
-        get: operations["types_registry.get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/types-registry/v2/entities": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Submit GTS entities for registration
-         * @description Submit one or more GTS entities for admission. Returns 202 with the operation's Location; poll GET /types-registry/v2/operations/{operation_id} for the per-candidate outcome. A replay of a terminal operation returns 200. An Idempotency-Key header is required: a replay with the same body returns the same operation, and a different body under the same key is a conflict.
-         */
-        post: operations["types_registry.submit_entities"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/types-registry/v2/entities/{entity_key}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get a GTS entity by identifier or Registry Reference
-         * @description Return one entity with its authored document and the effective artifacts materialized at admission. The key is either a canonical GTS identifier or the Registry Reference UUID derived from it. A deleted entity is still readable and reports its lifecycle status.
-         */
-        get: operations["types_registry.get_entity"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/types-registry/v2/operations/{operation_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get an admission operation
-         * @description Return one operation and the durable per-candidate outcomes. `status` is progress only: `completed` means every item is terminal, and the outcomes are on the items.
-         */
-        get: operations["types_registry.get_operation"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** @description The action being performed. */
-        Action: {
-            /** @description Action name (e.g., "list", "get", "create", "update", "delete"). */
-            name: string;
-        };
         /**
          * @description One test as the three overview lists draw it.
          *
@@ -1632,20 +1355,6 @@ export interface components {
          * @enum {string}
          */
         AnalyticsScopeDto: "all" | "plan";
-        AuthConfig: {
-            config?: {
-                [key: string]: string;
-            } | null;
-            sharing?: components["schemas"]["SharingMode"];
-            type: string;
-        };
-        /**
-         * @description Controls how barriers (self-managed tenants) are handled during `AuthZ` evaluation.
-         *
-         *     Consistent with `tenant_resolver_sdk::BarrierMode`.
-         * @enum {string}
-         */
-        AuthzBarrierMode: "respect" | "ignore";
         /**
          * @description Cached branch names of a repository (refreshed by sync and the
          *     branch-cache lifecycle task).
@@ -1657,15 +1366,6 @@ export interface components {
         BranchListDto: {
             branches: string[];
         };
-        BudgetConfig: {
-            mode?: components["schemas"]["BudgetMode"];
-            /** Format: double */
-            overcommit_ratio?: number | null;
-            /** Format: int32 */
-            total?: number | null;
-        };
-        /** @enum {string} */
-        BudgetMode: "unlimited" | "allocated" | "shared";
         /**
          * @description One build's slice of the "latest run per test" snapshot.
          *
@@ -1720,25 +1420,6 @@ export interface components {
             test_file: string;
             test_name: string;
         };
-        BurstConfig: {
-            /** Format: int32 */
-            capacity: number;
-        };
-        /**
-         * @description PEP-level capability declarations.
-         *
-         *     Tells the PDP which advanced features the PEP can handle so the PDP
-         *     can tailor its response accordingly.
-         *
-         *     **Note:** `GroupMembership` and `GroupHierarchy` require access to the
-         *     Resource Group tables (`resource_group`, `resource_group_membership`, `resource_group_closure`).
-         *     Services that can join against these tables may declare the capabilities;
-         *     the PDP will then return `InGroup`/`InGroupSubtree` predicates directly.
-         *     Services without access should omit these capabilities — the PDP will
-         *     degrade group predicates to explicit `In` with pre-resolved resource IDs.
-         * @enum {string}
-         */
-        Capability: "tenant_hierarchy" | "group_membership" | "group_hierarchy";
         /**
          * @description The body the runner posts with one file's exact case count —
          *     `CollectCountPayload`.
@@ -1774,29 +1455,6 @@ export interface components {
              */
             launched: number;
         };
-        /**
-         * @description A constraint on a specific resource property.
-         *
-         *     Multiple constraints within a response are `ORed`:
-         *     a resource matches if it satisfies ANY constraint.
-         */
-        Constraint: {
-            /**
-             * @description The predicates within this constraint. All predicates are `ANDed`:
-             *     a resource matches this constraint only if ALL predicates are satisfied.
-             */
-            predicates: components["schemas"]["Predicate"][];
-        };
-        CorsConfig: {
-            allow_credentials?: boolean;
-            allowed_methods?: components["schemas"]["CorsHttpMethod"][];
-            allowed_origins?: string[];
-            enabled?: boolean;
-            expose_headers?: string[];
-            sharing?: components["schemas"]["SharingMode"];
-        };
-        /** @enum {string} */
-        CorsHttpMethod: "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS";
         /**
          * @description One build's coverage, as `GET /qa/v1/dashboard/coverage` returns it.
          *
@@ -1983,42 +1641,6 @@ export interface components {
              */
             plugin_instance_id?: string | null;
         };
-        CreateRouteRequest: {
-            cors?: null | components["schemas"]["CorsConfig"];
-            enabled?: boolean;
-            match: components["schemas"]["MatchRules"];
-            plugins?: null | components["schemas"]["PluginsConfig"];
-            /** Format: int32 */
-            priority?: number;
-            rate_limit?: null | components["schemas"]["RateLimitConfig"];
-            tags?: string[];
-            upstream_id: string;
-        };
-        /**
-         * @description Request body for `POST /credstore/v1/secrets`.
-         *
-         *     `Debug` is hand-written to redact `value` — a derived `Debug` would expose
-         *     the plaintext secret if this DTO is ever `{:?}`-logged by a future layer.
-         */
-        CreateSecretRequestDto: {
-            /**
-             * Format: date-time
-             * @description Expiry instant (RFC 3339); only for expirable types.
-             */
-            expires_at?: string | null;
-            /** @description Secret reference key — `[a-zA-Z0-9_-]+`, max 255 characters. */
-            reference: string;
-            /** @description Sharing mode for the secret. */
-            sharing?: components["schemas"]["SharingModeDto"];
-            /**
-             * @description Secret type as a full GTS type id (built-in or custom); defaults to
-             *     the generic type. Resolved and existence-checked against the
-             *     types-registry.
-             */
-            type?: string | null;
-            /** @description Secret value as a UTF-8 string. */
-            value: string;
-        };
         /**
          * @description REST DTO for creating an SSH key. The PEM goes straight to credstore and
          *     is never echoed back (the response is [`SshKeyDto`], which carries
@@ -2063,18 +1685,6 @@ export interface components {
              *     userinfo credentials are rejected — use `credential_ref`.
              */
             url: string;
-        };
-        CreateUpstreamRequest: {
-            alias?: string | null;
-            auth?: null | components["schemas"]["AuthConfig"];
-            cors?: null | components["schemas"]["CorsConfig"];
-            enabled?: boolean;
-            headers?: null | components["schemas"]["HeadersConfig"];
-            plugins?: null | components["schemas"]["PluginsConfig"];
-            protocol: string;
-            rate_limit?: null | components["schemas"]["RateLimitConfig"];
-            server: components["schemas"]["Server"];
-            tags?: string[];
         };
         /**
          * @description One submitted credential on the wire: either the document or a reference.
@@ -2209,7 +1819,7 @@ export interface components {
              *     Sourced from `qa_runs_sdk::Run::environment_id` (this crate's own
              *     `test_result::Model` is not involved here — this row never touches
              *     `qa_test_results`), so it is qa-runs' own physical column, one gear
-             *     over, that this field projects. Renamed from `environment_id` (Task 25)
+             *     over, that this field projects. Renamed from `platform_id` (Task 25)
              *     — see [`TestResultDto::environment_id`]'s doc for why: the same
              *     rename applies on both sides of the boundary, even though the source
              *     column this field is sourced from is qa-runs', not this crate's own.
@@ -2401,56 +2011,6 @@ export interface components {
              */
             unattributable_runs: number;
         };
-        /** @description Reason for an explicit deny from the PDP. */
-        DenyReason: {
-            /** @description Human-readable details (optional). */
-            details?: string | null;
-            /** @description Machine-readable error code. */
-            error_code: string;
-        };
-        /**
-         * @description Deployment mode of a gear
-         * @enum {string}
-         */
-        DeploymentModeDto: "compiled_in" | "out_of_process";
-        Endpoint: {
-            host: string;
-            /** Format: int32 */
-            port?: number;
-            scheme?: components["schemas"]["Scheme"];
-        };
-        /**
-         * @description One entity with its authored content and the artifacts materialized at
-         *     admission (D3). No consumer recomputes an effective form.
-         */
-        EntityDto: {
-            content?: unknown;
-            /** Format: date-time */
-            created_at: string;
-            effective_traits?: unknown;
-            effective_traits_schema?: unknown;
-            gts_id: string;
-            /**
-             * Format: uuid
-             * @description The Registry Reference: a deterministic `UUIDv5` of the identifier.
-             */
-            gts_uuid: string;
-            kind: components["schemas"]["EntityKindDto"];
-            /** @description A tombstone stays exact-readable and only leaves discovery. */
-            lifecycle_status: components["schemas"]["LifecycleStatusDto"];
-            /** @description Caller-declared attribution. It MUST NOT be used to authorize. */
-            owning_gear?: string | null;
-            resolved_schema?: unknown;
-            /** Format: int64 */
-            resource_version: number;
-            /** Format: date-time */
-            updated_at: string;
-        };
-        /**
-         * @description `type_schema` or `instance`.
-         * @enum {string}
-         */
-        EntityKindDto: "type_schema" | "instance";
         /**
          * @description REST DTO for a registered target environment.
          *
@@ -2604,71 +2164,6 @@ export interface components {
              */
             total: number;
         };
-        /** @description Equality predicate: `property = value`. */
-        EqPredicate: {
-            /** @description Resource property name (e.g., `pep_properties::OWNER_TENANT_ID`, `pep_properties::RESOURCE_ID`). */
-            property: string;
-            /** @description The value to match (UUID string, plain string, number, bool, etc.). */
-            value: unknown;
-        };
-        /**
-         * @description Authorization evaluation request.
-         *
-         *     Follows the `AuthZEN` 1.0 model: Subject + Action + Resource + Context.
-         */
-        EvaluationRequest: {
-            /** @description The action being performed. */
-            action: components["schemas"]["Action"];
-            /** @description Additional context for the evaluation. */
-            context: components["schemas"]["EvaluationRequestContext"];
-            /** @description The resource being accessed. */
-            resource: components["schemas"]["Resource"];
-            /** @description The subject (who is making the request). */
-            subject: components["schemas"]["Subject"];
-        };
-        /** @description Additional evaluation request context. */
-        EvaluationRequestContext: {
-            /** @description PEP capabilities (tells PDP what the PEP can handle). */
-            capabilities?: components["schemas"]["Capability"][];
-            /**
-             * @description Whether the PDP should return row-level constraints.
-             *     - `true` for LIST/GET/UPDATE/DELETE (need scope filtering)
-             *     - `false` for CREATE (just need decision)
-             */
-            require_constraints?: boolean;
-            /** @description Supported constraint properties (tells PDP which properties the PEP understands). */
-            supported_properties?: string[];
-            tenant_context?: null | components["schemas"]["TenantContext"];
-            /** @description Token scopes from the `AuthN` result. */
-            token_scopes?: string[];
-        };
-        /**
-         * @description Authorization evaluation response.
-         *
-         *     The PDP returns a decision (allow/deny) and optionally a context
-         *     containing constraints or deny reason.
-         */
-        EvaluationResponse: {
-            /** @description Response context with constraints or deny reason. */
-            context?: components["schemas"]["EvaluationResponseContext"];
-            /** @description Whether access is granted. */
-            decision: boolean;
-        };
-        /**
-         * @description Authorization evaluation response context.
-         *
-         *     Contains constraints (when `decision` is `true`) or deny reason
-         *     (when `decision` is `false`).
-         */
-        EvaluationResponseContext: {
-            /**
-             * @description Row-level constraints to apply when `decision` is `true`.
-             *     Empty when `require_constraints` was `false` or when access is unrestricted.
-             *     Multiple constraints are `ORed` (any one matching is sufficient).
-             */
-            constraints?: components["schemas"]["Constraint"][];
-            deny_reason?: null | components["schemas"]["DenyReason"];
-        };
         /**
          * @description Which tier supplied a run's exclusivity decision. `plan.yaml` is the
          *     plan-file tier, spelled as the file is named.
@@ -2689,7 +2184,7 @@ export interface components {
              * Format: uuid
              * @description The environment the run occupied, as an id rather than a name — the same
              *     substitution [`DashboardRunDto::environment_id`] documents.
-             *     Renamed from `environment_id` (Task 25) — see
+             *     Renamed from `platform_id` (Task 25) — see
              *     [`TestResultDto::environment_id`]'s doc for why.
              */
             environment_id?: string | null;
@@ -2861,50 +2356,6 @@ export interface components {
             test_file: string;
             test_name: string;
         };
-        /** @description Response DTO for a single registered gear */
-        GearDto: {
-            /** @description Declared capabilities (e.g., "rest", "grpc", "system", "db") */
-            capabilities: string[];
-            /** @description Gear dependencies (other gear names) */
-            dependencies: string[];
-            /** @description Whether the gear is compiled-in or out-of-process */
-            deployment_mode: components["schemas"]["DeploymentModeDto"];
-            /** @description Running instances of this gear */
-            instances: components["schemas"]["GearInstanceDto"][];
-            /** @description Gear name */
-            name: string;
-            /** @description Plugins provided by this gear (reserved for follow-up implementation) */
-            plugins?: components["schemas"]["PluginDto"][];
-            /** @description Gear version (if reported by a running instance) */
-            version?: string | null;
-        };
-        /** @description Response DTO for a running gear instance */
-        GearInstanceDto: {
-            /** @description gRPC services provided by this instance (service name -> endpoint URI) */
-            grpc_services: {
-                [key: string]: string;
-            };
-            /**
-             * Format: uuid
-             * @description Unique instance ID
-             */
-            instance_id: string;
-            /** @description Current instance state (e.g., "registered", "healthy", "quarantined") */
-            state: string;
-            /** @description Gear version (if reported during registration) */
-            version?: string | null;
-        };
-        /**
-         * @description Response body for `GET /credstore/v1/secrets/{ref}`.
-         *
-         *     `Debug` is hand-written to redact `value` (see [`CreateSecretRequestDto`]).
-         */
-        GetSecretResponseDto: {
-            /** @description Access metadata for the resolved secret. */
-            metadata: components["schemas"]["SecretMetadataDto"];
-            /** @description Secret value as a UTF-8 string. */
-            value: string;
-        };
         /** @description One bar of a component or tag breakdown. */
         GroupSummaryDto: {
             failed: number;
@@ -2952,53 +2403,6 @@ export interface components {
              */
             tag: components["schemas"]["GroupSummaryDto"][];
         };
-        GrpcMatch: {
-            method: string;
-            service: string;
-        };
-        /** @description Response DTO for a GTS entity. */
-        GtsEntityDto: {
-            /** @description The entity content (schema for types, object for instances). */
-            content: unknown;
-            /** @description Optional description of the entity. */
-            description?: string | null;
-            /** @description The full GTS identifier string. */
-            gts_id: string;
-            /**
-             * Format: uuid
-             * @description Deterministic UUID generated from the GTS ID.
-             */
-            id: string;
-            /**
-             * @description Whether this entity is a schema (type definition).
-             *
-             *     - `true`: This is a type definition (GTS ID ends with `~`)
-             *     - `false`: This is an instance (GTS ID does not end with `~`)
-             */
-            is_schema: boolean;
-            /** @description All parsed segments from the GTS ID. */
-            segments: components["schemas"]["GtsIdSegmentDto"][];
-        };
-        /** @description DTO for a GTS ID segment. */
-        GtsIdSegmentDto: {
-            /** @description Namespace component of the segment. */
-            namespace: string;
-            /** @description Package component of the segment. */
-            package: string;
-            /** @description Type name component of the segment. */
-            type_name: string;
-            /** @description Vendor component of the segment. */
-            vendor: string;
-            /**
-             * Format: int32
-             * @description Major version number.
-             */
-            ver_major: number;
-        };
-        HeadersConfig: {
-            request?: null | components["schemas"]["RequestHeaderRules"];
-            response?: null | components["schemas"]["ResponseHeaderRules"];
-        };
         /**
          * @description The heatmap: a day axis and one row per test.
          *
@@ -3020,98 +2424,6 @@ export interface components {
              */
             values: string[];
         };
-        HttpMatch: {
-            methods: components["schemas"]["HttpMethod"][];
-            path: string;
-            path_suffix_mode?: components["schemas"]["PathSuffixMode"];
-            query_allowlist?: string[];
-        };
-        /** @enum {string} */
-        HttpMethod: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
-        /**
-         * @description Group membership predicate: resource is visible if it belongs to any of the listed groups.
-         *
-         *     Compiles to: `property IN (SELECT resource_id FROM resource_group_membership WHERE group_id IN (group_ids))`
-         */
-        InGroupPredicate: {
-            /** @description Group UUIDs - the resource must be a member of at least one. */
-            group_ids: unknown[];
-            /** @description Resource property to filter (e.g., `pep_properties::RESOURCE_ID`). */
-            property: string;
-        };
-        /**
-         * @description Group subtree predicate: resource is visible if it belongs to any group
-         *     that is a descendant of the listed ancestor groups.
-         *
-         *     Compiles to: `property IN (SELECT resource_id FROM resource_group_membership
-         *       WHERE group_id IN (SELECT descendant_id FROM resource_group_closure WHERE ancestor_id IN (ancestor_ids)))`
-         */
-        InGroupSubtreePredicate: {
-            /** @description Ancestor group UUIDs - the resource must be a member of any descendant. */
-            ancestor_ids: unknown[];
-            /** @description Resource property to filter (e.g., `pep_properties::RESOURCE_ID`). */
-            property: string;
-        };
-        /** @description Set membership predicate: `property IN (values)`. */
-        InPredicate: {
-            /** @description Resource property name (e.g., `pep_properties::OWNER_TENANT_ID`, `pep_properties::RESOURCE_ID`). */
-            property: string;
-            /** @description The set of values to match against. */
-            values: unknown[];
-        };
-        /**
-         * @description Tenant subtree predicate: resource is visible if its tenant property is a
-         *     descendant of a single root tenant per the AM-owned `tenant_closure` table.
-         *
-         *     Compiles to (with `barrier_mode = Respect`, the default):
-         *     `property IN (SELECT descendant_id FROM tenant_closure
-         *       WHERE ancestor_id = root_tenant_id AND barrier = 0)`
-         *
-         *     With `barrier_mode = Ignore`:
-         *     `property IN (SELECT descendant_id FROM tenant_closure
-         *       WHERE ancestor_id = root_tenant_id)`
-         *
-         *     The `barrier = 0` clamp matches the AM closure-table contract:
-         *     `barrier` is set when any tenant on the strict path
-         *     `(ancestor, descendant]` is `self_managed`. Respecting the barrier
-         *     therefore yields the canonical "subtree minus self-managed branches"
-         *     semantics; ignoring it is reserved for cross-barrier operations such
-         *     as billing or tenant metadata reads.
-         *
-         *     Multiple-root semantics are expressed at the constraint envelope: emit
-         *     one `Constraint` per root and rely on the OR-of-constraints semantics.
-         *
-         *     **`descendant_status`:** When non-empty, the predicate compiles to
-         *     `AND descendant_status IN (...)` on the closure subquery, restricting
-         *     the subtree to tenants in the listed statuses. The name mirrors the
-         *     `tenant_closure.descendant_status` column so the binding is unambiguous
-         *     — the filter applies to the descendants reached via the closure, not
-         *     to the ancestor root.
-         */
-        InTenantSubtreePredicate: {
-            /**
-             * @description Barrier enforcement mode. Defaults to [`BarrierMode::Respect`]
-             *     which clamps the closure subquery with `AND barrier = 0`.
-             */
-            barrier_mode?: components["schemas"]["AuthzBarrierMode"];
-            /**
-             * @description Status filter applied to the descendants reached via the closure.
-             *
-             *     Empty list means "no status filter"; a non-empty list compiles to
-             *     `AND descendant_status IN (...)` on the closure subquery. The PEP
-             *     maps each [`TenantStatus`] to the SMALLINT encoding canonically
-             *     defined by [`TenantStatus::as_smallint`] (`Active = 1`,
-             *     `Suspended = 2`, `Deleted = 3`).
-             */
-            descendant_status?: components["schemas"]["TenantStatus"][];
-            /**
-             * @description Resource property to filter (e.g., `pep_properties::OWNER_TENANT_ID`,
-             *     or `pep_properties::RESOURCE_ID` on the `tenants` entity itself).
-             */
-            property: string;
-            /** @description Root tenant UUID — the resource's tenant must be a descendant of this tenant. */
-            root_tenant_id: unknown;
-        };
         /**
          * @description One row of `GET /qa/v1/jira/open-bugs`. The plan is
          *     [`Self::repo_id`]/[`Self::plan_path`] and the environment is
@@ -3124,7 +2436,7 @@ export interface components {
             created_at: string;
             /**
              * Format: uuid
-             * @description Renamed from `environment_id` (Task 25) — see
+             * @description Renamed from `platform_id` (Task 25) — see
              *     [`TestResultDto::environment_id`]'s doc for why.
              */
             environment_id?: string | null;
@@ -3228,7 +2540,7 @@ export interface components {
             /**
              * Format: uuid
              * @description `null` launches a run with no target environment. Such a run is never
-             *     queued and never blocks anything. Renamed from `environment_id`
+             *     queued and never blocks anything. Renamed from `platform_id`
              *     (Task 25) — see [`RunDto::environment_id`]'s doc for why.
              */
             environment_id?: string | null;
@@ -3268,22 +2580,6 @@ export interface components {
             holder: string;
             /** @enum {string} */
             state: "held_exclusive";
-        };
-        /**
-         * @description `active` or `deleted`.
-         * @enum {string}
-         */
-        LifecycleStatusDto: "active" | "deleted";
-        /** @description Response DTO for listing GTS entities. */
-        ListEntitiesResponse: {
-            /** @description Total count of entities returned. */
-            count: number;
-            /** @description The list of entities. */
-            entities: components["schemas"]["GtsEntityDto"][];
-        };
-        MatchRules: {
-            grpc?: null | components["schemas"]["GrpcMatch"];
-            http?: null | components["schemas"]["HttpMatch"];
         };
         /**
          * @description The body of a create or a replace, with the same plan-identity pair.
@@ -3377,7 +2673,7 @@ export interface components {
             /**
              * Format: uuid
              * @description `null` schedules a run with no target environment. Renamed from
-             *     `environment_id` (Task 25) — see [`RunDto::environment_id`]'s doc for why.
+             *     `platform_id` (Task 25) — see [`RunDto::environment_id`]'s doc for why.
              */
             environment_id?: string | null;
             exclude_tags?: string[];
@@ -3405,7 +2701,7 @@ export interface components {
          *     until that review nothing enforced it, so an operator following the field's
          *     own name was the only thing keeping the secret out of a document
          *     `GET /qa/v1/settings/notifications` hands to any holder of
-         *     `qa.notification_config/get`.
+         *     `gts.cf.qa.insights.notification_config.v1~/get`.
          *     `domain::service::notify::NotifyService::save_config` now applies the JIRA
          *     surface's own syntax check to it. The one asymmetry that remains with
          *     [`JiraSettingsDto`] is that an empty value here *clears* the reference
@@ -3415,9 +2711,28 @@ export interface components {
             email_enabled: boolean;
             email_from: string;
             email_recipients: string;
+            /**
+             * @description Credstore **reference** to the SMTP password. This surface never carries
+             *     the password itself, in either direction: a `PUT` names a reference and
+             *     the `GET` answers with the same reference, exactly as
+             *     [`Self::slack_webhook_credstore_ref`] does.
+             */
+            email_smtp_credstore_ref: string;
             email_smtp_host: string;
-            /** Format: int32 */
+            /**
+             * Format: int32
+             * @description Also the TLS selector: 465 is implicit TLS, everything else is
+             *     `STARTTLS`. `qa_insights_sdk::NotificationConfig::email_smtp_port` and
+             *     `infra::notify::mail_smtp` carry the argument for the rule living on
+             *     this field rather than on a third one an operator could contradict.
+             */
             email_smtp_port: number;
+            /**
+             * @description SMTP AUTH username, in the clear — see the SDK field. Empty together
+             *     with [`Self::email_smtp_credstore_ref`] means unauthenticated
+             *     submission; either one alone is rejected by `save_config`.
+             */
+            email_smtp_username: string;
             manager_ui_base_url: string;
             notify_on_failure: boolean;
             notify_on_schedule_completion: boolean;
@@ -3491,63 +2806,6 @@ export interface components {
             /** @description One of `qa_runs_sdk::SLACK_NOTIFICATION_EVENTS`, e.g. `"failed"`. */
             event: string;
         };
-        /**
-         * @description The receipt returned by a submission: `202` for accepted work, `200` only when
-         *     a replayed operation is already terminal.
-         */
-        OperationAcceptedDto: {
-            /** Format: uuid */
-            operation_id: string;
-            /**
-             * @description `true` when this submission resolved to an operation that already existed
-             *     under its `Idempotency-Key` with a matching request.
-             */
-            replayed: boolean;
-            status: components["schemas"]["OperationStatusDto"];
-        };
-        /** @description An operation as a caller polls it. */
-        OperationDto: {
-            /** Format: date-time */
-            completed_at?: string | null;
-            /** Format: date-time */
-            created_at: string;
-            dry_run: boolean;
-            items: components["schemas"]["OperationItemDto"][];
-            kind: components["schemas"]["OperationKindDto"];
-            /** Format: uuid */
-            operation_id: string;
-            /** Format: date-time */
-            started_at?: string | null;
-            /**
-             * @description Progress only — the outcomes are on the items and are deliberately not
-             *     aggregated here.
-             */
-            status: components["schemas"]["OperationStatusDto"];
-        };
-        /** @description One candidate's durable outcome. */
-        OperationItemDto: {
-            /** @description The structured refusal reason, when this candidate failed. */
-            error?: unknown;
-            gts_id: string;
-            /** Format: int64 */
-            resource_version?: number | null;
-            status: components["schemas"]["OperationItemStatusDto"];
-        };
-        /**
-         * @description `pending`, `running`, `succeeded`, `unchanged` or `failed`.
-         * @enum {string}
-         */
-        OperationItemStatusDto: "pending" | "running" | "succeeded" | "unchanged" | "failed";
-        /**
-         * @description `registration` or `deletion`.
-         * @enum {string}
-         */
-        OperationKindDto: "registration" | "deletion";
-        /**
-         * @description `pending`, `running` or `completed`.
-         * @enum {string}
-         */
-        OperationStatusDto: "pending" | "running" | "completed";
         /** @description The universe partitioned three ways, plus the per-case counters. */
         OverviewSummaryDto: {
             /**
@@ -3634,10 +2892,6 @@ export interface components {
             items: components["schemas"]["VariableDto"][];
             page_info: components["schemas"]["PageInfo"];
         };
-        /** @enum {string} */
-        PassthroughMode: "none" | "allowlist" | "all";
-        /** @enum {string} */
-        PathSuffixMode: "disabled" | "append";
         /**
          * @description One build's distribution, as
          *     `GET /qa/v1/analytics/plan/builds?plan_id=` renders it.
@@ -3779,40 +3033,6 @@ export interface components {
             run_id: string;
             status: string;
         };
-        PluginBinding: {
-            config?: {
-                [key: string]: string;
-            };
-            plugin_ref: string;
-        };
-        /** @description Response DTO for a plugin (reserved for follow-up implementation) */
-        PluginDto: {
-            /** @description Plugin GTS identifier */
-            gts_id: string;
-            /** @description Plugin version */
-            version?: string | null;
-        };
-        PluginsConfig: {
-            items?: components["schemas"]["PluginBinding"][];
-            sharing?: components["schemas"]["SharingMode"];
-        };
-        /** @description A predicate comparing a resource property to a value or subquery. */
-        Predicate: (components["schemas"]["EqPredicate"] & {
-            /** @enum {string} */
-            op: "eq";
-        }) | (components["schemas"]["InPredicate"] & {
-            /** @enum {string} */
-            op: "in";
-        }) | (components["schemas"]["InGroupPredicate"] & {
-            /** @enum {string} */
-            op: "in_group";
-        }) | (components["schemas"]["InGroupSubtreePredicate"] & {
-            /** @enum {string} */
-            op: "in_group_subtree";
-        }) | (components["schemas"]["InTenantSubtreePredicate"] & {
-            /** @enum {string} */
-            op: "in_tenant_subtree";
-        });
         /** @description RFC 9457 problem+json. `context` varies by error category. */
         Problem: {
             context: Record<string, never>;
@@ -3994,7 +3214,7 @@ export interface components {
             enqueued_at: string;
             /**
              * Format: uuid
-             * @description Renamed from `environment_id` (Task 25) — see [`RunDto::environment_id`]'s
+             * @description Renamed from `platform_id` (Task 25) — see [`RunDto::environment_id`]'s
              *     doc for why.
              */
             environment_id: string;
@@ -4050,36 +3270,36 @@ export interface components {
             /** Format: uuid */
             run_id: string;
         };
-        /** @enum {string} */
-        RateLimitAlgorithm: "token_bucket" | "sliding_window";
-        RateLimitConfig: {
-            algorithm?: components["schemas"]["RateLimitAlgorithm"];
-            budget?: null | components["schemas"]["BudgetConfig"];
-            burst?: null | components["schemas"]["BurstConfig"];
-            /** Format: int32 */
-            cost?: number;
-            response_headers?: boolean;
-            scope?: components["schemas"]["RateLimitScope"];
-            sharing?: components["schemas"]["SharingMode"];
-            strategy?: components["schemas"]["RateLimitStrategy"];
-            sustained: components["schemas"]["SustainedRate"];
-        };
-        /** @enum {string} */
-        RateLimitScope: "global" | "tenant" | "user" | "ip" | "route";
-        /** @enum {string} */
-        RateLimitStrategy: "reject" | "queue" | "degrade";
         /**
          * @description What a rebuild did.
          *
-         *     # `watermark_advanced_to` is deliberately not on the wire
+         *     # `watermark_at` is deliberately not on the wire
          *
-         *     `ReconcileOutcome` carries it, and for a rebuild it is always `None` —
-         *     meaningfully so: not touching the watermark is the endpoint's contract, not a
-         *     gap in it. A field that is structurally always `null` invites a client to
-         *     branch on it, and the first client to do so would be writing dead code
-         *     against a promise the *other* caller of `ReconcileOutcome` (the reconcile
-         *     ticker, which has no HTTP surface) does not keep. The endpoint's description
-         *     states the guarantee instead.
+         *     `ReconcileOutcome` carries it — as `watermark_advanced_to` until the
+         *     2026-09-18 follow-ups renamed and re-specified it — and for a rebuild it is
+         *     always `None`, meaningfully so: not touching the watermark is the
+         *     endpoint's contract, not a gap in it. `result_rows_written` stays off for
+         *     the neighbouring reason: it is a diagnostic for the ticker's log rather than
+         *     a fact about the window an operator asked for. A field that is structurally
+         *     always `null` invites a client to branch on it, and the first client to do
+         *     so would be writing dead code against a promise the *other* caller of
+         *     `ReconcileOutcome` (the reconcile ticker, which has no HTTP surface) does not
+         *     keep. The endpoint's description states the guarantee instead.
+         *
+         *     # `caught_up` **is** on the wire now, as `complete`, and that is the change
+         *     # the 2026-09-18 follow-up made here
+         *
+         *     It used to be excluded by the same argument as `watermark_at` — always
+         *     `false` for a rebuild, which read one page and had no walk to finish. That
+         *     stopped being true when the rebuild learned to page: it now means "every run
+         *     in `[from, to)` was reached", which is the single most important thing this
+         *     response says, and its absence is what made a truncated rebuild
+         *     indistinguishable from a complete one. The old signal was a `WARN` in the
+         *     gear's log, and the outage this endpoint's fix wave came out of established
+         *     exactly what a log line nobody branches on is worth.
+         *
+         *     [`Self::resume_from`] travels with it rather than leaving the operator to
+         *     work out a continuation: it is the `from` of the next request.
          *
          *     # `stopped_at_run` is not on the wire either, and that one is only a scope
          *     # decision
@@ -4092,16 +3312,37 @@ export interface components {
          *     a tenant's backfill. It would be *useful* here too: an operator reading
          *     `stopped_at_gap: true` currently has to go to the logs to find out which run.
          *     Adding it is an additive key on a shipped response and nothing here objects
-         *     to it; it is simply not this review wave's to add. Unlike
-         *     `watermark_advanced_to`, there is no argument that it should stay off.
+         *     to it; it is simply not this review wave's to add. Unlike `watermark_at`,
+         *     there is no argument that it should stay off.
          */
         RebuildOutcomeDto: {
+            /**
+             * @description `true` when every run that finished in `[from, to)` was reached.
+             *
+             *     `false` means the rebuild did **part** of the job: it spent its page
+             *     budget, or it stopped on a run it could not re-project. This is the field
+             *     to branch on — a client that ignores it reads a partial replay as a
+             *     complete one, which is the failure this response was reshaped to prevent.
+             *     [`Self::resume_from`] then carries where to continue.
+             */
+            complete: boolean;
             /**
              * @description Runs whose projection was rewritten. Equal to `scanned` unless the
              *     rebuild stopped early — a rebuild replays every run in its window, it
              *     does not skip the ones that already had rows.
              */
             replayed: number;
+            /**
+             * Format: date-time
+             * @description The `from` of the request that finishes what this one did not.
+             *
+             *     `null` exactly when [`Self::complete`] is `true`. Otherwise an RFC 3339
+             *     instant to post straight back as `from`, with the same `to`. The
+             *     continuation re-replays the run it names and anything tied with it — a
+             *     rebuild is idempotent, so overlapping is free where skipping a tie group
+             *     would not be.
+             */
+            resume_from?: string | null;
             /** @description Runs found in the window and examined. */
             scanned: number;
             /**
@@ -4134,89 +3375,6 @@ export interface components {
              */
             to: string;
         };
-        /** @description Request DTO for registering GTS entities. */
-        RegisterEntitiesRequest: {
-            /** @description Array of GTS entities to register. */
-            entities: unknown[];
-        };
-        /** @description Response DTO for batch registration. */
-        RegisterEntitiesResponse: {
-            /** @description Results for each entity in the request. */
-            results: components["schemas"]["RegisterResultDto"][];
-            /** @description Summary of the registration operation. */
-            summary: components["schemas"]["RegisterSummaryDto"];
-        };
-        /** @description Result of registering a single entity. */
-        RegisterResultDto: {
-            /** @description The registered entity. */
-            entity: components["schemas"]["GtsEntityDto"];
-            /** @enum {string} */
-            status: "ok";
-        } | {
-            /** @description Error message. */
-            error: string;
-            /** @description The GTS ID that was attempted, if available. */
-            gts_id?: string | null;
-            /** @enum {string} */
-            status: "error";
-        };
-        /** @description Summary of a batch registration operation. */
-        RegisterSummaryDto: {
-            /** @description Number of failed registrations. */
-            failed: number;
-            /** @description Number of successfully registered entities. */
-            succeeded: number;
-            /** @description Total number of entities processed. */
-            total: number;
-        };
-        RequestHeaderRules: {
-            add?: {
-                [key: string]: string;
-            };
-            passthrough?: components["schemas"]["PassthroughMode"];
-            passthrough_allowlist?: string[];
-            remove?: string[];
-            set?: {
-                [key: string]: string;
-            };
-        };
-        /** @description The resource being accessed. */
-        Resource: {
-            /**
-             * Format: uuid
-             * @description Specific resource ID (for GET/UPDATE/DELETE on a single resource).
-             */
-            id?: string | null;
-            /** @description Additional resource properties for policy evaluation. */
-            properties?: {
-                [key: string]: unknown;
-            };
-            /** @description Resource type identifier (e.g., "`gts.cf.core.users.user.v1~`"). */
-            type: string;
-        };
-        ResponseHeaderRules: {
-            add?: {
-                [key: string]: string;
-            };
-            remove?: string[];
-            set?: {
-                [key: string]: string;
-            };
-        };
-        RouteResponse: {
-            cors?: null | components["schemas"]["CorsConfig"];
-            enabled: boolean;
-            id: string;
-            match: components["schemas"]["MatchRules"];
-            plugins?: null | components["schemas"]["PluginsConfig"];
-            /** Format: int32 */
-            priority: number;
-            rate_limit?: null | components["schemas"]["RateLimitConfig"];
-            tags?: string[];
-            /** Format: uuid */
-            tenant_id: string;
-            upstream_id: string;
-        };
         /**
          * @description The detail read: the run, its counters, and its per-test rows.
          *
@@ -4247,18 +3405,18 @@ export interface components {
             created_at: string;
             /**
              * Format: uuid
-             * @description Renamed from `environment_id` (Task 25): the wire now agrees with the
+             * @description Renamed from `platform_id` (Task 25): the wire now agrees with the
              *     Rust field. The column moved with it: `environment_id` is now the
-             *     column, the Rust field and the wire key alike. Every other `environment_id` on this
+             *     column, the Rust field and the wire key alike. Every other `platform_id` on this
              *     crate's wire (requests and responses alike) was renamed the same way
              *     — this is the one place it is spelled out in full.
              *
              *     **This was a breaking API change** (Task 25): a client reading
-             *     `environment_id` out of a response now finds it absent, replaced by
+             *     `platform_id` out of a response now finds it absent, replaced by
              *     `environment_id`. (This type is a response - a client never *sends*
              *     one, so there is no 400 to raise here. The 400 for a stale *request*
              *     is on the request-side types: [`LaunchRunReq::environment_id`] and
-             *     [`NewScheduleReq::environment_id`] both refuse a `environment_id` sent in
+             *     [`NewScheduleReq::environment_id`] both refuse a `platform_id` sent in
              *     their place explicitly - see the first one's doc, and ruling G-4.)
              */
             environment_id?: string | null;
@@ -4353,12 +3511,19 @@ export interface components {
             value: string;
         };
         /**
-         * @description A run's five outcome counters.
+         * @description A run's seven outcome counters.
          *
          *     `failed` is the failed-**or-errored** count: `FAILED` and `ERROR` are
          *     distinct per-test statuses and are folded together in every aggregate that
-         *     produces these numbers. `sdk::RunResult` explains why a sixth counter would
-         *     be a silent regression.
+         *     produces these numbers. `sdk::RunResult` explains why an `error` counter
+         *     would be a silent regression, and why `xfail` and `xpass` — which are
+         *     counters of their own — are not that case.
+         *
+         *     `passed + failed + skipped + in_progress + xfail + xpass == total` for a
+         *     run whose every result carries one of the eight statuses those counters
+         *     recognise. A status the runner invents is counted in `total` alone, so a
+         *     consumer reads the identity as "the counters account for every recognised
+         *     row" rather than as a guarantee it can divide by.
          */
         RunResultDto: {
             failed: number;
@@ -4366,6 +3531,13 @@ export interface components {
             passed: number;
             skipped: number;
             total: number;
+            /** @description Results reported `XFAIL` — an expected failure that failed. */
+            xfail: number;
+            /**
+             * @description Results reported `XPASS` — an expected failure that unexpectedly
+             *     passed.
+             */
+            xpass: number;
         };
         /**
          * @description Who asked for a run.
@@ -4538,7 +3710,7 @@ export interface components {
             /**
              * Format: uuid
              * @description `null` schedules a run with no target environment. Such a run is
-             *     never queued and never blocks anything. Renamed from `environment_id`
+             *     never queued and never blocks anything. Renamed from `platform_id`
              *     (Task 25) — see [`RunDto::environment_id`]'s doc for why.
              */
             environment_id?: string | null;
@@ -4584,6 +3756,39 @@ export interface components {
             updated_at: string;
         };
         /**
+         * @description One entry of `GET /qa/v1/schedules/{id}/ticks`: what a real fire's fixed
+         *     claim produced, or why it did not — **or, unfiltered, a referential-check
+         *     row** (`claimed_by == "referential-check"`), written when the schedule's
+         *     target stopped resolving. That row was never a claim: `due_at` is the
+         *     check's own timestamp rather than a due occurrence, and `run_id` is always
+         *     `null`. Nothing in this list tells the two apart except `claimed_by`
+         *     itself — do not read every row here as "what a fire produced".
+         *
+         *     Fields match `domain::repos::ScheduleTickRow` 1:1 - this is a read with no
+         *     wire vocabulary to translate, unlike [`ScheduleDto::exclusive_choice`].
+         */
+        ScheduleTickDto: {
+            /** Format: date-time */
+            claimed_at: string;
+            claimed_by: string;
+            /** Format: date-time */
+            due_at: string;
+            /** @description Why the claim did not produce a run: `null` on success. */
+            error?: string | null;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: uuid
+             * @description `null` until the launch it triggered completes, forever for an
+             *     orphaned claim, or **always**, unconditionally, for a
+             *     referential-check row (`claimed_by == "referential-check"`), which
+             *     never triggers a launch at all.
+             */
+            run_id?: string | null;
+            /** Format: uuid */
+            schedule_id: string;
+        };
+        /**
          * @description One status's Slack Block Kit sections, on the wire. `enabled`
          *     is a routing concern already spent by
          *     `domain::notify::routing::route` and reaches the wire anyway because a
@@ -4607,42 +3812,6 @@ export interface components {
             skipped: components["schemas"]["ScheduledRunSlackTemplateDto"];
             succeeded: components["schemas"]["ScheduledRunSlackTemplateDto"];
         };
-        /** @enum {string} */
-        Scheme: "http" | "https" | "wss" | "wt" | "grpc";
-        /** @description Access metadata returned alongside the secret value. */
-        SecretMetadataDto: {
-            /**
-             * Format: date-time
-             * @description Expiry instant (RFC 3339), when set.
-             */
-            expires_at?: string | null;
-            /** @description Whether the secret came from an ancestor tenant. */
-            is_inherited: boolean;
-            /**
-             * Format: uuid
-             * @description The tenant that owns this secret.
-             */
-            owner_tenant_id: string;
-            /** @description The sharing mode that governed the lookup result. */
-            sharing: components["schemas"]["SharingModeDto"];
-            /** @description Secret type as its full GTS type id. */
-            type: string;
-            /**
-             * Format: int64
-             * @description Monotonic version of the resolved secret (also returned as `ETag`).
-             */
-            version: number;
-        };
-        Server: {
-            endpoints: components["schemas"]["Endpoint"][];
-        };
-        /** @enum {string} */
-        SharingMode: "private" | "inherit" | "enforce";
-        /**
-         * @description Sharing mode for the REST transport layer.
-         * @enum {string}
-         */
-        SharingModeDto: "private" | "tenant" | "shared";
         /**
          * @description REST DTO for SSH key metadata.
          *
@@ -4680,113 +3849,6 @@ export interface components {
             /** Format: uuid */
             run_id: string;
         };
-        /** @description The authenticated subject making the request. */
-        Subject: {
-            /**
-             * Format: uuid
-             * @description Subject identifier (user ID, service ID).
-             */
-            id: string;
-            /**
-             * @description Additional subject properties for policy evaluation.
-             *     The subject's home tenant ID goes here as `"tenant_id"`.
-             */
-            properties?: {
-                [key: string]: unknown;
-            };
-            /**
-             * @description Subject type (e.g., "user", "service").
-             *     Serialized as `"type"` to match the `AuthZEN` spec.
-             */
-            type?: string | null;
-        };
-        /**
-         * @description A submission of one or more entities.
-         *
-         *     `items` and not `entities`: the operation result, the discovery page and
-         *     `Page<T>` all call their array `items`, so this is the house word for "the
-         *     array in this envelope". It is also the name v1 does *not* use, which keeps
-         *     the T24a promotion a loud break rather than one that turns on the element
-         *     shape.
-         */
-        SubmitEntitiesRequest: {
-            /**
-             * @description Reserved for T20 rollback-only evaluation. `true` is synchronously refused
-             *     until dry runs are implemented. The field is already part of the request
-             *     fingerprint, so a future dry run and commit cannot share one idempotency
-             *     identity.
-             */
-            dry_run?: boolean | null;
-            items: components["schemas"]["SubmitEntityDto"][];
-        };
-        /**
-         * @description One entity in a submission.
-         *
-         *     `SubmitEntityDto` and not `SubmitCandidateDto`: "candidate" is the domain's
-         *     word for a submitted-but-not-yet-admitted entity, and this type is the wire
-         *     form, whose name reaches callers as an `OpenAPI` component.
-         */
-        SubmitEntityDto: {
-            /** @description The authored document. */
-            content: unknown;
-            /**
-             * Format: int64
-             * @description Optimistic precondition. **Omit** to require that the identifier does not
-             *     exist; a literal `0` is refused. A positive version names a content
-             *     revision: the entity must exist at exactly that `resource_version`, and a
-             *     mismatch fails the candidate terminally rather than rebasing it.
-             */
-            expected_resource_version?: number | null;
-            /**
-             * @description ADR-0004 `force`: waive one cross-minor compatibility check. Refused where
-             *     the deployment disallows it, where the candidate has no such check, and
-             *     until T17 can evaluate the check and persist the waiver provenance.
-             */
-            force?: boolean | null;
-            /**
-             * @description The canonical GTS identifier. A non-canonical spelling is refused rather
-             *     than normalized.
-             */
-            gts_id: string;
-        };
-        SustainedRate: {
-            /** Format: int32 */
-            rate: number;
-            window?: components["schemas"]["Window"];
-        };
-        /** @description Tenant context for the evaluation. */
-        TenantContext: {
-            /** @description Barrier enforcement mode (default: `Respect`). */
-            barrier_mode?: components["schemas"]["AuthzBarrierMode"];
-            /** @description Tenant hierarchy mode (default: `Subtree`). */
-            mode?: components["schemas"]["TenantMode"];
-            /**
-             * Format: uuid
-             * @description The context tenant ID (tenant being operated on).
-             */
-            root_id?: string | null;
-            /** @description Required tenant status filter (e.g., `["active"]`). */
-            tenant_status?: string[] | null;
-        };
-        /**
-         * @description Tenant hierarchy mode.
-         * @enum {string}
-         */
-        TenantMode: "root_only" | "subtree";
-        /**
-         * @description Tenant lifecycle status.
-         *
-         *     Mirrors the SMALLINT encoding stored in `tenants.status` and
-         *     `tenant_closure.descendant_status` (the canonical mapping is
-         *     `Active = 1`, `Suspended = 2`, `Deleted = 3`). Use [`as_smallint`] /
-         *     [`from_smallint`] to cross the DB boundary so the mapping stays in
-         *     one place — duplicating it elsewhere risks future drift.
-         *
-         *     [`as_smallint`]: TenantStatus::as_smallint
-         *     [`from_smallint`]: TenantStatus::from_smallint
-         * @enum {string}
-         */
-        TenantStatus: "active" | "suspended" | "deleted";
         /**
          * @description One test *function* outcome, as `GET /qa/v1/test-case-results` returns it.
          *
@@ -4874,6 +3936,14 @@ export interface components {
              *     publishing a `fingerprint` rather than its `credstore_ref`.
              */
             has_credential: boolean;
+            /**
+             * @description Commit id the last successful sync materialized; `null` when the
+             *     repository has never synced. The content revision, where
+             *     `last_synced_at` is only the attempt instant — two syncs that find
+             *     the same upstream tip give two `last_synced_at` values and one
+             *     `head_commit`.
+             */
+            head_commit?: string | null;
             /** Format: uuid */
             id: string;
             /** Format: date-time */
@@ -4952,15 +4022,15 @@ export interface components {
             duration?: string | null;
             /**
              * Format: uuid
-             * @description Renamed from `environment_id` (Task 25): the wire now agrees with the
+             * @description Renamed from `platform_id` (Task 25): the wire now agrees with the
              *     Rust field. The column moved with it: `environment_id` is now the
              *     column, the Rust field and the wire key alike. Every other
-             *     `environment_id` on this crate's wire, whatever its own source entity,
+             *     `platform_id` on this crate's wire, whatever its own source entity,
              *     was renamed the same way — this is the one place it is spelled out
              *     in full.
              *
              *     **This was a breaking API change** (Task 25): a client reading
-             *     `environment_id` out of a response now finds it absent, replaced by
+             *     `platform_id` out of a response now finds it absent, replaced by
              *     `environment_id`. Every renamed field on this crate's wire is a
              *     response field - unlike `qa-runs`, nothing here is also a request
              *     field, so there is no 400 to raise on this crate's side of ruling G-4.
@@ -5131,16 +4201,6 @@ export interface components {
              */
             plugin_instance_id?: string | null;
         };
-        UpdateRouteRequest: {
-            cors?: null | components["schemas"]["CorsConfig"];
-            enabled: boolean;
-            match: components["schemas"]["MatchRules"];
-            plugins?: null | components["schemas"]["PluginsConfig"];
-            /** Format: int32 */
-            priority: number;
-            rate_limit?: null | components["schemas"]["RateLimitConfig"];
-            tags: string[];
-        };
         /**
          * @description The body of `PUT /qa/v1/schedules/{id}/notifications`.
          *
@@ -5196,27 +4256,6 @@ export interface components {
             slack_events: string[];
         };
         /**
-         * @description Request body for `PUT /credstore/v1/secrets/{ref}`.
-         *
-         *     `Debug` is hand-written to redact `value` (see [`CreateSecretRequestDto`]).
-         */
-        UpdateSecretRequestDto: {
-            /**
-             * Format: date-time
-             * @description Expiry instant (RFC 3339); only for expirable types. A PUT is a
-             *     whole-value replace: omitting `expires_at` clears a stored expiry.
-             */
-            expires_at?: string | null;
-            sharing?: null | components["schemas"]["SharingModeDto"];
-            /**
-             * @description Secret type as a full GTS type id. Optional; when present must match
-             *     the existing secret's type (the type is immutable).
-             */
-            type?: string | null;
-            /** @description Secret value as a UTF-8 string. */
-            value: string;
-        };
-        /**
          * @description REST DTO for `PUT /qa/v1/test-repos/{id}` — full replace of the
          *     repository's mutable fields (no tri-state patch semantics: an absent
          *     `credential_ref` *clears* the stored reference).
@@ -5251,18 +4290,6 @@ export interface components {
              *     userinfo credentials are rejected — use `credential_ref`.
              */
             url: string;
-        };
-        UpdateUpstreamRequest: {
-            alias?: string | null;
-            auth?: null | components["schemas"]["AuthConfig"];
-            cors?: null | components["schemas"]["CorsConfig"];
-            enabled: boolean;
-            headers?: null | components["schemas"]["HeadersConfig"];
-            plugins?: null | components["schemas"]["PluginsConfig"];
-            protocol: string;
-            rate_limit?: null | components["schemas"]["RateLimitConfig"];
-            server: components["schemas"]["Server"];
-            tags: string[];
         };
         /**
          * @description REST DTO for creating a custom plan, and — matching the SDK's
@@ -5299,21 +4326,6 @@ export interface components {
             name: string;
             value: string;
         };
-        UpstreamResponse: {
-            alias: string;
-            auth?: null | components["schemas"]["AuthConfig"];
-            cors?: null | components["schemas"]["CorsConfig"];
-            enabled: boolean;
-            headers?: null | components["schemas"]["HeadersConfig"];
-            id: string;
-            plugins?: null | components["schemas"]["PluginsConfig"];
-            protocol: string;
-            rate_limit?: null | components["schemas"]["RateLimitConfig"];
-            server: components["schemas"]["Server"];
-            tags?: string[];
-            /** Format: uuid */
-            tenant_id: string;
-        };
         /** @description REST DTO for a pipeline (global) or per-environment variable. */
         VariableDto: {
             /** Format: uuid */
@@ -5323,8 +4335,6 @@ export interface components {
             name: string;
             value: string;
         };
-        /** @enum {string} */
-        Window: "second" | "minute" | "hour" | "day";
     };
     responses: never;
     parameters: never;
@@ -5334,1379 +4344,6 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    auth_z_resolver_api_rest_evaluate: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["EvaluationRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["EvaluationResponse"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "credstore.create_secret": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description Secret reference, value, and sharing mode */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateSecretRequestDto"];
-            };
-        };
-        responses: {
-            /** @description Secret created (see Location header) */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "credstore.get_secret": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Secret reference (`[a-zA-Z0-9_-]+`, maximum length 255 characters) */
-                ref: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Resolved secret value and metadata */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GetSecretResponseDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "credstore.put_secret": {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description Mandatory optimistic-concurrency precondition (RFC 7232). `*` requires the secret to exist (explicit last-writer-wins overwrite); a quoted `"<id>.<version>"` ETag requires the current version to match, otherwise the request fails with `409 OPTIMISTIC_LOCK_FAILURE`. A missing header is a `400 IF_MATCH_REQUIRED`. */
-                "If-Match": string;
-            };
-            path: {
-                /** @description Secret reference (`[a-zA-Z0-9_-]+`, maximum length 255 characters) */
-                ref: string;
-            };
-            cookie?: never;
-        };
-        /** @description Secret value and sharing mode */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateSecretRequestDto"];
-            };
-        };
-        responses: {
-            /** @description Secret stored */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "credstore.delete_secret": {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description Mandatory optimistic-concurrency precondition (RFC 7232). `*` requires the secret to exist (explicit last-writer-wins overwrite); a quoted `"<id>.<version>"` ETag requires the current version to match, otherwise the request fails with `409 OPTIMISTIC_LOCK_FAILURE`. A missing header is a `400 IF_MATCH_REQUIRED`. */
-                "If-Match": string;
-            };
-            path: {
-                /** @description Secret reference (`[a-zA-Z0-9_-]+`, maximum length 255 characters) */
-                ref: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Secret deleted */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "gear_orchestrator.list_gears": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description List of registered gears */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GearDto"][];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "oagw.list_routes": {
-        parameters: {
-            query?: {
-                /** @description Upstream GTS identifier to filter by */
-                upstream_id?: string;
-                /** @description Maximum number of results (default 50, max 100) */
-                limit?: number;
-                /** @description Number of results to skip */
-                offset?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description List of routes */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RouteResponse"][];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "oagw.create_route": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description Route configuration */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateRouteRequest"];
-            };
-        };
-        responses: {
-            /** @description Created route */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RouteResponse"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "oagw.get_route": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Route GTS identifier */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Route found */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RouteResponse"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "oagw.update_route": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Route GTS identifier */
-                id: string;
-            };
-            cookie?: never;
-        };
-        /** @description Route update data */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateRouteRequest"];
-            };
-        };
-        responses: {
-            /** @description Updated route */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RouteResponse"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "oagw.delete_route": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Route GTS identifier */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Route deleted */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": Record<string, never>;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "oagw.list_upstreams": {
-        parameters: {
-            query?: {
-                /** @description Maximum number of results (default 50, max 100) */
-                limit?: number;
-                /** @description Number of results to skip */
-                offset?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description List of upstreams */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UpstreamResponse"][];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "oagw.create_upstream": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description Upstream configuration */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateUpstreamRequest"];
-            };
-        };
-        responses: {
-            /** @description Created upstream */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UpstreamResponse"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "oagw.get_upstream": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Upstream GTS identifier */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Upstream found */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UpstreamResponse"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "oagw.update_upstream": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Upstream GTS identifier */
-                id: string;
-            };
-            cookie?: never;
-        };
-        /** @description Upstream update data */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateUpstreamRequest"];
-            };
-        };
-        responses: {
-            /** @description Updated upstream */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["UpstreamResponse"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "oagw.delete_upstream": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Upstream GTS identifier */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Upstream deleted */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": Record<string, never>;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
     "qa_insights.analytics_build_tests": {
         parameters: {
             query: {
@@ -10106,6 +7743,65 @@ export interface operations {
             };
         };
     };
+    "qa_runs.list_schedule_ticks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Schedule UUID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The schedule's fire history, most recent first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleTickDto"][];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     "qa_insights.get_jira_settings": {
         parameters: {
             query?: never;
@@ -10778,7 +8474,10 @@ export interface operations {
     };
     "qa_catalog.download_bundle": {
         parameters: {
-            query?: never;
+            query: {
+                /** @description HMAC-SHA256 over (bundle_id, tenant_id), hex-encoded. This gear's own choice, minted when the bundle was built and handed to the runner on TEST_BUNDLE_URL; a download whose sig does not verify is refused with 403, including when this deployment has no bundle_download_signing_secret configured (fail-closed). Omitting it is a 400 rather than a 403 - the parameter is required, so the request never reaches the verification. */
+                sig: string;
+            };
             header?: never;
             path: {
                 /** @description Bundle UUID */
@@ -10797,8 +8496,8 @@ export interface operations {
                     "application/gzip": string;
                 };
             };
-            /** @description Unauthorized */
-            401: {
+            /** @description Bad Request */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11660,641 +9359,6 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "types_registry.list": {
-        parameters: {
-            query?: {
-                /** @description Wildcard pattern for GTS ID matching (e.g., gts.acme.*) */
-                pattern?: string;
-                /** @description Filter by entity kind: 'type' or 'instance' */
-                kind?: string;
-                /** @description Filter by vendor */
-                vendor?: string;
-                /** @description Filter by package */
-                package?: string;
-                /** @description Filter by namespace */
-                namespace?: string;
-                /** @description Segment match scope: 'primary' or 'any' (default) */
-                segmentScope?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description List of entities */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ListEntitiesResponse"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "types_registry.register": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description GTS entities to register */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RegisterEntitiesRequest"];
-            };
-        };
-        responses: {
-            /** @description Registration results */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RegisterEntitiesResponse"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Payload Too Large */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unsupported Media Type */
-            415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unprocessable Entity */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "types_registry.get": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description The GTS identifier (e.g., gts.acme.core.events.user_created.v1~) */
-                gts_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The requested entity */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GtsEntityDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "types_registry.submit_entities": {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description Caller-supplied key scoping the retry of this submission. A replay with the same body returns the same operation; a different body under the same key is a conflict. */
-                "Idempotency-Key": string;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        /** @description Entities to admit */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SubmitEntitiesRequest"];
-            };
-        };
-        responses: {
-            /** @description Replay of an operation that is already terminal */
-            200: {
-                headers: {
-                    /** @description Whether this submission replayed an existing operation */
-                    "Idempotency-Replayed"?: boolean;
-                    /** @description URI of the admission operation */
-                    Location?: string;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OperationAcceptedDto"];
-                };
-            };
-            /** @description Accepted; poll the operation at the returned Location */
-            202: {
-                headers: {
-                    /** @description Whether this submission replayed an existing operation */
-                    "Idempotency-Replayed"?: boolean;
-                    /** @description URI of the admission operation */
-                    Location?: string;
-                    /** @description Suggested delay in seconds before polling the operation */
-                    "Retry-After"?: number;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OperationAcceptedDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Payload Too Large */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unsupported Media Type */
-            415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unprocessable Entity */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
-                headers: {
-                    /** @description Suggested delay in seconds before repeating the submission under the same Idempotency-Key; present where the family-lock budget expired */
-                    "Retry-After"?: number;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "types_registry.get_entity": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description A GTS identifier (e.g. gts.acme.core.events.user_created.v1~) or a Registry Reference UUID */
-                entity_key: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The requested entity */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["EntityDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    "types_registry.get_operation": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description The operation UUID returned by a submission */
-                operation_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The operation */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OperationDto"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too Many Requests */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
                 headers: {
                     [name: string]: unknown;
                 };

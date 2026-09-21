@@ -53,6 +53,15 @@ pub struct Model {
     pub run_queue_queued_slack_enabled: bool,
     pub email_smtp_host: String,
     pub email_smtp_port: i32,
+    /// SMTP AUTH username, in the clear. Added by
+    /// `m20260921_000002_smtp_credentials`, defaulting to `''`, so every row
+    /// written before SMTP authentication existed reads back as "no
+    /// credential".
+    pub email_smtp_username: String,
+    /// Credstore **reference** to the SMTP AUTH password, never the password —
+    /// the same treatment [`Model::slack_webhook_credstore_ref`] gets, and for
+    /// the same reason.
+    pub email_smtp_credstore_ref: String,
     pub email_from: String,
     /// One string, not a list: legacy stores the operator's recipient line as
     /// typed and the mailer splits it. Kept as stored so a settings round-trip

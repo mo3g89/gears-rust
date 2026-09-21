@@ -105,6 +105,8 @@ fn fully_enabled_config() -> NotificationConfig {
         run_queue_queued_slack_enabled: true,
         email_smtp_host: "smtp.example.test".to_owned(),
         email_smtp_port: 587,
+        email_smtp_username: "qa-insights@example.test".to_owned(),
+        email_smtp_credstore_ref: "qa-smtp-password".to_owned(),
         email_from: "qa-insights@example.test".to_owned(),
         email_recipients: "oncall@example.test".to_owned(),
         email_enabled: true,
@@ -419,6 +421,21 @@ fn every_notification_config_field_gates_what_step_0_found() {
             baseline: run_completed_baseline,
             mutated: run_completed_baseline,
         },
+        // 12a/12b. Data only, exactly as `email_smtp_port` is: the SMTP
+        // credential pair is read by the *adapter*, at send time, and routing
+        // has never consulted anything about how the relay is reached.
+        Row {
+            field: "email_smtp_username",
+            event: Event::RunCompleted,
+            baseline: run_completed_baseline,
+            mutated: run_completed_baseline,
+        },
+        Row {
+            field: "email_smtp_credstore_ref",
+            event: Event::RunCompleted,
+            baseline: run_completed_baseline,
+            mutated: run_completed_baseline,
+        },
         // 13. Data only.
         Row {
             field: "email_from",
@@ -442,7 +459,7 @@ fn every_notification_config_field_gates_what_step_0_found() {
         },
     ];
 
-    assert_eq!(rows.len(), 15, "one row per NotificationConfig field");
+    assert_eq!(rows.len(), 17, "one row per NotificationConfig field");
 
     for row in rows {
         let baseline_decision = route(&fully_enabled_config(), &row.event, &baseline_schedule);
@@ -489,6 +506,8 @@ fn mutate(field: &str) -> NotificationConfig {
         "run_queue_queued_slack_enabled" => config.run_queue_queued_slack_enabled = false,
         "email_smtp_host" => config.email_smtp_host = String::new(),
         "email_smtp_port" => config.email_smtp_port = 0,
+        "email_smtp_username" => config.email_smtp_username = String::new(),
+        "email_smtp_credstore_ref" => config.email_smtp_credstore_ref = String::new(),
         "email_from" => config.email_from = String::new(),
         "email_recipients" => config.email_recipients = String::new(),
         "email_enabled" => config.email_enabled = false,

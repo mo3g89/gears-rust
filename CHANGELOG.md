@@ -9,6 +9,90 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+### Breaking
+
+- **qa-platform**: the qa-runs Argo runner pod now runs as a chart-provisioned
+  ServiceAccount, `qa-platform-runner` in the Argo namespace, instead of
+  `argo-workflow` — a name this chart never created and merely assumed a
+  separate `argo-workflows` Helm release had provisioned with its own RBAC.
+  **Pre-deploy operator action for any existing deployment**: if that
+  separate release's RBAC granted `argo-workflow` `create`/`patch` on
+  `workflowtaskresults.argoproj.io` in order to make runs succeed, that grant
+  now applies to the wrong account. This chart grants `qa-platform-runner`
+  the same two verbs on the same resource itself (a Role and RoleBinding
+  installed alongside the ServiceAccount), so no separate grant should be
+  needed going forward — but an operator relying on a wider grant against the
+  old name (or a `NetworkPolicy`/`PodSecurityPolicy`/admission rule keyed on
+  the old ServiceAccount name) must re-target it at `qa-platform-runner`
+  before upgrading, or runs will fail after producing all of their output
+  with `exit code 64` and `workflowtaskresults.argoproj.io is forbidden`.
+  Override `argo.workflowServiceAccount` to keep the old name if the
+  `argo-workflows` release's own account and RBAC should keep being used
+  instead of this chart's.
+- **qa-platform**: a qa-runs execution whose credential Secret cannot be
+  resolved now refuses to start, instead of running without it. The pod's
+  `secretKeyRef` env entries used to carry `optional: true` (inherited from
+  the source system), so a Secret the kubelet could not find left the
+  variable unset and the suite ran without the credential, failing the way a
+  broken product fails — the operator read a red test, not a missing
+  credential. They now carry `optional: false`: the pod does not start, and
+  Argo reports `CreateContainerConfigError` naming the missing Secret in the
+  pod's events. A pre-flight existence check was considered and is not
+  available to this gear — ADR-0008 cut `secrets` out of qa-runs' RBAC by
+  construction — so the pod's own refusal is the achievable form of the same
+  outcome.
+- **qa-platform**: authorization resource labels are now GTS type ids
+  (`qa.run` → `gts.cf.qa.runs.run.v1~`, and 16 more). A deployment with policies
+  written against the old bare strings must rewrite them. No such policy exists
+  in this repository — the strings appear in no chart, config or fixture — and
+  the change is made now precisely because that stops being true after release.
+  Permission instance ids are unchanged. (The source literal omits the `gts.`
+  prefix — `cf.qa.runs.run.v1~` — because the `gts_id!` macro prepends it at
+  compile time; a policy targets the prefixed runtime value shown above.)
+- **qa-platform**: Secret names carry their tenant. The name was
+  `sanitize(prefix + credstore_ref)` in seven places across three crates
+  (`qa-runs`, `qa-environments`, `qa-connector-k8s`) and one shell script, so
+  two tenants naming the same reference shared one Secret in a shared Argo
+  namespace. Generated references are UUIDs and safe from this; an
+  operator-typed `CredentialSubmission::Reference` is not. The name is now
+  `{readable}-{digest}`: `readable` is a sanitised, truncated
+  `prefix + tenant_id + "-" + credstore_ref` (a human's debugging hint,
+  nothing more), and `digest` is the 16-character lower-case hex encoding of
+  the FNV-1a 64-bit fingerprint of `prefix + tenant_id + "-" + credstore_ref`.
+  **An earlier version of this change put the tenant ahead of the reference
+  and truncated the concatenation directly, reasoning that truncation would
+  always eat the reference and never the tenant — that shipped and was found
+  in production to collapse every credential of one tenant onto one Secret,
+  because the default prefix and a full tenant leave only 14 bytes of
+  reference, and real references share that many leading characters.**
+  Distinctness now lives in the digest, which is a function of the whole
+  tuple and therefore survives no matter how much of `readable` truncates
+  away; there is correspondingly no longer a degenerate case where a
+  prefix/tenant combination leaves "no room" for a name; every input derives
+  a valid, distinct-enough name. Not a security boundary, so the digest uses
+  FNV-1a rather than this workspace's mandated `aws-lc-rs` — a first attempt
+  used `sha2` directly and was corrected before merge: Dylint's `DE0708`
+  already bans a direct `sha2`/`sha1`/`md5` import outside one allow-listed
+  file, this repository having already replaced its own direct `sha2` usage
+  with FNV-1a once (see the DE0708 entry below). `keycloak-idp-plugin`'s
+  `user_facade::legacy_filter_hash` is the standing precedent this follows,
+  same constants; the same fingerprint is computed in bash via `python3`
+  (both deploy scripts already require it) rather than any hashing tool, so
+  no new host dependency either way. **Pre-deploy operator action for any
+  existing deployment**: a
+  Secret an operator created by hand with
+  `provision-platform-kubeconfig-secret.sh` (which takes a `<tenant-id>`
+  argument, ahead of `<credstore-ref>`) sits under the pre-WS1 name until
+  moved — run `deploy/argo/rename-qa-secrets.sh` against a mapping of every
+  by-hand reference to its tenant; it creates the tenant-and-digest-qualified
+  counterpart and leaves the original in place. A Secret `qa-environments`'
+  `ensure_runner_secret` writes is re-created under the current name at that
+  writer's next create, update, or self-heal cycle, so no operator action is
+  needed for those. An environment deployed while the intermediate,
+  collision-prone scheme was live must have its by-hand Secrets re-migrated
+  with the corrected script; `qa-environments`-written Secrets self-heal
+  regardless.
+
 ## [0.2.2](https://github.com/constructorfabric/gears-rust/compare/cf-gears-event-broker-v0.2.1...cf-gears-event-broker-v0.2.2) - 2026-09-05
 
 ### Added

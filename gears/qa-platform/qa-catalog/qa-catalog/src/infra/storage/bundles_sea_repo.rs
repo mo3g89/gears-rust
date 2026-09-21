@@ -72,6 +72,32 @@ impl BundlesRepository for OrmBundlesRepository {
         found.map(bundle_to_sdk).transpose()
     }
 
+    async fn tenant_of<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<Uuid>, DomainError> {
+        let rows: Vec<TenantIdRow> = BundleEntity::find()
+            .secure()
+            .scope_with(scope)
+            .project_all(runner, |query| {
+                query
+                    .filter(sea_orm::Condition::all().add(BundleColumn::Id.eq(id)))
+                    .select_only()
+                    .column(BundleColumn::TenantId)
+                    .into_model::<TenantIdRow>()
+            })
+            .await
+            .map_err(db_err)?;
+
+        // `id` is the primary key, so this is at most one row; `first` rather
+        // than an "exactly one" assertion because a missing descriptor is the
+        // ordinary answer (an expired-and-GC'd bundle) and must read as
+        // `None`, not as an internal error.
+        Ok(rows.first().map(|row| row.tenant_id))
+    }
+
     async fn delete_expired<C: DBRunner>(
         &self,
         runner: &C,

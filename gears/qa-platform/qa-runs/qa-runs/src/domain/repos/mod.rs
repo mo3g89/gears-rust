@@ -190,7 +190,7 @@ pub(crate) fn window_size(window: u64) -> usize {
 
 pub use log_line::{
     MAX_LINE_BYTES, TRUNCATION_MARKER_MAX, WRITE_SIDE_MAX_LINE_BYTES, sanitize_line,
-    sanitize_line_for_archive,
+    sanitize_line_for_archive, split_kubelet_timestamp,
 };
 pub use queue_repo::{
     ClaimAge, ClaimRow, ExpiredRow, MAX_CLAIM_SCAN, MAX_QUEUE_READ_LIMIT, NewQueueRow,
@@ -204,7 +204,10 @@ pub use runs_repo::{
     MAX_TIMEOUT_SWEEP_SCAN, MAX_WATCH_SCAN, NewRun, NewTestResult, OwnedRunId, RunResultDelta,
     RunStatePatch, RunWithResult, RunsRepository, TestResultRow, TimeoutCandidate, WatchCandidate,
 };
-pub use schedules_repo::{OwnedScheduleId, SchedulesRepository};
+pub use schedules_repo::{
+    MAX_SCHEDULE_SCAN, MAX_TICK_READ_LIMIT, OwnedScheduleId, REFERENTIAL_CHECK_CLAIMED_BY,
+    ScheduleTickRow, SchedulesRepository,
+};
 
 #[cfg(test)]
 mod window_tests {

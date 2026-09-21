@@ -31,9 +31,18 @@ pub(super) fn ctx(tenant_id: Uuid) -> SecurityContext {
         .unwrap()
 }
 
-/// Build a `TestRepository` fixture. `synced` sets `last_synced_at` (with a
-/// clear `sync_error`), i.e. the state after a successful default-branch
-/// (`"main"`) sync.
+/// The revision [`repo_fixture`] and the mock sync engine agree a successful
+/// sync left behind. A real 40-character hex object id, so a test that
+/// asserts on the value is asserting on something shaped like what git
+/// produces.
+pub(super) const SYNCED_HEAD_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// Build a `TestRepository` fixture. `synced` sets `last_synced_at` **and a
+/// `head_commit`** (with a clear `sync_error`), i.e. the state after a
+/// successful default-branch (`"main"`) sync. Both are set together because
+/// that is the only way a real sync leaves the row, and the discovery cache
+/// keys on the revision — a fixture that set only the timestamp would be a
+/// state the write path cannot produce.
 pub(super) fn repo_fixture(id: Uuid, synced: bool) -> TestRepository {
     let now = OffsetDateTime::now_utc();
     TestRepository {
@@ -45,6 +54,7 @@ pub(super) fn repo_fixture(id: Uuid, synced: bool) -> TestRepository {
         content_root: String::new(),
         credential_ref: None,
         last_synced_at: synced.then_some(now),
+        head_commit: synced.then(|| SYNCED_HEAD_COMMIT.to_owned()),
         sync_error: None,
         created_at: now,
         updated_at: now,
@@ -245,6 +255,53 @@ impl MockTestReposRepository {
     pub(super) fn recorded_branch_tenant(&self) -> Option<Uuid> {
         *self.recorded_branch_tenant.lock().unwrap()
     }
+
+    /// Simulate a successful sync that found **nothing new**: bump the
+    /// stored repository's `last_synced_at` and leave `head_commit` where it
+    /// is, which is exactly what `record_sync_success` writes when the fetch
+    /// returns the same tip. A discovery cache keyed on the revision must
+    /// treat this as "the working copy is unchanged" and keep its answer.
+    pub(super) fn touch_synced_at(&self, at: OffsetDateTime) {
+        if let Some(repo) = self.repo.lock().unwrap().as_mut() {
+            repo.last_synced_at = Some(at);
+        }
+    }
+
+    /// Simulate a successful sync that **advanced the branch**: a new
+    /// `head_commit` together with the new `last_synced_at` that always
+    /// accompanies it. This is the pair `record_sync_success` writes, so a
+    /// test that used this is exercising a state the write path can actually
+    /// produce.
+    pub(super) fn touch_head_commit(&self, at: OffsetDateTime, head_commit: &str) {
+        if let Some(repo) = self.repo.lock().unwrap().as_mut() {
+            repo.last_synced_at = Some(at);
+            repo.head_commit = Some(head_commit.to_owned());
+        }
+    }
+
+    /// Simulate a `content_root` change landing on the stored repository.
+    ///
+    /// `RepoService::update_repo` clears the synced state for this, and the
+    /// re-sync that follows restores the **same** `head_commit` when the
+    /// branch has not moved — so the revision alone cannot see the change.
+    /// This helper reproduces the end state of that sequence: a new
+    /// `content_root` under an unchanged revision.
+    pub(super) fn set_content_root(&self, content_root: &str) {
+        if let Some(repo) = self.repo.lock().unwrap().as_mut() {
+            repo.content_root = content_root.to_owned();
+        }
+    }
+
+    /// Simulate a product reassignment landing on the stored repository —
+    /// `RepoService::update_repo` writes `product_id` unconditionally and
+    /// does *not* advance `last_synced_at` for it (only a `url`/
+    /// `content_root` change does). A discovery cache keyed only on
+    /// `last_synced_at` would miss this.
+    pub(super) fn set_product_id(&self, product_id: Uuid) {
+        if let Some(repo) = self.repo.lock().unwrap().as_mut() {
+            repo.product_id = product_id;
+        }
+    }
 }
 
 #[async_trait]
@@ -296,6 +353,7 @@ impl TestReposRepository for MockTestReposRepository {
             content_root: new.content_root,
             credential_ref: new.credential_ref,
             last_synced_at: None,
+            head_commit: None,
             sync_error: None,
             created_at: now,
             updated_at: now,
@@ -355,6 +413,7 @@ impl TestReposRepository for MockTestReposRepository {
         _scope: &AccessScope,
         id: Uuid,
         last_synced_at: Option<OffsetDateTime>,
+        head_commit: Option<String>,
         sync_error: Option<String>,
     ) -> Result<Option<TestRepository>, DomainError> {
         let mut guard = self.repo.lock().unwrap();
@@ -362,6 +421,7 @@ impl TestReposRepository for MockTestReposRepository {
             return Ok(None);
         };
         repo.last_synced_at = last_synced_at;
+        repo.head_commit = head_commit;
         repo.sync_error = sync_error;
         repo.updated_at = OffsetDateTime::now_utc();
         Ok(Some(repo.clone()))

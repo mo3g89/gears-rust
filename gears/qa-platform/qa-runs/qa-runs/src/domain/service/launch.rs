@@ -458,7 +458,7 @@ fn platform_default_branch(platform: Option<&Environment>) -> Option<&str> {
         observed_build: _,
         default_branch,
         // Added 2026-08-31 by the default-platform work (qa-environments
-        // `m20260831_000009_platform_is_default`). Consciously ignored, like the
+        // `m20260831_000009_platform_is_default` (folded into `migrations::m20260812_000001_initial` by the docs squash)). Consciously ignored, like the
         // fields below it: the flag answers "which platform does the UI's
         // 'Default cluster' option mean?", which is a question settled *before* a
         // launch reaches this gear -- by the time branch resolution runs, a
@@ -485,7 +485,7 @@ fn platform_default_branch(platform: Option<&Environment>) -> Option<&str> {
         // so this is consciously ignored rather than wired, exactly like
         // `vhp_base_url`/`observed_namespace` above.
         // Added 2026-09-04 by the product-plugins work (qa-environments
-        // Task 14, `m20260903_000011_environment_plugin_columns`). Branch
+        // Task 14, `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash)). Branch
         // resolution has nothing to do with any of them, so they are
         // consciously ignored here, exactly like the observation fields above.
         //
@@ -1095,6 +1095,28 @@ fn environments_error(error: &qa_environments_sdk::QaEnvironmentsError) -> Domai
     DomainError::Environments(error.to_string())
 }
 
+/// Build the [`DomainError::Validation`] [`LaunchService::resolve_target_exists`]
+/// reports for a dangling reference, naming `field`.
+///
+/// A **deliberately different** classification from
+/// [`classify_catalog_failure`]/[`environments_error`]: both of those exist for
+/// a launch already under way, where an absent target is a fault
+/// (`DomainError::Catalog`/`Environments`, both 500) — see
+/// `classify_catalog_failure`'s own doc, *"an absent repository, plan or
+/// custom plan is ... the target of the launch, so the launch fails"*.
+/// [`LaunchService::resolve_target_exists`] exists for the one case where the
+/// absence is not yet a fault: the caller can still fix the request before it
+/// is ever persisted, so it is reported as `Validation` (400) instead, with
+/// the field named. Every *other* failure from the same read — a policy
+/// denial, a genuine backend fault — still goes through the shared
+/// classifiers unchanged.
+fn dangling_reference(field: &str, message: impl std::fmt::Display) -> DomainError {
+    DomainError::Validation {
+        field: field.to_owned(),
+        message: message.to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Resolution: rules 1, 2, 3 and 6
 // ---------------------------------------------------------------------------
@@ -1361,6 +1383,119 @@ impl<R: RunsRepository> LaunchService<R> {
             }
             RunTarget::Collect { repo_id, .. } => {
                 self.collect_target_facts(ctx, request, *repo_id).await
+            }
+        }
+    }
+
+    /// Resolve `target`'s plan/repository and `environment_id`'s environment
+    /// against qa-catalog and qa-environments, without admission, dispatch or
+    /// any write. Rejects with [`DomainError::Validation`], naming the
+    /// dangling field, when a referenced repository, plan, custom plan or
+    /// environment does not exist.
+    ///
+    /// Shared by [`super::schedules::ScheduleService`]'s write-time validation
+    /// (`create`/`update`) and its background referential check, so a
+    /// schedule can never disagree with a run about whether its target
+    /// exists — both ask this, through the same [`Self::catalog`]/
+    /// [`Self::environments`] clients [`Self::launch`] itself resolves
+    /// against.
+    ///
+    /// # This signature was corrected against the plan that specified it
+    ///
+    /// The plan drafting this method took `tenant: &TenantBound` and no
+    /// `environment_id` or `branch` parameter, on the premise that
+    /// `classify_catalog_failure`/`environments_error` already answer
+    /// [`DomainError::Validation`] for an absent target the way a launch
+    /// would. Neither does — see [`dangling_reference`]'s doc, which is why
+    /// this method builds its own `Validation` rather than delegating to
+    /// them for the not-found case. And `environment_id` and `branch` are
+    /// fields of [`qa_runs_sdk::NewSchedule`]/[`qa_runs_sdk::Schedule`], not of
+    /// [`RunTarget`]: a signature that omitted them could not check either —
+    /// there is no environment to probe, and a plan-backed target's `path`
+    /// cannot be looked up at all without a resolved branch. Takes
+    /// `ctx: &SecurityContext` rather than `TenantBound`, matching every other
+    /// resolution method on this type: `create`/`update` already hold the
+    /// caller's own end-user context, and only the background pass needs to
+    /// mint a system-actor one (`system_actor::for_schedule_fire`), exactly as
+    /// the firing tick already does to reach this same target.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::Validation`] naming `"target.repo_id"`, `"target.path"`,
+    /// `"target.id"` or `"environment_id"` when that reference does not
+    /// resolve; [`DomainError::Forbidden`] when a policy denies the read;
+    /// [`DomainError::Catalog`]/[`DomainError::Environments`] on any other
+    /// failure.
+    pub(crate) async fn resolve_target_exists(
+        &self,
+        ctx: &SecurityContext,
+        target: &RunTarget,
+        environment_id: Option<Uuid>,
+        branch: Option<&str>,
+    ) -> Result<(), DomainError> {
+        let platform = match environment_id {
+            None => None,
+            Some(id) => match self.environments.get_environment(ctx, id).await {
+                Ok(environment) => Some(environment),
+                Err(qa_environments_sdk::QaEnvironmentsError::NotFound { .. }) => {
+                    return Err(dangling_reference(
+                        "environment_id",
+                        format!("environment {id} does not exist"),
+                    ));
+                }
+                Err(error) => return Err(environments_error(&error)),
+            },
+        };
+
+        match target {
+            RunTarget::Plan { repo_id, path } | RunTarget::Test { repo_id, path, .. } => {
+                let repo = match self.catalog.get_repo(ctx, *repo_id).await {
+                    Ok(repo) => repo,
+                    Err(QaCatalogError::NotFound { .. }) => {
+                        return Err(dangling_reference(
+                            "target.repo_id",
+                            format!("repository {repo_id} does not exist"),
+                        ));
+                    }
+                    Err(error) => return Err(classify_catalog_failure(error)),
+                };
+                let resolved_branch = resolve_branch(
+                    branch,
+                    platform_default_branch(platform.as_ref()),
+                    &repo.default_branch,
+                );
+                match self
+                    .catalog
+                    .get_plan(ctx, *repo_id, &resolved_branch, path)
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(QaCatalogError::NotFound { .. }) => Err(dangling_reference(
+                        "target.path",
+                        format!(
+                            "{path} does not resolve to a plan on branch {resolved_branch}"
+                        ),
+                    )),
+                    Err(error) => Err(classify_catalog_failure(error)),
+                }
+            }
+            RunTarget::CustomPlan { id } => match self.catalog.get_custom_plan(ctx, *id).await {
+                Ok(_) => Ok(()),
+                Err(QaCatalogError::NotFound { .. }) => Err(dangling_reference(
+                    "target.id",
+                    format!("custom plan {id} does not exist"),
+                )),
+                Err(error) => Err(classify_catalog_failure(error)),
+            },
+            RunTarget::Collect { repo_id, .. } => {
+                match self.catalog.get_repo(ctx, *repo_id).await {
+                    Ok(_) => Ok(()),
+                    Err(QaCatalogError::NotFound { .. }) => Err(dangling_reference(
+                        "target.repo_id",
+                        format!("repository {repo_id} does not exist"),
+                    )),
+                    Err(error) => Err(classify_catalog_failure(error)),
+                }
             }
         }
     }

@@ -200,8 +200,11 @@ pub trait EnvironmentsRepository: Send + Sync {
     /// This is the enforcement point for "at most one default environment per (tenant,
     /// product)". It lives in the repository rather than as a database constraint
     /// because `MySQL` has no partial unique indexes, so a schema-level rule would
-    /// hold on two dialects out of three — see
-    /// `m20260831_000009_platform_is_default`'s module doc.
+    /// hold on two dialects out of three. (Originally recorded in the module doc of
+    /// `m20260831_000009_platform_is_default`, one of the migrations folded into
+    /// `migrations::m20260812_000001_initial` by the docs squash; that module
+    /// doc's fuller text did not survive the fold, so the reason is restated
+    /// here rather than pointed at.)
     ///
     /// **This gear has no transaction seam** — every write goes through
     /// `self.db.conn()` and there is no `begin()` anywhere in it — so the clear and
@@ -289,7 +292,11 @@ pub trait EnvironmentsRepository: Send + Sync {
     /// *successful* read too, and that is the one legacy rule this phase
     /// cannot preserve: the plugin contract keeps only the health verdict and
     /// leaves a product's own facts in `ObservedAttrs`
-    /// (`PRODUCT-PLUGINS-DESIGN.md` §5.3), so nothing reaching here carries a
+    /// (`gears/qa-platform/docs/features/product-plugins.md`'s `observe`
+    /// section: "The gear persists the result into `observed_version`,
+    /// `observed_build`, `observed_base_url`, `observed_attrs`,
+    /// `health_state`, `health_detail` and `health_checked_at`"), so nothing
+    /// reaching here carries a
     /// node list any more. Clearing rather than keeping is D-CH-3's own rule
     /// applied to an observation that cannot vouch for nodes: a
     /// stale-but-reported-ready node rendered green on a cluster nobody

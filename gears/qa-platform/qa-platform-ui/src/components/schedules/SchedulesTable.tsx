@@ -296,7 +296,7 @@ export function SchedulesTable({
                   <span className="text-muted-foreground">—</span>
                 ) : (
                   <span
-                    title={`Total ${latest.total} · Pass ${latest.passed} · In progress ${latest.in_progress} · Fail ${latest.failed} · Skip ${latest.skipped}`}
+                    title={`Total ${latest.total} · Pass ${latest.passed} · In progress ${latest.in_progress} · Fail ${latest.failed} · Skip ${latest.skipped} · Expected fail ${latest.xfail} · Unexpected pass ${latest.xpass}`}
                   >
                     <span className="text-muted-foreground">{latest.total}</span>
                     <span className="text-muted-foreground">/</span>
@@ -313,6 +313,18 @@ export function SchedulesTable({
                     <span className={latest.skipped > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'}>
                       {latest.skipped}
                     </span>
+                    {latest.xfail > 0 && (
+                      <>
+                        <span className="text-muted-foreground">/</span>
+                        <span className="text-violet-600 dark:text-violet-400">{latest.xfail}</span>
+                      </>
+                    )}
+                    {latest.xpass > 0 && (
+                      <>
+                        <span className="text-muted-foreground">/</span>
+                        <span className="text-sky-600 dark:text-sky-400">{latest.xpass}</span>
+                      </>
+                    )}
                   </span>
                 )}
               </TableCell>

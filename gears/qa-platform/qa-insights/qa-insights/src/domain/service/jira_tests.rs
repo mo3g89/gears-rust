@@ -42,6 +42,7 @@ use qa_insights_sdk::{JiraBug, JiraConfig, JiraPollerConfig, NewJiraBug};
 use time::OffsetDateTime;
 use toolkit_db::DBProvider;
 use toolkit_db::secure::DBRunner;
+use toolkit_gts::GTS_ID_PREFIX;
 use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
@@ -52,6 +53,7 @@ use crate::domain::ports::jira_client::{
     IssueRef, JiraClient, JiraIssue, NewIssue, StatusCategory,
 };
 use crate::domain::repos::{JiraRepository, NewTestCaseResult, NewTestResult, ResultsRepository};
+use crate::domain::service::resources;
 use crate::domain::service::test_support::{
     DenyAllAuthZ, RecordingAuthZ, TenantScopedAuthZ, ctx, permissive_response,
 };
@@ -206,7 +208,9 @@ impl authz_resolver_sdk::AuthZResolverApi for GrantsJiraButNotResultsAuthZ {
         _ctx: PlatformSecurityContext,
         request: authz_resolver_sdk::EvaluationRequest,
     ) -> Result<authz_resolver_sdk::EvaluationResponse, CanonicalError> {
-        if request.resource.resource_type.starts_with("qa.jira") {
+        if request.resource.resource_type == resources::JIRA_BUG_NAME
+            || request.resource.resource_type == resources::JIRA_CONFIG_NAME
+        {
             Ok(permissive_response(&request))
         } else {
             Ok(authz_resolver_sdk::EvaluationResponse {
@@ -1883,9 +1887,18 @@ async fn file_bugs_asks_the_pdp_about_every_resource_it_reads() {
     assert_eq!(
         authz.asked(),
         vec![
-            ("qa.jira_bug".to_owned(), "create".to_owned()),
-            ("qa.test_result".to_owned(), "list".to_owned()),
-            ("qa.jira_config".to_owned(), "get".to_owned()),
+            (
+                format!("{GTS_ID_PREFIX}cf.qa.insights.jira_bug.v1~"),
+                "create".to_owned()
+            ),
+            (
+                format!("{GTS_ID_PREFIX}cf.qa.insights.test_result.v1~"),
+                "list".to_owned()
+            ),
+            (
+                format!("{GTS_ID_PREFIX}cf.qa.insights.jira_config.v1~"),
+                "get".to_owned()
+            ),
         ],
     );
 }

@@ -28,7 +28,7 @@
 //!
 //! # What is here beyond the brief
 //!
-//! One falsifiable test per further rule Step 0 turned up. Three of them exist
+//! One falsifiable test per further rule Step 0 turned up. Two of them exist
 //! because the rule looks like a defect and a later reader would "fix" it:
 //!
 //! * [`a_not_run_file_contributes_no_synthetic_case_so_the_undercount_is_real`] —
@@ -37,12 +37,27 @@
 //!   without case rows contributes nothing.
 //! * [`an_unrecognized_case_status_is_counted_in_no_case_counter`] — `case_total`
 //!   is the sum of five named counters (`:1385`), not the number of case rows.
-//! * [`the_summary_total_is_the_universe_length_so_a_file_in_two_plans_counts_twice`]
-//!   — `total` is `universe.len()` (`:1231`) over a universe legacy keys on
-//!   `(source, repo_id, test_file)` (`:899-903`).
 //!
-//! All three are ported verbatim under Phase B's standing instruction and pinned
+//! Both are ported verbatim under Phase B's standing instruction and pinned
 //! here so a later change to a rendered number is a failing test.
+//!
+//! A third test used to stand beside these two,
+//! `the_summary_total_is_the_universe_length_so_a_file_in_two_plans_counts_twice`,
+//! asserting that `total` (`universe.len()`, `:1231`) counts a file listed by
+//! two plans twice. It hand-built a universe no production reader can produce:
+//! qa-catalog's `walk_repo_universe` merges a second plan's contribution into
+//! the first, within one repository, before the universe ever reaches this
+//! module, so that input never occurs. Removed, along with the three doc
+//! comments that rested on the same wrong reading —
+//! [`OverviewSummary::total`], [`build_heatmap`]'s header and
+//! [`the_heatmap_emits_one_row_per_universe_entry_in_the_universes_order`]'s —
+//! rewritten rather than deleted, because each was pointing at a real
+//! invariant and describing it wrongly.
+//!
+//! **No existing test here varied `repo_id`.** Two repositories can list the
+//! same `test_file` — `(tenant_id, product_id)` is not a unique index — and
+//! that is the input the suite was missing; see [`ExecRow::repo_id`] and
+//! `the_analytics_folds_key_on_repo_id_and_test_file_not_the_path_alone`.
 //!
 //! # Task 23's five brief tests, and the one it does not contain
 //!
@@ -181,7 +196,7 @@ use crate::domain::analytics::universe::{NOT_RUN, UNKNOWN_BUILD, build_latest_ma
 use crate::domain::analytics::{CaseRow, ExecRow};
 use crate::domain::ports::Clock;
 use crate::domain::service::test_support::{
-    FixedClock, TODAY, exec_row_at, ts, universe_test, universe_test_full,
+    FixedClock, TODAY, UNIVERSE_TEST_REPO_ID, exec_row_at, ts, universe_test, universe_test_full,
 };
 
 /// A run id chosen per test rather than random, because the case-level join key
@@ -269,6 +284,352 @@ fn named(test_file: &str, test_name: &str) -> UniverseTest {
 /// partition rather than one arm of it.
 fn names(items: &[AnalyticsListItem]) -> Vec<&str> {
     items.iter().map(|item| item.test_name.as_str()).collect()
+}
+
+// ---------------------------------------------------------------------------
+// The repository key
+// ---------------------------------------------------------------------------
+
+/// A product owns several repositories and `(tenant_id, product_id)` is not a
+/// unique index, so two repositories can each hold `tests/test_smoke.py`.
+/// qa-catalog's `walk_repo_universe` deduplicates only *within* one
+/// repository, so the universe then holds two entries sharing that
+/// `test_file` — and every fold here must key on `(repo_id, test_file)`, not
+/// the path alone, or one repository's row answers for the other's test.
+///
+/// **No test before this one varied `repo_id`.** Every other fixture over
+/// `ExecRow`/`UniverseTest` in this module and in `universe_tests` builds its
+/// rows and its universe under one repository
+/// (`test_support::UNIVERSE_TEST_REPO_ID`), so a fold keyed on `test_file`
+/// alone satisfied every existing assertion by accident — that absence is
+/// this defect's whole reason for shipping.
+#[test]
+fn the_analytics_folds_key_on_repo_id_and_test_file_not_the_path_alone() {
+    const SHARED_FILE: &str = "tests/test_smoke.py";
+
+    let repo_a = Uuid::from_u128(0xa1a1);
+    let repo_b = Uuid::from_u128(0xb2b2);
+
+    let universe = vec![
+        UniverseTest {
+            repo_id: repo_a,
+            ..named(SHARED_FILE, "test_smoke")
+        },
+        UniverseTest {
+            repo_id: repo_b,
+            ..named(SHARED_FILE, "test_smoke")
+        },
+    ];
+    let rows = vec![
+        ExecRow {
+            repo_id: repo_a,
+            ..row_at(run(1), SHARED_FILE, "PASSED", ts())
+        },
+        ExecRow {
+            repo_id: repo_b,
+            ..row_at(run(2), SHARED_FILE, "FAILED", ts())
+        },
+    ];
+
+    let latest = build_latest_map(&universe, &rows);
+
+    assert_eq!(
+        latest[&(repo_a, SHARED_FILE.to_owned())].status_bucket,
+        "PASSED",
+        "repository A's row must report repository A's own status",
+    );
+    assert_eq!(
+        latest[&(repo_b, SHARED_FILE.to_owned())].status_bucket,
+        "FAILED",
+        "repository B's row must report repository B's own status, not A's",
+    );
+
+    let summary = summarize(
+        &universe,
+        &latest,
+        &build_case_data(&universe, &latest, &[]),
+    );
+    assert_eq!(
+        summary.total, 2,
+        "two repositories' entries, not one path collapsed into one",
+    );
+    assert_eq!(summary.passed, 1, "only repository A's test passed");
+    assert_eq!(
+        summary.failed, 1,
+        "only repository B's test failed, not both"
+    );
+}
+
+/// Fix-round regression: `StatsMap` and `CaseData::by_file` were still keyed
+/// on the bare `test_file`, so `build_lists`' `pass_count`/`fail_count` and
+/// `case_tickets` attributed one repository's runs and case tickets to the
+/// other's test whenever two repositories shared a path — the exact "case
+/// counts doubled" symptom the defect names, surviving past this module's
+/// first repository-key test because that test never called `build_lists`.
+#[test]
+fn build_lists_keeps_two_repositories_pass_fail_and_case_signal_separate() {
+    const SHARED_FILE: &str = "tests/test_smoke.py";
+
+    let repo_a = Uuid::from_u128(0xa1a1);
+    let repo_b = Uuid::from_u128(0xb2b2);
+
+    let universe = vec![
+        UniverseTest {
+            repo_id: repo_a,
+            ..named(SHARED_FILE, "test_smoke")
+        },
+        UniverseTest {
+            repo_id: repo_b,
+            ..named(SHARED_FILE, "test_smoke")
+        },
+    ];
+    // Repository A's latest run (`run(1)`) is its first-listed row, `PASSED`;
+    // a second row on the same run is `FAILED`, so `StatsMap` — which counts
+    // every row rather than picking one — must tally 1 pass/1 fail for A
+    // alone. Repository B's latest run (`run(2)`) is two `PASSED` rows.
+    let rows = vec![
+        ExecRow {
+            repo_id: repo_a,
+            ..row_at(run(1), SHARED_FILE, "PASSED", ts())
+        },
+        ExecRow {
+            repo_id: repo_a,
+            ..row_at(run(1), SHARED_FILE, "FAILED", ts())
+        },
+        ExecRow {
+            repo_id: repo_b,
+            ..row_at(run(2), SHARED_FILE, "PASSED", ts())
+        },
+        ExecRow {
+            repo_id: repo_b,
+            ..row_at(run(2), SHARED_FILE, "PASSED", ts())
+        },
+    ];
+    let case_rows = vec![
+        case_with_ticket(run(1), SHARED_FILE, "FAILED", "REPO-A-1"),
+        case_with_ticket(run(2), SHARED_FILE, "PASSED", "REPO-B-1"),
+    ];
+
+    let latest = build_latest_map(&universe, &rows);
+    let stats = build_stats_map(&rows);
+    let cases = build_case_data(&universe, &latest, &case_rows);
+    let lists = build_lists(&universe, &latest, &stats, &cases);
+
+    let all_items = lists
+        .passed
+        .iter()
+        .chain(lists.failed.iter())
+        .chain(lists.not_run.iter());
+    let mut item_a = None;
+    let mut item_b = None;
+    for item in all_items {
+        if item.plan.repo_id == repo_a {
+            item_a = Some(item);
+        } else if item.plan.repo_id == repo_b {
+            item_b = Some(item);
+        }
+    }
+    let item_a = item_a.expect("repository A's item");
+    let item_b = item_b.expect("repository B's item");
+
+    assert_eq!(
+        (item_a.pass_count, item_a.fail_count),
+        (1, 1),
+        "repository A's own tally, not the two repositories' rows merged",
+    );
+    assert_eq!(
+        (item_b.pass_count, item_b.fail_count),
+        (2, 0),
+        "repository B's own tally, not repository A's",
+    );
+    assert_eq!(
+        item_a.case_tickets,
+        vec!["REPO-A-1".to_owned()],
+        "repository A's own case ticket",
+    );
+    assert_eq!(
+        item_b.case_tickets,
+        vec!["REPO-B-1".to_owned()],
+        "repository B's own case ticket, not repository A's - a bare `test_file` \
+         key made the second repository processed overwrite the first's entry \
+         in `CaseData::by_file`",
+    );
+}
+
+/// Fix-round regression: `build_flaky`'s `by_test` and `universe_by_file` were
+/// still keyed on the bare `test_file`, so two repositories sharing a path had
+/// their rows tallied into one `StatusStats` and one pass rate — able to hide
+/// a genuinely flaky test behind an unrelated repository's clean run, or the
+/// reverse.
+#[test]
+fn build_flaky_keeps_two_repositories_pass_rates_separate() {
+    const SHARED_FILE: &str = "tests/test_flaky.py";
+
+    let repo_a = Uuid::from_u128(0xa1a1);
+    let repo_b = Uuid::from_u128(0xb2b2);
+
+    let universe = vec![
+        UniverseTest {
+            repo_id: repo_a,
+            ..named(SHARED_FILE, "test_flaky")
+        },
+        UniverseTest {
+            repo_id: repo_b,
+            ..named(SHARED_FILE, "test_flaky")
+        },
+    ];
+
+    let mut rows = Vec::new();
+    // Repository A: 4 passed, 1 failed — 80.0, the flaky band's own upper
+    // edge, inclusive.
+    for status in ["PASSED", "PASSED", "PASSED", "PASSED", "FAILED"] {
+        rows.push(ExecRow {
+            repo_id: repo_a,
+            ..row(run(1), SHARED_FILE, status)
+        });
+    }
+    // Repository B: 5 passed — 100.0, outside the band and not flaky. Merged
+    // under a bare `test_file` key this is 9 passed of 10, 90.0 — also
+    // outside the band — so repository A's own flakiness would vanish along
+    // with the merge, not just get attributed to the wrong repository.
+    for status in ["PASSED", "PASSED", "PASSED", "PASSED", "PASSED"] {
+        rows.push(ExecRow {
+            repo_id: repo_b,
+            ..row(run(2), SHARED_FILE, status)
+        });
+    }
+
+    let flaky = build_flaky(&universe, &rows, 7, TODAY);
+
+    assert_eq!(
+        flaky.len(),
+        1,
+        "only repository A's test is flaky; merging the two repositories' \
+         rows would read 90.0 and report neither",
+    );
+    assert_eq!(
+        flaky[0].executions, 5,
+        "repository A's own five executions, not the combined ten",
+    );
+    assert_eq!(flaky[0].pass_count, 4);
+    assert_eq!(flaky[0].fail_count, 1);
+    assert_eq!(flaky[0].pass_rate, 80.0);
+}
+
+/// Fix-round regression: `buckets_by_file_and_day`'s `DayBuckets` was still
+/// keyed on the bare `test_file`, so two repositories sharing a path had
+/// their day cells folded onto one calendar and the first-wins rule picked
+/// one repository's status for both — the same collision
+/// [`build_latest_map`](super::universe::build_latest_map) already closes,
+/// reached here through the heatmap and the trend instead.
+#[test]
+fn build_heatmap_keeps_two_repositories_day_buckets_separate() {
+    const SHARED_FILE: &str = "tests/test_smoke.py";
+
+    let repo_a = Uuid::from_u128(0xa1a1);
+    let repo_b = Uuid::from_u128(0xb2b2);
+
+    let universe = vec![
+        UniverseTest {
+            repo_id: repo_a,
+            ..named(SHARED_FILE, "test_smoke")
+        },
+        UniverseTest {
+            repo_id: repo_b,
+            ..named(SHARED_FILE, "test_smoke")
+        },
+    ];
+    let rows = vec![
+        ExecRow {
+            repo_id: repo_a,
+            ..row(run(1), SHARED_FILE, "PASSED")
+        },
+        ExecRow {
+            repo_id: repo_b,
+            ..row(run(2), SHARED_FILE, "FAILED")
+        },
+    ];
+
+    let heat = build_heatmap(&universe, &rows, 1, TODAY);
+
+    assert_eq!(
+        heat.rows.len(),
+        2,
+        "one row per universe entry, not one path collapsed into one",
+    );
+    assert_eq!(
+        heat.rows[0].values,
+        vec!["PASSED"],
+        "repository A's own day, not repository B's - a bare `test_file` key \
+         would have repository A's first-inserted row win both cells",
+    );
+    assert_eq!(
+        heat.rows[1].values,
+        vec!["FAILED"],
+        "repository B's own day, not repository A's",
+    );
+}
+
+/// Fix-round regression: `build_test_details`'s `by_file` map was still keyed
+/// on the bare `test_file`, so two repositories sharing a path had their
+/// universe metadata collapse to one `HashMap` slot — whichever repository's
+/// entry `collect` visited last — and both repositories' drill-down rows
+/// would render that repository's `component`/`tags`.
+#[test]
+fn build_test_details_keeps_two_repositories_metadata_separate() {
+    const SHARED_FILE: &str = "tests/test_smoke.py";
+
+    let repo_a = Uuid::from_u128(0xa1a1);
+    let repo_b = Uuid::from_u128(0xb2b2);
+
+    let universe = vec![
+        UniverseTest {
+            repo_id: repo_a,
+            component: Some("component-a".to_owned()),
+            ..named(SHARED_FILE, "test_smoke")
+        },
+        UniverseTest {
+            repo_id: repo_b,
+            component: Some("component-b".to_owned()),
+            ..named(SHARED_FILE, "test_smoke")
+        },
+    ];
+    let rows = vec![
+        ExecRow {
+            repo_id: repo_a,
+            ..build_row(run(1), SHARED_FILE, "PASSED", Some("9.1"), ts())
+        },
+        ExecRow {
+            repo_id: repo_b,
+            ..build_row(run(2), SHARED_FILE, "FAILED", Some("9.1"), ts())
+        },
+    ];
+
+    let details = build_test_details(&universe, &rows, "9.1");
+
+    assert_eq!(
+        details.len(),
+        2,
+        "one row per repository, not merged into one"
+    );
+    let item_a = details
+        .iter()
+        .find(|item| item.status == "PASSED")
+        .expect("repository A's item");
+    let item_b = details
+        .iter()
+        .find(|item| item.status == "FAILED")
+        .expect("repository B's item");
+    assert_eq!(
+        item_a.component.as_deref(),
+        Some("component-a"),
+        "repository A's own component, not repository B's",
+    );
+    assert_eq!(
+        item_b.component.as_deref(),
+        Some("component-b"),
+        "repository B's own component, not repository A's",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -391,33 +752,6 @@ fn case_expected_stays_zero_out_of_summarize_so_the_service_layer_does_not_doubl
 
     assert_eq!(summary.case_expected, 0);
     assert_eq!(summary.total, 3, "the universe is not empty, the field is");
-}
-
-/// `build_summary:1231`, `total = universe.len()` — over a universe legacy keys on
-/// `(source, repo_id, test_file)` (`:899-903`), so **one file listed by two plans
-/// is two entries and is counted twice**.
-///
-/// Pinned because it reads as a defect and the fix is a one-line `dedup` that
-/// would change every percentage on the screen. The same duplication runs through
-/// the case fold (`:1345`, which iterates the universe too) and through the
-/// lists, so all three are asserted here: two entries, two counted files, two
-/// synthetic cases, two list rows.
-#[test]
-fn the_summary_total_is_the_universe_length_so_a_file_in_two_plans_counts_twice() {
-    let mut second = universe_test("tests/a.py");
-    second.plan_path = "plans/nightly.yaml".to_owned();
-    let universe = vec![universe_test("tests/a.py"), second];
-    let rows = vec![row(run(1), "tests/a.py", "PASSED")];
-    let latest = build_latest_map(&universe, &rows);
-    let cases = build_case_data(&universe, &latest, &[]);
-
-    let summary = summarize(&universe, &latest, &cases);
-    assert_eq!(summary.total, 2);
-    assert_eq!(summary.passed, 2);
-    assert_eq!(summary.case_total, 2);
-
-    let lists = build_lists(&universe, &latest, &build_stats_map(&rows), &cases);
-    assert_eq!(lists.passed.len(), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -675,7 +1009,7 @@ fn the_per_test_tally_splits_rows_three_ways_and_keys_on_the_file() {
 
     let stats = build_stats_map(&rows);
 
-    let a = stats.get("tests/a.py");
+    let a = stats.get(UNIVERSE_TEST_REPO_ID, "tests/a.py");
     assert_eq!(a.pass_count, 1);
     assert_eq!(a.fail_count, 2, "ERROR is a failure here too");
     assert_eq!(
@@ -683,11 +1017,11 @@ fn the_per_test_tally_splits_rows_three_ways_and_keys_on_the_file() {
         "SKIPPED and XFAIL both land in the catch-all"
     );
 
-    let b = stats.get("tests/b.py");
+    let b = stats.get(UNIVERSE_TEST_REPO_ID, "tests/b.py");
     assert_eq!(b.pass_count, 1);
     assert_eq!(b.fail_count, 0);
 
-    let missing = stats.get("tests/never.py");
+    let missing = stats.get(UNIVERSE_TEST_REPO_ID, "tests/never.py");
     assert_eq!(missing.pass_count, 0);
     assert_eq!(missing.fail_count, 0);
     assert_eq!(missing.skipped_count, 0);
@@ -785,8 +1119,13 @@ const CARRIED: &str = "tests/carried/test_carried.py";
 /// carries a `test_name` too, and here the two deliberately differ — `ExecRow`'s
 /// header records that it is not an aggregation grain.
 fn carried_lists() -> AnalyticsLists {
+    // Distinct from `exec_row_at`'s `UNIVERSE_TEST_REPO_ID`, and every row below
+    // is stamped with it too — `build_latest_map` now joins on `(repo_id,
+    // test_file)`, so a universe entry and its rows disagreeing on `repo_id`
+    // would simply never meet.
+    let repo_id = Uuid::from_u128(0xa1);
     let universe = vec![UniverseTest {
-        repo_id: Uuid::from_u128(0xa1),
+        repo_id,
         plan_path: "plans/carried.yaml".to_owned(),
         plan_name: "Carried plan name".to_owned(),
         component: Some("carried-component".to_owned()),
@@ -796,6 +1135,7 @@ fn carried_lists() -> AnalyticsLists {
     }];
     let rows = vec![
         ExecRow {
+            repo_id,
             build: Some("9.1.0-4412".to_owned()),
             environment_id: Some(Uuid::from_u128(0xb2)),
             ..row_at(
@@ -806,6 +1146,7 @@ fn carried_lists() -> AnalyticsLists {
             )
         },
         ExecRow {
+            repo_id,
             build: Some("8.0.0-1111".to_owned()),
             environment_id: Some(Uuid::from_u128(0xb9)),
             ..row_at(
@@ -815,13 +1156,19 @@ fn carried_lists() -> AnalyticsLists {
                 datetime!(2026-08-18 12:00:00 UTC),
             )
         },
-        row_at(run(1), CARRIED, "ERROR", datetime!(2026-08-18 12:00:00 UTC)),
-        row_at(
-            run(1),
-            CARRIED,
-            "SKIPPED",
-            datetime!(2026-08-18 12:00:00 UTC),
-        ),
+        ExecRow {
+            repo_id,
+            ..row_at(run(1), CARRIED, "ERROR", datetime!(2026-08-18 12:00:00 UTC))
+        },
+        ExecRow {
+            repo_id,
+            ..row_at(
+                run(1),
+                CARRIED,
+                "SKIPPED",
+                datetime!(2026-08-18 12:00:00 UTC),
+            )
+        },
     ];
     let latest = build_latest_map(&universe, &rows);
     let case_rows = vec![
@@ -1288,9 +1635,19 @@ fn a_row_lands_on_its_own_day_and_not_on_today() {
 /// Two mutations, and the first is the likely one: the sibling fold in this file
 /// **does** sort — `build_lists` sorts each list by `test_name` (`:1440-1442`) —
 /// so a sort added here for symmetry would reorder every chart's y-axis and no
-/// other test would notice. The second is de-duplication: a file listed by two
-/// plans is two universe entries (`:899-903`) and therefore two identical rows,
-/// which is the same grain `summarize`'s `total` counts twice.
+/// other test would notice.
+///
+/// **The second used to be described as "a file listed by two plans is two
+/// universe entries and therefore two identical rows, the same grain
+/// `summarize`'s `total` counts twice" — that reading was wrong.** Two plans of
+/// the *same* repository listing one file never reach this fold as two
+/// entries: qa-catalog's `walk_repo_universe` merges the second plan's
+/// contribution into the first before the universe exists. The fixture below
+/// hands `build_heatmap` two identical entries directly, bypassing that merge,
+/// to pin a narrower and still-real property: this fold has no de-duplication
+/// pass of its own and trusts its input, so *if* it were ever handed a universe
+/// already holding a repeated entry, it would emit a repeated row rather than
+/// collapsing it silently.
 #[test]
 fn the_heatmap_emits_one_row_per_universe_entry_in_the_universes_order() {
     let universe = [
@@ -1602,7 +1959,7 @@ fn flaky_and_the_per_test_tally_split_a_status_the_same_way() {
         ],
     );
     let flaky = build_flaky(&[universe_test("tests/a.py")], &rows, 7, TODAY);
-    let stats = build_stats_map(&rows).get("tests/a.py");
+    let stats = build_stats_map(&rows).get(UNIVERSE_TEST_REPO_ID, "tests/a.py");
 
     assert_eq!(flaky.len(), 1, "4 of 8 is 50.0, inside the band");
     assert_eq!(flaky[0].executions, 8, "all three arms feed the count");
@@ -1846,14 +2203,14 @@ fn quality_vectors_fold_case_variants_and_drop_blanks() {
 /// `total_tests` is the number of **distinct files** (`:1081`), not
 /// `universe.len()`.
 ///
-/// Legacy keys the vector map on the normalized test file (`:839`) and the
-/// universe on `(source, repo_id, test_file)` (`:899-903`), so a file listed by
-/// two plans is two universe entries and one vector entry — where
-/// `OverviewSummary::total` counts it twice
-/// (`the_summary_total_is_the_universe_length_so_a_file_in_two_plans_counts_twice`).
-/// Folding this over the slice instead double-counts the file in `total_tests`
-/// and in the item's `tests`, and the two plans' vector sets are merged rather
-/// than counted apart.
+/// Legacy keys the vector map on the normalized test file (`:839`). This fixture
+/// hands the fold two entries for one file directly — bypassing
+/// `walk_repo_universe`'s own same-repository merge, which is why the two
+/// plans reach this fold as two entries at all — to pin that this fold
+/// de-duplicates on the file itself rather than trusting the universe to have
+/// done so. Folding over the slice without that de-duplication would
+/// double-count the file in `total_tests` and in the item's `tests`; the two
+/// plans' vector sets are merged rather than counted apart.
 #[test]
 fn a_file_in_two_plans_is_one_quality_vector_test() {
     let universe = vec![
@@ -1874,6 +2231,58 @@ fn a_file_in_two_plans_is_one_quality_vector_test() {
     assert!(
         summary.items.iter().all(|item| item.tests == 1),
         "each vector is carried by one file, not two"
+    );
+}
+
+/// A `test_file` collision **across two repositories** is two files, not one —
+/// fix-round-2's correction to `by_file`'s key.
+///
+/// Unlike [`a_file_in_two_plans_is_one_quality_vector_test`], which pins that
+/// one repo's file listed by two plans collapses to one entry, this pins the
+/// opposite: two *different* repositories that each happen to have a
+/// `tests/test_smoke.py` are two distinct files. Keying `by_file` on the bare
+/// path would merge them, so repo B's untagged file would inherit repo A's
+/// `security` vector and never count toward `unclassified_tests` — silently
+/// losing the fact that repo B declares nothing at all. Keyed on
+/// `(repo_id, test_file)`, the two stay apart: `total_tests` counts both, and
+/// repo B's file is the one entry behind `unclassified_tests`.
+///
+/// Observed red under the previous `test_file`-only key, which reports
+/// `total_tests: 1` and `unclassified_tests: 0`.
+#[test]
+fn a_cross_repo_path_collision_is_two_files_not_one() {
+    let repo_a = Uuid::from_u128(0x41);
+    let repo_b = Uuid::from_u128(0x42);
+    let universe = vec![
+        UniverseTest {
+            repo_id: repo_a,
+            ..vectored("tests/test_smoke.py", &["security"])
+        },
+        UniverseTest {
+            repo_id: repo_b,
+            ..vectored("tests/test_smoke.py", &[])
+        },
+    ];
+
+    let summary = build_quality_vector_summary(&universe);
+
+    assert_eq!(
+        summary.total_tests, 2,
+        "two repositories' files, not one merged file"
+    );
+    assert_eq!(
+        summary.unclassified_tests, 1,
+        "repo B's file declares no vector and must still count as unclassified, \
+         rather than inheriting repo A's `security`"
+    );
+    assert_eq!(
+        summary.items.len(),
+        1,
+        "only repo A's `security` is declared"
+    );
+    assert_eq!(
+        summary.items[0].tests, 1,
+        "security is carried by repo A's file alone"
     );
 }
 

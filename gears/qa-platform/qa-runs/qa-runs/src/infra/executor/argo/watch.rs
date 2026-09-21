@@ -70,8 +70,9 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, DynamicObject, ListParams, LogParams};
 use kube::{Client, ResourceExt};
 use serde_json::Value;
+use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::ArgoExecutorConfig;
 use crate::domain::error::DomainError;
@@ -81,9 +82,9 @@ use crate::domain::ports::run_executor::{
 // `sanitize_line_for_archive` came from `api::rest::sse` until Task 21 (review
 // findings #15, #16, #39): an infra module importing the transport layer for a
 // cap that decides what the archive holds. It now sits in `domain::repos`
-// beside `flatten_log_char`, the other rule the archived text obeys, and the
-// two arrive here in one `use`.
-use crate::domain::repos::{LogResume, flatten_log_char, sanitize_line_for_archive};
+// beside `split_kubelet_timestamp`, Task 2 (WS5)'s parser for the other thing
+// this file no longer has to guess -- where a resumed read should start.
+use crate::domain::repos::{LogResume, sanitize_line_for_archive, split_kubelet_timestamp};
 use crate::domain::state_machine::ExecutorOutcome;
 use crate::infra::executor::argo::markers::MarkerParser;
 use crate::infra::executor::argo::workflow::NODE_ANNOTATION;
@@ -222,208 +223,14 @@ fn node_of(pod: &Pod) -> String {
         .unwrap_or_else(|| pod.name_any())
 }
 
-/// How many more of one node's lines to suppress before letting them reach
-/// the sink — Task 13, review finding #50, **fix-round 1**.
-///
-/// # Why a count, and not `LogParams::since_time`
-///
-/// The first version of this fix asked Kubernetes to filter by
-/// `since_time`, using the archive row's `updated_at` as a stand-in for "this
-/// node's last archived line". Review found that compares two different
-/// clocks: `updated_at` is the **control plane's** write-time — stamped when
-/// a flush *commits* the row — while Kubernetes filters by each log entry's
-/// own **kubelet-recorded emission time**. A line can reach this process
-/// (queued in `ExecutionStream`, which is a 512-slot channel, each entry
-/// costing the consumer a database round trip before it is archived) and
-/// still be sitting unflushed when a tick stamps `updated_at = now` for
-/// whatever *had* been archived by then. Re-attaching with `since_time` set
-/// to that stamp filters out every such line — its own emission time is
-/// **earlier** than the stamp — and `RunLogsRepository` has no re-read to
-/// recover it. That is permanent loss, worse than the bug this task fixes
-/// (which only duplicated), so it was dropped before landing.
-///
-/// A count has no clock in it. This re-reads a node's pod log from byte 0,
-/// exactly as before this task, and suppresses the first `lines` of what
-/// comes back — the same lines [`domain::repos::LogResume::from_archived_text`]
-/// already counted as archived for that node.
-///
-/// **It is not true that a count can never over-suppress relative to what
-/// actually reached the executor — the first version of this doc said so,
-/// and review disproved it.** kubelet only retains a container's log up to
-/// `containerLogMaxSize` × `containerLogMaxFiles` (10Mi × 5 by default); once
-/// rotation has dropped lines from the head, a re-attach's "byte 0" is no
-/// longer this node's true byte 0, and suppressing by the archived count
-/// alone would drop real, never-archived lines — on exactly the long, chatty
-/// run `cpt-cf-qa-nfr-run-duration` exists for. See "Two guards" below for
-/// the fix.
-///
-/// **The guarded property is not an absolute either, and this paragraph
-/// used to claim one — the same mistake rounds 0 and 1 each made once
-/// already.** Two residuals survive, both named on "Two guards"' own
-/// paragraphs rather than repeated here in full: the inflated-count case is
-/// detected, not recovered, so whatever it wrongly suppresses before the
-/// last-line check fires is genuinely lost; and once the first-line guard
-/// trips for a node, that node's count is dead for the rest of the run —
-/// the archive's first line will never match the retained window again
-/// after rotation moves it, so every later re-attach re-suppresses nothing
-/// and the archive grows by this node's whole retained window each time,
-/// unbounded for as long as the run and its rotation both continue. Neither
-/// residual is a regression against the bug this task fixes — both fail
-/// toward duplication, never toward silent loss beyond what "detected, not
-/// recovered" already names — but "guarded" was never "solved", and the
-/// property that holds without exception is narrower still: a count can
-/// only ever *under*-suppress relative to the real log, or be caught
-/// failing to align with it. It cannot silently lose a line the archive
-/// did not already have.
-///
-/// The cost is an unchanged one: a re-attach re-reads a node's whole log over
-/// the network, exactly as every attach always has. Finding #50 was about
-/// `append_log`'s `CONCAT` duplicating what came back, never about paying for
-/// the read itself — a real per-line emission timestamp (`LogParams::
-/// timestamps: true`, parsed and stored per node) would let a resumed read
-/// start late instead of at byte 0, and is a real future optimisation that
-/// needs a parser and a schema change neither of which exists yet.
-///
-/// # Two guards — fix-round 2
-///
-/// See [`domain::repos::LogPosition`]'s own "Two anchors" section for the
-/// full argument; this is the mechanism side of it.
-///
-/// **Rotation, guarded by the first line.** [`Self::consume`] compares the
-/// very first line this node's fresh read produces against
-/// [`LogResume::first_line_for`]'s answer, once, before suppressing
-/// anything. A mismatch means the window has moved — this read's byte 0 is
-/// not the archive's — and the response is to suppress *nothing* for this
-/// node for the rest of this attach: safe, because emitting everything is
-/// the duplication direction, never the loss direction.
-///
-/// **A pre-fix-inflated count, guarded by the last line, detected but not
-/// recoverable.** Once [`Self::consume`] has suppressed exactly as many
-/// lines as the count called for, it compares the last one it actually
-/// suppressed against [`LogResume::last_line_for`]'s answer. A mismatch
-/// means the count itself was wrong — see [`LogResume::lines_for`]'s doc for
-/// the one way that happens, a run whose archive still carries duplicates
-/// from before this fix shipped — and by the time this fires, whatever it
-/// wrongly suppressed already did not reach the sink. There is no re-read
-/// that gets it back, so the contract here is "log loudly enough that an
-/// operator can tell this happened", not "recover it": an `error!` naming
-/// the execution reference, the node, and both lines.
-///
-/// Pulled out of [`Watcher::follow`] as its own type so the suppression
-/// decision — the actual fix — is unit-testable without a Kubernetes API
-/// server: `follow` needs one to open the log stream; this needs only a
-/// [`LogResume`], an execution reference and node name for its own log
-/// lines, and a sequence of raw lines.
-struct LineSkip {
-    execution_ref: String,
-    node: String,
-    /// How many more lines to suppress. Reaches `0` and stops there:
-    /// consuming more lines than were seeded — a resume position larger
-    /// than what this fresh read actually has left — suppresses everything
-    /// this read produces and never underflows.
-    remaining: i64,
-    /// `remaining`'s starting value, kept so the last-line guard can tell
-    /// "suppression just finished" (`remaining` reached `0` having started
-    /// above it) apart from "there was never anything to suppress"
-    /// (`remaining` started at `0`).
-    total: i64,
-    first_line: Option<String>,
-    last_line: Option<String>,
-    /// Set on the first call to [`Self::consume`], so the first-line guard
-    /// runs exactly once regardless of how many lines follow.
-    checked_first: bool,
-    /// Set once the first-line guard disagrees. Every following line is
-    /// then emitted unconditionally, the safe direction — see this type's
-    /// "Two guards" doc.
-    misaligned: bool,
-    /// The most recent line actually suppressed, kept only long enough to
-    /// compare against `last_line` the moment `remaining` reaches `0`.
-    last_suppressed: Option<String>,
-}
-
-impl LineSkip {
-    /// Seeded from `resume`'s answers for `node` — `0` lines and no anchors
-    /// for a node `resume` says nothing about, which is what a first
-    /// attach's empty [`LogResume`] produces for every node, and what makes
-    /// [`Self::consume`] suppress nothing for it.
-    fn for_node(resume: &LogResume, execution_ref: &str, node: &str) -> Self {
-        let remaining = resume.lines_for(node);
-        Self {
-            execution_ref: execution_ref.to_owned(),
-            node: node.to_owned(),
-            remaining,
-            total: remaining,
-            first_line: resume.first_line_for(node),
-            last_line: resume.last_line_for(node),
-            checked_first: false,
-            misaligned: false,
-            last_suppressed: None,
-        }
-    }
-
-    /// `true` if `line` is already archived and must not reach the sink
-    /// again; `false` if it should. See this type's "Two guards" doc for
-    /// the two checks this performs around the count, and
-    /// [`domain::repos::LogPosition`]'s "Two anchors" for why both exist.
-    ///
-    /// **`line` is flattened through [`flatten_log_char`] before either
-    /// guard compares it — fix-round 3.** The anchors hold *flattened* text:
-    /// `fan_out_log` maps every `'\n'`/`'\r'` to a space before archiving, so
-    /// one archived entry can never split into two. `line` here is a fresh,
-    /// raw pod line, and `futures`' `Lines` strips only its *trailing*
-    /// terminator — an embedded `\r` survives. Comparing the raw line
-    /// against a flattened anchor made every guard fail on any line
-    /// carrying one, permanently for that node (the first-line guard has no
-    /// second chance) and spuriously for the last-line guard (a false
-    /// "pre-fix duplicate" alarm on a perfectly healthy archive). Both sides
-    /// must go through the one shared flattening, not just the write side.
-    fn consume(&mut self, line: &str) -> bool {
-        let line: String = line.chars().map(flatten_log_char).collect();
-        if !self.checked_first {
-            self.checked_first = true;
-            if self.remaining > 0 && self.first_line.as_deref() != Some(line.as_str()) {
-                debug!(
-                    execution_ref = %self.execution_ref,
-                    node = %self.node,
-                    "this node's re-read log does not start where its archive does (log \
-                     rotation is the expected cause on a long-running node); resuming \
-                     without suppression for it rather than trusting a misaligned count -- \
-                     this node's count is now dead for the rest of this run and its archive \
-                     will grow unbounded on every further re-attach",
-                );
-                self.misaligned = true;
-                self.remaining = 0;
-                return false;
-            }
-        }
-
-        if self.misaligned || self.remaining <= 0 {
-            return false;
-        }
-
-        self.last_suppressed = Some(line);
-        self.remaining -= 1;
-
-        if self.remaining == 0 && self.total > 0 {
-            let matches = self.last_line.as_deref() == self.last_suppressed.as_deref();
-            if !matches {
-                error!(
-                    execution_ref = %self.execution_ref,
-                    node = %self.node,
-                    expected = self.last_line.as_deref().unwrap_or_default(),
-                    actual = self.last_suppressed.as_deref().unwrap_or_default(),
-                    "this node's archived line count did not match its re-read log at the \
-                     boundary the count expected; the archive most likely still carries \
-                     duplicate lines from a run that hit review finding #50 before this \
-                     resume fix shipped, and any lines this count wrongly suppressed cannot \
-                     be recovered",
-                );
-            }
-        }
-
-        true
-    }
-}
+// Task 2 (WS5) deleted the per-node suppression counter that used to live
+// here, plus its first-line rotation guard, and replaced it with
+// kubelet's own per-line emission timestamp. See this module's own header
+// and `domain::repos::LogResume` for what that counter degraded into on a
+// long, chatty run whose log rotated, and why a timestamp closes that hole
+// rather than merely tightening it: `Watcher::open_log` now asks
+// Kubernetes to start the read late (`LogParams::since_time`), rather than
+// asking this process to suppress what it re-reads from byte 0.
 
 /// Open an observation of one execution.
 ///
@@ -504,10 +311,10 @@ struct Watcher {
     /// re-attach.
     drained: HashSet<String>,
     /// Where to resume each pod's log read from, keyed by node — see
-    /// [`LogResume`]'s own doc. Consulted once per pod, at the start of
-    /// [`Self::follow`] via [`LineSkip::for_node`], the first time that pod
-    /// is followed by *this* `watch` call; `drained` above is what stops a
-    /// second consultation for the same pod on a later poll tick.
+    /// [`LogResume`]'s own doc. Consulted once per pod, inside
+    /// [`Self::open_log`], the first time that pod is followed by *this*
+    /// `watch` call; `drained` above is what stops a second consultation for
+    /// the same pod on a later poll tick.
     resume: LogResume,
     /// The executor's own shutdown signal, as a child token — see
     /// [`super::ArgoRunExecutor`]'s `cancel` field doc for why it lives there
@@ -645,13 +452,13 @@ impl Watcher {
                 // At least one pod stopped part-way. End this observation
                 // without a verdict rather than polling again in place: a
                 // second follow of the same pod by the *same* `Watcher` would
-                // re-read it from byte 0 against `self.resume`, which still
-                // holds the count from before this call started, and so would
+                // re-open its log against `self.resume`, which still holds
+                // the position from before this call started, and so would
                 // re-emit everything this call already emitted for it (see
                 // `drained`'s field doc, which is why a pod is followed at
                 // most once per call). A fresh `Watcher` from
                 // `reattach_watchers` gets a fresh `LogResume` instead, and
-                // `LineSkip` suppresses what is already archived.
+                // `open_log`'s `since_time` skips what is already archived.
                 FollowOutcome::Incomplete => {
                     info!(
                         execution_ref = %self.name,
@@ -853,16 +660,14 @@ impl Watcher {
     /// [`ExecutionEvent::Log`] per line and a
     /// [`ExecutionEvent::TestResult`] per completed test.
     ///
-    /// **Re-reads from byte 0 every time**, exactly as before Task 13 — see
-    /// [`LineSkip`]'s doc for why that read is unchanged and only the
-    /// archive-facing half of what it produces is suppressed, guarded
-    /// against both a moved window (log rotation) and an inflated count (a
-    /// pre-fix duplicate archive). `skip` is seeded once per pod, here, from
-    /// `self.resume`'s answers for `node`; a line it says is already
-    /// archived still reaches the marker parser (`upsert_test_result`
-    /// replaces a row rather than appending, so re-parsing a marker is
-    /// harmless) but not the sink's `Log` event, which is what
-    /// `append_log`'s `CONCAT` would otherwise duplicate.
+    /// **Reads from `self.resume`'s answer for `node`, not from byte 0** —
+    /// Task 2 (WS5) replaced the previous per-node suppression counter
+    /// (which *did* re-read from byte 0 every time and suppressed a
+    /// client-side count of what was already archived) with kubelet's own
+    /// per-line emission timestamp: [`Self::open_log`] asks Kubernetes for
+    /// `since_time`, so the read itself starts late and every line that
+    /// reaches this loop is meant to be emitted — no suppression decision
+    /// happens here any more (see [`handle_line`]'s own doc).
     ///
     /// # Where this ends, and what each ending leaves behind
     ///
@@ -969,27 +774,29 @@ impl Watcher {
     /// `domain::service::watch`'s `drain` already calls *"nothing more to
     /// say"*, **never** *"this failed"*. The slot is released, the run stays
     /// in `active_states`, and `reattach_watchers` re-attaches on its next 5 s
-    /// tick with a fresh [`LogResume`], which suppresses whatever was already
-    /// archived. So a pod that was merely quiet resumes without duplicating
-    /// what it had already emitted.
+    /// tick with a fresh [`LogResume`], seeded from
+    /// `RunLogsRepository::log_resume_positions`, whose `since_time` skips
+    /// what was already archived. So a pod that was merely quiet resumes
+    /// without duplicating what it had already emitted.
     ///
     /// **A fresh `Watcher` rather than another pass of this one, deliberately.**
     /// `run` could poll again in place instead of returning, but a second
-    /// follow of the same pod by the *same* `Watcher` seeds [`LineSkip`] from
-    /// `self.resume` again — the archived count from before this call started
-    /// — and would re-emit everything this call had already emitted for that
+    /// follow of the same pod by the *same* `Watcher` opens its log against
+    /// `self.resume` again — the position from before this call started —
+    /// and would re-emit everything this call had already emitted for that
     /// pod. `drained`'s field doc is the same invariant from the other side: a
     /// pod is followed at most once per `watch` call.
     ///
-    /// **Unless that node's log has rotated.** [`LineSkip::consume`]'s
-    /// first-line guard is what compares the re-read against the archive, and
-    /// its own doc records what happens when they disagree: suppression is dead
-    /// for that node for the rest of the run and *"its archive will grow
-    /// unbounded on every further re-attach"*, announced by a `debug!` that
-    /// names rotation as the expected cause. That residual is not new, but C1
-    /// made it **more reachable**: before it, a mid-stream reset drained
-    /// the pod and produced no re-attach at all, so the guard was never
-    /// re-consulted; now every reset produces one. Bounded duplication in
+    /// **Log rotation is no longer a residual worth naming here.** The
+    /// previous mechanism compared a fresh re-read's first line against an
+    /// archived anchor and, on a mismatch, disabled its own suppression for
+    /// that node for the rest of the run — unbounded duplication on a long,
+    /// chatty run whose log rotated, which is what Task 2 (WS5) replaced
+    /// this whole mechanism to close. `since_time` has nothing analogous to
+    /// disable: a rotated window simply means Kubernetes may not have the
+    /// exact instant requested any more and starts from whatever it does
+    /// retain, and the next successful flush advances the position again
+    /// regardless. Bounded duplication in
     /// exchange for a correct verdict is still the right trade, but "loses
     /// nothing" is the wrong summary and an earlier version of this paragraph
     /// said it.
@@ -1072,11 +879,10 @@ impl Watcher {
                   different way this follow can end, which the metric counts fully"
     )]
     async fn follow(&mut self, pod_name: &str, node: &str) -> FollowOutcome {
-        let Some(stream) = self.open_log(pod_name).await else {
+        let Some(stream) = self.open_log(pod_name, node).await else {
             return FollowOutcome::Complete;
         };
         let mut parser = MarkerParser::new(node);
-        let mut skip = LineSkip::for_node(&self.resume, &self.name, node);
         let mut lines = stream.lines();
         let idle = std::time::Duration::from_secs(self.config.log_follow_idle_seconds.max(1));
         loop {
@@ -1093,7 +899,7 @@ impl Watcher {
             };
             match next {
                 Ok(Ok(Some(line))) => {
-                    if !handle_line(&self.sink, &mut parser, &mut skip, node, line).await {
+                    if !handle_line(&self.sink, &mut parser, node, line).await {
                         return FollowOutcome::Stop;
                     }
                 }
@@ -1142,9 +948,38 @@ impl Watcher {
         FollowOutcome::Complete
     }
 
-    /// Open a follow-mode stream on one pod's `main` container log, from
-    /// byte 0 — see [`LineSkip`]'s doc for why this carries no resume-shaped
-    /// parameter at all.
+    /// Open a follow-mode stream on one pod's `main` container log —
+    /// `timestamps: true` so every line arrives kubelet-prefixed with its
+    /// own emission instant, and `since_time` set to `node`'s most recent
+    /// recorded position, so a resumed read starts late instead of at byte
+    /// 0. Task 2 (WS5): this replaced the per-node suppression counter
+    /// previously here, which re-read a node's whole log from byte 0 on
+    /// every re-attach and suppressed a client-side count of what was
+    /// already archived — see this module's own header for why that
+    /// mechanism degraded into unbounded duplication once a
+    /// long-running node's log rotated.
+    ///
+    /// # `since_time`'s type is not `time::OffsetDateTime`
+    ///
+    /// `kube-core`'s `LogParams::since_time` is `Option<jiff::Timestamp>`,
+    /// not this crate's usual `time::OffsetDateTime` — a genuine, if narrow,
+    /// new dependency this task's own plan did not anticipate (its "no new
+    /// crate dependency" constraint), confirmed by reading `kube-core`'s
+    /// vendored source rather than assumed from the plan's illustrative
+    /// code. [`since_time_of`] does the one-way conversion; see its own doc
+    /// for why it needs no string round-trip.
+    ///
+    /// # `since_time` is inclusive at second granularity in practice
+    ///
+    /// `kube-core`'s own request builder rounds `since_time` to the second
+    /// before sending it as Kubernetes' `sinceTime` query parameter. So a
+    /// re-attach may re-emit at most the handful of lines sharing the last
+    /// recorded second — never more, and never a line that was already
+    /// recorded — never claim exactly-once. This is the same
+    /// "under-suppress, never lose" direction the deleted per-node counter
+    /// aimed for, reached
+    /// without a client-side count that can drift out of alignment with
+    /// what the pod's log retention window actually holds.
     ///
     /// `None` is "not yet", not "never": a pod that has only just gone Running
     /// can still refuse a log request, so the caller retries on the next pass
@@ -1190,10 +1025,19 @@ impl Watcher {
     /// observed at the very next loop iteration inside [`Self::follow`], not
     /// indefinitely: bounded by however long this one request takes, never by
     /// how long the pod itself keeps running.
-    async fn open_log(&self, pod_name: &str) -> Option<Pin<Box<dyn AsyncBufRead + Send>>> {
+    async fn open_log(
+        &self,
+        pod_name: &str,
+        node: &str,
+    ) -> Option<Pin<Box<dyn AsyncBufRead + Send>>> {
         let params = LogParams {
             container: Some(MAIN_CONTAINER.to_owned()),
             follow: true,
+            timestamps: true,
+            since_time: self
+                .resume
+                .last_emitted_for(node)
+                .and_then(since_time_of),
             ..LogParams::default()
         };
         match self.pods.log_stream(pod_name, &params).await {
@@ -1206,14 +1050,54 @@ impl Watcher {
     }
 }
 
+/// Convert this crate's usual `time::OffsetDateTime` into the
+/// `jiff::Timestamp` `LogParams::since_time` actually wants — see
+/// [`Watcher::open_log`]'s own doc for why the two differ at all.
+///
+/// `OffsetDateTime::unix_timestamp`/`::nanosecond` give exactly the
+/// `(second, sub-second-nanosecond)` pair `jiff::Timestamp::new` takes, so
+/// no RFC 3339 string round-trip is needed for a conversion that is, in the
+/// end, "the same instant in a different crate's type."
+///
+/// `None` only if `jiff` itself refuses the value (a year outside its
+/// supported range, unreachable for any instant this crate's own clock
+/// produces) — the safe direction, since an absent `since_time` makes
+/// [`Watcher::open_log`] read from the beginning rather than fail the
+/// attach outright.
+fn since_time_of(instant: OffsetDateTime) -> Option<jiff::Timestamp> {
+    let nanosecond = i32::try_from(instant.nanosecond()).unwrap_or(0);
+    match jiff::Timestamp::new(instant.unix_timestamp(), nanosecond) {
+        Ok(when) => Some(when),
+        Err(error) => {
+            debug!(
+                %error,
+                "could not convert this node's resume position into a `since_time`; \
+                 reading its log from the beginning instead",
+            );
+            None
+        }
+    }
+}
+
 /// Everything `follow`'s loop does with one freshly read pod-log line.
 ///
 /// Free rather than a `Watcher` method for one reason: it only ever touches
 /// the channel half of a `Watcher` (`sink`) plus the per-pod state
-/// (`parser`, `skip`) `follow` already keeps in its own locals — nothing
-/// here needs the `kube::Api` handles the rest of `Watcher` carries. That is
-/// what lets this file's own tests drive it against a plain
-/// `ExecutionStream::channel`, with no cluster and no `Api` construction.
+/// (`parser`) `follow` already keeps in its own locals — nothing here needs
+/// the `kube::Api` handles the rest of `Watcher` carries. That is what lets
+/// this file's own tests drive it against a plain `ExecutionStream::channel`,
+/// with no cluster and no `Api` construction.
+///
+/// # The kubelet timestamp is parsed and stripped first, then sanitized
+///
+/// `line` arrives exactly as kubelet wrote it: an RFC 3339 instant, a
+/// space, then the container's own output — because [`Watcher::open_log`]
+/// opens every stream with `timestamps: true` (Task 2, WS5). This function
+/// splits that prefix off via [`split_kubelet_timestamp`] before anything
+/// else touches the line, so every downstream consumer — the marker
+/// parser, the sanitizer, the sink — sees the same content a pre-Task-2
+/// stream would have handed them, plus the parsed instant travelling
+/// alongside it rather than embedded in the text.
 ///
 /// # Two forms of one line, and why there are two (review finding #30)
 ///
@@ -1222,107 +1106,72 @@ impl Watcher {
 /// `IngestService::fan_out_log` wraps every line in (see that function's
 /// doc for why a plain `sanitize_line` here would get re-truncated on
 /// read, discarding the true dropped-byte count) — is computed once, here,
-/// and used for two of this line's three destinations:
+/// and used for the sink, and downstream of it `IngestService::fan_out_log`'s
+/// archive write, so a pathological line no longer sits in the broadcaster
+/// or the archive at full size.
 ///
-/// * the sink, and downstream of it `IngestService::fan_out_log`'s archive
-///   write, so a pathological line no longer sits in the broadcaster or the
-///   archive at full size — the truncation this task adds;
-/// * [`LineSkip::consume`]'s anchor comparison, capped **the same way**,
-///   because the anchor it compares against is now the *capped* archived
-///   text. Comparing a raw re-read against a capped anchor would never
-///   match again for any node that ever emitted an over-long line —
-///   permanently disabling this run's resume suppression for that node,
-///   the same failure shape `flatten_log_char`'s own doc already recounts
-///   once for a different mismatch.
-///
-/// The **marker parser** gets the raw, uncapped line instead, not the
-/// sanitized one. This is deliberate, not an oversight: `MarkerParser::case`
-/// decodes a `=== TEST_CASE: <base64-json> ===` marker whose capture
-/// (`CASE_RE`, `\S+`) has no length limit, carrying a pytest plugin's JSON —
-/// `reason` and `ticket` fields this crate does not control the size of. So
-/// a marker line is not provably under `MAX_LINE_BYTES` the way an
-/// ordinary log line usually is. And truncating it would not merely cut the
-/// marker in half: [`sanitize_line_for_archive`] *appends* its own marker
-/// after whatever survives the cut, so a truncated `TEST_CASE` line would no
+/// The **marker parser** gets the raw (timestamp-stripped, but otherwise
+/// unsanitized) line instead, not the sanitized one. This is deliberate,
+/// not an oversight: `MarkerParser::case` decodes a
+/// `=== TEST_CASE: <base64-json> ===` marker whose capture (`CASE_RE`,
+/// `\S+`) has no length limit, carrying a pytest plugin's JSON — `reason`
+/// and `ticket` fields this crate does not control the size of. So a
+/// marker line is not provably under `MAX_LINE_BYTES` the way an ordinary
+/// log line usually is. And truncating it would not merely cut the marker
+/// in half: [`sanitize_line_for_archive`] *appends* its own marker after
+/// whatever survives the cut, so a truncated `TEST_CASE` line would no
 /// longer end in `===` at all — `CASE_RE` (`^=== TEST_CASE: (\S+) ===$`)
 /// would simply fail to match, and the whole case would be silently
 /// dropped, not partially decoded. The parser's input has to stay raw to
 /// avoid that.
-///
-/// # A residual this change accepts, and only for one of three positions
-///
-/// An archived `first_line`/`last_line` anchor from a run whose over-long
-/// line was written before this fix deployed holds the *full, untruncated*
-/// text — nothing rewrites an archive already on disk. A post-deploy
-/// re-attach's now-truncated re-read of that same line will not match that
-/// stale anchor, and what happens next depends on *where* the over-long
-/// line sits in that node's archived output, because [`LineSkip`] has two
-/// independent guards over three positions:
-///
-/// * **First archived line for that node**: the first-line guard fires,
-///   exactly the misaligned-window case it exists for. Suppression is
-///   disabled for that node for the rest of the re-attach — the safe
-///   direction (duplication, not loss) — same as real log rotation.
-/// * **A middle line**: neither guard runs against it at all — suppression
-///   is purely count-based between the two anchors, so a stale (untruncated
-///   in the archive, truncated on re-read) middle line changes what that
-///   one re-read line's own bytes look like, not whether it is suppressed.
-///   Nothing diverges: no duplication, no loss.
-/// * **Last archived line for that node**: the last-line guard fires
-///   instead, once the count is exhausted, and logs an `error!` asserting
-///   the archive "most likely still carries duplicate lines from a run
-///   that hit review finding #50" — which is not what happened here. That
-///   `error!` is a false alarm with no data effect in this specific case;
-///   an operator reading it would misdiagnose why.
-///
-/// Bounded to runs whose watch spans this deploy and whose affected node is
-/// re-attached to afterwards.
-async fn handle_line(
-    sink: &ExecutionSink,
-    parser: &mut MarkerParser,
-    skip: &mut LineSkip,
-    node: &str,
-    line: String,
-) -> bool {
-    let sanitized = sanitize_line_for_archive(&line);
-    let suppress = skip.consume(&sanitized);
-    // `&line` (raw) for the parser, `sanitized` for everything else -- see
-    // this function's own doc for why the split exists. Do not collapse
-    // these back to one form without re-checking that a marker line still
-    // cannot exceed `MAX_LINE_BYTES`, and do not swap `sanitize_line_for_archive`
-    // back for plain `sanitize_line` without re-checking `WRITE_SIDE_MAX_LINE_BYTES`'s
-    // doc -- that swap is exactly what let the read side re-truncate an
-    // already-truncated line and lose the true dropped-byte count.
-    emit_line(sink, parser, node, &line, sanitized, suppress).await
+async fn handle_line(sink: &ExecutionSink, parser: &mut MarkerParser, node: &str, line: String) -> bool {
+    // Defensive fallback for a line kubelet did not prefix — see
+    // `split_kubelet_timestamp`'s own doc for why this is not expected to
+    // happen on a stream this module always opens with `timestamps: true`.
+    let (emitted_at, content) = match split_kubelet_timestamp(&line) {
+        Some((when, rest)) => (Some(when), rest.to_owned()),
+        None => (None, line),
+    };
+    let sanitized = sanitize_line_for_archive(&content);
+    // `&content` (raw, timestamp-stripped) for the parser, `sanitized` for
+    // everything else -- see this function's own doc for why the split
+    // exists. Do not collapse these back to one form without re-checking
+    // that a marker line still cannot exceed `MAX_LINE_BYTES`, and do not
+    // swap `sanitize_line_for_archive` back for plain `sanitize_line`
+    // without re-checking `WRITE_SIDE_MAX_LINE_BYTES`'s doc -- that swap is
+    // exactly what let the read side re-truncate an already-truncated line
+    // and lose the true dropped-byte count.
+    emit_line(sink, parser, node, &content, sanitized, emitted_at).await
 }
 
-/// One log line: whatever it completed first, then the line itself —
-/// unless `suppress`, in which case the line has already been archived by
-/// an earlier `watch()` and must not reach the sink a second time (Task
-/// 13, review finding #50; see [`LineSkip`]'s doc for the mechanism).
+/// One log line: whatever it completed first, then the line itself.
 ///
-/// **Results before the line that produced them**, and **always**, even
-/// when `suppress` is set — so a consumer reading both streams never sees
-/// a `TEST_RESULT` marker in the log before the result it announced, and
-/// a re-attach never fails to notice a marker just because its line is
-/// being resumed past.
+/// **Results before the line that produced them**, and **always** — so a
+/// consumer reading both streams never sees a `TEST_RESULT` marker in the
+/// log before the result it announced.
+///
+/// No suppression decision here at all (Task 2, WS5, replacing the
+/// deleted per-node suppression counter):
+/// every line this function is called with is emitted. What keeps a
+/// resumed read from re-emitting everything it already archived is
+/// [`Watcher::open_log`]'s `since_time`, upstream of this function
+/// entirely — Kubernetes decides what this stream contains, not this
+/// process.
 async fn emit_line(
     sink: &ExecutionSink,
     parser: &mut MarkerParser,
     node: &str,
     raw_line: &str,
     sanitized_line: String,
-    suppress: bool,
+    emitted_at: Option<OffsetDateTime>,
 ) -> bool {
     if !emit_results(sink, parser.line(raw_line)).await {
         return false;
     }
-    if suppress {
-        return true;
-    }
     sink.emit(ExecutionEvent::Log {
         node: node.to_owned(),
         line: sanitized_line,
+        emitted_at,
     })
     .await
 }
@@ -1340,31 +1189,25 @@ async fn emit_results(sink: &ExecutionSink, observations: Vec<TestObservation>) 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    //! `LineSkip` is the actual fix for review finding #50 in this adapter.
-    //! Fix-round 1 added the count-based suppression properties below (every
-    //! test that shipped with the original commit drove `MockRunExecutor`,
-    //! never this file, because `argo/watch.rs` had no `#[cfg(test)]` module
-    //! at all). Fix-round 2 added the two-guard tests: the first-line guard
-    //! is Critical (kubelet log rotation moves the window forward, and an
-    //! unguarded count would then suppress real, never-archived lines); the
-    //! last-line guard is Important (a pre-fix archive's inflated count is
-    //! detected, though not recovered — that half is exercised through
-    //! `tracing_test` rather than its own dedicated test, since its only
-    //! observable effect is the `error!` line). Fix-round 3 added two more:
-    //! a normalisation test (an anchor and a fresh line must be flattened
-    //! the same way, or a `\r` this crate's own `fan_out_log` strips before
-    //! archiving would never match its own anchor), and a negative pin on
-    //! the fully-aligned path added to the existing matching-first-line
-    //! test, so the last-line `error!` staying inside its `if !matches`
-    //! guard is itself covered rather than merely inspected.
+    //! Task 2 (WS5) deleted the per-node suppression counter this module's
+    //! tests used to pin fix-round by fix-round, and replaced it with
+    //! kubelet's own per-line emission timestamp. What remains below:
     //!
-    //! These run under `--features argo`, which is this module's own gate —
-    //! no separate `#[cfg]` needed on the module itself.
-    //!
-    //! Task 15 (review finding #30) added `handle_line`'s own test below,
-    //! driven directly against a plain `ExecutionStream::channel` rather
-    //! than a `Watcher` — see that function's doc for why no `kube::Api` is
-    //! needed to exercise it.
+    //! * [`split_kubelet_timestamp`]'s own parser tests live in
+    //!   `domain::repos::log_line_tests`, not here — this module tests the
+    //!   integration (`handle_line` parsing and stripping the prefix before
+    //!   anything else sees the line), not the parser itself.
+    //! * `handle_line`'s pathological-line truncation test (Task 15, review
+    //!   finding #30) survives unchanged in spirit, minus the `skip`
+    //!   parameter that no longer exists.
+    //! * A new integration test proves what this task actually claims: a
+    //!   resumed `follow()` asks Kubernetes for exactly the caller's last
+    //!   recorded position on every re-attach, however many came before it
+    //!   — the direct evidence that the deleted counter's own failure mode ("that
+    //!   node's count is now dead for the rest of the run... unbounded for
+    //!   as long as the run and its rotation both continue") has nothing
+    //!   analogous to get stuck in any more: there is no per-node state here
+    //!   that a mismatch could disable.
     //!
     //! Task 17 (review findings #20/#21) added the two `Watcher`-level tests
     //! at the bottom of this module: cancellation stopping a running `run()`,
@@ -1377,9 +1220,13 @@ mod tests {
     //! but not reusing it: that server always writes a full response the
     //! moment its route table returns, which cannot produce "accepts and
     //! never writes" — the shape review finding #21 needed a red test for.
+    //!
+    //! These run under `--features argo`, which is this module's own gate —
+    //! no separate `#[cfg]` needed on the module itself.
 
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
     use std::time::Duration;
 
@@ -1389,243 +1236,80 @@ mod tests {
     use kube::api::Api;
     use tokio_util::sync::CancellationToken;
 
-    use super::{FollowOutcome, LineSkip, Watcher, handle_line, workflow_resource};
+    use super::{FollowOutcome, Watcher, handle_line, since_time_of, workflow_resource};
     use crate::config::ArgoExecutorConfig;
     use crate::domain::ports::run_executor::{ExecutionEvent, ExecutionStream};
     use crate::domain::repos::{
-        LogPosition, LogResume, MAX_LINE_BYTES, TRUNCATION_MARKER_MAX, sanitize_line_for_archive,
+        LogPosition, LogResume, MAX_LINE_BYTES, TRUNCATION_MARKER_MAX,
     };
     use crate::infra::executor::argo::markers::MarkerParser;
 
-    /// Build a resume position the way a real `LogResume::from_archived_text`
-    /// would for a node whose archived lines are exactly `lines`, in order —
-    /// `first_line`/`last_line` derived from it, so a resume built this way
-    /// is aligned by construction against a fresh read that reproduces the
-    /// same lines.
-    fn aligned_resume(node: &str, lines: &[&str]) -> LogResume {
-        resume_with(
-            node,
-            i64::try_from(lines.len()).expect("test fixture length fits in i64"),
-            lines.first().copied().unwrap_or_default(),
-            lines.last().copied().unwrap_or_default(),
-        )
-    }
+    /// **A kubelet-prefixed line is parsed and stripped before it reaches
+    /// the sink or the marker parser.** `handle_line`'s own doc names this
+    /// as the point where Task 2's parser is actually wired in — this is
+    /// the test that would fail if it were not.
+    #[tokio::test]
+    async fn a_kubelet_prefixed_line_is_stripped_and_its_instant_is_emitted() {
+        let (sink, mut stream) = ExecutionStream::channel(4);
+        let mut parser = MarkerParser::new("node-1");
 
-    /// Build a resume position with an explicit `lines` count against
-    /// explicit anchors — for a test that wants a count larger than the
-    /// handful of lines it is convenient to spell out, where
-    /// [`aligned_resume`] (whose count is always the anchor slice's own
-    /// length) cannot express the mismatch.
-    fn resume_with(node: &str, lines: i64, first_line: &str, last_line: &str) -> LogResume {
-        [(
-            node.to_owned(),
-            LogPosition {
-                lines,
-                first_line: first_line.to_owned(),
-                last_line: last_line.to_owned(),
-            },
-        )]
-        .into_iter()
-        .collect()
-    }
+        // No trailing `\n`: `futures::AsyncBufReadExt::lines()` (what
+        // `Watcher::follow` actually reads from) strips it before `handle_line`
+        // ever sees the line -- this module's own header names that.
+        assert!(
+            handle_line(
+                &sink,
+                &mut parser,
+                "node-1",
+                "2026-09-18T10:00:00.5Z hello".to_owned(),
+            )
+            .await,
+            "the observer is still attached; this must not report false"
+        );
+        drop(sink);
 
-    /// An empty resume — what every first attach passes — suppresses
-    /// nothing at all.
-    #[test]
-    fn an_empty_resume_suppresses_nothing() {
-        let mut skip = LineSkip::for_node(&LogResume::default(), "wf-1", "a");
-
-        for line in ["x0", "x1", "x2", "x3", "x4"] {
-            assert!(!skip.consume(line), "nothing is archived for this node yet");
-        }
-    }
-
-    /// **The first-line guard, matching.** A resume of `N` whose first line
-    /// agrees with the fresh read's first line suppresses exactly the first
-    /// `N` and lets every line after them through — fix-round 1's original
-    /// property, now under the guard fix-round 2 added.
-    ///
-    /// **Also pins fix-round 3's Minor**: the aligned path must never log
-    /// the last-line mismatch `error!` — nothing here should trip an alarm
-    /// meant for a misaligned count. `#[traced_test]` so a future change
-    /// that hoisted that `error!` out of its `if !matches` guard, logging it
-    /// unconditionally, would turn this red instead of staying silently
-    /// green.
-    #[test]
-    #[tracing_test::traced_test]
-    fn a_matching_first_line_suppresses_the_full_count() {
-        let resume = aligned_resume("a", &["l0", "l1", "l2"]);
-        let mut skip = LineSkip::for_node(&resume, "wf-1", "a");
-
-        let suppressed: Vec<bool> = ["l0", "l1", "l2", "l3", "l4"]
-            .into_iter()
-            .map(|line| skip.consume(line))
-            .collect();
-
+        let event = stream.recv().await.expect("one Log event");
+        let ExecutionEvent::Log {
+            line, emitted_at, ..
+        } = event
+        else {
+            panic!("expected a Log event");
+        };
         assert_eq!(
-            suppressed,
-            vec![true, true, true, false, false],
-            "the first 3 are suppressed, the 4th and 5th are not",
+            line, "hello",
+            "the kubelet timestamp prefix must not survive into the archived line"
         );
-        assert!(
-            !logs_contain("archived line count did not match its re-read log"),
-            "a fully aligned resume must never trip the last-line mismatch alarm",
-        );
-    }
-
-    /// **Normalisation must agree on both sides of the guard — the
-    /// Important fix, fix-round 3.** `fan_out_log` flattens every `'\n'` and
-    /// `'\r'` in a line to a space before archiving it, so the anchor for a
-    /// node whose real output was `"a\rb\rc"` is the flattened `"a b c"`.
-    /// `futures`' `Lines` strips only the *trailing* terminator, so a fresh
-    /// re-read still hands `consume` the raw `"a\rb\rc"`. Without matching
-    /// normalisation on the read side, this would never match its own
-    /// anchor — disabling suppression for this node permanently, for a
-    /// reason that has nothing to do with log rotation.
-    #[test]
-    fn an_embedded_carriage_return_in_the_first_line_still_matches_its_anchor() {
-        let resume = resume_with("a", 1, "a b c", "a b c");
-        let mut skip = LineSkip::for_node(&resume, "wf-1", "a");
-
-        assert!(
-            skip.consume("a\rb\rc"),
-            "the raw line must match its flattened archived anchor"
-        );
-        assert!(
-            !skip.consume("next line"),
-            "the count (1) is exhausted after the one archived line"
-        );
-    }
-
-    /// **The first-line guard, mismatching — the Critical fix, fix-round
-    /// 2.** kubelet log rotation (or anything else) can move a node's log
-    /// window forward between attaches, so a fresh read's first line need
-    /// not be the archive's first line any more. When it is not, the count
-    /// must not be trusted at all: suppressing nothing here is the
-    /// duplication direction, which is safe; suppressing by the stale count
-    /// would drop real lines the archive never had a chance to see.
-    #[test]
-    fn a_mismatched_first_line_suppresses_nothing() {
-        let resume = aligned_resume("a", &["l0", "l1", "l2"]);
-        let mut skip = LineSkip::for_node(&resume, "wf-1", "a");
-
-        // The fresh read's first line is not "l0" -- rotation has moved
-        // the window forward past it.
-        let suppressed: Vec<bool> = ["l2", "l3", "l4"]
-            .into_iter()
-            .map(|line| skip.consume(line))
-            .collect();
-
         assert_eq!(
-            suppressed,
-            vec![false, false, false],
-            "a misaligned window suppresses nothing at all, not even the lines \
-             that happen to coincide with what the archive has",
+            emitted_at.map(time::OffsetDateTime::unix_timestamp),
+            Some(1_789_725_600),
+            "the parsed instant must reach the event"
         );
     }
 
-    /// The first-line guard is per node: a mismatch for one node must not
-    /// disable suppression for another, and a node with nothing archived at
-    /// all is never compared against anything.
-    #[test]
-    fn the_first_line_guard_is_per_node() {
-        let resume_a = aligned_resume("a", &["a0", "a1", "a2"]);
-        let resume_b = aligned_resume("b", &["b0", "b1"]);
-        let mut skip_a = LineSkip::for_node(&resume_a, "wf-1", "a");
-        let mut skip_b = LineSkip::for_node(&resume_b, "wf-1", "b");
-
-        // Node a's window has rotated; node b's has not.
-        assert!(
-            !skip_a.consume("a-rotated-past-the-anchor"),
-            "node a is misaligned"
-        );
-        assert!(
-            skip_b.consume("b0"),
-            "node b's own guard is unaffected by node a's mismatch"
-        );
-        assert!(skip_b.consume("b1"), "node b keeps suppressing normally");
-    }
-
-    /// A resume larger than the lines this read will ever produce suppresses
-    /// all of them and does not panic or underflow — the case a stale or
-    /// otherwise-too-high resume position produces. The last-line guard
-    /// never fires here: `remaining` never reaches `0`, so "suppression
-    /// completed" never happens within this read.
-    #[test]
-    fn a_resume_larger_than_available_lines_suppresses_all_of_them() {
-        // The last-line anchor is never reached (`remaining` stays above `0`
-        // for this whole read), so its value cannot matter here.
-        let resume = resume_with("a", 1_000_000, "l0", "irrelevant -- never reached");
-        let mut skip = LineSkip::for_node(&resume, "wf-1", "a");
-
-        for (i, line) in ["l0", "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9"]
-            .into_iter()
-            .enumerate()
-        {
-            assert!(
-                skip.consume(line),
-                "a read this short never exhausts the count (line {i})"
-            );
-        }
-    }
-
-    /// Suppression is per node, not global: a resume for one node must not
-    /// suppress a single line of another's, however large its own count is.
-    #[test]
-    fn suppression_is_per_node_not_global() {
-        let resume = resume_with("a", 10, "a0", "a9");
-        let mut skip_a = LineSkip::for_node(&resume, "wf-1", "a");
-        let mut skip_b = LineSkip::for_node(&resume, "wf-1", "b");
-
-        assert!(skip_a.consume("a0"), "node a has 10 archived lines to skip");
-        assert!(
-            !skip_b.consume("anything"),
-            "node b has none, regardless of node a's count",
-        );
-    }
-
-    /// **The last-line guard fires when the count is inflated — Important,
-    /// fix-round 2.** A pre-fix archive whose count over-counts this node's
-    /// real content still passes the first-line guard (the window has not
-    /// moved, only the count is wrong), so suppression proceeds and
-    /// consumes real, never-before-archived lines it should not have. The
-    /// mismatch is detected once the count is exhausted, and logged loudly
-    /// rather than silently, because nothing at that point can undo the
-    /// suppression already applied.
-    #[test]
-    #[tracing_test::traced_test]
-    fn a_mismatched_last_line_logs_but_still_suppresses() {
-        // Archive says node a has 2 lines, "l0" then "l1" -- but the real
-        // log only ever had "l0"; "l1" is a pre-fix duplicate of "l0" that
-        // never really existed as a second, distinct line.
-        let resume: LogResume = [(
-            "a".to_owned(),
-            LogPosition {
-                lines: 2,
-                first_line: "l0".to_owned(),
-                last_line: "l1".to_owned(),
-            },
-        )]
-        .into_iter()
-        .collect();
-        let mut skip = LineSkip::for_node(&resume, "wf-1", "a");
-
-        // The fresh read's real content: "l0", then genuinely new output
-        // that was never archived at all.
-        assert!(skip.consume("l0"), "the first line still matches");
-        assert!(
-            skip.consume("new-output-never-archived"),
-            "the count says 2, so this is still suppressed -- wrongly"
-        );
-        assert!(
-            !skip.consume("more-new-output"),
-            "the count is now exhausted; later lines emit normally"
-        );
+    /// Defensive fallback: a line with no kubelet prefix at all still
+    /// reaches the sink, with `emitted_at: None` rather than being dropped
+    /// or panicking — `split_kubelet_timestamp`'s own doc says this should
+    /// not happen on a stream this module always opens with
+    /// `timestamps: true`, but a caller must not lose the line if it does.
+    #[tokio::test]
+    async fn a_line_with_no_kubelet_prefix_still_reaches_the_sink() {
+        let (sink, mut stream) = ExecutionStream::channel(4);
+        let mut parser = MarkerParser::new("node-1");
 
         assert!(
-            logs_contain("archived line count did not match its re-read log"),
-            "the mismatch must be logged loudly, since it cannot be recovered",
+            handle_line(&sink, &mut parser, "node-1", "no timestamp here".to_owned()).await
         );
+        drop(sink);
+
+        let event = stream.recv().await.expect("one Log event");
+        let ExecutionEvent::Log {
+            line, emitted_at, ..
+        } = event
+        else {
+            panic!("expected a Log event");
+        };
+        assert_eq!(line, "no timestamp here");
+        assert_eq!(emitted_at, None);
     }
 
     /// **A pathological log line is truncated before it enters the
@@ -1637,23 +1321,19 @@ mod tests {
     /// hundreds of megabytes of resident memory for output no reader can
     /// ever receive in full.
     ///
-    /// The same cap and the same helper as the read side, deliberately: two
-    /// truncation rules that must agree is a drift this crate has been
-    /// bitten by (see `LogPosition`'s doc on `flatten_log_char`, one such
-    /// drift already fixed once). Review finding #30.
+    /// The same cap and the same helper as the read side, deliberately —
+    /// review finding #30.
     #[tokio::test]
     async fn a_pathological_line_is_truncated_before_it_is_emitted() {
         let (sink, mut stream) = ExecutionStream::channel(4);
         let mut parser = MarkerParser::new("node-1");
-        let mut skip = LineSkip::for_node(&LogResume::default(), "wf-1", "node-1");
 
         assert!(
             handle_line(
                 &sink,
                 &mut parser,
-                &mut skip,
                 "node-1",
-                "y".repeat(MAX_LINE_BYTES * 4),
+                format!("2026-09-18T10:00:00Z {}", "y".repeat(MAX_LINE_BYTES * 4)),
             )
             .await,
             "the observer is still attached; this must not report false"
@@ -1679,49 +1359,242 @@ mod tests {
         );
     }
 
-    /// **The property `handle_line`'s "two forms" doc turns on: `skip.consume`
-    /// must see the *sanitized* form, not the raw one — fix round 1.**
-    ///
-    /// The test above seeds `LogResume::default()`, under which
-    /// `skip.consume` returns `false` no matter what text it is given, so it
-    /// cannot tell a correct call (`skip.consume(&sanitized)`) apart from the
-    /// exact regression this crate's own resume invariant exists to prevent
-    /// (`skip.consume(&line)`, the raw re-read). This test seeds an aligned
-    /// resume whose one archived anchor is the *capped* form a real
-    /// `fan_out_log` would have archived for this same over-long line, then
-    /// re-feeds the identical raw line and asserts it is suppressed. Red
-    /// under `skip.consume(&line)` (raw never matches a capped anchor, so
-    /// nothing is ever suppressed for a node that once emitted an over-long
-    /// line); green under the shipped `skip.consume(&sanitized)`.
-    #[tokio::test]
-    async fn a_re_read_pathological_line_is_suppressed_against_its_capped_anchor() {
-        let huge = "y".repeat(MAX_LINE_BYTES * 4);
-        let archived_anchor = sanitize_line_for_archive(&huge);
-        let resume = aligned_resume("node-1", &[archived_anchor.as_str()]);
-
-        let (sink, mut stream) = ExecutionStream::channel(4);
-        let mut parser = MarkerParser::new("node-1");
-        let mut skip = LineSkip::for_node(&resume, "wf-1", "node-1");
-
-        assert!(
-            handle_line(&sink, &mut parser, &mut skip, "node-1", huge).await,
-            "the observer is still attached; this must not report false"
-        );
-        drop(sink);
-
-        let mut emitted = Vec::new();
-        while let Some(event) = stream.recv().await {
-            if let ExecutionEvent::Log { line, .. } = event {
-                emitted.push(line);
+    /// Minimal percent-decoder for this test's own query-string assertions
+    /// only — `kube-core`'s request builder percent-encodes `sinceTime`'s
+    /// colons, and this avoids hard-coding that encoding's exact form.
+    fn percent_decode(input: &str) -> String {
+        let bytes = input.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%'
+                && i + 2 < bytes.len()
+                && let Ok(byte) = u8::from_str_radix(&input[i + 1..i + 3], 16)
+            {
+                out.push(byte);
+                i += 3;
+                continue;
             }
+            out.push(bytes[i]);
+            i += 1;
         }
+        String::from_utf8(out).unwrap_or_default()
+    }
+
+    /// `key`'s decoded value out of a `?a=1&b=2`-shaped query string, or
+    /// `None` if `key` is absent.
+    fn query_param(query: &str, key: &str) -> Option<String> {
+        query.split('&').find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            (k == key).then(|| percent_decode(v))
+        })
+    }
+
+    /// A `kube::Client` whose pod-log requests are captured (path's query
+    /// string, in request order) and answered from a fixed, ordered list of
+    /// bodies — one per call, cycling to the last if exhausted. Everything
+    /// else (`get_opt`, pod `list`) answers with a fixed running single-pod
+    /// cluster, since these tests drive `Watcher::follow` directly rather
+    /// than `Watcher::run`'s whole loop.
+    fn capturing_log_client(
+        bodies: Vec<&'static str>,
+        captured: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    ) -> Client {
+        let bodies = std::sync::Arc::new(bodies);
+        let call = std::sync::Arc::new(AtomicUsize::new(0));
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let path = request.uri().path().to_owned();
+            let query = request.uri().query().map(str::to_owned);
+            let bodies = std::sync::Arc::clone(&bodies);
+            let call = std::sync::Arc::clone(&call);
+            let captured = std::sync::Arc::clone(&captured);
+            async move {
+                let body: Vec<u8> = if path.ends_with("/log") {
+                    captured.lock().unwrap().push(query);
+                    let idx = call.fetch_add(1, Ordering::SeqCst);
+                    let chosen = bodies.get(idx).or_else(|| bodies.last()).copied();
+                    chosen.unwrap_or_default().as_bytes().to_vec()
+                } else if path.contains("/pods") {
+                    br#"{"apiVersion":"v1","kind":"PodList","metadata":{},
+                         "items":[{"metadata":{"name":"pod-1","namespace":"ns"},
+                                   "status":{"phase":"Running"}}]}"#
+                        .to_vec()
+                } else {
+                    br#"{"apiVersion":"argoproj.io/v1alpha1","kind":"Workflow",
+                         "metadata":{"name":"wf-1","namespace":"ns"},
+                         "status":{"phase":"Running"}}"#
+                        .to_vec()
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(kube::client::Body::from(body))
+                        .expect("building a stub response"),
+                )
+            }
+        });
+        Client::new(service, "ns")
+    }
+
+    /// Build a `Watcher` directly against `client`, with `resume` as its
+    /// seed, and the stream half of its own sink — the shape every test
+    /// below that drives `follow()` without `run()`'s whole loop shares.
+    fn watcher_over(client: Client, resume: LogResume) -> (Watcher, ExecutionStream) {
+        let (sink, stream) = ExecutionStream::channel(32);
+        let watcher = Watcher {
+            workflows: Api::namespaced_with(client.clone(), "ns", &workflow_resource()),
+            pods: Api::namespaced(client, "ns"),
+            config: ArgoExecutorConfig::default(),
+            name: "wf-1".to_owned(),
+            sink,
+            started: false,
+            drained: std::collections::HashSet::new(),
+            resume,
+            cancel: CancellationToken::new(),
+        };
+        (watcher, stream)
+    }
+
+    /// Drop `watcher` (closing its sink) and drain everything its `follow`
+    /// call already put in `stream` — the same "drop then drain" shape
+    /// this module's other `Watcher`-level tests use.
+    async fn drain_and_events(watcher: Watcher, mut stream: ExecutionStream) -> Vec<ExecutionEvent> {
+        drop(watcher);
+        let mut events = Vec::new();
+        while let Some(event) = stream.recv().await {
+            events.push(event);
+        }
+        events
+    }
+
+    /// Every `Log` event's `(node, emitted_at)`, in order — what a real
+    /// `IngestService::fan_out_log` would have fed into
+    /// `RunLogsRepository::upsert_log_position`, and so what a real
+    /// `log_resume_positions` read would answer for the node this test
+    /// cares about.
+    fn last_emitted(events: &[ExecutionEvent], node: &str) -> Option<time::OffsetDateTime> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ExecutionEvent::Log {
+                    node: n,
+                    emitted_at: Some(when),
+                    ..
+                } if n == node => Some(*when),
+                _ => None,
+            })
+            .next_back()
+    }
+
+    /// **Task 2 (WS5): proof that the replacement actually replaces.**
+    ///
+    /// The deleted per-node counter's own doc named the failure mode this task exists to
+    /// close: once a re-read's first line disagreed with the archive's
+    /// (log rotation, or anything else that moved the window), "that node's
+    /// count is now dead for the rest of the run... unbounded for as long
+    /// as the run and its rotation both continue" — every later re-attach
+    /// re-duplicated the node's *entire* retained window, forever, because
+    /// there was a per-node flag a mismatch could set and nothing ever
+    /// cleared.
+    ///
+    /// There is no analogous flag here to get stuck in. Three consecutive
+    /// re-attaches, each one a **fresh `Watcher`** (as a real re-attach
+    /// always is — see `Watcher::run`'s own doc on why the same `Watcher`
+    /// is never re-followed), each seeded with nothing but the *previous*
+    /// attach's own emitted events — exactly how a real caller builds
+    /// `resume` (`RunLogsRepository::log_resume_positions`, never by
+    /// inspecting this adapter's internals). Each attach's captured
+    /// request must carry exactly that instant as `sinceTime`: the first
+    /// carries none at all (a first attach), and each later one advances
+    /// to the previous attach's own last line — never resetting to "read
+    /// everything again" the way a misaligned suppression count would have,
+    /// and never getting stuck repeating the same `sinceTime` the way a
+    /// dead count's zero-suppression would have looked from the outside.
+    #[tokio::test]
+    async fn a_resumed_follow_always_asks_for_exactly_its_last_recorded_position() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = capturing_log_client(
+            vec![
+                "2026-09-18T10:00:00Z line-one\n2026-09-18T10:00:01Z line-two\n",
+                // Modelling a rotated window: this attach's content has no
+                // relationship to the first's, and nothing here compares it
+                // against anything archived -- the request alone is what
+                // tells Kubernetes where to start.
+                "2026-09-18T10:00:05Z line-three\n",
+                "2026-09-18T10:00:09Z line-four\n",
+            ],
+            std::sync::Arc::clone(&captured),
+        );
+
+        // Attach 1: no resume at all, the shape a first attach always has.
+        let (mut watcher, stream) = watcher_over(client.clone(), LogResume::default());
+        let outcome = watcher.follow("pod-1", "node-1").await;
+        assert_eq!(outcome, FollowOutcome::Complete);
+        let events_1 = drain_and_events(watcher, stream).await;
+        let position_1 =
+            last_emitted(&events_1, "node-1").expect("attach 1 must have emitted a Log event");
+
+        // Attach 2: a fresh Watcher, resumed from attach 1's own last
+        // position -- built the way a real caller builds it, from the
+        // previous attach's own emitted events.
+        let resume_2: LogResume = [(
+            "node-1".to_owned(),
+            LogPosition {
+                last_emitted_at: position_1,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let (mut watcher, stream) = watcher_over(client.clone(), resume_2);
+        watcher.follow("pod-1", "node-1").await;
+        let events_2 = drain_and_events(watcher, stream).await;
+        let position_2 =
+            last_emitted(&events_2, "node-1").expect("attach 2 must have emitted a Log event");
+
+        // Attach 3: resumed again, from attach 2's own last position.
+        let resume_3: LogResume = [(
+            "node-1".to_owned(),
+            LogPosition {
+                last_emitted_at: position_2,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let (mut watcher, stream) = watcher_over(client, resume_3);
+        watcher.follow("pod-1", "node-1").await;
+        drop(drain_and_events(watcher, stream).await);
+
+        let requests = captured.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3, "one pod-log request per attach");
 
         assert!(
-            emitted.is_empty(),
-            "a re-read of an already-archived (capped) line must be suppressed, \
-             not re-emitted: {emitted:?}"
+            requests[0]
+                .as_deref()
+                .is_some_and(|q| query_param(q, "sinceTime").is_none()),
+            "a first attach must not send a sinceTime at all, got {:?}",
+            requests[0]
         );
+        for (query, expected) in [
+            (&requests[1], since_time_of(position_1)),
+            (&requests[2], since_time_of(position_2)),
+        ] {
+            let sent = query
+                .as_deref()
+                .and_then(|q| query_param(q, "sinceTime"))
+                .unwrap_or_else(|| panic!("a resumed attach must send sinceTime, got {query:?}"));
+            let expected = expected
+                .expect("this test's own fixture instants must convert")
+                .round(jiff::Unit::Second)
+                .expect("rounding to the second must not fail for a whole-second instant")
+                .to_string();
+            assert_eq!(
+                sent, expected,
+                "a resumed attach must carry exactly its resume's own instant, not a stale, \
+                 reset, or otherwise-recomputed one",
+            );
+        }
     }
+
 
     /// A response body that never produces a frame — modelling a wedged
     /// API-server connection from this process' point of view: the
@@ -2453,7 +2326,8 @@ mod tests {
     /// bound on the *whole loop* — under `tokio::time::timeout(idle,
     /// whole_loop)` that test would still pass at exactly the same 1 s. That
     /// is precisely the regression `ArgoExecutorConfig::log_follow_idle_seconds`'s
-    /// own doc and `LineSkip`'s six fix rounds on this same file both exist to
+    /// own doc and the deleted per-node counter's six fix rounds on this same
+    /// file both existed to
     /// prevent, and nothing in the suite would have gone red if a future edit
     /// collapsed the per-iteration timeout into one around the loop.
     ///

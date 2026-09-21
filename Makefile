@@ -291,9 +291,39 @@ fmt:
 
 CFS ?= cfs
 CFS_PIPX_SPEC ?= git+https://github.com/constructorfabric/studio.git
-export PATH := $(HOME)/.local/bin:$(PATH)
 
-# Fast two-pass clippy used in PR CI (target: <5 min with sccache).
+# `$(HOME)/.cargo/bin` AHEAD OF THE INHERITED PATH, and it is the rustup SHIM
+# that belongs there -- not a toolchain's own bin directory.
+#
+# Every cargo-invoking recipe in this file says bare `cargo`, which resolves
+# through PATH. On a host that also carries a distribution cargo
+# (`/usr/bin/cargo`, Debian/Ubuntu's `cargo` package) and whose non-interactive
+# shell never sources `~/.cargo/env`, that is what a recipe gets -- and it is
+# NOT the toolchain `rust-toolchain.toml` pins. Measured on a 2026-09-18 dev
+# host: a recipe resolved `cargo 1.75.0` from `/usr/bin/cargo` while the pin
+# said 1.97.0, and `cargo-nextest` was not on PATH at all, so
+# `test-qa-platform-features` could not have run there in any form.
+#
+# The shim is what makes the pin work: `~/.cargo/bin/cargo` is a symlink to
+# `rustup`, which reads `rust-toolchain.toml` and execs the pinned toolchain.
+# Putting the toolchain's own `cargo` here instead would bypass rustup entirely
+# and produce the misleading "rustc 1.75.0 is not supported by the following
+# packages" -- the shim, and only the shim, goes on PATH.
+#
+# WHY THE WHOLE FILE AND NOT ONE TARGET. The skew is not a property of any one
+# recipe; it is a property of `cargo` being resolved through PATH, which every
+# recipe here does. Fixing it at one target would leave `clippy`, `deny`,
+# `shear` (whose `cargo +$(RUST_NIGHTLY)` syntax the distribution cargo does
+# not even understand) and the rest silently on the wrong toolchain. The
+# feature-gated suites are simply where it was noticed, being the ones least
+# often run by hand.
+#
+# A non-existent directory in PATH is ignored, so this is inert on a host
+# without rustup.
+export PATH := $(HOME)/.cargo/bin:$(HOME)/.local/bin:$(PATH)
+
+# Fast three-pass clippy used in PR CI (target: <5 min with sccache; pass 3
+# below adds to that, and its own comment says what it buys for the time).
 #
 # Pass 1 — one workspace-wide all-features run.
 #   Covers every crate, every target, every additive feature combination.
@@ -306,7 +336,7 @@ export PATH := $(HOME)/.local/bin:$(PATH)
 #   See GH issue #1574 for original motivation.
 #
 # Use `make clippy-deep` for the full 182-run matrix (nightly / pre-release).
-CLIPPY_FLAGS := -- -D warnings -D clippy::perf
+
 # `bss-fixtures` is on the list because it is the one crate whose *production*
 # surface is the narrow one: pricing's `FixtureGate` inherits it with
 # `default-features = false`, while `default = ["corpus"]` means every ordinary
@@ -319,6 +349,31 @@ CLIPPY_HACK_CRATES := -p cf-gears-toolkit -p cf-gears-toolkit-db -p cf-gears-too
 # anyone can ship, so it is not worth a lint pass.
 CLIPPY_HACK_EXCLUDE := --exclude-features _any-backend
 
+# Pass 3 -- the DEFAULT feature set, which neither pass above can see.
+#
+#   NOT A WEAKER COPY OF PASS 1. `--all-features` does not mean "a superset of
+#   the code": it is a superset of the `#[cfg(feature = "x")]` regions and a
+#   COMPLEMENT of the `#[cfg(not(feature = "x"))]` ones, of which this
+#   workspace has 62 at the time of writing (`grep -rn 'cfg(not(feature'
+#   --include=*.rs gears/ libs/ apps/`). Every one of them is code that ships
+#   in a default build and that pass 1 never compiles, so no lint in any of
+#   them can fire there.
+#
+#   NOR IS `clippy-deep` THE ANSWER. cargo-hack's `--each-feature` enumerates
+#   no-default-features, each feature alone, and all-features -- the DEFAULT
+#   set is not among them -- and it runs nightly, not on a PR.
+#
+#   So this is the pass that lints what an ordinary `cargo build` actually
+#   compiles, and before it existed nothing in the Makefile or in CI ran that
+#   configuration at all. It is also the cheapest of the three (fewest
+#   optional dependencies), which is why it is worth its minute.
+#
+#   IT IS A PASS OF `clippy`, NOT A NEW TARGET OR A NEW CI JOB, deliberately.
+#   `make ci` runs `clippy` and .github/workflows/ci.yml's `clippy` job runs
+#   `make clippy`; a fourth entry point would have to be wired into both and
+#   would be the next thing to fall out of them silently.
+CLIPPY_FLAGS := -- -D warnings -D clippy::perf
+
 clippy:
 	$(call print_target_banner)
 	$(call check_rustup_component,clippy)
@@ -326,6 +381,7 @@ ifeq ($(GEAR),)
 	$(call check_tool,cargo-hack)
 	cargo clippy --workspace --all-targets --all-features $(CLIPPY_FLAGS)
 	cargo hack clippy $(CLIPPY_HACK_CRATES) --all-targets --each-feature $(CLIPPY_HACK_EXCLUDE) $(CLIPPY_FLAGS)
+	cargo clippy --workspace --all-targets $(CLIPPY_FLAGS)
 else
 	cargo clippy $(GEAR_PKGS) $(GEAR_CLIPPY_ARGS)
 endif
@@ -408,6 +464,43 @@ dylint:
 	$(call print_target_banner)
 	$(call check_tool,cargo-gears)
 	cargo gears lint --dylint
+
+## Dylint for the qa-platform gear bundle ALONE.
+##
+## WHY THIS EXISTS, and why it is not a substitute for `dylint`. Dylint is a
+## separate pass from clippy and is the only thing enforcing DE0708 (no direct
+## `sha2`/`sha1`/`md5` outside `dylint.toml`'s `hasher_allowed_paths`), DE0301,
+## DE0803, DE0901 and DE1302. The workspace-wide `dylint` target aborts on the
+## FIRST crate that fails, which is a failure mode worth knowing about: for a
+## long while `gears/credstore/plugins/postgres-credstore-plugin` carried two
+## standing DE0301 violations, so `make dylint` never reached qa-platform's
+## crates at all and every lint above was unenforced here without anyone being
+## able to tell -- the pass "failed", which looks like somebody else's problem,
+## rather than "did not run".
+##
+## Those two are now fixed (that plugin's domain service holds an
+## `Arc<dyn ValueStore>` and its `SeaORM` repository sits behind the adapter in
+## `infra/storage/store.rs`), and `make dylint` runs clean workspace-wide. This
+## target stays as the fast scoped pass while working inside the bundle, and as
+## the thing to run first if the workspace pass ever aborts upstream of here
+## again.
+##
+## RUNNING IT FROM THE GEAR DIRECTORY DOES NOT WORK: `cargo gears lint` there
+## dies with `can't canonicalize manifest .../gears/qa-platform/Gears.toml`,
+## since the manifest is the workspace root's. Hence a target here.
+##
+## There is no gear NAMED qa-platform -- the bundle is four gears (qa-catalog,
+## qa-environments, qa-insights, qa-runs) plus two product plugins, two
+## connector libraries and the product SDK, so `--gear qa-platform` is refused.
+## The package list is derived from the directory rather than written out, so
+## a package added under gears/qa-platform is linted without editing this.
+.PHONY: dylint-qa-platform
+dylint-qa-platform:
+	$(call print_target_banner)
+	$(call check_tool,cargo-gears)
+	@SCOPE=$$(cargo gears ls packages --dirs gears/qa-platform -f cargo-flags | sed 's/-p /-P /g') || exit 1; \
+	echo "cargo gears lint --dylint $$SCOPE"; \
+	cargo gears lint --dylint $$SCOPE
 
 # Check for unused dependencies with cargo-shear.
 shear:
@@ -580,9 +673,25 @@ web-docs-preview:
 
 # -------- qa-platform UI --------
 
-.PHONY: ui-install ui-lint ui-test ui-build ui-contract
+.PHONY: ui-install ui-lint ui-test ui-build ui-contract qa-openapi qa-openapi-check
 
 UI_DIR := gears/qa-platform/qa-platform-ui
+QA_OPENAPI := gears/qa-platform/docs/openapi.json
+
+## Regenerate gears/qa-platform/docs/openapi.json from the gear code.
+## Needs no running stack: the generator registers the four qa gears' route
+## *definitions* into an OpenApiRegistryImpl and builds the document, which is
+## what the gateway does at startup before anything is served.
+qa-openapi:
+	$(call print_target_banner)
+	cargo run -q -p qa-platform-openapi
+
+## Fail when the committed contract does not match what the code would generate.
+## This is the drift gate: `docs/openapi.json` and the UI's `openapi.d.ts` are
+## both derived, and both were hand-edited for months before they were.
+qa-openapi-check:
+	$(call print_target_banner)
+	cargo run -q -p qa-platform-openapi -- --check
 
 ## Install UI dependencies from the lockfile
 ui-install:
@@ -605,10 +714,11 @@ ui-test: ui-install
 ui-build: ui-install
 	cd $(UI_DIR) && npm run build
 
-## Regenerate UI types from a running gears stack and fail if they drift. Requires the compose
-## stack up on localhost:8087 (`docker compose up -d` in gears/qa-platform/deploy/compose) — it
-## hits a live /openapi.json, so it is not wired into a CI job that has no gears.
-ui-contract: ui-install
+## Regenerate the UI wire types from the committed contract and fail if either artefact
+## drifts. No running stack: `qa-openapi-check` proves `docs/openapi.json` still matches
+## the Rust handlers and DTOs, and `npm run gen:api` reads that same file rather than a
+## live localhost:8087, which is why this now runs in CI where it never could before.
+ui-contract: qa-openapi-check ui-install
 	cd $(UI_DIR) && npm run gen:api
 	git diff HEAD --exit-code -- $(UI_DIR)/src/api/generated/openapi.d.ts \
 	  || (echo "UI wire types are stale: regenerate with 'make ui-contract' and commit" && exit 1)
@@ -939,26 +1049,103 @@ test-qa-platform-features: install-tools
 ## Run the qa-platform Helm chart guards. No cluster needed -- these are
 ## `helm template` plus file reads -- so the `lint` job holds them.
 ## Includes `test_no_system_gear_changes.py`, the guard FOOTPRINT names for the
-## reverted system-gear changes, and `test_nginx_template.sh`, which is what
-## proves the SSE access-log redaction.
+## reverted system-gear changes, `test_nginx_template.sh`, which is what
+## proves the SSE access-log redaction, `test_collect_exit_code.sh`
+## (WS2 Task 3), which proves the runner's collect cycle fails closed on a
+## partial collect (some files refused or uncollectable), not only a total
+## one, and `check_no_password_in_argv.sh` (WS3 Task 6), which proves the
+## Postgres password never appears in `sed`'s argv during entrypoint.sh's
+## config render -- entrypoint.sh has no test harness of its own, so both of
+## these extract the real decision/render out of the real file by line
+## markers rather than reimplementing it.
+##
+## `check_secret_name_parity.sh` is a third of that shape, and closes a gap
+## `qa-runs`' `naming.rs` documented and deliberately left open. The runner
+## `Secret` naming rule is implemented in three Rust files AND in two shell
+## scripts; the three Rust copies check each other, while the shell side was
+## pinned only by literals someone transcribed from one run by hand (two of
+## those copies cite, as their authority, a test name that exists nowhere in
+## the workspace). This extracts `derive_name` / `new_name` / `old_name` out
+## of the real scripts by markers and the expectation tables -- with the
+## tenant and the prefix -- out of the real Rust test files, then runs one
+## against the other. Drift here is not a build failure; it is a pod stuck
+## Pending with FailedMount on a stand.
 ##
 ## Only test_no_system_gear_changes.py is pytest-shaped (it defines a
-## `test_*` function); `test_chart_file_sync.py`, `test_features.py`,
-## `test_metrics_config.py`, `test_no_environment_hardcode.py` and
-## `test_pins.py` are standalone scripts -- a `main()` run via
-## `if __name__ == "__main__"` -- so `python3 -m pytest tests/` collects zero
-## items from them and would silently skip five of the seven guards. Each is
-## invoked directly so all seven actually run; a non-zero exit from any of them
-## fails this target.
+## `test_*` function). Every other Python guard here is named `check_*.py`
+## (WS3 Task 5 -- these used to be `test_*.py` despite being `main()`
+## scripts, which made `python3 -m pytest tests/` collect zero items from
+## them and report a truthful-looking "1 passed" for a nine-file suite;
+## renaming them is what makes that count honest instead of coincidentally
+## correct): `check_chart_file_sync.py`, `check_features.py`,
+## `check_metrics_config.py`, `check_no_environment_hardcode.py`,
+## `check_pins.py`, `check_runner_service_account.py`,
+## `check_runner_networkpolicy.py`, `check_release_isolation.py`
+## (WS3 Task 1 -- asserts every workload's selector carries
+## app.kubernetes.io/instance, and that two releases never select the same
+## pods), `check_replica_guard.py` (WS3 Task 2 -- asserts
+## `gears.replicaCount` above 1 is refused with a message citing DESIGN
+## §3.4), `check_realm_secrecy.py` (WS3 Task 3 -- asserts the realm
+## renders as a Secret and never leaks the workflow client's secret into a
+## ConfigMap, that `keycloak.adminPassword` has no default, that the
+## fixture password `admin` is refused unless `devMode=true`, and the
+## realm/UI-client hardening -- directAccessGrantsEnabled, bruteForceProtected,
+## passwordPolicy, session limits -- is present), `check_hook_weights.py`
+## (WS3 Task 5 -- asserts the tenant-seed hook's rendered weight is
+## strictly greater than db-migrate's, so tenant-seed always runs after
+## migrations) and `check_tls_secret_name.py` (WS3 Task 5 -- asserts the
+## `qa-platform-tls` literal agrees between certs-job.yaml, which mints
+## it, and verify-k8s.sh, which reads it back on the stand) and
+## `check_smtp_egress.py` (the SMTP follow-up -- asserts qa-insights'
+## relay allow-list survives the render in both states, and that renaming
+## the key it transforms fails the render rather than discarding an
+## operator's setting; that allow-list is the whole egress control on the
+## mail path, for the reason ADR-0011 gives) and `check_bundle_token.py`
+## (the per-run bundle token -- asserts that no runner pod carries an IdP
+## credential any more, in the rendered chart, in values.yaml and in the
+## runner image's own two scripts, and that the signing secret that replaced
+## it never ships as its committed dev literal. The credential and the
+## signature are a replacement, not a pair: a partial revert would restore
+## the first while the second kept working, every test kept passing, and
+## nothing else in the tree noticed) are standalone
+## scripts -- a `main()` run via `if __name__ == "__main__"` -- so
+## `python3 -m pytest tests/` collects zero items from them and would
+## silently skip every Python guard but `test_no_system_gear_changes.py`.
+## Each is therefore invoked directly, one recipe line per guard, so every
+## guard in `deploy/helm/tests/` actually runs; a non-zero exit from any of
+## them fails this target. `test_nginx_template.sh`,
+## `test_collect_exit_code.sh`, `check_no_password_in_argv.sh` and
+## `check_secret_name_parity.sh` are bash, invoked the same direct way.
+##
+## THE GUARD COUNT IS DELIBERATELY NOT WRITTEN HERE ANY MORE. It was, and it
+## was wrong within hours: `check_secret_name_parity.sh` landed the same day
+## as the sentence that said "sixteen", making it seventeen, and the sentence
+## stayed. The recipe below is one line per guard, so counting it is a
+## `grep -c` and reading it is exact; a number in prose is a second,
+## unenforced copy of that list and goes stale the next time a guard is
+## added. Adding a guard means adding a recipe line, and nothing else.
 helm-tests:
 	@command -v helm >/dev/null || (echo "helm is required for helm-tests" && exit 1)
 	cd gears/qa-platform/deploy/helm && python3 -m pytest tests/ -q
-	python3 gears/qa-platform/deploy/helm/tests/test_chart_file_sync.py
-	python3 gears/qa-platform/deploy/helm/tests/test_features.py
-	python3 gears/qa-platform/deploy/helm/tests/test_metrics_config.py
-	python3 gears/qa-platform/deploy/helm/tests/test_no_environment_hardcode.py
-	python3 gears/qa-platform/deploy/helm/tests/test_pins.py
+	python3 gears/qa-platform/deploy/helm/tests/check_chart_file_sync.py
+	python3 gears/qa-platform/deploy/helm/tests/check_features.py
+	python3 gears/qa-platform/deploy/helm/tests/check_metrics_config.py
+	python3 gears/qa-platform/deploy/helm/tests/check_no_environment_hardcode.py
+	python3 gears/qa-platform/deploy/helm/tests/check_pins.py
+	python3 gears/qa-platform/deploy/helm/tests/check_runner_service_account.py
+	python3 gears/qa-platform/deploy/helm/tests/check_runner_networkpolicy.py
+	python3 gears/qa-platform/deploy/helm/tests/check_release_isolation.py
+	python3 gears/qa-platform/deploy/helm/tests/check_replica_guard.py
+	python3 gears/qa-platform/deploy/helm/tests/check_realm_secrecy.py
+	python3 gears/qa-platform/deploy/helm/tests/check_hook_weights.py
+	python3 gears/qa-platform/deploy/helm/tests/check_tls_secret_name.py
+	python3 gears/qa-platform/deploy/helm/tests/check_smtp_egress.py
+	python3 gears/qa-platform/deploy/helm/tests/check_bundle_token.py
+	python3 gears/qa-platform/deploy/helm/tests/check_config_rollout.py
 	bash gears/qa-platform/deploy/helm/tests/test_nginx_template.sh
+	bash gears/qa-platform/deploy/helm/tests/test_collect_exit_code.sh
+	bash gears/qa-platform/deploy/helm/tests/check_no_password_in_argv.sh
+	bash gears/qa-platform/deploy/helm/tests/check_secret_name_parity.sh
 
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
 ## Covers:

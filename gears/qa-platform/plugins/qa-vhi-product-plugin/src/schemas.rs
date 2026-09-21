@@ -233,8 +233,11 @@ pub fn observed_schema() -> Vec<FieldDesc> {
 /// Keys the schema does not declare are ignored rather than rejected: the
 /// gear writes only what a plugin classified, so an undeclared key reaches
 /// nothing, and rejecting the whole form over one is a worse failure than
-/// dropping it. (The design spec's §4.1 said the opposite until 2026-09-09;
-/// the code is the side that is right, and the spec has been corrected.)
+/// dropping it. (A design document disagreed with this choice until
+/// 2026-09-09; that document, `PRODUCT-PLUGINS-DESIGN.md`, is not in the
+/// repository any more, and its successor,
+/// `gears/qa-platform/docs/features/product-plugins.md`, does not address
+/// per-key handling at all. The code's behaviour is what ships.)
 ///
 /// # The one optional field that *is* checked
 ///
@@ -251,8 +254,11 @@ pub fn observed_schema() -> Vec<FieldDesc> {
 ///
 /// [`FailureClass::Malformed`] when a required field is absent or blank, or
 /// when `ssh_port` is present, non-blank, and not a port number. The text is
-/// fixed and names no submitted value — the enforcement point for the rule in
-/// `PRODUCT-PLUGINS-DESIGN.md` §9.
+/// fixed and names no submitted value — the enforcement point for the
+/// "Credential containment" rule in
+/// `gears/qa-platform/docs/features/product-plugins.md` (unnumbered;
+/// `PRODUCT-PLUGINS-DESIGN.md` §9, cited here before the docs squash, no
+/// longer exists).
 pub fn validate_credentials(
     input: &CredentialInput,
 ) -> Result<Vec<CredentialClassification>, PluginFailure> {

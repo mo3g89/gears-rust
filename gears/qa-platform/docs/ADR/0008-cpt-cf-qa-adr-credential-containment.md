@@ -43,7 +43,7 @@ Three mechanisms make it structural rather than advisory:
 * **`assert_no_leak`**, in `qa-product-sdk`'s test support, drives every plugin with planted
   credential material and fails the build if any of that material reaches a published surface.
   A new plugin inherits the check by existing.
-* **Secrets travel as references.** `prepare_access` works from `credstore_ref` alone, so the
+* **Secrets travel as references.** `prepare_run_access` works from `credstore_ref` alone, so the
   dispatching process never holds plaintext to leak in the first place.
 
 The one sanctioned exception is **text a remote sent back**. A remote's own error message is not

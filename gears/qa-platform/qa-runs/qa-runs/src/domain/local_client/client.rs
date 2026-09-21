@@ -25,10 +25,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use qa_runs_sdk::{
-    LaunchOutcome, LaunchRequest, NewSchedule, QaRunsClientV1, QaRunsError, QueueEntry, Run,
-    RunResult, RunTestResult, Schedule, ScheduleNotificationSettings,
+    FinishedRunCursor, LaunchOutcome, LaunchRequest, NewSchedule, QaRunsClientV1, QaRunsError,
+    QueueEntry, Run, RunResult, RunTestResult, Schedule, ScheduleNotificationSettings,
+    ScheduleTick,
 };
-use time::OffsetDateTime;
 use toolkit_odata::ODataQuery;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
@@ -111,7 +111,7 @@ impl QaRunsClientV1 for QaRunsLocalClient {
     async fn list_runs_finished_since(
         &self,
         ctx: &SecurityContext,
-        since: OffsetDateTime,
+        cursor: FinishedRunCursor,
         limit: u32,
     ) -> Result<Vec<Run>, QaRunsError> {
         // Not `page_of(limit)`: this is not an `OData` collection read. The
@@ -120,7 +120,7 @@ impl QaRunsClientV1 for QaRunsLocalClient {
         // cursor a caller could re-sort. The repository clamps `limit` itself.
         self.services
             .runs
-            .list_runs_finished_since(ctx, since, limit)
+            .list_runs_finished_since(ctx, cursor, limit)
             .await
             .map_err(Into::into)
     }
@@ -300,6 +300,26 @@ impl QaRunsClientV1 for QaRunsLocalClient {
             .await
             .map_err(as_schedule_error)
     }
+
+    /// `list_ticks` resolves the schedule under the caller's own scope first,
+    /// so an unknown schedule and another tenant's are the same `not_found`
+    /// here as everywhere else in this gear - matching
+    /// `list_run_test_results`'s own shape one call above the boundary.
+    async fn list_schedule_ticks(
+        &self,
+        ctx: &SecurityContext,
+        schedule_id: Uuid,
+    ) -> Result<Vec<ScheduleTick>, QaRunsError> {
+        Ok(self
+            .services
+            .schedules
+            .list_ticks(ctx, schedule_id)
+            .await
+            .map_err(as_schedule_error)?
+            .into_iter()
+            .map(ScheduleTick::from)
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -379,7 +399,7 @@ mod tests {
         assert!(body.contains("name"), "{body}");
     }
 
-    /// And a denial, on every one of the six schedule methods.
+    /// And a denial, on every one of the seven schedule methods.
     ///
     /// Same reasoning as `handlers::schedules`'s `handler_tests`'
     /// `every_handler_attributes_a_denial_to_the_schedule`: a 403 carries no
@@ -437,6 +457,15 @@ mod tests {
                     id,
                     qa_runs_sdk::ScheduleNotificationSettings::default(),
                 )
+                .await
+                .err()
+                .unwrap(),
+        ));
+        // The seventh: WS5 Task 1's read, scoped exactly like `get` above.
+        refusals.push((
+            "list_schedule_ticks",
+            client
+                .list_schedule_ticks(&ctx(TENANT), id)
                 .await
                 .err()
                 .unwrap(),

@@ -37,24 +37,32 @@
 //!
 //! # Two call sites are in `infra`, not `domain`
 //!
-//! `LogArchive` compiles its own `qa.run` scopes
+//! `LogArchive` compiles its own `resources::RUN_NAME` scopes
 //! (`crate::infra::logs::archive`) under `system_actor::for_log_archive`:
 //! `dispatch` for the archive write, `get` for the resume read. Both pairs are
 //! already reached by the run surface, so neither adds a row - but it is why
 //! the scan reads all of `src/` rather than `domain` alone, and why a
 //! `domain`-only measurement would have been the wrong one.
 //!
-//! # Why both items carry `#[allow(dead_code)]`
+//! # Why `ENFORCED` carries `#[allow(dead_code)]`, and `RESOURCE_TYPES` carries `#[cfg(test)]`
 //!
-//! Neither has a non-test consumer, and neither is waiting for one.
-//! [`ENFORCED`] is read under `cfg(test)` only, by the anti-drift test that
-//! compares this list to the generated catalog; [`RESOURCE_TYPES`] likewise, by
-//! the scan's equality test - and it is **not** getting the stub type-schema
-//! registration it was written for, which is the non-test consumer it was
-//! waiting on (see that item's own doc for what settled that). An `#[expect]`
-//! cannot express this - `clippy --all-targets` builds this crate twice and the
-//! test build *does* use both, so the expectation would be unfulfilled there
-//! and fulfilled in the lib build.
+//! [`ENFORCED`] has no non-test consumer, and none is waiting on it: it is read
+//! under `cfg(test)` only, by the anti-drift test that compares this list to
+//! the generated catalog. An `#[expect]` cannot express this - `clippy
+//! --all-targets` builds this crate twice and the test build *does* use it, so
+//! the expectation would be unfulfilled there and fulfilled in the lib build.
+//! `#[allow(dead_code)]` is the annotation that survives both builds.
+//!
+//! [`RESOURCE_TYPES`] used to carry the same annotation for the same reason,
+//! before it got the non-test consumer it was written for: each of its entries
+//! now has a stub type-schema declared in [`crate::gts::authz_types`], which
+//! `types-registry::init()` registers at boot. That registration is driven by
+//! the `#[gts_type_schema]` declarations there, not by reading this const, so
+//! the const itself is still read under `cfg(test)` only, by the scan's
+//! equality test - which is why it is annotated `#[cfg(test)]` rather than
+//! `#[allow(dead_code)]`: with no lib-build definition to warn about, there is
+//! nothing for `#[expect]`'s two-build problem to bite on either. See that
+//! item's own doc for the registration.
 //!
 //! Review finding #1.
 
@@ -94,9 +102,12 @@ pub(crate) const ENFORCED: &[(&str, &str)] = &[
     (resources::QUEUE_ENTRY_NAME, actions::GET),
     (resources::QUEUE_ENTRY_NAME, actions::LIST),
     // `qa.schedule` - `schedules`, over `qa_schedules` and
-    // `qa_schedule_ticks`. `fire` is the background ticker's own action,
-    // enforced under `system_actor::for_schedule_fire`, and it is separate so
-    // a deployment can grant the sweep without granting schedule edits.
+    // `qa_schedule_ticks`. `fire` is the background firing ticker's own
+    // action and `check` is the background referential-check ticker's,
+    // enforced under `system_actor::for_schedule_fire`; both are separate
+    // from `create`/`update`/`delete` so a deployment can grant either
+    // background sweep without granting schedule edits.
+    (resources::SCHEDULE_NAME, actions::CHECK),
     (resources::SCHEDULE_NAME, actions::CREATE),
     (resources::SCHEDULE_NAME, actions::DELETE),
     (resources::SCHEDULE_NAME, actions::FIRE),
@@ -107,26 +118,25 @@ pub(crate) const ENFORCED: &[(&str, &str)] = &[
 
 /// The distinct resource types in [`ENFORCED`].
 ///
-/// Written to drive one stub type-schema registration per resource type: the
-/// platform RBAC role-definition validator resolves a rule's `target_type`
-/// through the types registry, so a resource type it cannot resolve is a
-/// permission no role definition can target -- which is why `ledger` registers
-/// a stub per authz label from `labels::ALL`
-/// (`gears/bss/ledger/ledger/src/authz.rs:109`).
+/// This list is the drift guard against [`ENFORCED`]: the platform
+/// RBAC role-definition validator resolves a rule's `target_type` through the
+/// types registry, so a resource type it cannot resolve is a permission no
+/// role definition can target.
 ///
-/// **No such registration exists here, and none can be built from these
-/// strings.** A types-registry type-schema id must end with `~`
-/// (`types-registry-sdk/src/models.rs:53-55`), these are plain strings like
-/// `qa.queue_entry`, and renaming them to GTS type ids is precluded because they are
-/// what a deployment's policies are written against. So this list is measured
-/// and pinned to [`ENFORCED`] by the scan, but no production code consumes it;
-/// the consequence -- no custom role can target a QA resource type -- is
-/// recorded as a follow-up in
-/// `gears/qa-platform/docs/DESIGN.md` section 3.10, "Authorization surface".
-#[allow(
-    dead_code,
-    reason = "test-only consumer by design - see this item's doc"
-)]
+/// Each entry has a stub declared in [`crate::gts::authz_types`], which
+/// `types-registry::init()` registers at boot from the `inventory`
+/// collection — the same route `crate::gts::permissions` takes.
+/// `authz_surface_tests` pins this list to [`ENFORCED`] in both directions
+/// and asserts every entry resolves as a registered schema.
+///
+/// **Test-only, and `#[cfg(test)]` rather than `#[allow(dead_code)]` says so in
+/// the type system.** The registration is driven by the `#[gts_type_schema]`
+/// declarations in [`crate::gts::authz_types`], not by this list, so the list
+/// genuinely has no non-test consumer. The annotation this replaces carried the
+/// reason "test-only consumer by design", which was true, alongside a doc claiming
+/// no such registration could be built from these strings — which stopped being
+/// true when it was.
+#[cfg(test)]
 pub(crate) const RESOURCE_TYPES: &[&str] = &[
     resources::QUEUE_ENTRY_NAME,
     resources::RUN_NAME,

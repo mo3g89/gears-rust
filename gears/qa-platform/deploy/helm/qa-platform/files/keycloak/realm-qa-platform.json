@@ -4,15 +4,19 @@
   "displayName": "QA Platform (dev)",
   "attributes": {
     "x-qa-platform-provenance": "REDUCED KEYCLOAK REALM EXPORT (26.0.8), not hand-written. Configured via kcadm.sh, exported with `kc.sh export --users same_file`, then stripped of every key that only restated a Keycloak default -- notably components['org.keycloak.keys.KeyProvider'], which would have committed the realm's private signing key. Do not paste it back.",
-    "x-qa-platform-docs": "Rendered by the Helm chart's keycloak-realm-configmap.yaml, which carries the full rationale; the placeholders below are substituted at template time. This file cannot carry JSON comments: an unrecognised top-level key such as `_comment` aborts import with 'Unrecognized field ... RealmRepresentation, not marked as ignorable'. This `attributes` map is the one place a note fits.",
+    "x-qa-platform-docs": "Rendered by the Helm chart's keycloak-realm-secret.yaml, which carries the full rationale; the placeholders below are substituted at template time. This file cannot carry JSON comments: an unrecognised top-level key such as `_comment` aborts import with 'Unrecognized field ... RealmRepresentation, not marked as ignorable'. This `attributes` map is the one place a note fits.",
     "x-qa-platform-tenant-claim": "The tenant-id protocol mapper must emit a UUID: oidc-authn-plugin parses it with Uuid::parse_str. The value is toolkit_security::constants::DEFAULT_TENANT_ID, which owns every row created while auth_disabled was true. Changing it hides that data silently rather than erroring.",
-    "x-qa-platform-dev-only": "DEV FIXTURE. Passwords are in this file and directAccessGrantsEnabled is on so an automated gate can get a token without a browser. Not a template for a real deployment."
+    "x-qa-platform-dev-only": "DEV FIXTURE. The seeded users' passwords are in this file in the clear -- admin/AdminPass1! and viewer/ViewerPass1!, not admin/admin and viewer/viewer any more. MEASURED: the realm's own passwordPolicy (below) is enforced by --import-realm itself, not only on a future change, so importing the old admin/admin credential (equal to its own username, with no digit/uppercase/special character) made Keycloak abort start-up with invalidPasswordMinSpecialCharsMessage rather than import a realm that violates its own policy. Not a template for a real deployment. The `users` array below is now wrapped in `{{if .Values.devMode}}...{{end}}` -- keycloak-realm-secret.yaml's `tpl` call expands it same as any other placeholder here -- so these two well-known-literal-password application users only render at all when the installer has explicitly said this is a throwaway stand; a real install gets an empty `users` array and neither login exists. `check_realm_secrecy.py` asserts both sides of that. directAccessGrantsEnabled is now OFF on qa-platform-ui -- see that client's own comment -- so getting a token without a browser means the qa-platform-workflow service-account client's client-credentials grant, not a password grant against a public client."
   },
   "sslRequired": "external",
   "registrationAllowed": false,
   "loginWithEmailAllowed": true,
   "defaultSignatureAlgorithm": "RS256",
   "accessTokenLifespan": 300,
+  "bruteForceProtected": true,
+  "passwordPolicy": "length(8) and notUsername and notEmail and lowerCase(1) and upperCase(1) and digits(1) and specialChars(1)",
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
   "clients": [
     {
       "clientId": "qa-platform-ui",
@@ -23,7 +27,7 @@
       "bearerOnly": false,
       "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
-      "directAccessGrantsEnabled": true,
+      "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "consentRequired": false,
       "fullScopeAllowed": true,
@@ -36,7 +40,8 @@
         "{{ .Values.publicOrigin }}"
       ],
       "attributes": {
-        "pkce.code.challenge.method": "S256"
+        "pkce.code.challenge.method": "S256",
+        "x-qa-platform-direct-grants": "OFF, deliberately. This is a PUBLIC client (no client secret), so a resource-owner-password-credentials grant here would accept a username/password directly from any caller that can reach the token endpoint -- no PKCE, no redirect URI, no origin check, none of the standardFlow protections above. The browser-facing standardFlowEnabled/PKCE path is the only login route for this client; an automated caller that needs a token without a browser uses the qa-platform-workflow service-account client's client-credentials grant instead."
       },
       "protocolMappers": [
         {
@@ -113,6 +118,7 @@
     }
   ],
   "users": [
+{{- if .Values.devMode }}
     {
       "username": "admin",
       "enabled": true,
@@ -128,7 +134,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "admin",
+          "value": "AdminPass1!",
           "temporary": false
         }
       ],
@@ -151,7 +157,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "viewer",
+          "value": "ViewerPass1!",
           "temporary": false
         }
       ],
@@ -159,6 +165,7 @@
         "default-roles-qa-platform"
       ]
     }
+{{- end }}
   ],
   "components": {
     "org.keycloak.userprofile.UserProfileProvider": [

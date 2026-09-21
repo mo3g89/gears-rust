@@ -42,10 +42,12 @@ impl From<DomainError> for CanonicalError {
 
             // Same AIP-193 category as `NotFound` above, and deliberately
             // so: from a caller's point of view a product whose plugin
-            // cannot be resolved has no usable product behaviour to address,
-            // and `PRODUCT-PLUGINS-DESIGN.md` §4.2 states the outcome for a
-            // plugin gear that is not linked into the binary as a not-found
-            // at *use* rather than a boot failure.
+            // cannot be resolved has no usable product behaviour to address.
+            // (`PRODUCT-PLUGINS-DESIGN.md` §4.2 was cited here for this
+            // outcome; that document is not in the repository, and its
+            // successor, `docs/features/product-plugins.md`, does not state
+            // it either -- the not-found-at-use-rather-than-boot-failure
+            // choice stands on this arm's own reasoning, not on a citation.)
             //
             // One shape since Task 20a: a product always names a plugin, so
             // the only failure left is that the plugin is not registered here.
@@ -225,6 +227,11 @@ mod tests {
     /// and this test was the only thing keeping its arm alive — a test that
     /// builds by hand a state no caller can reach (review finding
     /// IMPORTANT-5).
+    #[allow(unknown_lints, de0901_gts_string_pattern)] // deliberately malformed:
+    // these fixtures pin how a plugin instance id is CARRIED on the wire, not
+    // that it parses. `gts.a~b.c._.d.v1` / `gts.a.b.v1~c.d.v1` are exactly the
+    // shapes `GtsOps::parse_id` rejects, which is the point. Same treatment as
+    // `types-registry`'s `in_memory_repo` fixtures.
     #[test]
     fn product_plugin_unavailable_maps_to_a_404_naming_the_missing_plugin() {
         let product_id = Uuid::new_v4();
@@ -440,6 +447,11 @@ mod tests {
     ///    qa-insights' catalog carries the identical chain and the identical
     ///    gap, having found it the hard way; it is written down here rather
     ///    than argued away.
+    #[allow(unknown_lints, de0901_gts_string_pattern)] // deliberately malformed:
+    // these fixtures pin how a plugin instance id is CARRIED on the wire, not
+    // that it parses. `gts.a~b.c._.d.v1` / `gts.a.b.v1~c.d.v1` are exactly the
+    // shapes `GtsOps::parse_id` rejects, which is the point. Same treatment as
+    // `types-registry`'s `in_memory_repo` fixtures.
     fn every_domain_error() -> [DomainError; DOMAIN_ERROR_VARIANTS] {
         [
             DomainError::PlanYamlInvalid {

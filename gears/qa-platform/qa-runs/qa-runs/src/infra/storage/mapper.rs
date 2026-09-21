@@ -52,9 +52,9 @@ use sea_orm::entity::prelude::Json;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::entity::{run, run_queue, run_test_result, schedule};
+use super::entity::{run, run_queue, run_test_result, schedule, schedule_tick};
 use crate::domain::error::DomainError;
-use crate::domain::repos::{QueueRowRecord, RunWithResult, TestResultRow};
+use crate::domain::repos::{QueueRowRecord, RunWithResult, ScheduleTickRow, TestResultRow};
 
 /// Build a fail-closed decode error for `row_id`'s `what` column.
 fn corrupt(what: &'static str, id: Uuid, value: impl std::fmt::Display) -> DomainError {
@@ -644,6 +644,8 @@ pub(crate) fn run_result_from_row(m: &run::Model) -> Result<RunResult, DomainErr
         failed: usize_from_db(m.failed, "run.failed", id)?,
         skipped: usize_from_db(m.skipped, "run.skipped", id)?,
         in_progress: usize_from_db(m.in_progress, "run.in_progress", id)?,
+        xfail: usize_from_db(m.xfail, "run.xfail", id)?,
+        xpass: usize_from_db(m.xpass, "run.xpass", id)?,
         total: usize_from_db(m.total, "run.total", id)?,
     })
 }
@@ -673,7 +675,7 @@ pub(crate) fn run_with_result_from_row(m: run::Model) -> Result<RunWithResult, D
 /// [`DomainError::CorruptState`] if `run_kind`, the target columns,
 /// `exclusive_choice` or any JSON column does not decode — the JSON columns
 /// being `include_tags`, `exclude_tags`, `parameters` and, since
-/// `m20260818_000007_schedule_notifications`, `slack_notification_events`.
+/// `m20260818_000007_schedule_notifications` (folded into `migrations::m20260813_000003_initial` by the docs squash), `slack_notification_events`.
 pub(crate) fn schedule_to_sdk(m: schedule::Model) -> Result<Schedule, DomainError> {
     let id = m.id;
     let run_kind = run_kind_from_str(&m.run_kind, "schedule.run_kind", id)?;
@@ -701,7 +703,7 @@ pub(crate) fn schedule_to_sdk(m: schedule::Model) -> Result<Schedule, DomainErro
         include_tags: json_from_column("schedule.include_tags", &m.include_tags, id)?,
         exclude_tags: json_from_column("schedule.exclude_tags", &m.exclude_tags, id)?,
         parameters: parameters_from_column("schedule.parameters", &m.parameters, id)?,
-        // The three notification columns `m20260818_000007_schedule_notifications`
+        // The three notification columns `m20260818_000007_schedule_notifications` (folded into `migrations::m20260813_000003_initial` by the docs squash)
         // added. **Both halves of this codec have to name them or a user's Slack
         // settings are lost silently**: this direction is the read, and
         // `schedules_sea_repo::schedule_columns` is the write. A literal that
@@ -727,6 +729,23 @@ pub(crate) fn schedule_to_sdk(m: schedule::Model) -> Result<Schedule, DomainErro
         created_at: m.created_at,
         updated_at: m.updated_at,
     })
+}
+
+/// Convert a tick row into the repository-level record.
+///
+/// Infallible: `qa_schedule_ticks`' own entity doc says why - "nothing here
+/// decodes; every column is a scalar or an opaque string" - so there is no
+/// `CorruptState` this mapper can produce, matching `test_result_to_row`.
+pub(crate) fn tick_to_sdk(m: schedule_tick::Model) -> ScheduleTickRow {
+    ScheduleTickRow {
+        id: m.id,
+        schedule_id: m.schedule_id,
+        due_at: m.due_at,
+        claimed_by: m.claimed_by,
+        claimed_at: m.claimed_at,
+        run_id: m.run_id,
+        error: m.error,
+    }
 }
 
 /// Convert a queue row into the repository-level record.

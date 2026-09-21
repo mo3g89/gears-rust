@@ -1108,6 +1108,8 @@ mod tests {
             failed: 0,
             skipped: 0,
             in_progress: 0,
+            xfail: 0,
+            xpass: 0,
             total: 10,
         };
         assert_eq!(
@@ -1123,6 +1125,8 @@ mod tests {
             failed: 1,
             skipped: 0,
             in_progress: 0,
+            xfail: 0,
+            xpass: 0,
             total: 10,
         };
         assert_eq!(
@@ -1149,6 +1153,8 @@ mod tests {
             failed: 0,
             skipped: 1,
             in_progress: 0,
+            xfail: 0,
+            xpass: 0,
             total: 10,
         };
         assert_eq!(
@@ -1167,6 +1173,8 @@ mod tests {
             failed: 0,
             skipped: 68,
             in_progress: 0,
+            xfail: 0,
+            xpass: 0,
             total: 68,
         };
         let derived = derive_terminal_state(ExecutorOutcome::Succeeded, counts, None);
@@ -1188,6 +1196,8 @@ mod tests {
             failed: 0,
             skipped: 5,
             in_progress: 0,
+            xfail: 0,
+            xpass: 0,
             total: 15,
         };
         assert_eq!(
@@ -1200,6 +1210,8 @@ mod tests {
             failed: 1,
             skipped: 5,
             in_progress: 0,
+            xfail: 0,
+            xpass: 0,
             total: 16,
         };
         assert_eq!(
@@ -1227,6 +1239,8 @@ mod tests {
             failed: 1,
             skipped: 0,
             in_progress: 0,
+            xfail: 0,
+            xpass: 0,
             total: 1,
         };
         let once = derive_terminal_state(ExecutorOutcome::Succeeded, counts, None);
@@ -1242,6 +1256,8 @@ mod tests {
             failed: 3,
             skipped: 2,
             in_progress: 0,
+            xfail: 0,
+            xpass: 0,
             total: 5,
         };
         for (outcome, expected) in [
@@ -1265,6 +1281,8 @@ mod tests {
             failed: 0,
             skipped: 0,
             in_progress: 0,
+            xfail: 0,
+            xpass: 0,
             total: 10,
         };
         assert_eq!(
@@ -1284,6 +1302,8 @@ mod tests {
             failed: 0,
             skipped: 0,
             in_progress: 0,
+            xfail: 0,
+            xpass: 0,
             total: 3,
         };
         assert_eq!(

@@ -49,6 +49,12 @@ pub struct TestRepositoryDto {
     pub has_credential: bool,
     #[serde(with = "time::serde::rfc3339::option")]
     pub last_synced_at: Option<OffsetDateTime>,
+    /// Commit id the last successful sync materialized; `null` when the
+    /// repository has never synced. The content revision, where
+    /// `last_synced_at` is only the attempt instant — two syncs that find
+    /// the same upstream tip give two `last_synced_at` values and one
+    /// `head_commit`.
+    pub head_commit: Option<String>,
     /// Sanitized error text of the last failed sync (`null` after a
     /// successful sync).
     pub sync_error: Option<String>,
@@ -69,6 +75,7 @@ impl From<sdk::TestRepository> for TestRepositoryDto {
             content_root: r.content_root,
             has_credential: r.credential_ref.is_some(),
             last_synced_at: r.last_synced_at,
+            head_commit: r.head_commit,
             sync_error: r.sync_error,
             created_at: r.created_at,
             updated_at: r.updated_at,
@@ -593,6 +600,7 @@ mod tests {
             content_root: "tests".to_owned(),
             credential_ref: Some("qa-cred".to_owned()),
             last_synced_at: Some(now),
+            head_commit: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
             sync_error: Some("boom".to_owned()),
             created_at: now,
             updated_at: now,
@@ -967,6 +975,28 @@ mod tests {
     }
 }
 
+// ==================== Test bundle DTOs ====================
+
+/// The query string of `GET /qa/v1/test-bundles/{id}`.
+///
+/// One required field, and it is the route's entire access control: the route
+/// is registered `.anonymous().exposed()` (see `api::rest::routes::bundles`),
+/// so a request that reaches the handler has passed no authentication at all.
+///
+/// `sig` is **this gear's own choice, echoed back** — an HMAC-SHA256 tag over
+/// `(bundle_id, tenant_id)` that `BundlesService::create_bundle` minted and
+/// the Argo adapter rendered into `TEST_BUNDLE_URL`. It is a plain `String`
+/// rather than a parsed byte array because a non-hex value must be refused
+/// exactly like a mismatching one, on the same 403, and a deserialization
+/// error here would be a 400 that told the caller which of the two it was.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BundleDownloadQuery {
+    /// Required. Hex-encoded HMAC-SHA256 over `(bundle_id, tenant_id)`,
+    /// verified by `BundlesService::get_bundle_content_signed` before the
+    /// descriptor is read under any tenant's scope.
+    pub sig: String,
+}
+
 // ==================== Product plugin DTOs ====================
 
 /// A field's data type, mirroring `qa_product_sdk::FieldKind`.
@@ -1184,6 +1214,11 @@ mod product_plugin_dto_tests {
     }
 
     /// The response's field names, pinned. Tasks 21-22 read these.
+    #[allow(unknown_lints, de0901_gts_string_pattern)] // deliberately malformed:
+    // these fixtures pin how a plugin instance id is CARRIED on the wire, not
+    // that it parses. `gts.a~b.c._.d.v1` / `gts.a.b.v1~c.d.v1` are exactly the
+    // shapes `GtsOps::parse_id` rejects, which is the point. Same treatment as
+    // `types-registry`'s `in_memory_repo` fixtures.
     #[test]
     fn the_wire_shape_is_the_documented_one() {
         let dto = ProductPluginDto::from(RegisteredProductPlugin {
@@ -1222,6 +1257,11 @@ mod product_plugin_dto_tests {
     /// A plugin declaring no vendor serialises `vendor: null`, not a missing
     /// key or an empty string: the UI distinguishes "no vendor declared" from
     /// a vendor named "".
+    #[allow(unknown_lints, de0901_gts_string_pattern)] // deliberately malformed:
+    // these fixtures pin how a plugin instance id is CARRIED on the wire, not
+    // that it parses. `gts.a~b.c._.d.v1` / `gts.a.b.v1~c.d.v1` are exactly the
+    // shapes `GtsOps::parse_id` rejects, which is the point. Same treatment as
+    // `types-registry`'s `in_memory_repo` fixtures.
     #[test]
     fn an_absent_vendor_is_null() {
         let dto = ProductPluginDto::from(RegisteredProductPlugin {

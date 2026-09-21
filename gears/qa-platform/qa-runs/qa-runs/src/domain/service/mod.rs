@@ -64,6 +64,7 @@ use authz_resolver_sdk::pep::ResourceType;
 use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_catalog_sdk::QaCatalogClientV1;
 use qa_environments_sdk::QaEnvironmentsClientV1;
+use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 use toolkit_db::DBProvider;
 use uuid::Uuid;
@@ -252,7 +253,18 @@ pub trait LogArchive: Send + Sync {
     /// `tenant_id` is carried on the buffer rather than looked up at flush
     /// time: `fan_out_log` already runs under a tenant-bound context, so the
     /// flush needs no read to learn where the row belongs.
-    fn record(&self, tenant_id: Uuid, run_id: Uuid, line: &str);
+    ///
+    /// `node` and `emitted_at` are Task 2 (WS5)'s addition: alongside `line`
+    /// (the archive-facing, already-prefixed text), the buffer also tracks
+    /// each node's most recent `emitted_at`, so the flush that writes `line`
+    /// to `qa_run_logs` can also upsert `qa_run_log_positions` for every node
+    /// it saw — see [`RunLogsRepository::upsert_log_position`]. `emitted_at`
+    /// is `None` for an executor with no per-line clock (the mock; a line
+    /// from before this task shipped), which advances no position at all
+    /// for that call rather than recording a fabricated one.
+    ///
+    /// [`RunLogsRepository::upsert_log_position`]: crate::domain::repos::RunLogsRepository::upsert_log_position
+    fn record(&self, tenant_id: Uuid, run_id: Uuid, node: &str, line: &str, emitted_at: Option<OffsetDateTime>);
 
     /// Drain `run_id`'s buffer into its row.
     ///
@@ -426,6 +438,7 @@ pub(in crate::domain::service) fn emit(silenced: &AtomicBool, record: impl FnOnc
 /// this citation had already drifted twice as a line range.
 pub(crate) mod resources {
     use super::ResourceType;
+    use toolkit_gts::gts_id;
     use toolkit_security::pep_properties;
 
     pub const RUN: ResourceType = ResourceType::from_static(
@@ -435,7 +448,13 @@ pub(crate) mod resources {
 
     /// [`RUN`]'s name as a `&'static str`, for the reason this module's header
     /// cites.
-    pub const RUN_NAME: &str = "qa.run";
+    ///
+    /// A concrete GTS type id rather than a bare string, so the RBAC
+    /// role-definition validator can resolve it as a `target_type`. The id is
+    /// the one this gear already publishes on its RFC-9457 error surface; the
+    /// stub type-schema that registers it is
+    /// [`crate::gts::authz_types::QaRunV1`].
+    pub const RUN_NAME: &str = gts_id!("cf.qa.runs.run.v1~");
 
     /// `qa_run_queue`. The same two properties as [`RUN`]: rows are
     /// tenant-owned and addressed by id.
@@ -445,8 +464,8 @@ pub(crate) mod resources {
     );
 
     /// [`QUEUE_ENTRY`]'s name as a `&'static str`, for the reason this module's
-    /// header cites.
-    pub const QUEUE_ENTRY_NAME: &str = "qa.queue_entry";
+    /// header cites. See [`RUN_NAME`] for why it is a GTS type id.
+    pub const QUEUE_ENTRY_NAME: &str = gts_id!("cf.qa.runs.queue_entry.v1~");
 
     /// `qa_schedules` **and** `qa_schedule_ticks`.
     ///
@@ -462,8 +481,8 @@ pub(crate) mod resources {
     );
 
     /// [`SCHEDULE`]'s name as a `&'static str`, for the reason this module's
-    /// header cites.
-    pub const SCHEDULE_NAME: &str = "qa.schedule";
+    /// header cites. See [`RUN_NAME`] for why it is a GTS type id.
+    pub const SCHEDULE_NAME: &str = gts_id!("cf.qa.runs.schedule.v1~");
 }
 
 /// Authorization actions.
@@ -673,6 +692,20 @@ pub(crate) mod actions {
     /// this gear's system subject — the same real coupling [`CREATE`] and
     /// [`LIST`] already have on the launch path.
     pub const FIRE: &str = "fire";
+
+    /// The one write the background referential-check pass makes on
+    /// `qa.schedule`: a synthetic `qa_schedule_ticks` row recording that an
+    /// enabled schedule's target no longer resolves.
+    ///
+    /// **A separate action from [`FIRE`], deliberately**, even though both
+    /// write the same table. `FIRE`'s own doc names it as "every write the
+    /// schedule firing tick makes" — a real fire, a real due time, a real (or
+    /// refused) launch. This pass makes none of that: no claim, no launch, no
+    /// due time, just a probe of whether the stored target still exists. A
+    /// deployment that wants the referential check without also granting the
+    /// firing tick's writes — or the reverse — can only express that if the
+    /// two are distinct grants.
+    pub const CHECK: &str = "check";
 }
 
 /// The three capacity settings the queue enforces, as named fields.

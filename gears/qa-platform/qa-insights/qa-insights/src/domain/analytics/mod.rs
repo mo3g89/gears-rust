@@ -97,11 +97,18 @@ pub mod universe;
 ///   — `COALESCE(NULLIF(r.source_ref,''), NULLIF(r.test_version,'')) = $N`
 ///   (`:966-969`) — so it belongs on [`UniverseFilter`], not on the row. Same
 ///   for the product version, which is legacy's `WHERE r.app_version = $1`.
-/// * **`repo_id` is on legacy's `ExecRow` and the plan omits it** — and it is
-///   *write-only*: assigned at `:1036` and read by nothing. Counted, not
-///   eyeballed: `grep 'row\.repo_id'` over `analytics.rs` returns exactly the
-///   one construction site. It is therefore **not** reproduced here. Carrying a
-///   dead field forward is how a later task talks itself into keying on it.
+/// * **`repo_id` is on legacy's `ExecRow`, and it is `write-only` *there*** —
+///   assigned at `:1036` and read by nothing; `grep 'row\.repo_id'` over
+///   `analytics.rs` returns exactly the one construction site. An earlier pass
+///   of this section took that as license to drop the field here too, and it
+///   was wrong to: `(tenant_id, product_id)` is not a unique index, a product's
+///   several repositories can each hold `tests/test_smoke.py`, and
+///   `walk_repo_universe` deduplicates only *within* one repository — so two
+///   such repositories produce two universe entries sharing one `test_file`,
+///   and every fold below needs `repo_id` to tell them apart. [`Self::repo_id`]
+///   and [`Self::plan_path`] are both carried, for exactly that reason, and
+///   neither is fetched specially: they are the `(repo_id, plan_path)` pair
+///   [`UniverseFilter::plans`] already filtered the row on.
 /// * **`build` is on legacy's `ExecRow` and the plan lists it, correctly.** It
 ///   is here, as [`Self::build`], and the column it reads was added by Task 12
 ///   — see below.
@@ -170,6 +177,33 @@ pub struct ExecRow {
     /// [`crate::api::rest::dto::AnalyticsListItemDto`] carries the argument.
     /// Nothing between here and the response `Display`s the id into a name.
     pub run_id: Uuid,
+    /// The repository this row's run executed against —
+    /// `qa_test_results.repo_id`, the same column
+    /// [`UniverseFilter::plans`]'s `(repo_id, plan_path)` predicate already
+    /// filtered this row on.
+    ///
+    /// **Carried forward, not fetched, and not legacy's dead column** — see
+    /// this type's header, "What the plan got wrong about the fields". A
+    /// product owns several repositories and `(tenant_id, product_id)` is not
+    /// a unique index, so two repositories can each hold
+    /// `tests/test_smoke.py`; qa-catalog's `walk_repo_universe`
+    /// (`qa-catalog/src/domain/service/plans.rs`) deduplicates only *within*
+    /// one repository, so the universe then holds two entries sharing that
+    /// `test_file`. Every fold in [`universe`] and
+    /// [`aggregates`] keys on `(repo_id, test_file)` rather than the path
+    /// alone for exactly this reason — a fold that did not would attribute one
+    /// repository's status, run id, build and environment to the other's
+    /// test.
+    pub repo_id: Uuid,
+    /// The plan this row's run executed against — `qa_test_results.plan_path`,
+    /// the other half of the same predicate.
+    ///
+    /// No fold reads this today; it is carried alongside [`Self::repo_id`]
+    /// because the two are filtered as one pair
+    /// ([`UniverseFilter::plans`]) and a `repo_id` carried without its
+    /// `plan_path` is the same half-carried shape that left `repo_id` off
+    /// this type in the first place.
+    pub plan_path: String,
     /// The stored path, **unnormalized and possibly empty**. `""` is legal and
     /// meaningful — the column is `NOT NULL DEFAULT ''` — and it is precisely
     /// the case [`Self::test_name`] exists to resolve. Task 20 applies
@@ -268,7 +302,7 @@ pub struct ExecRow {
     /// ingest rewrites a run's rows on every result event. Reading the row's
     /// would have made an unfinished run's position in the newest-first order
     /// move every time another of its results landed, and with it which row
-    /// `latest_per_test` calls latest.
+    /// every downstream latest-wins fold calls latest.
     /// `qa_insights_sdk::TestResultRecord::run_created_at` carries the column and
     /// `infra::storage::results_sea_repo::effective_ts` the expression.
     pub ts: OffsetDateTime,

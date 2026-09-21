@@ -43,7 +43,7 @@ pub fn environment_to_sdk(m: environment::Model) -> Environment {
 /// type it goes through.
 ///
 /// **The two field names are load-bearing**: they are what
-/// `m20260903_000011_environment_plugin_columns`' backfill writes, and
+/// `m20260903_000011_environment_plugin_columns`'s (folded into `migrations::m20260812_000001_initial` by the docs squash) backfill writes, and
 /// `the_credentials_backfill_is_byte_identical_to_what_serde_writes` compares
 /// this type's `serde_json` output against the bytes that migration really
 /// stored, so a rename here fails a test rather than silently orphaning every
@@ -845,6 +845,10 @@ mod tests {
             holders,
             version: 3,
             updated_at: OffsetDateTime::from_unix_timestamp(1_786_579_200).unwrap(),
+            // Not read by `lease_to_state` — the anchor is carried beside the
+            // state, not decoded from it. Populated anyway so a fixture full of
+            // `None`s cannot hide a mapper that started reading it.
+            freed_at: Some(OffsetDateTime::from_unix_timestamp(1_786_579_100).unwrap()),
         }
     }
 

@@ -34,10 +34,9 @@
 //! precisely so a caller can push its window down into SQL; pagination is not
 //! added because no caller exists yet to page.
 //!
-//! [`OrmResultsRepository::latest_per_test`] and
-//! [`OrmResultsRepository::ingested_run_ids_between`] **do** reduce, in SQL,
+//! [`OrmResultsRepository::ingested_run_ids_between`] **does** reduce, in SQL,
 //! through `SecureSelect::project_all`
-//! (`libs/toolkit-db/src/secure/select.rs:396`). They used to materialise the
+//! (`libs/toolkit-db/src/secure/select.rs:396`). It used to materialise the
 //! whole row set and fold it here, justified by the claim that `SecureSelect`
 //! could not project or group — which is false: `project_all` hands the closure
 //! the *already-scoped* `Select<E>`, so `select_only`, `column`, `group_by`,
@@ -52,7 +51,7 @@ use qa_insights_sdk::{TestCaseResultRecord, TestResultRecord};
 use sea_orm::sea_query::{Expr, Func, SimpleExpr};
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, EntityTrait, ExprTrait, FromQueryResult, Order,
-    QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+    QueryFilter, QueryOrder, QuerySelect,
 };
 use time::OffsetDateTime;
 use toolkit_db::odata::sea_orm_filter::paginate_odata;
@@ -115,16 +114,16 @@ pub struct OrmResultsRepository;
 /// `run_created_at` and pointed the **dashboard** reads at a second expression,
 /// leaving the analytics reads here — recorded at the time as a known divergence
 /// with an owner. Controller Ruling C closed that in the round after: four
-/// downstream tasks (22, 23, 24, 25) fold over `list_for_universe` and
-/// `latest_per_test`, so a window *and* an ordering tiebreak that disagree with
-/// legacy would have been discovered by whichever of them first noticed a
-/// universe it could not explain. The two expressions are now one again.
+/// downstream tasks (22, 23, 24, 25) fold over `list_for_universe`, so a window
+/// *and* an ordering tiebreak that disagree with legacy would have been
+/// discovered by whichever of them first noticed a universe it could not
+/// explain. The two expressions are now one again.
 ///
 /// What that fixes on the analytics side: a run still in progress sorted and
 /// bucketed by when its rows were last re-ingested rather than by when it
 /// started, so its position in `list_for_universe`'s newest-first order — and
-/// therefore which row `latest_per_test` calls latest — moved every time another
-/// result landed.
+/// therefore which row every downstream latest-wins fold calls latest — moved
+/// every time another result landed.
 ///
 /// # Only reached on the `finished_only == false` path, and that is the point
 ///
@@ -312,13 +311,15 @@ fn smaller_of(left: &SimpleExpr, right: &SimpleExpr) -> SimpleExpr {
         .into()
 }
 
-/// The quantity `list_for_universe` orders by and `latest_per_test` takes the
-/// maximum of, for one filter.
+/// The quantity `list_for_universe` orders by, for one filter.
 ///
 /// The bare column on the `finished_only` path and the `COALESCE` otherwise —
-/// the same choice [`ordered_rows`] makes, factored out so the `ORDER BY`, the
-/// `MAX(...)` and the subquery's join key cannot drift into three different
-/// notions of "latest".
+/// the same choice [`ordered_rows`] makes. It was factored out when a second
+/// reader (`latest_per_test`'s `MAX(...)` and its subquery join key) needed the
+/// identical expression and the three could have drifted into three different
+/// notions of "latest"; that reader has since been deleted, and this stays
+/// factored out because [`ordered_rows`] is not the only place a future one
+/// would land.
 fn sort_key(filter: &UniverseFilter) -> SimpleExpr {
     if filter.finished_only {
         Expr::col(ResultColumn::RunFinishedAt)
@@ -641,120 +642,6 @@ impl ResultsRepository for OrmResultsRepository {
         Ok(rows.into_iter().map(exec_row_from_result).collect())
     }
 
-    /// # Reduced in SQL: `(test_file, latest) IN (SELECT test_file, MAX(latest) … GROUP BY test_file)`
-    ///
-    /// The subquery is built from a **clone of the already-scoped, already-filtered
-    /// `Select`**, so its `WHERE` carries the same `AccessScope` condition and the
-    /// same [`universe_condition`] as the outer query by construction. That is the
-    /// property that makes this safe: a hand-written correlated subquery would have
-    /// had to re-spell the tenant predicate, and getting that wrong is a
-    /// cross-tenant leak rather than a wrong number.
-    ///
-    /// `project_all` is `SecureORM`'s documented path for this
-    /// (`libs/toolkit-db/src/secure/select.rs:396`) and is what makes the
-    /// projection impossible to un-scope, unlike `into_inner()`, which hands back
-    /// a raw `Select` and would.
-    ///
-    /// **This replaced a fold over the whole row set**, which was justified here by
-    /// the claim that `SecureSelect` exposed only `filter`/`order_by`/`limit`/`offset`.
-    /// It does not; see this module's header, and `qa-runs`'
-    /// `queue_sea_repo::platforms_with_queued_rows` for the same correction made
-    /// one gear earlier.
-    ///
-    /// # A `MAX` is not a full tiebreak, so a small fold remains — and it cannot
-    /// be removed
-    ///
-    /// `(test_file, MAX(latest))` still admits more than one row when two rows of
-    /// one file share that instant, which is exactly what ingesting a single run
-    /// produces. The remaining first-wins fold runs over *ties only*, not over
-    /// history, and it consumes [`ordered_rows`]' ordering — whose within-run
-    /// tiebreak is now `ingest_ordinal DESC`, so the winner is legacy's.
-    ///
-    /// **The obvious way to make the reduction exact is wrong, and that was
-    /// measured rather than reasoned about.** Adding `MAX(ingest_ordinal)` to the
-    /// group and the ordinal to the tuple compiles cleanly and breaks
-    /// `a_newer_run_wins_even_when_its_row_has_a_lower_ordinal`: `MAX(ordinal)` is
-    /// the maximum over *every* row of the file, not over the rows at
-    /// `MAX(latest)`, so an older run holding a higher ordinal makes the tuple
-    /// match nothing and the file vanishes from the result. An exact single
-    /// statement needs a two-level argmax — a window function over a subquery, or
-    /// a correlated `NOT EXISTS` whose tenant predicate would have to be
-    /// hand-written, which this method has no `tenant_id` parameter to write. The
-    /// two-stage form is what ships.
-    ///
-    /// The caveat the trait's doc already carries still applies: this keys on the
-    /// **stored** `test_file`, where Task 20's latest-map keys on the *resolved*
-    /// one, so for any run whose results carry no file path the two differ.
-    ///
-    /// # What no test here can catch, stated rather than implied
-    ///
-    /// **Deleting the subquery leaves the whole suite green.** Measured: with the
-    /// `in_subquery` filter removed, all tests still pass, because the fold below
-    /// then produces the identical answer — that is precisely why this method
-    /// could ship as a fold in the first place. The reduction is a *cost*
-    /// property, and the assertions here are about the *answer*, so a future edit
-    /// that quietly reverts it would not go red.
-    ///
-    /// What *is* covered is everything that could make the reduction return a
-    /// different answer than the fold:
-    /// `the_sql_reduction_picks_the_same_latest_row_the_ordered_read_does`
-    /// (equivalence), `the_latest_per_test_subquery_is_scoped_to_the_caller` and
-    /// `the_latest_per_test_subquery_respects_the_universe_filter` (the subquery
-    /// carries the scope and the filter), and
-    /// `two_rows_of_one_run_sharing_a_test_file_reduce_to_one_stable_winner` (the
-    /// tie fold). Same shape of gap as `collect_sea_repo::list_counts_for`'s
-    /// empty-slice guard, recorded the same way.
-    async fn latest_per_test<C: DBRunner>(
-        &self,
-        runner: &C,
-        scope: &AccessScope,
-        filter: &UniverseFilter,
-    ) -> Result<Vec<ExecRow>, DomainError> {
-        let rows: Vec<test_result::Model> = ResultEntity::find()
-            .secure()
-            .scope_with(scope)
-            .filter(universe_condition(filter))
-            .project_all(runner, |query| {
-                // The inner query: one row per file, carrying that file's latest
-                // instant. `query.clone()` is what keeps the scope condition on
-                // it — `Select<E>` is `Clone` and `QueryTrait::into_query` turns
-                // it into the `SelectStatement` a subquery needs.
-                let latest_per_file = query
-                    .clone()
-                    .select_only()
-                    .column(ResultColumn::TestFile)
-                    .column_as(SimpleExpr::from(Func::max(sort_key(filter))), "latest")
-                    .group_by(Expr::col(ResultColumn::TestFile))
-                    .into_query();
-
-                query
-                    .filter(
-                        Expr::tuple([Expr::col(ResultColumn::TestFile), sort_key(filter)])
-                            .in_subquery(latest_per_file),
-                    )
-                    .order_by(sort_key(filter), Order::Desc)
-                    .order_by(Expr::col(ResultColumn::CreatedAt), Order::Desc)
-                    .order_by(Expr::col(ResultColumn::IngestOrdinal), Order::Desc)
-                    .order_by(Expr::col(ResultColumn::Id), Order::Desc)
-                    .into_model::<test_result::Model>()
-            })
-            .await
-            .map_err(db_err)?;
-
-        // `contains` before `insert` so the `String` is cloned only for a row that
-        // is actually kept — one per file — rather than for every row scanned.
-        // `HashSet<String>` borrows as `str`, so the probe itself allocates
-        // nothing.
-        let mut seen = std::collections::HashSet::new();
-        Ok(rows
-            .into_iter()
-            .filter(|row| {
-                !seen.contains(row.test_file.as_str()) && seen.insert(row.test_file.clone())
-            })
-            .map(exec_row_from_result)
-            .collect())
-    }
-
     /// # No join, and no window
     ///
     /// Legacy joins `run_results` only to translate a run *name* into the foreign
@@ -832,14 +719,19 @@ impl ResultsRepository for OrmResultsRepository {
     }
 
     /// See [`ResultsRepository::latest_version_for_plan`]'s doc for the whole
-    /// argument — fix round 1, Important 2. Direct translation: `product_version
-    /// IS NOT NULL`, the same four-key `ORDER BY` [`list_for_plan`](Self::list_for_plan)
-    /// uses, and `.one()` rather than `.all()` — legacy's `LIMIT 1`.
+    /// argument — fix round 1, Important 2, and task 2's composite-key fix.
+    /// Direct translation: `product_version IS NOT NULL`, the same four-key
+    /// `ORDER BY` [`list_for_plan`](Self::list_for_plan) uses, and `.one()`
+    /// rather than `.all()` — legacy's `LIMIT 1`. `(tenant_id, repo_id,
+    /// plan_path)` is the composite key, `plan_path` alone being
+    /// repository-relative and therefore ambiguous across two repositories
+    /// of the same tenant.
     async fn latest_version_for_plan<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
         tenant_id: Uuid,
+        repo_id: Uuid,
         plan_path: &str,
     ) -> Result<Option<String>, DomainError> {
         validate_tenant_in_scope(tenant_id, scope).map_err(db_err)?;
@@ -850,6 +742,7 @@ impl ResultsRepository for OrmResultsRepository {
             .filter(
                 Condition::all()
                     .add(ResultColumn::TenantId.eq(tenant_id))
+                    .add(ResultColumn::RepoId.eq(repo_id))
                     .add(ResultColumn::PlanPath.eq(plan_path))
                     .add(ResultColumn::ProductVersion.is_not_null()),
             )
@@ -1219,10 +1112,18 @@ impl ResultsRepository for OrmResultsRepository {
     ///
     /// Three counters, one `GROUP BY`, and the same three status expressions
     /// built from the caller's two sets. What it does **not** share is the
-    /// grouping key (`test_file`, not the `(test_name, repo_id, plan_path)`
-    /// triple) or any of the three clauses legacy attaches only to the flaky
-    /// query — the trait's doc tabulates the difference and argues why adding
-    /// either clause here would change a rendered number.
+    /// grouping key (`(repo_id, test_file)`, not the `(test_name, repo_id,
+    /// plan_path)` triple) or any of the three clauses legacy attaches only to
+    /// the flaky query — the trait's doc tabulates the difference and argues
+    /// why adding either clause here would change a rendered number.
+    ///
+    /// `repo_id` joined the grouping key in a fix-round-2 correction: two
+    /// repositories can share a `test_file`, and grouping on the path alone
+    /// merged their counters into one bucket that the quality-vector fold then
+    /// joined to *both* repositories' universe entries for that path. `plan_path`
+    /// stays out of it — this grain was never the flaky read's triple, and the
+    /// fold this feeds intentionally collapses a file listed by two plans in one
+    /// repo to a single vector test.
     ///
     /// The counter expressions are cloned rather than rebuilt: each is used once
     /// in the select list here, where `flaky_groups` needs its two a second and
@@ -1282,10 +1183,12 @@ impl ResultsRepository for OrmResultsRepository {
                 query
                     .select_only()
                     .column(ResultColumn::TestFile)
+                    .column(ResultColumn::RepoId)
                     .column_as(passed, "passed")
                     .column_as(failed, "failed")
                     .column_as(total, "total")
                     .group_by(Expr::col(ResultColumn::TestFile))
+                    .group_by(Expr::col(ResultColumn::RepoId))
                     .into_model::<FileStatusCountRow>()
             })
             .await
@@ -1515,19 +1418,23 @@ impl FlakyGroupRow {
 
 /// One group of [`OrmResultsRepository::file_status_counts`].
 ///
-/// Four fields against [`FileStatusCount`]'s four, and the field names are the
+/// Five fields against [`FileStatusCount`]'s five, and the field names are the
 /// column aliases — the same runtime-string binding [`RunIdRow`] records. Three
-/// of the four aliases are invented by the projection (`passed`, `failed`,
+/// of the five aliases are invented by the projection (`passed`, `failed`,
 /// `total`) and none needs quoting in Postgres, exactly as
 /// [`FlakyGroupRow`]'s do not.
 ///
-/// `test_file` is a plain `String` and not an `Option`, and here it is the
-/// *grouping key* rather than [`FlakyGroupRow`]'s `MAX()` — the column is
+/// `test_file` is a plain `String` and not an `Option`, and here it is part of
+/// the *grouping key* rather than [`FlakyGroupRow`]'s `MAX()` — the column is
 /// `NOT NULL` and the read filters `<> ''`, so the group can be neither `NULL`
-/// nor empty.
+/// nor empty. `repo_id` joins it in the grouping key — a fix-round-2
+/// correction, `Option<Uuid>` and read straight off the column exactly as
+/// [`FlakyGroupRow::repo_id`] is, and for the same reason: it is nullable on
+/// the row, not derived.
 #[derive(Debug, FromQueryResult)]
 struct FileStatusCountRow {
     test_file: String,
+    repo_id: Option<Uuid>,
     passed: i64,
     failed: i64,
     total: i64,
@@ -1539,7 +1446,7 @@ impl FileStatusCountRow {
     /// cannot make a pass rate nonsense.
     ///
     /// **Every field is named explicitly**, which makes a column added to
-    /// [`FileStatusCount`] later a compile error here. Three of the four are
+    /// [`FileStatusCount`] later a compile error here. Three of the five are
     /// same-typed integers and a transposition among them is correct Rust;
     /// `the_denominator_counts_only_passed_failed_and_error` asserts `(2, 3, 5)`
     /// over three deliberately unequal counters, so any pair of them swapped
@@ -1547,6 +1454,7 @@ impl FileStatusCountRow {
     fn into_domain(self) -> FileStatusCount {
         FileStatusCount {
             test_file: self.test_file,
+            repo_id: self.repo_id,
             passed: u64::try_from(self.passed).unwrap_or(0),
             failed: u64::try_from(self.failed).unwrap_or(0),
             total: u64::try_from(self.total).unwrap_or(0),
@@ -2242,7 +2150,7 @@ mod tests {
             .unwrap();
 
         let latest = OrmResultsRepository
-            .latest_version_for_plan(&conn, &scope(tenant), tenant, PLAN)
+            .latest_version_for_plan(&conn, &scope(tenant), tenant, Uuid::from_u128(0x12), PLAN)
             .await
             .unwrap();
 
@@ -2307,7 +2215,7 @@ mod tests {
             .unwrap();
 
         let latest = OrmResultsRepository
-            .latest_version_for_plan(&conn, &scope(tenant), tenant, PLAN)
+            .latest_version_for_plan(&conn, &scope(tenant), tenant, Uuid::from_u128(0x12), PLAN)
             .await
             .unwrap();
 
@@ -2327,7 +2235,7 @@ mod tests {
         let tenant = Uuid::from_u128(TENANT);
 
         let latest = OrmResultsRepository
-            .latest_version_for_plan(&conn, &scope(tenant), tenant, PLAN)
+            .latest_version_for_plan(&conn, &scope(tenant), tenant, Uuid::from_u128(0x12), PLAN)
             .await
             .unwrap();
 
@@ -2365,7 +2273,7 @@ mod tests {
             .unwrap();
 
         let latest = OrmResultsRepository
-            .latest_version_for_plan(&conn, &scope(mine), mine, PLAN)
+            .latest_version_for_plan(&conn, &scope(mine), mine, Uuid::from_u128(0x12), PLAN)
             .await
             .unwrap();
 
@@ -2448,7 +2356,7 @@ mod tests {
         let spanning = AccessScope::for_tenants(vec![mine, theirs]);
 
         let latest = OrmResultsRepository
-            .latest_version_for_plan(&conn, &spanning, mine, PLAN)
+            .latest_version_for_plan(&conn, &spanning, mine, Uuid::from_u128(0x12), PLAN)
             .await
             .unwrap();
 
@@ -2836,60 +2744,6 @@ mod tests {
         );
     }
 
-    /// `latest_per_test` keeps the newest row per **stored** `test_file`, over
-    /// exactly the order `list_for_universe` returns.
-    #[tokio::test]
-    async fn the_latest_row_per_test_file_is_the_newest_one() {
-        let db = inmem_db().await;
-        let conn = db.conn().unwrap();
-        let tenant = Uuid::from_u128(TENANT);
-        let ctx = scope(tenant);
-
-        let older = now();
-        let newer = older + Duration::days(1);
-        for (run, at, status) in [(0x20_u128, older, "FAILED"), (0x21, newer, "PASSED")] {
-            OrmResultsRepository
-                .upsert_run_results(
-                    &conn,
-                    &ctx,
-                    tenant,
-                    Uuid::from_u128(run),
-                    vec![
-                        NewTestResult {
-                            run_finished_at: Some(at),
-                            ..result_row("tests/a.py", "test_a", status)
-                        },
-                        NewTestResult {
-                            run_finished_at: Some(at),
-                            ..result_row("tests/b.py", "test_b", status)
-                        },
-                    ],
-                    vec![],
-                )
-                .await
-                .unwrap();
-        }
-
-        let mut latest = OrmResultsRepository
-            .latest_per_test(
-                &conn,
-                &ctx,
-                &UniverseFilter {
-                    finished_only: true,
-                    ..any_row()
-                },
-            )
-            .await
-            .unwrap();
-        latest.sort_by(|a, b| a.test_file.cmp(&b.test_file));
-
-        assert_eq!(latest.len(), 2, "one row per file: {latest:?}");
-        assert!(
-            latest.iter().all(|r| r.status == "PASSED" && r.ts == newer),
-            "each must be the newer of the two: {latest:?}"
-        );
-    }
-
     /// The three settled predicates, each one applied.
     ///
     /// One test rather than three because the risk is a predicate silently *not*
@@ -3153,9 +3007,7 @@ mod tests {
     /// The three tests above pin the *window* and the derived `ExecRow::ts`. This
     /// pins what `sort_key` does with them, which is the half with four consumers
     /// queued behind it: `list_for_universe`'s newest-first contract is what every
-    /// "latest wins" map in the analytics cores relies on, and
-    /// `latest_per_test`'s `MAX(sort_key)` picks the winner for a file from the
-    /// same expression.
+    /// "latest wins" map in the analytics cores relies on.
     ///
     /// One file, two runs, and the wrong column inverts them:
     ///
@@ -3217,17 +3069,6 @@ mod tests {
             vec![finished, long_running],
             "newest first by the run's own instant, not by when the rows were \
              last written: {ordered:?}"
-        );
-
-        let latest = OrmResultsRepository
-            .latest_per_test(&conn, &ctx, &any_row())
-            .await
-            .unwrap();
-        assert_eq!(
-            latest.iter().map(|r| r.run_id).collect::<Vec<_>>(),
-            vec![finished],
-            "and the SQL reduction picks the same winner for the shared file: \
-             {latest:?}"
         );
     }
 
@@ -3367,221 +3208,6 @@ mod tests {
         );
     }
 
-    /// **The database-side reduction must pick the same winner the ordered read
-    /// would.**
-    ///
-    /// `latest_per_test` reduces in SQL — `(test_file, latest) IN (SELECT
-    /// test_file, MAX(latest) … GROUP BY test_file)` — where it used to fold
-    /// [`list_for_universe`]'s output in memory. Those are two different
-    /// statements over the same data, and nothing in the types says they agree.
-    /// This asserts they do, against a fixture where the newest row for each file
-    /// is *not* the one a naive `GROUP BY` would surface: each file has three
-    /// runs, its newest is in the middle run, and the statuses differ per run so a
-    /// wrong winner is visible rather than merely a different row id.
-    #[tokio::test]
-    async fn the_sql_reduction_picks_the_same_latest_row_the_ordered_read_does() {
-        let db = inmem_db().await;
-        let conn = db.conn().unwrap();
-        let tenant = Uuid::from_u128(TENANT);
-        let ctx = scope(tenant);
-
-        // Deliberately not in timestamp order: the newest run is written second.
-        for (run, offset_days, status) in [
-            (0x20_u128, 0_i64, "FAILED"),
-            (0x21, 5, "PASSED"),
-            (0x22, 2, "ERROR"),
-        ] {
-            OrmResultsRepository
-                .upsert_run_results(
-                    &conn,
-                    &ctx,
-                    tenant,
-                    Uuid::from_u128(run),
-                    vec![
-                        NewTestResult {
-                            run_finished_at: Some(now() + Duration::days(offset_days)),
-                            ..result_row("tests/a.py", "test_a", status)
-                        },
-                        NewTestResult {
-                            run_finished_at: Some(now() + Duration::days(offset_days)),
-                            ..result_row("tests/b.py", "test_b", status)
-                        },
-                    ],
-                    vec![],
-                )
-                .await
-                .unwrap();
-        }
-
-        let filter = UniverseFilter {
-            finished_only: true,
-            ..any_row()
-        };
-
-        // Ground truth: the same first-wins fold, over the full ordered read.
-        let mut seen = std::collections::HashSet::new();
-        let mut expected = OrmResultsRepository
-            .list_for_universe(&conn, &ctx, &filter)
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|row| seen.insert(row.test_file.clone()))
-            .collect::<Vec<_>>();
-        expected.sort_by(|a, b| a.test_file.cmp(&b.test_file));
-
-        let mut actual = OrmResultsRepository
-            .latest_per_test(&conn, &ctx, &filter)
-            .await
-            .unwrap();
-        actual.sort_by(|a, b| a.test_file.cmp(&b.test_file));
-
-        assert_eq!(
-            actual, expected,
-            "the SQL reduction and the in-memory fold must agree on the winner"
-        );
-        // Non-vacuity: the fixture must actually have a newest-in-the-middle run,
-        // or the assertion above would pass for a reduction that just took the
-        // last row it saw.
-        assert_eq!(actual.len(), 2, "one row per file: {actual:?}");
-        assert!(
-            actual.iter().all(|r| r.status == "PASSED"),
-            "the winner is the middle-written run, which is the newest: {actual:?}"
-        );
-    }
-
-    /// **The reduction's subquery must be scoped, or another tenant's newer row
-    /// suppresses yours.**
-    ///
-    /// `latest_per_test` filters on `(test_file, latest) IN (SELECT test_file,
-    /// MAX(latest) … GROUP BY test_file)`. If that subquery is not bound to the
-    /// caller's scope, the `MAX` it computes is the maximum across *every*
-    /// tenant — so a tenant whose newest row for a file is older than some other
-    /// tenant's gets **no row at all** for that file. Not a leak of another
-    /// tenant's data; a silent hole in your own, which is harder to notice.
-    ///
-    /// The implementation is safe by construction because the subquery is a clone
-    /// of the already-scoped `Select`. This test is what makes that structural
-    /// property observable: replacing `query.clone()` with a bare
-    /// `ResultEntity::find()` compiles, keeps every other test green, and turns
-    /// this one red.
-    #[tokio::test]
-    async fn the_latest_per_test_subquery_is_scoped_to_the_caller() {
-        let db = inmem_db().await;
-        let conn = db.conn().unwrap();
-        let mine = Uuid::from_u128(0xA);
-        let theirs = Uuid::from_u128(0xB);
-
-        // My row is older; theirs is newer, on the same file.
-        OrmResultsRepository
-            .upsert_run_results(
-                &conn,
-                &scope(mine),
-                mine,
-                Uuid::from_u128(0x20),
-                vec![NewTestResult {
-                    run_finished_at: Some(now()),
-                    ..result_row("tests/a.py", "test_a", "PASSED")
-                }],
-                vec![],
-            )
-            .await
-            .unwrap();
-        OrmResultsRepository
-            .upsert_run_results(
-                &conn,
-                &scope(theirs),
-                theirs,
-                Uuid::from_u128(0x21),
-                vec![NewTestResult {
-                    run_finished_at: Some(now() + Duration::days(7)),
-                    ..result_row("tests/a.py", "test_a", "FAILED")
-                }],
-                vec![],
-            )
-            .await
-            .unwrap();
-
-        let filter = UniverseFilter {
-            finished_only: true,
-            ..any_row()
-        };
-        let latest = OrmResultsRepository
-            .latest_per_test(&conn, &scope(mine), &filter)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            latest.len(),
-            1,
-            "my own latest row for the file must come back; an unscoped MAX \
-             would compute another tenant's newer instant and match nothing: \
-             {latest:?}"
-        );
-        assert_eq!(latest[0].ts, now());
-        assert_eq!(latest[0].status, "PASSED");
-    }
-
-    /// The same property for the universe filter: a row the filter excludes must
-    /// not set the `MAX` that the included rows are compared against.
-    #[tokio::test]
-    async fn the_latest_per_test_subquery_respects_the_universe_filter() {
-        let db = inmem_db().await;
-        let conn = db.conn().unwrap();
-        let tenant = Uuid::from_u128(TENANT);
-        let ctx = scope(tenant);
-
-        OrmResultsRepository
-            .upsert_run_results(
-                &conn,
-                &ctx,
-                tenant,
-                Uuid::from_u128(0x20),
-                vec![NewTestResult {
-                    run_finished_at: Some(now()),
-                    ..result_row("tests/a.py", "test_a", "PASSED")
-                }],
-                vec![],
-            )
-            .await
-            .unwrap();
-        // Newer, but on a product version the filter excludes.
-        OrmResultsRepository
-            .upsert_run_results(
-                &conn,
-                &ctx,
-                tenant,
-                Uuid::from_u128(0x21),
-                vec![NewTestResult {
-                    product_version: Some("4.9.0".to_owned()),
-                    run_finished_at: Some(now() + Duration::days(7)),
-                    ..result_row("tests/a.py", "test_a", "FAILED")
-                }],
-                vec![],
-            )
-            .await
-            .unwrap();
-
-        let latest = OrmResultsRepository
-            .latest_per_test(
-                &conn,
-                &ctx,
-                &UniverseFilter {
-                    product_version: Some("5.0.1".to_owned()),
-                    finished_only: true,
-                    ..any_row()
-                },
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            latest.len(),
-            1,
-            "the excluded row must not set the MAX: {latest:?}"
-        );
-        assert_eq!(latest[0].status, "PASSED");
-    }
-
     /// **The ordinal is the batch position, written 0..n in the order given.**
     ///
     /// Read back through the entity rather than through `ExecRow` or
@@ -3707,22 +3333,9 @@ mod tests {
             finished_only: true,
             ..any_row()
         };
-        let latest = OrmResultsRepository
-            .latest_per_test(&conn, &ctx, &filter)
-            .await
-            .unwrap();
-        let for_a = latest
-            .iter()
-            .find(|r| r.test_file == "tests/a.py")
-            .expect("tests/a.py must be in the result");
-        assert_eq!(
-            for_a.test_name, "test_a_newer_run",
-            "legacy's global SERIAL puts the LAST-INGESTED row first; a tiebreak \
-             of ingest_ordinal alone picks the older run's row because its batch \
-             position happens to be higher"
-        );
-
-        // The full ordered read must agree, since the fold consumes its order.
+        // Legacy's global SERIAL puts the LAST-INGESTED row first; a tiebreak of
+        // `ingest_ordinal` alone would pick the older run's row, because its
+        // batch position happens to be higher.
         let ordered = OrmResultsRepository
             .list_for_universe(&conn, &ctx, &filter)
             .await
@@ -3736,89 +3349,6 @@ mod tests {
             names,
             vec!["test_a_newer_run", "test_a_older_run"],
             "the later-ingested run's row must sort first: {ordered:?}"
-        );
-    }
-
-    /// **A newer run whose row has a *lower* ordinal must still win.**
-    ///
-    /// This is the fixture that rules out the tempting-but-wrong exact reduction:
-    /// `(test_file, MAX(sort_key), MAX(ingest_ordinal)) GROUP BY test_file` takes
-    /// the maximum ordinal over *every* row of the file, not over the rows at the
-    /// maximum instant — so with an older run holding a higher ordinal than the
-    /// newer run's row, the tuple matches nothing and the file disappears from the
-    /// result entirely. Attempted and measured, not reasoned about: that shortcut
-    /// makes this test fail with an empty result.
-    ///
-    /// The shipped reduction narrows on the instant only and lets the fold break
-    /// the ordinal tie, which is why it is correct here.
-    #[tokio::test]
-    async fn a_newer_run_wins_even_when_its_row_has_a_lower_ordinal() {
-        let db = inmem_db().await;
-        let conn = db.conn().unwrap();
-        let tenant = Uuid::from_u128(TENANT);
-        let ctx = scope(tenant);
-
-        // Older run: the file is the *third* row, so ordinal 2.
-        OrmResultsRepository
-            .upsert_run_results(
-                &conn,
-                &ctx,
-                tenant,
-                Uuid::from_u128(0x20),
-                vec![
-                    NewTestResult {
-                        run_finished_at: Some(now()),
-                        ..result_row("tests/x.py", "test_x", "PASSED")
-                    },
-                    NewTestResult {
-                        run_finished_at: Some(now()),
-                        ..result_row("tests/y.py", "test_y", "PASSED")
-                    },
-                    NewTestResult {
-                        run_finished_at: Some(now()),
-                        ..result_row("tests/a.py", "test_a_old", "PASSED")
-                    },
-                ],
-                vec![],
-            )
-            .await
-            .unwrap();
-        // Newer run: the file is the *only* row, so ordinal 0 — lower than above.
-        OrmResultsRepository
-            .upsert_run_results(
-                &conn,
-                &ctx,
-                tenant,
-                Uuid::from_u128(0x21),
-                vec![NewTestResult {
-                    run_finished_at: Some(now() + Duration::days(1)),
-                    ..result_row("tests/a.py", "test_a_new", "FAILED")
-                }],
-                vec![],
-            )
-            .await
-            .unwrap();
-
-        let latest = OrmResultsRepository
-            .latest_per_test(
-                &conn,
-                &ctx,
-                &UniverseFilter {
-                    finished_only: true,
-                    ..any_row()
-                },
-            )
-            .await
-            .unwrap();
-
-        let for_a = latest
-            .iter()
-            .find(|r| r.test_file == "tests/a.py")
-            .expect("tests/a.py must still be in the result at all");
-        assert_eq!(
-            for_a.test_name, "test_a_new",
-            "the newer run wins on the instant; the ordinal only breaks ties \
-             *within* an instant"
         );
     }
 
@@ -3868,23 +3398,9 @@ mod tests {
             finished_only: true,
             ..any_row()
         };
-        let latest = OrmResultsRepository
-            .latest_per_test(&conn, &ctx, &filter)
-            .await
-            .unwrap();
-        assert_eq!(
-            latest.len(),
-            1,
-            "the tie must reduce to one row, not three: {latest:?}"
-        );
-        assert_eq!(
-            latest[0].test_name, "test_a_last",
-            "legacy's winner is the LAST row the parser produced, which is the \
-             highest ingest_ordinal, not the first and not an arbitrary UUID"
-        );
-        assert_eq!(latest[0].status, "FAILED");
-
-        // The full ordered read must agree, since the fold consumes its order.
+        // Legacy's winner for a tie is the LAST row the parser produced -- the
+        // highest `ingest_ordinal`, not the first and not an arbitrary UUID --
+        // and that is a property of this ordering, which is what puts it first.
         let ordered = OrmResultsRepository
             .list_for_universe(&conn, &ctx, &filter)
             .await
@@ -3896,73 +3412,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["test_a_last", "test_a_second", "test_a_first"],
             "descending on ingest_ordinal within the run: {ordered:?}"
-        );
-    }
-
-    /// The tie reduces to **one** row and repeated reads agree — the properties
-    /// that hold independently of which row the tiebreak picks.
-    ///
-    /// Kept alongside
-    /// [`the_last_row_of_a_batch_wins_a_tie_on_one_test_file`] rather than folded
-    /// into it: totality of the ordering and *identity* of the winner are
-    /// different claims, and a future change to the tiebreak should have to face
-    /// them separately.
-    #[tokio::test]
-    async fn two_rows_of_one_run_sharing_a_test_file_reduce_to_one_stable_winner() {
-        let db = inmem_db().await;
-        let conn = db.conn().unwrap();
-        let tenant = Uuid::from_u128(TENANT);
-        let ctx = scope(tenant);
-        let run_id = Uuid::from_u128(0x20);
-
-        OrmResultsRepository
-            .upsert_run_results(
-                &conn,
-                &ctx,
-                tenant,
-                run_id,
-                vec![
-                    result_row("tests/a.py", "test_a_first", "PASSED"),
-                    result_row("tests/a.py", "test_a_second", "FAILED"),
-                ],
-                vec![],
-            )
-            .await
-            .unwrap();
-
-        let filter = UniverseFilter {
-            finished_only: true,
-            ..any_row()
-        };
-        let first = OrmResultsRepository
-            .latest_per_test(&conn, &ctx, &filter)
-            .await
-            .unwrap();
-        assert_eq!(
-            first.len(),
-            1,
-            "the tie must reduce to one row, not two: {first:?}"
-        );
-
-        let second = OrmResultsRepository
-            .latest_per_test(&conn, &ctx, &filter)
-            .await
-            .unwrap();
-        assert_eq!(
-            first, second,
-            "the order is total, so a repeated read must pick the same winner"
-        );
-
-        assert_eq!(
-            OrmResultsRepository
-                .list_for_universe(&conn, &ctx, &filter)
-                .await
-                .unwrap(),
-            OrmResultsRepository
-                .list_for_universe(&conn, &ctx, &filter)
-                .await
-                .unwrap(),
-            "repeated reads of the same rows must not reorder them"
         );
     }
 
@@ -5868,7 +5317,7 @@ mod tests {
     /// So what this pins is that the empty-set answer is empty **by whichever
     /// route** — which is the property a caller depends on, and which a future
     /// edit that made an empty partition mean "match everything" would break. Same
-    /// shape of gap as `latest_per_test`'s reduction and
+    /// shape of gap as the (since-deleted) `latest_per_test`'s reduction and
     /// `collect_sea_repo::list_counts_for`'s own guard, recorded the same way.
     ///
     /// **The claim it replaces was inherited and is wrong for this builder**, on two
@@ -6556,6 +6005,103 @@ mod tests {
             ],
             "two test names against one file are one group, and `ERROR` is a \
              failure",
+        );
+    }
+
+    /// **Two repositories sharing a `test_file` are two rows, not one merged
+    /// row** — the SQL-level end-to-end test the round-2 re-key never got.
+    /// Round 2's two regression tests
+    /// (`aggregates_tests.rs`/`dashboard_tests.rs`) build `FileStatusCount` by
+    /// hand at the fold level; neither drives a real cross-repository path
+    /// collision through this method's actual SQL.
+    ///
+    /// `seed_files` cannot express two repositories — it has no `repo_id`
+    /// parameter, and all seven of its other call sites share `result_row`'s
+    /// one default — so this bypasses it and calls `upsert_run_results`
+    /// directly, once per repository, both against `tests/shared.py`.
+    ///
+    /// Confirmed red against a temporary revert of the `GROUP BY repo_id` this
+    /// query gained in fix round 2: the two rows below collapse into one whose
+    /// counters are the sum of both repositories'.
+    #[tokio::test]
+    async fn two_repositories_sharing_a_test_file_are_two_rows_not_one() {
+        let db = inmem_db().await;
+        let conn = db.conn().unwrap();
+        let tenant = Uuid::from_u128(0xF126);
+        let at = OffsetDateTime::now_utc() - Duration::days(1);
+        let repo_a = Uuid::from_u128(0xAA01);
+        let repo_b = Uuid::from_u128(0xBB01);
+
+        OrmResultsRepository
+            .upsert_run_results(
+                &conn,
+                &scope(tenant),
+                tenant,
+                Uuid::from_u128(0xB1),
+                vec![
+                    NewTestResult {
+                        repo_id: Some(repo_a),
+                        run_finished_at: Some(at),
+                        ..result_row("tests/shared.py", "test_a1", "PASSED")
+                    },
+                    NewTestResult {
+                        repo_id: Some(repo_a),
+                        run_finished_at: Some(at),
+                        ..result_row("tests/shared.py", "test_a2", "FAILED")
+                    },
+                ],
+                vec![],
+            )
+            .await
+            .unwrap();
+        OrmResultsRepository
+            .upsert_run_results(
+                &conn,
+                &scope(tenant),
+                tenant,
+                Uuid::from_u128(0xB2),
+                vec![NewTestResult {
+                    repo_id: Some(repo_b),
+                    run_finished_at: Some(at),
+                    ..result_row("tests/shared.py", "test_b1", "PASSED")
+                }],
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let counts = OrmResultsRepository
+            .file_status_counts(
+                &conn,
+                &scope(tenant),
+                &PASSED,
+                &FAILED,
+                at - Duration::days(7),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // No explicit tuple type here — `clippy::type_complexity` (denied in
+        // this workspace) flags a five-element tuple with an `Option<Uuid>`
+        // in it; inference from `c.repo_id`/`.passed`/etc. and from `want`
+        // below settles the same type without writing it out.
+        let mut got = counts
+            .into_iter()
+            .map(|c| (c.repo_id, c.test_file, c.passed, c.failed, c.total))
+            .collect::<Vec<_>>();
+        got.sort();
+
+        let mut want = vec![
+            (Some(repo_a), "tests/shared.py".to_owned(), 1, 1, 2),
+            (Some(repo_b), "tests/shared.py".to_owned(), 1, 0, 1),
+        ];
+        want.sort();
+
+        assert_eq!(
+            got, want,
+            "one row per repository, each with its own counters, not one \
+             merged row summing both: {got:?}"
         );
     }
 

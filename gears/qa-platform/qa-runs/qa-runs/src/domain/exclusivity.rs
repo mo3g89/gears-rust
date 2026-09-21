@@ -10,8 +10,12 @@
 //! and file reads, and the part worth testing is which tier wins. Everything
 //! here takes already-fetched data, so the whole contract is unit-testable with
 //! no database and no fixture tree. qa-catalog supplies the inputs (per-plan
-//! and per-file flags plus tags) and deliberately does not interpret them
-//! (DESIGN §3.2, qa-catalog "Responsibility boundaries" — DESIGN §3.3).
+//! and per-file flags plus tags) and deliberately does not interpret them —
+//! DESIGN §3.3's Services table gives qa-catalog's `plans` and `custom_plans`
+//! rows as discovery and CRUD, not launch-time interpretation (§3.2 is
+//! qa-environments, not qa-catalog, and DESIGN has no "Responsibility
+//! boundaries" heading anywhere; the nearest thing is that per-gear
+//! "Responsibility" table column).
 //!
 //! Fail-closed here means fail *toward exclusive*: every ambiguity the source
 //! system resolves, it resolves toward "give this run the platform to itself",

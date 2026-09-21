@@ -43,7 +43,7 @@ SKIP_FILES = {
     "NOTES-hairpin.md",
     # This file. Its prose quotes the addresses it exists to ban, and a module
     # docstring is a string rather than a comment, so strip_comments cannot see it.
-    "test_no_environment_hardcode.py",
+    "check_no_environment_hardcode.py",
 }
 
 # An IPv4 literal that is not a documentation/loopback/link-local address, and
@@ -58,6 +58,47 @@ ALLOWED = {
     "127.0.0.11",
     # RFC 5737 documentation ranges, which is what examples should use.
     # (Matched by prefix below, not listed exhaustively.)
+    #
+    # RFC 1918 private-address range bases, RFC 3927 link-local, and the
+    # cloud-metadata address several providers serve from that link-local
+    # block -- universal IANA reservations, not any one deployment's own
+    # address, unlike the `10.136.20.200`/`10.43.0.10` literals this test was
+    # written to ban. runner-networkpolicy.yaml's egress superset for the
+    # run's target environment excludes these ranges (they are where the
+    # cluster's OWN pods, Postgres, Keycloak and the gears API live, on every
+    # deployment this chart has been run against -- see that file's own
+    # comment), and its chart guard quotes the same literals to check the
+    # exclusion is actually there.
+    "10.0.0.0", "172.16.0.0", "192.168.0.0", "169.254.0.0", "169.254.169.254",
+    # `argo.apiServerClusterIP`'s default -- k3s' conventional first service
+    # address (10.43.0.0/16 is k3s' own default service CIDR), not a
+    # specific deployment's own measured address. `clusterDns` above quotes
+    # the same convention for the same reason (10.43.0.10, that CIDR's
+    # kube-dns address, paired there with kubeadm's own default
+    # equivalent, 10.96.0.10 -- this value's kubeadm equivalent is
+    # 10.96.0.1). Unlike `publicOrigin`'s old `10.136.20.200` or
+    # `clusterDns`'s old `10.43.0.10` AS A DEFAULT -- both blanked out and
+    # made REQUIRED/discovered specifically because of what this test
+    # guards against -- this one stays a documented default on purpose (fix
+    # round 1 of task 8): `wait` needs SOME address to authenticate to
+    # before its Role/RBAC even matters, and a `required` here would fail a
+    # bare `helm template`/`helm lint` the same way `publicOrigin` does.
+    # What makes it safe to default rather than blank: it names a
+    # convention, not a host, the same way `images.kubectl.tag`'s pinned
+    # version elsewhere in this file is a convention rather than a secret;
+    # and its own doc in values.yaml states in the open that any cluster
+    # not running that convention MUST override it, and says exactly how
+    # the failure looks if it doesn't (exit code 64, after the run has
+    # already produced all of its output -- not a silent 502, which is what
+    # made the earlier two dangerous enough to ban outright).
+    "10.43.0.1",
+    # `argo.podCidr` / `argo.serviceCidr`'s defaults -- fix round 6, the same
+    # convention `apiServerClusterIP` above already names: k3s' own default
+    # pod CIDR (10.42.0.0/16) and Service CIDR (10.43.0.0/16, matched by
+    # `10.43.0.0` here). Not a specific deployment's own measured range;
+    # both values' own doc in values.yaml names kubeadm's equivalents beside
+    # them and states plainly that any other cluster MUST override both.
+    "10.42.0.0", "10.43.0.0",
 }
 ALLOWED_PREFIXES = ("192.0.2.", "198.51.100.", "203.0.113.", "127.")
 

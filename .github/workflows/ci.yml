@@ -78,6 +78,14 @@ jobs:
               - 'Makefile'
               - 'rust-toolchain.toml'
               - '.cargo/**'
+              # The lint configuration itself. Without this line the `clippy`
+              # job below does not run on a diff that only edits `clippy.toml`
+              # -- so widening `disallowed-methods`, raising a complexity
+              # threshold or deleting a `disallowed-types` entry lands with the
+              # gate that would have judged it never having been asked. The
+              # same reasoning as `release-plz.toml` below: a config-only edit
+              # must still get the thing it configures run.
+              - 'clippy.toml'
               # Input to `make check-release-config` in the test job: a config-only
               # edit must still get the release configuration validated.
               - 'release-plz.toml'
@@ -103,6 +111,9 @@ jobs:
             ui:
               - 'gears/qa-platform/qa-platform-ui/**'
               - 'Makefile'
+              # The UI's wire types are generated from this file, so an edit to
+              # it must re-run `ui-contract` even when no .ts changed.
+              - 'gears/qa-platform/docs/openapi.json'
 
   # ── Jobs ──────────────────────────────────────────────────────────────
 
@@ -294,6 +305,17 @@ jobs:
       # assertions hold trivially and prove nothing they were written for.
       - name: cargo test (bss-fixtures narrow production surface)
         run: make test-fixtures-narrow
+
+      # The qa-platform contract is generated from the gear code
+      # (`gears/qa-platform/qa-platform-openapi`). This is the half of the
+      # drift gate that needs a compiler: it rebuilds the document from the
+      # handlers and DTOs and fails when the committed json disagrees. The
+      # other half — json to `openapi.d.ts` — runs in the `ui` job, which has
+      # Node and no Rust. Ubuntu only: the document is platform-independent
+      # and rebuilding it on three runners buys nothing.
+      - name: qa-platform OpenAPI contract is up to date
+        if: runner.os == 'Linux'
+        run: make qa-openapi-check
   ui:
     name: QA Platform UI
     needs: changes
@@ -317,11 +339,24 @@ jobs:
           cache: npm
           cache-dependency-path: gears/qa-platform/qa-platform-ui/package-lock.json
 
-      # `ui-contract` is deliberately absent: it regenerates types from a live
-      # /openapi.json and needs the compose stack up on localhost:8087, which
-      # this job has no gears to serve.
       - name: Lint, test and build the UI
         run: make ui-lint ui-test ui-build
+
+      # `ui-contract` used to be impossible here: it regenerated types from a
+      # live /openapi.json on localhost:8087, which this job has no gears to
+      # serve. `npm run gen:api` now reads the committed
+      # `gears/qa-platform/docs/openapi.json` instead, so the drift check runs
+      # with nothing but Node. `npm run gen:api` directly rather than `make
+      # ui-contract`, because that target also runs `qa-openapi-check`, which
+      # needs the Rust toolchain this job does not install — the `test` job
+      # owns that half.
+      - name: UI wire types match the committed contract
+        run: |
+          cd gears/qa-platform/qa-platform-ui && npm run gen:api
+          cd "$GITHUB_WORKSPACE"
+          git diff --exit-code -- \
+            gears/qa-platform/qa-platform-ui/src/api/generated/openapi.d.ts \
+            || { echo "::error::UI wire types are stale: run 'make ui-contract' and commit"; exit 1; }
 
   integration:
     name: Integration tests
@@ -790,6 +825,50 @@ jobs:
 
       - name: Run the qa-platform Helm chart guards
         run: make helm-tests
+
+      # `helm lint` and kubeconform both validate the RENDERED chart, not
+      # the templates -- the templates are Go-template text, not valid
+      # Kubernetes YAML, until `helm template` fills them in. Both steps
+      # pass the same fixture --set values the guard scripts above use.
+      # FOUR values have no default on purpose, so a bare render/lint with no
+      # overrides fails before either tool gets a chance to run: publicOrigin
+      # (WS3 Task 1), keycloak.adminPassword (WS3 Task 3), and the two signing
+      # secrets (2026-09-21 -- each is the only access control on an
+      # anonymously reachable route, and their old per-render `randAlphaNum`
+      # fallback silently rotated the key on every upgrade).
+      - name: helm lint (qa-platform)
+        run: |
+          helm lint gears/qa-platform/deploy/helm/qa-platform \
+            --set publicOrigin=https://example-ci-lint.invalid \
+            --set keycloak.adminPassword=ci-fixture-not-a-real-password \
+            --set bundleDownloadSigningSecret=ci-fixture-not-a-real-bundle-key \
+            --set collectReportSigningSecret=ci-fixture-not-a-real-collect-key
+
+      # kubeconform is not on the taiki-e/install-action tool registry and
+      # is not preinstalled on ubuntu-latest, so it is fetched directly
+      # from its GitHub release the same way oasdiff is in
+      # api_contracts.yml -- a pinned version plus a checked SHA-256, not a
+      # floating "latest".
+      - name: Install kubeconform
+        env:
+          KUBECONFORM_VERSION: "0.8.0"
+          KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" -o /tmp/kubeconform.tgz
+          echo "${KUBECONFORM_SHA256}  /tmp/kubeconform.tgz" | sha256sum -c -
+          tar -xzf /tmp/kubeconform.tgz -C /tmp kubeconform
+          sudo mv /tmp/kubeconform /usr/local/bin/kubeconform
+          chmod +x /usr/local/bin/kubeconform
+
+      - name: kubeconform (rendered qa-platform manifests)
+        run: |
+          helm template qa-platform gears/qa-platform/deploy/helm/qa-platform \
+            --namespace qa-platform \
+            --set publicOrigin=https://example-ci-lint.invalid \
+            --set keycloak.adminPassword=ci-fixture-not-a-real-password \
+            --set bundleDownloadSigningSecret=ci-fixture-not-a-real-bundle-key \
+            --set collectReportSigningSecret=ci-fixture-not-a-real-collect-key \
+            | kubeconform -strict -summary
 
       - name: Install protoc
         uses: taiki-e/install-action@6ef672efc2b5aabc787a9e94baf4989aa02a97df # v2.70.3

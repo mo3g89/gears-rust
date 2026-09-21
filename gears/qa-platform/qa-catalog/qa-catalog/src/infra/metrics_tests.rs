@@ -19,9 +19,12 @@ use std::time::Duration;
 use super::probe::MetricsProbe;
 use super::{DURATION_BUCKETS, SCOPE, build_default_adapter};
 use crate::domain::metrics::{
-    COUNTERS, DURATIONS, QA_CATALOG_PLUGIN_RESOLUTION, QA_CATALOG_PLUGIN_RESOLUTION_DURATION,
+    COUNTERS, DURATIONS, QA_CATALOG_BUNDLE_DOWNLOAD, QA_CATALOG_PLUGIN_RESOLUTION,
+    QA_CATALOG_PLUGIN_RESOLUTION_DURATION,
 };
-use crate::domain::ports::metrics::{PluginResolutionMetrics, PluginResolutionOutcome};
+use crate::domain::ports::metrics::{
+    BundleDownloadMetrics, BundleDownloadOutcome, PluginResolutionMetrics, PluginResolutionOutcome,
+};
 
 /// **Every family in the catalog is exported under exactly its catalog name.**
 ///
@@ -36,10 +39,14 @@ use crate::domain::ports::metrics::{PluginResolutionMetrics, PluginResolutionOut
 fn every_catalog_family_is_exported_under_its_catalog_name() {
     let probe = MetricsProbe::new();
 
-    // One emission, which drives every family this gear has.
+    // One emission per PORT, which between them drive every family this gear
+    // has. Two ports now, and the sweep below is over the catalog rather than
+    // over a list written here, so a third family added without an emission
+    // above fails this test rather than exporting nothing quietly.
     probe
         .adapter()
         .plugin_resolution(PluginResolutionOutcome::Resolved, Duration::from_millis(1));
+    probe.adapter().bundle_download(BundleDownloadOutcome::Served);
 
     let series = probe.collect();
     let exported = series.names();
@@ -247,5 +254,41 @@ fn the_default_adapter_emits_silently_with_no_pipeline_configured() {
 
     for outcome in PluginResolutionOutcome::ALL {
         adapter.plugin_resolution(outcome, Duration::from_millis(1));
+    }
+    for outcome in BundleDownloadOutcome::ALL {
+        adapter.bundle_download(outcome);
+    }
+}
+
+/// **Every bundle-download outcome reaches the exporter as its own data
+/// point.**
+///
+/// The same sweep, and the same defect, as the resolution family's: an adapter
+/// that hard-coded the attribute would merge all four values into one series,
+/// and the one question this family exists to answer — *is this deployment
+/// refusing downloads because no secret is configured, or because someone is
+/// guessing* — would read as a single flat line.
+///
+/// This family is the ONLY place those three refusals are told apart. The
+/// response deliberately cannot: all three are one 403, so that it is not an
+/// oracle (`domain::service::bundles::SignatureRefusal`). A merged series here
+/// would leave an operator with no way to tell them apart at all.
+#[test]
+fn every_bundle_download_outcome_reaches_the_exporter_on_its_own_series() {
+    let probe = MetricsProbe::new();
+    let adapter = probe.adapter();
+
+    for outcome in BundleDownloadOutcome::ALL {
+        adapter.bundle_download(outcome);
+    }
+
+    let series = probe.collect();
+    for outcome in BundleDownloadOutcome::ALL {
+        assert_eq!(
+            series.counter_with(QA_CATALOG_BUNDLE_DOWNLOAD, &[("outcome", outcome.as_str())]),
+            1,
+            "bundle-download outcome {} exported no counter series of its own",
+            outcome.as_str()
+        );
     }
 }

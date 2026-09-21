@@ -855,13 +855,18 @@ where
         &self,
         scope: &AccessScope,
         universe: &[UniverseTest],
-        latest: &HashMap<String, crate::domain::analytics::universe::LatestInfo>,
+        latest: &HashMap<(Uuid, String), crate::domain::analytics::universe::LatestInfo>,
     ) -> Result<CaseData, DomainError> {
         // Iterating the universe rather than the map's values is legacy's shape
-        // (`:1297-1301`) and is the same set: the map is keyed on universe files.
+        // (`:1297-1301`) and is the same set: the map is keyed on
+        // `(repo_id, test_file)`, one entry per universe file.
         let run_ids: Vec<Uuid> = universe
             .iter()
-            .filter_map(|test| latest.get(&test.test_file).and_then(|info| info.run_id))
+            .filter_map(|test| {
+                latest
+                    .get(&(test.repo_id, test.test_file.clone()))
+                    .and_then(|info| info.run_id)
+            })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();

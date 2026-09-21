@@ -2,7 +2,8 @@
 //! custom plans, and ephemeral test bundle descriptors.
 //!
 //! Follows the qa-environments migration shape: a backend match producing a
-//! single `execute_unprepared` DDL blob per dialect (see DESIGN.md §3.7).
+//! single `execute_unprepared` DDL blob per dialect (see DESIGN.md §3.8,
+//! "Database Schemas & Tables").
 //! JSON array columns (`files`, `tags`) mirror the `holders` column pattern
 //! used by qa-environments' `qa_environment_leases` (renamed from
 //! `qa_platform_leases`). Column, index, and FK order

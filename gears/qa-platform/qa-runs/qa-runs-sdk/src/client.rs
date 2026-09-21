@@ -1,14 +1,13 @@
 //! Object-safe client trait for inter-gear consumption via `ClientHub`.
 
 use async_trait::async_trait;
-use time::OffsetDateTime;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use crate::errors::QaRunsError;
 use crate::models::{
-    LaunchOutcome, LaunchRequest, NewSchedule, QueueEntry, Run, RunResult, RunTestResult, Schedule,
-    ScheduleNotificationSettings,
+    FinishedRunCursor, LaunchOutcome, LaunchRequest, NewSchedule, QueueEntry, Run, RunResult,
+    RunTestResult, Schedule, ScheduleNotificationSettings, ScheduleTick,
 };
 
 /// Object-safe client for the qa-runs gear (Version 1).
@@ -69,19 +68,44 @@ pub trait QaRunsClientV1: Send + Sync {
     /// forbids that, not because there was an API to port. Do not go looking
     /// for the legacy endpoint; there is none.
     ///
-    /// # Both bounds are half-open at one end only
+    /// # The lower bound, and the keyset half of it
     ///
-    /// `finished_at >= since`, inclusive, and a run whose `finished_at` is
-    /// `NULL` - anything not yet terminal - is never returned. An inclusive
-    /// lower bound can re-deliver the run sitting exactly on the watermark;
-    /// re-delivering one run is the cheap failure, and the reconciler's
-    /// backfill is idempotent. An exclusive bound would drop a run that
-    /// finished in the same clock tick as the watermark, which is the
-    /// expensive one.
+    /// [`FinishedRunCursor::starting_at`] is `finished_at >= at`, inclusive,
+    /// and a run whose `finished_at` is `NULL` - anything not yet terminal - is
+    /// never returned. An inclusive lower bound can re-deliver the run sitting
+    /// exactly on the watermark; re-delivering one run is the cheap failure,
+    /// and the reconciler's backfill is idempotent. An exclusive bound would
+    /// drop a run that finished in the same clock tick as the watermark, which
+    /// is the expensive one.
+    ///
+    /// [`FinishedRunCursor::after`] is the **keyset** bound:
+    /// `(finished_at, id) > (at, run_id)`, strictly. That is the same total
+    /// order this method already sorts by, so the caller resumes exactly where
+    /// the previous page ended and no run is delivered twice.
+    ///
+    /// ## Why the cursor carries an id, and what an instant alone could not do
+    ///
+    /// A caller paging forward with an instant alone advances its cursor to the
+    /// newest instant on the page it just read. When `limit` runs share **one**
+    /// `finished_at` - which a burst of parallel completions produces routinely;
+    /// the 2026-09-18 dev-stand burst contained single instants shared by 54,
+    /// 40, 31 and 29 runs - the next page starts at that same instant and comes
+    /// back identical. The cursor cannot step, and every run after that instant
+    /// is stranded for good. Carrying the last run's id along with its instant
+    /// is what makes the cursor total, and a total cursor always steps.
+    ///
+    /// ## One parameter, not two, and that is a guard rather than tidiness
+    ///
+    /// The instant and the id shipped as two positional parameters until the
+    /// 2026-09-18 follow-ups. [`FinishedRunCursor`]'s own doc carries the whole
+    /// argument; in one line, this method is delegated through four layers, at
+    /// every one of them passing the instant on and the id as `None` compiled
+    /// and read like a legitimate first page, and no double could tell the two
+    /// apart.
     async fn list_runs_finished_since(
         &self,
         ctx: &SecurityContext,
-        since: OffsetDateTime,
+        cursor: FinishedRunCursor,
         limit: u32,
     ) -> Result<Vec<Run>, QaRunsError>;
 
@@ -197,4 +221,23 @@ pub trait QaRunsClientV1: Send + Sync {
         id: Uuid,
         settings: ScheduleNotificationSettings,
     ) -> Result<Schedule, QaRunsError>;
+
+    /// One schedule's fire history, most recent `due_at` first: what it
+    /// claimed, what it produced (`run_id`) or why it did not (`error`).
+    ///
+    /// Bounded at `qa-runs`' own `MAX_TICK_READ_LIMIT` (200) — a tick row is
+    /// written once per fire attempt and never deleted except by its
+    /// schedule's cascade, so this is the same "the repository allocates, so
+    /// the repository bounds" reasoning as every other unpaged read in this
+    /// gear.
+    ///
+    /// # Errors
+    ///
+    /// `not_found` when the schedule does not exist **or** is not visible to
+    /// `ctx` — indistinguishable, as everywhere else in this gear.
+    async fn list_schedule_ticks(
+        &self,
+        ctx: &SecurityContext,
+        schedule_id: Uuid,
+    ) -> Result<Vec<ScheduleTick>, QaRunsError>;
 }

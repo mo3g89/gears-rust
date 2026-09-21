@@ -13,10 +13,14 @@
 //! below each take exactly one.
 //!
 //! That name comes from **the plan**, which lists three for this gear — this
-//! header shipped crediting `DESIGN.md` §3.7 and that was wrong. §3.7 names
-//! *tables*; it contains none of the three resource types, and the document's
-//! only `qa.schedule` is the `qa.schedule.fired` event. `domain::service::resources`
-//! is where the vocabulary is recorded, and it cites the plan correctly.
+//! header shipped crediting `DESIGN.md` §3.7 and that was wrong even then:
+//! old §3.7 named *tables*, not resource types, and the document's only
+//! `qa.schedule` was the `qa.schedule.fired` event, in old §3.3's Events
+//! table. A documentation squash has since removed that table, and current
+//! `DESIGN.md` has **zero** occurrences of `qa.schedule` (`grep -c`) under
+//! any section number; current §3.7 is `Product SDK, Product Plugins,
+//! Connectors`. `domain::service::resources` is where the vocabulary is
+//! recorded, and it cites the plan correctly.
 //!
 //! **The `ResourceType` constant is `domain::service::resources::SCHEDULE`,**
 //! and `ScheduleService::scope` is what compiles a scope from it — one
@@ -28,35 +32,39 @@
 //! `PolicyEnforcer`", and both stopped being true when the schedule service
 //! landed. Neither was re-read afterwards.
 //!
-//! ## The tick table is write-only, deliberately and for now
+//! ## The tick table was write-only; [`SchedulesRepository::list_ticks`] closes half of that
 //!
-//! Nothing in this trait reads a `qa_schedule_ticks` row back. Two consequences,
-//! written down because both look like oversights and neither is:
+//! Until WS5 Task 1, nothing in this trait read a `qa_schedule_ticks` row back.
+//! Two consequences were written down here because both looked like oversights
+//! and neither was:
 //!
 //! * **`error` is recorded and cannot be retrieved.** [`SchedulesRepository::record_tick_outcome`]
-//!   writes why a launch failed, and no method returns it. Its readers today are
-//!   a human with a SQL prompt and the log line the caller emits. It is stored
-//!   anyway because the alternative — discarding the reason at the moment it is
-//!   known — is worse, and because the row is the only durable record that the
-//!   fire was attempted at all.
-//! * **An orphaned claim cannot be enumerated.** A claim won by a process that
-//!   died before `record_tick_outcome` keeps `run_id` and `error` NULL forever,
-//!   and nothing here can find such rows. That is not a stuck schedule — see
+//!   writes why a launch failed, and until [`Self::list_ticks`] no method returned
+//!   it — a human with a SQL prompt and the log line the caller emits were the
+//!   only readers. [`Self::list_ticks`] is that read: one schedule's fire
+//!   history, bounded, newest-`due_at`-first, with `run_id`/`error` intact. It
+//!   does not add an orphan sweep or any other write — it is a read, and the
+//!   claim/outcome mechanics above are unchanged.
+//! * **An orphaned claim still cannot be enumerated across schedules.** A claim
+//!   won by a process that died before `record_tick_outcome` keeps `run_id` and
+//!   `error` NULL forever, and nothing here finds *such rows specifically*
+//!   across the fleet. That is not a stuck schedule — see
 //!   [`SchedulesRepository::claim_tick`] on why the next occurrence proceeds
-//!   regardless — but it is an unreconciled row, and no sweep reclaims it.
-//!
-//! A read path (`list_ticks`, a tick-history endpoint, an orphan sweep) is in no
-//! task's file list. This is a deferral recorded at the plan level, not a gap
-//! this module should close on its own initiative.
+//!   regardless — but it is an unreconciled row. [`Self::list_ticks`] makes it
+//!   *visible* to a caller who already knows which schedule to ask about; it is
+//!   not the orphan sweep, which remains a deferral recorded at the plan level,
+//!   not a gap this module closes on its own initiative.
 
 use async_trait::async_trait;
-use qa_runs_sdk::{NewSchedule, Schedule, ScheduleNotificationSettings};
+use qa_runs_sdk::{NewSchedule, Schedule, ScheduleNotificationSettings, ScheduleTick};
 use time::OffsetDateTime;
 use toolkit_db::secure::DBRunner;
+use toolkit_macros::domain_model;
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
+use crate::domain::repos::Windowed;
 
 /// A schedule id that has been resolved under the caller's own access scope.
 ///
@@ -135,6 +143,65 @@ impl OwnedScheduleId {
         self.0
     }
 }
+
+/// One row of [`SchedulesRepository::list_ticks`] — every column of
+/// `qa_schedule_ticks` a caller may read back, except `tenant_id` (the scope's
+/// business, not a caller's) and `created_at` (redundant with `due_at`/
+/// `claimed_at`, which already order and timestamp the row for this read).
+///
+/// **Not every row is a fire attempt.** [`SchedulesRepository::list_ticks`]
+/// returns [`SchedulesRepository::record_referential_check`]'s rows
+/// unfiltered too — `claimed_by == `[`REFERENTIAL_CHECK_CLAIMED_BY`], `due_at`
+/// a check instant rather than a due occurrence, `run_id` always `None`. See
+/// that method's own doc, and this struct's `run_id` field below.
+///
+/// Same shape as `runs_repo::TestResultRow`: a `#[domain_model]` struct that
+/// exists so the mapper (`infra::storage::mapper::tick_to_sdk`) has one place
+/// to name every field the read needs, rather than building
+/// [`qa_runs_sdk::ScheduleTick`] straight from the `SeaORM` model at the call
+/// site, where a dropped field would compile silently.
+#[domain_model]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduleTickRow {
+    pub id: Uuid,
+    pub schedule_id: Uuid,
+    pub due_at: OffsetDateTime,
+    pub claimed_by: String,
+    pub claimed_at: OffsetDateTime,
+    /// `None` until `record_tick_outcome` writes it, forever for an orphaned
+    /// claim (see this module's header) — or **always**, unconditionally,
+    /// when `claimed_by == `[`REFERENTIAL_CHECK_CLAIMED_BY`]: that row was
+    /// never a claim, so there is no launch outcome to ever write here.
+    pub run_id: Option<Uuid>,
+    pub error: Option<String>,
+}
+
+/// Project a stored tick row onto the SDK's read-only [`ScheduleTick`].
+///
+/// Infallible, like `runs_repo::TestResultRow`'s conversion: every column here
+/// is a scalar or an opaque string, matching this table's own entity doc —
+/// "nothing here decodes".
+impl From<ScheduleTickRow> for ScheduleTick {
+    fn from(row: ScheduleTickRow) -> Self {
+        Self {
+            id: row.id,
+            schedule_id: row.schedule_id,
+            due_at: row.due_at,
+            claimed_by: row.claimed_by,
+            claimed_at: row.claimed_at,
+            run_id: row.run_id,
+            error: row.error,
+        }
+    }
+}
+
+/// Ceiling on one [`SchedulesRepository::list_enabled`] scan. Same shape as
+/// `queue_repo::MAX_CLAIM_SCAN`, for a different reason: a fleet's
+/// enabled-schedule count is hand-curated, not something that grows without
+/// bound, so this bounds only the pathological case — see that method's doc
+/// for why fairness at ordinary scale comes from rotating `after`, not from
+/// this cap being tight.
+pub const MAX_SCHEDULE_SCAN: u64 = 1_000;
 
 /// Repository for `qa_schedules` and its `qa_schedule_ticks` claim rows.
 #[async_trait]
@@ -384,15 +451,23 @@ pub trait SchedulesRepository: Send + Sync {
     /// point, because writing under the platform-root identity is worse than
     /// skipping a row.
     ///
-    /// **Uncapped and unwindowed**, unlike every other cross-tenant read in this
-    /// gear. Those are windowed because their sets grow without bound — every
-    /// live run, every claim — and because visiting a row late merely delays
-    /// work that is already late. Neither holds here: a fleet's schedules are a
-    /// hand-curated set, and a schedule *skipped* by a window is a fire that
-    /// never happens, with nothing to retry it until the next due time. A window
-    /// would trade a bounded read for silently missed fires, which is the wrong
-    /// direction for this pass. Stated rather than left implicit: the read is
-    /// therefore linear in the fleet's schedule count, once per tick.
+    /// **Windowed, but not for the reason every other cross-tenant read in
+    /// this gear is.** Those are windowed because their sets grow without
+    /// bound; a hand-curated fleet of schedules does not, and
+    /// [`MAX_SCHEDULE_SCAN`] exists only to cap the pathological case, not to
+    /// decide which schedules get a chance to fire — a schedule *dropped* by
+    /// this scan's own cap would be a fire that never happens, with nothing
+    /// to retry it until the next due time, which is exactly the outcome
+    /// [`ScheduleService`](crate::domain::service::schedules::ScheduleService)'s
+    /// own doc on `MAX_FIRES_PER_TICK` rejected for the *service's* cap. So
+    /// `after` exists for a narrower purpose: it lets the caller rotate which
+    /// end of the id-ordered fleet is read first, which is what closes the
+    /// starvation that constant's doc names — see `Windowed::truncated`'s own
+    /// distinction between "more rows exist past this cap" (this method's
+    /// business) and "the fire budget ran out before the window did" (the
+    /// service's, tracked and rotated on its own cursor, not derived from
+    /// this method's `truncated` flag). `None` starts from the beginning, in
+    /// `id` order, at most [`MAX_SCHEDULE_SCAN`] rows.
     ///
     /// # One corrupt row must not stop the fleet
     ///
@@ -424,7 +499,8 @@ pub trait SchedulesRepository: Send + Sync {
         &self,
         runner: &C,
         scope: &AccessScope,
-    ) -> Result<Vec<(Schedule, Uuid)>, DomainError>;
+        after: Option<Uuid>,
+    ) -> Result<Windowed<(Schedule, Uuid)>, DomainError>;
 
     /// Claim `(schedule_id, due_at)` for this instance, returning the tick id
     /// on success and **`Ok(None)` when somebody else already holds it**.
@@ -435,8 +511,11 @@ pub trait SchedulesRepository: Send + Sync {
     /// `idx_qa_schedule_ticks_claim` and by nothing above it. The claim is an
     /// `INSERT` against a unique index: two instances racing for one due time
     /// both attempt it, one commits, the other takes a unique violation. No
-    /// read-then-write and no advisory lock — DESIGN §3.7 puts it as *"a
-    /// constraint, not a convention"*.
+    /// read-then-write and no advisory lock — a constraint, not a convention.
+    /// (No section of `DESIGN.md` states this; an earlier revision of this
+    /// comment cited "DESIGN §3.7", which is Product SDK and says nothing of
+    /// the kind. The property is stated here, in the one place code actually
+    /// enforces it.)
     ///
     /// # `Ok(None)` is the normal path, and must never be a 500
     ///
@@ -618,4 +697,107 @@ pub trait SchedulesRepository: Send + Sync {
         id: Uuid,
         due_at: OffsetDateTime,
     ) -> Result<bool, DomainError>;
+
+    /// One schedule's fire history, most recent `due_at` first: what a real
+    /// fire claimed, what it produced (`run_id`) or why it did not (`error`)
+    /// — **plus, unfiltered, any [`REFERENTIAL_CHECK_CLAIMED_BY`] row.** That
+    /// row is not a fire attempt at all (see
+    /// [`Self::record_referential_check`]'s own doc): no filter here
+    /// distinguishes it, so a caller that assumes every returned row was a
+    /// claim will misread one as "a fire that produced no run".
+    ///
+    /// Closes the gap this trait's own header names — "the row explaining why
+    /// is reachable by no query, endpoint or SDK method" — for a fixed claim
+    /// followed by a failed launch, a full queue, or an instance death. The
+    /// scope is compiled for `resources::SCHEDULE` with `schedule_id` as the
+    /// resource id, exactly as [`Self::claim_tick`]/[`Self::record_tick_outcome`]
+    /// already do — see this module's header; "the resource id is the
+    /// schedule's, not the tick's" is `ScheduleService`'s decision, not this
+    /// repository's, but the scope it is handed always carries that shape.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::Database`] on a query failure.
+    async fn list_ticks<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        schedule_id: Uuid,
+    ) -> Result<Vec<ScheduleTickRow>, DomainError>;
+
+    /// Write a synthetic `qa_schedule_ticks` row recording that `schedule`'s
+    /// target no longer resolves — the background counterpart of
+    /// `create`/`update`'s write-time check
+    /// ([`crate::domain::service::launch::LaunchService::resolve_target_exists`]).
+    ///
+    /// `checked_at` is the check's own timestamp, not a real due instant, and
+    /// `run_id` is always implicitly `None`: this is not a claim and must not
+    /// be confused with one. `claimed_by` is fixed at the implementation to
+    /// [`REFERENTIAL_CHECK_CLAIMED_BY`], so this row is visually
+    /// distinguishable in the tick history from a real fire attempt. Only
+    /// called when a problem is found — a clean check writes nothing, so a
+    /// healthy fleet does not fill this table.
+    ///
+    /// # Why this does **not** reuse `claim_tick`/`record_tick_outcome`
+    ///
+    /// Both of those are keyed to a real due instant and exist to make firing
+    /// exactly-once — `idx_qa_schedule_ticks_claim`'s whole point. Spending a
+    /// claim on a synthetic timestamp would let a referential-check pass
+    /// collide with, or itself win, the unique index a real fire depends on.
+    ///
+    /// **Being a plain `INSERT` does not exempt this row from that index.**
+    /// `idx_qa_schedule_ticks_claim` covers `(tenant_id, schedule_id,
+    /// due_at)` over the *whole* table, so this row occupies a slot in it
+    /// exactly as a real claim would — "nothing races it" is not why a
+    /// collision cannot happen. What actually keeps the two apart is
+    /// `checked_at`: it is `now_utc()` at sub-second precision, while a real
+    /// `due_at` is a cron occurrence on a minute boundary, so the two spaces
+    /// do not overlap in practice.
+    ///
+    /// **If they ever did collide, the failure is not "the check fails".**
+    /// Whichever of the two rows lands second takes the unique violation.
+    /// If that is the real fire, `claim_tick`'s own mapping
+    /// (`infra::storage::schedules_sea_repo`) classifies any unique
+    /// violation on this index as a lost race and returns `Ok(None)` — the
+    /// normal, silent outcome for "someone else already claimed this". The
+    /// caller then does not launch, believing another instance already
+    /// fired. No row records the real occurrence, and cron does not
+    /// back-fill: that due instant is silently skipped and never retried.
+    ///
+    /// # `schedule` and `tenant_id`, not a bare `Uuid`
+    ///
+    /// Same shape as [`Self::claim_tick`] and for the same reason — see
+    /// [`OwnedScheduleId`]'s doc: the token proves a scope could see the
+    /// schedule but carries no tenant of its own, so the tenant the row is
+    /// written under is a separate, explicit argument rather than derived
+    /// from the token.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::Database`] on a query failure.
+    async fn record_referential_check<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        schedule: OwnedScheduleId,
+        checked_at: OffsetDateTime,
+        error: &str,
+    ) -> Result<(), DomainError>;
 }
+
+/// `qa_schedule_ticks.claimed_by` for a row
+/// [`SchedulesRepository::record_referential_check`] wrote, as opposed to one
+/// a real fire attempt claimed. Public so the service layer that calls the
+/// method and any test that asserts on the row agree on the literal without
+/// either restating it.
+pub const REFERENTIAL_CHECK_CLAIMED_BY: &str = "referential-check";
+
+/// Ceiling on one [`SchedulesRepository::list_ticks`] read. A tick row is
+/// written once per fire attempt and never deleted except by its schedule's
+/// cascade, so an operator-authored, frequently-firing schedule is the one
+/// case this bounds rather than a caller-controlled window — same shape as
+/// `RunsRepository::MAX_TIMEOUT_SWEEP_SCAN`'s reasoning, for the same reason: a
+/// repository that will materialise however many rows exist is the layer that
+/// actually allocates them.
+pub const MAX_TICK_READ_LIMIT: u64 = 200;

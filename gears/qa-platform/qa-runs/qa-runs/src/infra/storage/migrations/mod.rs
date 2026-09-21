@@ -1,6 +1,9 @@
 use sea_orm_migration::prelude::*;
 
 mod m20260813_000003_initial;
+mod m20260918_000004_run_log_positions;
+mod m20260921_000005_run_xfail_counter;
+mod m20260921_000006_run_xpass_counter;
 
 #[cfg(test)]
 mod schema_behaviour_tests;
@@ -23,6 +26,11 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m20260813_000003_initial::Migration)]
+        vec![
+            Box::new(m20260813_000003_initial::Migration),
+            Box::new(m20260918_000004_run_log_positions::Migration),
+            Box::new(m20260921_000005_run_xfail_counter::Migration),
+            Box::new(m20260921_000006_run_xpass_counter::Migration),
+        ]
     }
 }

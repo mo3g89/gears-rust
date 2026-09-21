@@ -5,7 +5,7 @@ template that embeds a file living elsewhere in the repo can only read a copy
 kept inside the chart. Two copies of one file is the shape that already caused a
 real incident here (see the commit before this test's first version, which
 replaced an unguarded second copy of the argo feature list with
-test_features.py's subset check), so each such pair gets a row below.
+check_features.py's subset check), so each such pair gets a row below.
 
 # Most of this test's rows are gone, and that is the point
 

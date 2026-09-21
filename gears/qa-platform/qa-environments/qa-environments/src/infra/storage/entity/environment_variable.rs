@@ -12,19 +12,10 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
     pub tenant_id: Uuid,
-    /// The environment this variable belongs to.
-    ///
-    /// **The physical column is still `environment_id`, and this attribute is what
-    /// keeps it that way — do not delete it as redundant.** The aggregate was
-    /// renamed `TargetPlatform` → `Environment` (spec D5) and this field
-    /// follows, but `m20260903_000010_rename_platform_tables` renames only the
-    /// three *tables*: renaming a column is a behaviour change, three further
-    /// gears own `environment_id` columns with no migration scheduled for them,
-    /// and the plan defers column rewrites to the later expand/contract
-    /// migrations that already touch these columns. Without `column_name` here
-    /// `SeaORM` would derive the column from the field and emit
-    /// `SELECT environment_id FROM qa_environment_variables` against a column
-    /// that does not exist.
+    /// The environment this variable belongs to. Field and physical column
+    /// are both `environment_id`; no `#[sea_orm(column_name)]` pin is needed
+    /// or present — `m20260903_000010_rename_platform_tables` (folded into `migrations::m20260812_000001_initial` by the docs squash), once cited
+    /// here as the reason one was, was removed by the migration squash.
     pub environment_id: Uuid,
     pub name: String,
     pub value: String,

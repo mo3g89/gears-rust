@@ -18,11 +18,11 @@
 //! # `POST /qa/v1/jira/bugs` needs three grants, not one — fix round 1,
 //! # Important 4
 //!
-//! An earlier revision of this description named only `qa.jira_bug/create`.
+//! An earlier revision of this description named only `gts.cf.qa.insights.jira_bug.v1~/create`.
 //! [`crate::domain::service::jira::JiraService::file_bugs`] also reads
 //! `qa_test_results`/`qa_test_case_results` under a separately-compiled
-//! `qa.test_result/list` scope (controller ruling R87) and reads the tenant's
-//! JIRA settings under `qa.jira_config/get` (via
+//! `gts.cf.qa.insights.test_result.v1~/list` scope (controller ruling R87) and reads the tenant's
+//! JIRA settings under `gts.cf.qa.insights.jira_config.v1~/get` (via
 //! [`crate::domain::service::jira::JiraService::active_config`]) before
 //! filing starts — an operator who granted exactly what the old text said
 //! would see every request refused. The description below names all three,
@@ -40,6 +40,18 @@ use toolkit::api::operation_builder::OperationBuilder;
 use super::{API_TAG, License};
 use crate::api::rest::{dto, handlers};
 
+// `DE0901` (GTS string literals must parse) is allowed for this function, and
+// the lint is firing on prose rather than on an identifier. The
+// `file_jira_bugs` description NAMES the three grants a caller needs -
+// `gts.cf.qa.insights.jira_bug.v1~/create` and two more - inside an
+// operation description that a reader of the OpenAPI document sees. The lint
+// scans the whole string literal, so it reads the id plus the sentence that
+// follows it as one identifier and reports the sentence as an invalid GTS
+// segment. The ids themselves are correct and are the values
+// `require_*` checks against; naming them in the description is the point, and
+// the alternative (splitting the prose so no id is ever adjacent to a word) is
+// contorting documentation to satisfy a scanner.
+#[allow(unknown_lints, de0901_gts_string_pattern)]
 pub(super) fn register_jira_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     // GET /qa/v1/jira/open-bugs
     router = OperationBuilder::get("/qa/v1/jira/open-bugs")
@@ -55,7 +67,7 @@ pub(super) fn register_jira_routes(mut router: Router, openapi: &dyn OpenApiRegi
              across every repository a caller's scope admits. A bug the poller has since \
              resolved leaves this list even though POST /qa/v1/jira/bugs' local re-file dedupe \
              may still recognise it - see that endpoint's own description. Requires the \
-             qa.jira_bug/list grant.",
+             gts.cf.qa.insights.jira_bug.v1~/list grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -98,9 +110,9 @@ pub(super) fn register_jira_routes(mut router: Router, openapi: &dyn OpenApiRegi
              failing the whole request - a partial success is a 200 with fewer entries than \
              failed tests, matching the system being replaced's own per-test error handling. \
              404 means run_id has no ingested results at all, which is distinct from a run with \
-             no failures (a 200 with an empty list). Requires three grants: qa.jira_bug/create \
-             for the registry write, qa.test_result/list to read the run's own results, and \
-             qa.jira_config/get to read the tenant's JIRA settings. Unlike the per-test failures \
+             no failures (a 200 with an empty list). Requires three grants: gts.cf.qa.insights.jira_bug.v1~/create \
+             for the registry write, gts.cf.qa.insights.test_result.v1~/list to read the run's own results, and \
+             gts.cf.qa.insights.jira_config.v1~/get to read the tenant's JIRA settings. Unlike the per-test failures \
              above, a denial on any of the three refuses the whole request with a 403 rather \
              than being swallowed - authorization is checked once, before any test is filed.",
         )
