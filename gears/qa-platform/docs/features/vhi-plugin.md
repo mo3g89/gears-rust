@@ -54,6 +54,24 @@ pod at `SSH_KEY_PATH`, mode `0o400`. This is recorded in full in
 `prepare_run_access` returns the mounts and environment bindings a run needs to reach the node, built
 from credstore references only.
 
+### Run variables and which of them a run parameter cannot override
+
+| Variable | Carries | Reserved |
+|----------|---------|----------|
+| `VHI_SSH_HOST` | the node host | yes |
+| `VHI_SSH_KEY_FILE` | path of the mounted private key (`/etc/qa/vhi-ssh/id`) | yes |
+| `VINFRA_PORTAL` | the portal address | yes |
+| `VINFRA_PASSWORD_FILE` | path of the mounted `vinfra` password (`/etc/qa/vhi-vinfra/password`) | yes |
+| `VHI_SSH_PORT`, `VHI_SSH_USER`, `VINFRA_USERNAME` | operator-tunable knobs the credential form already exposes | no |
+| `E2E_VHI_BASE_URL` | the observed base URL | no |
+
+`env_contract` reserves the first four, on top of the platform's own reserved set (PRD §5.4; none of the four is in it): a run parameter
+of one of those names is refused, because each is a fact about the target and overriding one would
+point the run at a different host or credential. The knobs are left open because an operator could
+have typed the same value into the credential form, so an override escalates nothing.
+`E2E_VHI_BASE_URL` is left open for parity with VHP's `E2E_VHP_BASE_URL`, which a run parameter may override. There is no
+`VINFRA_PASSWORD` variable at all: the password reaches the run only as a mounted file.
+
 ## Verification
 
 * Plugin boot and resolution in `qa_product_plugin_boot.rs`.

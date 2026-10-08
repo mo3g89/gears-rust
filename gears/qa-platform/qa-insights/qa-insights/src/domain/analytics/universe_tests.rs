@@ -565,7 +565,7 @@ fn the_latest_entry_carries_every_field_the_lists_render() {
 /// `LatestInfo::default()` keeps `build: None` (`:294-303`), so the `Option`
 /// distinguishes "never executed" and nothing else.
 ///
-/// **Controller ruling R15, and a live parity gap until it.** This port read
+/// **A live parity gap until a review closed it.** This port read
 /// `row.build` straight through, so it rendered `null` where legacy renders
 /// `"unknown"` and `"  9.1  "` where legacy renders `"9.1"` — on
 /// `AnalyticsListItem::last_build`, a column the UI already draws. The gap was
@@ -725,7 +725,7 @@ async fn the_universe_a_reader_returns_feeds_the_alias_map() {
 }
 
 // ---------------------------------------------------------------------------
-// Expected cases (Task 29)
+// Expected cases
 // ---------------------------------------------------------------------------
 
 /// [`expected_cases`](super::expected_cases)' own tests, in their own module

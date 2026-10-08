@@ -40,8 +40,10 @@ Scoping is applied in two different places, and which one depends on what the se
 
 | Surface | Scoped by | Where |
 |---------|-----------|-------|
-| Dashboard | a `product_id` request parameter | server, aggregated |
-| Runs, schedules, plans, environments, custom plans | target → product | browser, over data the page already holds |
+| Dashboard (runs, stats, charts) | a `product_id` request parameter | server, aggregated |
+| Dashboard environments card, Environments page | the environment's own `product_id` (required: every environment belongs to exactly one product) | browser, over the environment list the surface fetches |
+| Runs, schedules, custom plans | target → product | browser, over data the page already holds |
+| Plans, Standard tab | the repository's own `product_id` (plans are listed per repository) | browser, by narrowing the repository list before the per-repository fetch |
 
 Where the server cannot attribute a row and the client can, **the page says so** rather than the
 discrepancy being left to a code comment. A list that silently accepts an ignored `product_id`
@@ -62,5 +64,22 @@ parameter is worse than one that admits it filters client-side: it looks scoped 
 ### Confirmation
 
 * `test_repositories.product_id` is `NOT NULL`.
-* No scoped list derives a product from an environment.
-* The surfaces that filter in the browser state it in the UI rather than only in comments.
+* `qa_environments.product_id` is `NOT NULL` (qa-environments' `m20260812_000001_initial` migration;
+  DESIGN §3.8 "Database Schemas & Tables", `qa_environments`), so every environment belongs to
+  exactly one product.
+* No scoped list of runs, schedules or plans derives a product from an environment. The two
+  environment surfaces scope by the environment's *own* `product_id`, which is an attribute of the
+  row, not an attribution through another one.
+* The surfaces that filter in the browser state it in the UI rather than only in comments: the Runs,
+  Schedules and Environments pages, the Plans page (both the Standard Plans and the Custom Plans
+  tab) and the Dashboard's environments strip each show a "filtered in your browser" notice, and
+  each has a test that asserts it.
+
+## Amendments
+
+**Environments without a product.** When this ADR was accepted `qa_environments.product_id` was
+nullable, and the browser-scoped environment surfaces listed an environment that named no product
+under every product (it belonged to no product rather than to another one, so listing it leaked
+nothing). qa-environments has since made the column `NOT NULL` and its model a plain `Uuid`, so that
+state cannot exist: every environment is listed under exactly its own product, and the UI no longer
+describes the other case.

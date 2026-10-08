@@ -212,9 +212,7 @@ const KUBECONFIG_REQUIRED: &str =
 /// [`FailureClass::Malformed`] when a required field is absent or blank. The
 /// text is fixed and names no submitted value — the enforcement point for
 /// the "Credential containment" rule in
-/// `gears/qa-platform/docs/features/product-plugins.md` (unnumbered;
-/// `PRODUCT-PLUGINS-DESIGN.md` §9, cited here before the docs squash, no
-/// longer exists).
+/// `gears/qa-platform/docs/features/product-plugins.md` and in ADR-0008.
 pub fn validate_credentials(
     input: &CredentialInput,
 ) -> Result<Vec<CredentialClassification>, PluginFailure> {

@@ -1,6 +1,7 @@
 //! Shared test doubles for the `domain::service` unit tests.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -17,7 +18,9 @@ use uuid::Uuid;
 
 use super::DbProvider;
 use super::authz_surface::ENFORCED;
+use super::branch_snapshot::BranchSync;
 use crate::domain::error::DomainError;
+use crate::domain::ports::repo_sync::{RepoSyncPort, SyncResult};
 use crate::domain::repos::{RefreshTarget, SshKeysRepository, TestReposRepository};
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::PlatformSecurityContext;
@@ -197,19 +200,28 @@ impl AuthZResolverApi for SelectiveGrantAuthZ {
 /// The SDK `TestRepository` model carries no `tenant_id`, so the owning
 /// tenant is held alongside it: `list_refresh_targets` reports it (rather
 /// than a hardcoded nil, which would mask a service passing the wrong tenant
-/// to `replace_branches`), and `recorded_branch_tenant` exposes the tenant
-/// the service actually wrote branch rows under.
+/// to `replace_branches`).
 pub(super) struct MockTestReposRepository {
     repo: Mutex<Option<TestRepository>>,
     tenant_id: Uuid,
     branches: Mutex<Vec<String>>,
-    recorded_branch_tenant: Mutex<Option<Uuid>>,
+    replace_calls: Mutex<usize>,
     /// When set, the stored repository's `url` is replaced with this value
     /// right after the FIRST `get` returns — a deterministic stand-in for a
     /// concurrent `update_repo` landing between `sync_repo`'s pre-lock read
     /// and its under-lock re-read.
     url_after_first_get: Mutex<Option<String>>,
+    /// Run once, right after the next `get` has read the row: a
+    /// deterministic stand-in for something landing between a caller's row
+    /// read and whatever it reads next.
+    after_get_hook: AfterGetHook,
 }
+
+type AfterGetHook = Mutex<
+    Option<
+        Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>,
+    >,
+>;
 
 impl MockTestReposRepository {
     pub(super) fn with_repo(repo: TestRepository) -> Self {
@@ -223,8 +235,9 @@ impl MockTestReposRepository {
             repo: Mutex::new(Some(repo)),
             tenant_id,
             branches: Mutex::new(Vec::new()),
-            recorded_branch_tenant: Mutex::new(None),
+            replace_calls: Mutex::new(0),
             url_after_first_get: Mutex::new(None),
+            after_get_hook: Mutex::new(None),
         }
     }
 
@@ -237,23 +250,44 @@ impl MockTestReposRepository {
         mock
     }
 
+    /// Run `hook` once, right after the next `get` has read the row.
+    pub(super) fn with_after_get_hook<F>(self, hook: impl FnOnce() -> F + Send + 'static) -> Self
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        *self.after_get_hook.lock().unwrap() = Some(Box::new(move || Box::pin(hook())));
+        self
+    }
+
     pub(super) fn none() -> Self {
         Self {
             repo: Mutex::new(None),
             tenant_id: Uuid::new_v4(),
             branches: Mutex::new(Vec::new()),
-            recorded_branch_tenant: Mutex::new(None),
+            replace_calls: Mutex::new(0),
             url_after_first_get: Mutex::new(None),
+            after_get_hook: Mutex::new(None),
         }
+    }
+
+    /// Seed the branch cache, as an earlier sync or refresher pass would
+    /// have left it.
+    pub(super) fn set_cached_branches(&self, branches: &[&str]) {
+        *self.branches.lock().unwrap() = branches.iter().map(|b| (*b).to_owned()).collect();
+    }
+
+    /// The stored repository row as it is now.
+    pub(super) fn current(&self) -> Option<TestRepository> {
+        self.repo.lock().unwrap().clone()
     }
 
     pub(super) fn recorded_branches(&self) -> Vec<String> {
         self.branches.lock().unwrap().clone()
     }
 
-    /// The `tenant_id` the last `replace_branches` call was handed.
-    pub(super) fn recorded_branch_tenant(&self) -> Option<Uuid> {
-        *self.recorded_branch_tenant.lock().unwrap()
+    /// How many times `replace_branches` was called.
+    pub(super) fn replace_calls(&self) -> usize {
+        *self.replace_calls.lock().unwrap()
     }
 
     /// Simulate a successful sync that found **nothing new**: bump the
@@ -302,6 +336,21 @@ impl MockTestReposRepository {
             repo.product_id = product_id;
         }
     }
+
+    /// Simulate an `update_repo` of the credential landing on the stored row.
+    pub(super) fn set_credential_ref(&self, credential_ref: Option<&str>) {
+        if let Some(repo) = self.repo.lock().unwrap().as_mut() {
+            repo.credential_ref = credential_ref.map(ToOwned::to_owned);
+        }
+    }
+
+    /// Simulate another branch's failed sync landing on the stored row: the
+    /// repository-wide `sync_error`, nothing else touched.
+    pub(super) fn set_sync_error(&self, sync_error: Option<&str>) {
+        if let Some(repo) = self.repo.lock().unwrap().as_mut() {
+            repo.sync_error = sync_error.map(ToOwned::to_owned);
+        }
+    }
 }
 
 #[async_trait]
@@ -325,7 +374,28 @@ impl TestReposRepository for MockTestReposRepository {
         {
             repo.url = moved_url;
         }
+        let hook = self.after_get_hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook().await;
+        }
         Ok(found)
+    }
+
+    async fn owner_tenant<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<Uuid>, DomainError> {
+        // The pinned tenant, as `list_refresh_targets` reports it: a request
+        // path and the refresher must agree on the owner.
+        Ok(self
+            .repo
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|r| r.id == id)
+            .map(|_| self.tenant_id))
     }
 
     async fn list<C: DBRunner>(
@@ -431,12 +501,25 @@ impl TestReposRepository for MockTestReposRepository {
         &self,
         _runner: &C,
         _scope: &AccessScope,
-        tenant_id: Uuid,
-        _repo_id: Uuid,
+        repo_id: Uuid,
         branches: Vec<String>,
     ) -> Result<(), DomainError> {
-        *self.branches.lock().unwrap() = branches;
-        *self.recorded_branch_tenant.lock().unwrap() = Some(tenant_id);
+        // Same contract as `OrmTestReposRepository::replace_branches`: an
+        // unresolvable repository is `NotFound`, and the cache ends as the
+        // listing, duplicates collapsed. The owning tenant is the adapter's to
+        // read off the row, so there is nothing to record here.
+        if self
+            .repo
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|r| r.id != repo_id)
+        {
+            return Err(DomainError::NotFound { id: repo_id });
+        }
+        let listed: std::collections::BTreeSet<String> = branches.into_iter().collect();
+        *self.branches.lock().unwrap() = listed.into_iter().collect();
+        *self.replace_calls.lock().unwrap() += 1;
         Ok(())
     }
 
@@ -539,5 +622,405 @@ impl SshKeysRepository for MockSshKeysRepository {
         _id: Uuid,
     ) -> Result<bool, DomainError> {
         unimplemented!("ReposService never deletes ssh keys")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sync engine double
+// ---------------------------------------------------------------------------
+
+enum SyncBehavior {
+    /// Return these branches and write `(relative path, content)` fixture
+    /// files into the branch snapshot first (mirrors a real materialization).
+    Succeed {
+        branches: Vec<String>,
+        files: Vec<(String, String)>,
+    },
+    /// Fail with this message (as the gix adapter would via `DomainError`).
+    Fail { message: String },
+    /// The content sync fails with the error this builds — for the variants
+    /// the service classifies (timeout, byte budget).
+    FailWith(fn() -> DomainError),
+}
+
+/// How the double's ls-refs half fails, when told to: the two classes the lazy
+/// read answers differently (DESIGN §3.3).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum LsRefsFailure {
+    /// The remote could not be reached.
+    Unreachable,
+    /// The remote refused the credential.
+    CredentialRejected,
+    /// The remote did not answer within the deadline (the adapter's
+    /// `RemoteTimedOut`).
+    TimedOut,
+}
+
+/// In-memory `RepoSyncPort` double: programmed to succeed (optionally
+/// writing fixture files into the branch snapshot, as the real gix adapter
+/// materializes one) or fail with a given message.
+///
+/// By default `Succeed`/`Fail` drive both halves — the content sync and the
+/// ls-refs listing. [`Self::failing_sync_of`] splits them: the remote lists
+/// branches, and the content sync of any of them fails.
+pub(super) struct MockRepoSyncPort {
+    behavior: SyncBehavior,
+    /// When set, what `list_remote_branches` answers regardless of
+    /// `behavior`.
+    remote_branches_override: Option<Vec<String>>,
+    seen_credentials: Mutex<Vec<Option<String>>>,
+    seen_urls: Mutex<Vec<String>>,
+    /// Every branch the content-sync half was asked to materialize.
+    synced_branches: Mutex<Vec<String>>,
+    /// How many times the ls-refs half was called.
+    ls_refs_calls: Mutex<usize>,
+    /// When set, how every call to the remote fails, ahead of everything
+    /// else: ls-refs, and the content sync too — a remote that is down, or
+    /// that refuses the credential, refuses both.
+    ls_refs_failure: Mutex<Option<LsRefsFailure>>,
+    /// Run once, inside the next ls-refs call: a deterministic stand-in for
+    /// something landing while the remote is being listed.
+    ls_refs_hook: LsRefsHook,
+}
+
+type LsRefsHook = Mutex<Option<Box<dyn FnOnce() + Send>>>;
+
+impl MockRepoSyncPort {
+    fn with_behavior(
+        behavior: SyncBehavior,
+        remote_branches_override: Option<Vec<String>>,
+    ) -> Self {
+        Self {
+            behavior,
+            remote_branches_override,
+            seen_credentials: Mutex::new(Vec::new()),
+            seen_urls: Mutex::new(Vec::new()),
+            synced_branches: Mutex::new(Vec::new()),
+            ls_refs_calls: Mutex::new(0),
+            ls_refs_failure: Mutex::new(None),
+            ls_refs_hook: Mutex::new(None),
+        }
+    }
+
+    /// Run `hook` once, inside the next ls-refs call.
+    pub(super) fn with_ls_refs_hook(self, hook: impl FnOnce() + Send + 'static) -> Self {
+        *self.ls_refs_hook.lock().unwrap() = Some(Box::new(hook));
+        self
+    }
+
+    /// Make every ls-refs call (and content sync) fail with `failure` until
+    /// told otherwise.
+    pub(super) fn with_ls_refs_failure(self, failure: LsRefsFailure) -> Self {
+        *self.ls_refs_failure.lock().unwrap() = Some(failure);
+        self
+    }
+
+    pub(super) fn set_ls_refs_failure(&self, failure: Option<LsRefsFailure>) {
+        *self.ls_refs_failure.lock().unwrap() = failure;
+    }
+
+    pub(super) fn succeeding(branches: Vec<String>, files: Vec<(String, String)>) -> Self {
+        Self::with_behavior(SyncBehavior::Succeed { branches, files }, None)
+    }
+
+    pub(super) fn failing(message: &str) -> Self {
+        Self::with_behavior(
+            SyncBehavior::Fail {
+                message: message.to_owned(),
+            },
+            None,
+        )
+    }
+
+    /// The remote lists `remote_branches`, and every content sync fails with
+    /// `message` — a branch that exists but cannot be fetched.
+    pub(super) fn failing_sync_of(remote_branches: Vec<String>, message: &str) -> Self {
+        Self::with_behavior(
+            SyncBehavior::Fail {
+                message: message.to_owned(),
+            },
+            Some(remote_branches),
+        )
+    }
+
+    /// The remote lists `remote_branches`, and every content sync fails with
+    /// the error `error` builds — for the timeout and budget classes.
+    pub(super) fn failing_sync_with(
+        remote_branches: Vec<String>,
+        error: fn() -> DomainError,
+    ) -> Self {
+        Self::with_behavior(SyncBehavior::FailWith(error), Some(remote_branches))
+    }
+
+    /// Every `credential` argument the engine was handed, in call order.
+    /// `Some(material)` proves the resolved credstore secret actually reached
+    /// the engine; `None` is a public-repository call.
+    pub(super) fn seen_credentials(&self) -> Vec<Option<String>> {
+        self.seen_credentials.lock().unwrap().clone()
+    }
+
+    /// Every `url` the content-sync half was handed, in call order.
+    pub(super) fn seen_urls(&self) -> Vec<String> {
+        self.seen_urls.lock().unwrap().clone()
+    }
+
+    /// Every branch the content-sync half was asked for, in call order.
+    pub(super) fn synced_branches(&self) -> Vec<String> {
+        self.synced_branches.lock().unwrap().clone()
+    }
+
+    /// How many times the ls-refs half was called.
+    pub(super) fn ls_refs_calls(&self) -> usize {
+        *self.ls_refs_calls.lock().unwrap()
+    }
+
+    /// The `list_remote_branches` (ls-refs) half of the double, used by the
+    /// branch-cache refresher tests. `Succeed`/`Fail` drive both halves
+    /// unless an override was set.
+    /// The programmed remote failure, if any, as the adapter reports it for
+    /// the step named `context`.
+    fn remote_failure(&self, context: &str) -> Option<DomainError> {
+        match *self.ls_refs_failure.lock().unwrap() {
+            Some(LsRefsFailure::Unreachable) => Some(DomainError::SyncFailed {
+                message: format!(
+                    "{context}: failed to connect to https://git.example/r.git: Connection refused"
+                ),
+            }),
+            Some(LsRefsFailure::CredentialRejected) => Some(DomainError::CredentialRejected {
+                message: format!(
+                    "{context}: Credentials provided for \"https://git.example/r.git\" were not accepted by the remote"
+                ),
+            }),
+            Some(LsRefsFailure::TimedOut) => Some(DomainError::RemoteTimedOut {
+                message: format!("{context}: did not finish within 30 s"),
+            }),
+            None => None,
+        }
+    }
+
+    fn remote_branches(&self) -> Result<Vec<String>, DomainError> {
+        if let Some(err) = self.remote_failure("ls-refs failed") {
+            return Err(err);
+        }
+        if let Some(branches) = &self.remote_branches_override {
+            return Ok(branches.clone());
+        }
+        match &self.behavior {
+            SyncBehavior::Succeed { branches, .. } => Ok(branches.clone()),
+            SyncBehavior::Fail { message } => Err(DomainError::Internal(message.clone())),
+            SyncBehavior::FailWith(error) => Err(error()),
+        }
+    }
+}
+
+#[async_trait]
+impl RepoSyncPort for MockRepoSyncPort {
+    async fn sync(
+        &self,
+        url: &str,
+        branch: &str,
+        credential: Option<&str>,
+        _host_dir: &Path,
+        branch_workdir: &Path,
+    ) -> Result<SyncResult, DomainError> {
+        self.seen_credentials
+            .lock()
+            .unwrap()
+            .push(credential.map(ToOwned::to_owned));
+        self.seen_urls.lock().unwrap().push(url.to_owned());
+        self.synced_branches.lock().unwrap().push(branch.to_owned());
+        // A real fetch suspends; yielding here lets a concurrent reader run
+        // while this sync is in flight, which is the interleaving the
+        // "concurrent first reads sync once" tests need to exercise.
+        tokio::task::yield_now().await;
+        if let Some(err) = self.remote_failure("fetch negotiation failed") {
+            return Err(err);
+        }
+        match &self.behavior {
+            SyncBehavior::Succeed { branches, files } => {
+                // The snapshot directory exists after a real sync even when
+                // the branch has no files.
+                std::fs::create_dir_all(branch_workdir).unwrap();
+                for (rel, content) in files {
+                    let path = branch_workdir.join(rel);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).unwrap();
+                    }
+                    std::fs::write(&path, content).unwrap();
+                }
+                Ok(SyncResult {
+                    branches: branches.clone(),
+                    head_commit: "deadbeef".to_owned(),
+                })
+            }
+            SyncBehavior::Fail { message } => Err(DomainError::Internal(message.clone())),
+            SyncBehavior::FailWith(error) => Err(error()),
+        }
+    }
+
+    async fn list_remote_branches(
+        &self,
+        _url: &str,
+        credential: Option<&str>,
+    ) -> Result<Vec<String>, DomainError> {
+        self.seen_credentials
+            .lock()
+            .unwrap()
+            .push(credential.map(ToOwned::to_owned));
+        *self.ls_refs_calls.lock().unwrap() += 1;
+        let hook = self.ls_refs_hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.remote_branches()
+    }
+}
+
+/// A `ReposService` over `repos` and `engine`, for the readers' lazy-sync
+/// tests: the plan and bundle readers hold it as their `BranchSync`.
+///
+/// `freshness_ttl` is the sync cache's TTL; a non-zero one is what lets a
+/// second concurrent reader find the branch fresh once the first has synced.
+pub(super) async fn branch_sync_over(
+    repos: Arc<MockTestReposRepository>,
+    engine: Arc<MockRepoSyncPort>,
+    repos_dir: std::path::PathBuf,
+    freshness_ttl: std::time::Duration,
+) -> Arc<dyn BranchSync> {
+    branch_sync_with(
+        repos,
+        engine,
+        repos_dir,
+        super::sync_cache::SyncCache::new(freshness_ttl),
+        Arc::new(PermissiveAuthZ),
+    )
+    .await
+}
+
+/// A `ReposService` over `repos` and `engine` with a caller-built sync cache
+/// and `AuthZ` double — for the lazy-read tests that need a backoff window or a
+/// reader who lacks `SYNC`.
+pub(super) async fn branch_sync_with(
+    repos: Arc<MockTestReposRepository>,
+    engine: Arc<MockRepoSyncPort>,
+    repos_dir: std::path::PathBuf,
+    cache: super::sync_cache::SyncCache,
+    authz: Arc<dyn AuthZResolverApi>,
+) -> Arc<dyn BranchSync> {
+    Arc::new(super::repos::ReposService::new(
+        test_db_provider().await,
+        repos,
+        Arc::new(MockSshKeysRepository::none()),
+        Arc::new(credstore_sdk::test_util::MockCredStoreClient::empty()),
+        engine,
+        repos_dir,
+        Arc::new(cache),
+        authz_resolver_sdk::PolicyEnforcer::new(authz),
+    ))
+}
+
+/// [`branch_sync_over`] with a caller-supplied credential store — for the
+/// lazy-read tests that need to know which identity read the secret.
+pub(super) async fn branch_sync_with_credstore(
+    repos: Arc<MockTestReposRepository>,
+    engine: Arc<MockRepoSyncPort>,
+    repos_dir: std::path::PathBuf,
+    freshness_ttl: std::time::Duration,
+    credstore: Arc<dyn credstore_sdk::CredStoreClientV1>,
+) -> Arc<dyn BranchSync> {
+    Arc::new(super::repos::ReposService::new(
+        test_db_provider().await,
+        repos,
+        Arc::new(MockSshKeysRepository::none()),
+        credstore,
+        engine,
+        repos_dir,
+        Arc::new(super::sync_cache::SyncCache::new(freshness_ttl)),
+        authz_resolver_sdk::PolicyEnforcer::new(Arc::new(PermissiveAuthZ)),
+    ))
+}
+
+/// A `BranchSync` over a remote with no branches at all: every read of a
+/// branch without a snapshot is `BranchNotFound`, and the content-sync half
+/// is never reached. For reader tests that do not exercise the lazy sync.
+pub(super) async fn branch_sync_over_an_empty_remote(
+    repos: Arc<MockTestReposRepository>,
+    repos_dir: std::path::PathBuf,
+) -> Arc<dyn BranchSync> {
+    branch_sync_over(
+        repos,
+        Arc::new(MockRepoSyncPort::succeeding(Vec::new(), Vec::new())),
+        repos_dir,
+        std::time::Duration::ZERO,
+    )
+    .await
+}
+
+/// One secret [`SharingCredStore`] holds: who owns it, in which tenant,
+/// shared how.
+pub(super) struct StoredSecret {
+    /// The reference, a bare name as every credential reference is.
+    pub(super) reference: &'static str,
+    pub(super) value: &'static str,
+    pub(super) tenant: Uuid,
+    pub(super) owner: Uuid,
+    pub(super) sharing: credstore_sdk::SharingMode,
+}
+
+/// A credential store that applies credstore's sharing rule to the caller.
+///
+/// `credstore_sdk::test_util::MockCredStoreClient` answers the same value to
+/// every caller, so it cannot tell a user's read from the qa-catalog system
+/// actor's — the distinction a sync and a read have to make. This double
+/// applies the visibility predicate of credstore's resolver (`resolve_for_get`
+/// in `gears/credstore/credstore/src/infra/storage/repo_impl/reads.rs`) for a
+/// one-tenant chain: `Private` is visible to its owner only, `Tenant` and
+/// `Shared` to every subject of the owning tenant. A miss is `Ok(None)`, the
+/// SDK's single anti-enumeration surface. Read-only: every write takes the
+/// trait's default, which fails.
+pub(super) struct SharingCredStore {
+    secrets: Vec<StoredSecret>,
+}
+
+impl SharingCredStore {
+    pub(super) const fn new(secrets: Vec<StoredSecret>) -> Self {
+        Self { secrets }
+    }
+
+    fn visible(
+        secret: &StoredSecret,
+        ctx: &SecurityContext,
+        key: &credstore_sdk::SecretRef,
+    ) -> bool {
+        secret.reference == key.as_ref()
+            && secret.tenant == ctx.subject_tenant_id()
+            && match secret.sharing {
+                credstore_sdk::SharingMode::Private => secret.owner == ctx.subject_id(),
+                credstore_sdk::SharingMode::Tenant | credstore_sdk::SharingMode::Shared => true,
+            }
+    }
+}
+
+#[async_trait]
+impl credstore_sdk::CredStoreClientV1 for SharingCredStore {
+    async fn get(
+        &self,
+        ctx: &SecurityContext,
+        key: &credstore_sdk::SecretRef,
+    ) -> Result<Option<credstore_sdk::GetSecretResponse>, credstore_sdk::CredStoreError> {
+        Ok(self
+            .secrets
+            .iter()
+            .find(|s| Self::visible(s, ctx, key))
+            .map(|s| credstore_sdk::GetSecretResponse {
+                value: credstore_sdk::SecretValue::new(s.value.as_bytes().to_vec()),
+                id: Uuid::nil(),
+                owner_tenant_id: credstore_sdk::TenantId(s.tenant),
+                sharing: s.sharing,
+                is_inherited: false,
+                version: 1,
+                secret_type: credstore_sdk::SecretType::generic().gts_id().to_owned(),
+                expires_at: None,
+            }))
     }
 }

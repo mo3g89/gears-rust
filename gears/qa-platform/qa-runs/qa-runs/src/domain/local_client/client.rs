@@ -286,8 +286,9 @@ impl QaRunsClientV1 for QaRunsLocalClient {
     /// records why that split is a property of the `SET` list rather than of the
     /// caller.
     ///
-    /// This is the seam D9 exists for: qa-insights reads the settings back off
-    /// `Schedule` when a scheduled run changes status (Task 36).
+    /// This is the seam per-schedule notification settings exist for:
+    /// qa-insights reads the settings back off `Schedule` when a scheduled run
+    /// changes status.
     async fn update_schedule_notifications(
         &self,
         ctx: &SecurityContext,

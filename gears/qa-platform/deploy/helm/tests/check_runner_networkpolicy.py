@@ -68,7 +68,7 @@ the rule's ABSENCE is what stops a partial revert leaving the egress path
 open while the token claims to have replaced the credential.
 
 The remaining allow-list item -- the run's target environment -- is NOT
-statically knowable at all (task-8-report.md has the full reasoning) and
+statically knowable at all (the tenant supplies its address per run) and
 this guard only checks that the static superset chosen for it still
 excludes the CLUSTER'S OWN pod/Service CIDRs (`argo.podCidr` /
 `argo.serviceCidr`), not all of RFC 1918 -- fix round 6 found that the
@@ -122,12 +122,18 @@ def render(*extra):
     out = subprocess.run(
         ["helm", "template", "qa-platform", str(CHART),
          "--namespace", "qa-platform", "--set", f"publicOrigin={ORIGIN}",
-         # keycloak.adminPassword has no default (WS3 Task 3) -- any value
+         # keycloak.adminPassword has no default -- any value
          # that is not the literal "admin" satisfies the render.
          "--set", "keycloak.adminPassword=guard-fixture-not-a-real-password",
+         # argo.workflowClientSecret is `required` too (2026-09-29): it is the
+         # qa-platform-workflow client's confidential secret and the chart
+         # refuses the committed dev literal outside devMode. Any other value
+         # renders; check_realm_secrecy.py owns both of those assertions.
+         "--set", "argo.workflowClientSecret=guard-fixture-not-a-real-workflow-secret",  # nosec: test fixture only
+         "--set", "postgres.password=guard-fixture-not-a-real-db-password",  # nosec: test fixture only
          # Both signing secrets have no default either (2026-09-21): the
          # per-render `randAlphaNum` fallback became a pod roll on every
-         # upgrade once the gears Deployment started hashing the ConfigMap.
+         # upgrade once the gears Deployment started hashing that object.
          "--set", "bundleDownloadSigningSecret=guard-fixture-not-a-real-bundle-key",
          "--set", "collectReportSigningSecret=guard-fixture-not-a-real-collect-key",
          *extra],
@@ -382,7 +388,7 @@ def check_keycloak_egress_is_gone(failures):
 
 def check_target_environment_superset_excludes_private_space(failures):
     """Not a claim that this expresses "the target environment" -- it
-    doesn't, and can't (see task-8-report.md). Only that whatever static
+    doesn't, and can't. Only that whatever static
     superset was chosen still keeps the CLUSTER'S OWN pod/Service networks
     out of it -- not all of RFC1918, which is the wrong thing to check since
     fix round 6: excluding every private range also excludes every on-prem
@@ -421,7 +427,7 @@ def check_target_environment_superset_excludes_private_space(failures):
         print(
             "NOTE: no 0.0.0.0/0 egress rule found -- this deployment allows "
             "no additional egress for the run's target environment. That is "
-            "a valid choice (see task-8-report.md) but means runs whose "
+            "a valid choice but means runs whose "
             "target is not covered by the DNS/gears rules cannot reach it.")
         return
 

@@ -93,7 +93,7 @@
 //!
 //!   That is not the usual cardinality argument wearing a disclosure hat. This
 //!   gear's whole design is about keeping exactly those values from leaving:
-//!   `EnvironmentDto` deliberately drops `kubeconfig_credstore_ref` because
+//!   `EnvironmentDto` deliberately drops the credential references because
 //!   under `SharingMode::Tenant` the reference *is* a read path to the
 //!   kubeconfig; `PluginFailure::detail` is `&'static str` because a measured
 //!   leak on 2026-08-28 put a PEM private key on the environment page through a
@@ -508,8 +508,9 @@ impl From<&DomainError> for ObservationClass {
 /// # There is no value for a plugin that was never reached
 ///
 /// Deliberately, and it is the same argument as above from the other side.
-/// `observe_through_plugin` has four exits before the round trip — no product,
-/// no resolvable plugin, no resolver at all, an unreadable credential — and
+/// `observe_through_plugin` has three exits before the round trip — no
+/// resolvable plugin, no resolver at all, an unreadable credential (an
+/// environment naming no product is unrepresentable since Task 20b) — and
 /// none of them emits into this family, because nothing was called and a
 /// near-zero sample would corrupt the distribution this family exists to
 /// report. They are still counted, as

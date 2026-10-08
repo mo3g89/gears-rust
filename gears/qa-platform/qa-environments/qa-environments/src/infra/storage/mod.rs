@@ -31,7 +31,13 @@ mod leases_sea_repo;
 /// would be the redundancy `clippy::redundant_pub_crate` names.
 pub mod odata;
 mod variables_sea_repo;
+#[cfg(all(test, feature = "postgres"))]
+#[path = "variables_pg_tests.rs"]
+mod variables_pg_tests;
 
+/// Re-exported for the routes, which declare `limit` with the bounds the
+/// repositories clamp to. `pub` for the reason [`odata`] gives.
+pub use db::PAGE_LIMITS;
 pub use environments_sea_repo::OrmEnvironmentsRepository;
 pub use leases_sea_repo::OrmLeasesRepository;
 pub use variables_sea_repo::OrmVariablesRepository;

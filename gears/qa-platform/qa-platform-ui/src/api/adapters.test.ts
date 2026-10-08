@@ -37,7 +37,7 @@ import {
 //
 // The literals here are the gears' real `Page<T>` envelope — `{ items, page_info }`
 // (`generated/openapi.d.ts` `PageInfo` + the eight `Page_*` instantiations).
-// The plan's Task 10 step list wrote `{ value, count }`, which is OData's envelope
+// An earlier plan wrote `{ value, count }`, which is OData's envelope
 // and appears nowhere in this document; asserting on it would have made the test
 // pass against a shape the gears never send.
 
@@ -72,7 +72,7 @@ describe('observedFromEnvironments', () => {
   });
 
   it('keeps the build beside the version without treating it as a branch', () => {
-    // CONTRACT-DIFF §5-E: `observed_build` is a build, never a branch. It is carried
+    // `observed_build` is a build, never a branch. It is carried
     // here so a caller that wants a build label has one, and no branch list is fed
     // from it anywhere.
     expect(observedFromEnvironments([{ id: '1', observed_version: '7.0', observed_build: '7.0.1' }])).toEqual([
@@ -102,7 +102,7 @@ describe('distinctObservedVersions', () => {
   });
 
   it('answers an empty list when no environment observes a version', () => {
-    // Which is every deployment this plan produces (§9.1). An empty dropdown is a true
+    // Which is every deployment this plan produces. An empty dropdown is a true
     // statement; a hardcoded "unknown" fallback would present a probe value as real data.
     expect(distinctObservedVersions([{ id: 'a', observed_version: null, observed_build: null }])).toEqual([]);
   });
@@ -116,7 +116,7 @@ describe('odataLiteral', () => {
   });
 
   it('leaves a uuid unquoted, because a quoted uuid is a 400', () => {
-    // Driven against the live gear during Task 10:
+    // Driven against the live gear:
     //   $filter=run_id eq '<uuid>' -> 400 "Type mismatch for field run_id: expected Uuid, got string"
     //   $filter=run_id eq <uuid>   -> 200
     expect(odataLiteral('1a9adedc-83b2-4a63-b353-8cd4b3eb1c9e', 'uuid')).toBe(
@@ -128,10 +128,9 @@ describe('odataLiteral', () => {
 describe('recentResultsQuery', () => {
   it('builds an OData query for recent results from file and limit', () => {
     const q = recentResultsQuery({ file: 'tests/a.py', limit: 5 });
-    // `limit`, not `$top`: `$top` is declared nowhere on /qa/v1/test-results and is
-    // silently ignored (verified live in Task 6 — `?$top=1` and `?$top=0` both
-    // returned the full default page). Asserting `$top=5` would pass while the
-    // bound had no effect.
+    // `limit` alone: the toolkit's OData parameters bind `$top` to the same slot as
+    // `limit` (an alias of one parameter), and a request that sends both is refused
+    // with 400. The adapter sends one spelling, `limit`, and never `$top` beside it.
     expect(q).toContain('limit=5');
     expect(q).not.toContain('$top');
     expect(q).toContain('tests%2Fa.py');
@@ -152,7 +151,7 @@ describe('recentResultsQuery', () => {
   });
 });
 
-// --- Plan identity (X6) --------------------------------------------------------
+// --- Plan identity --------------------------------------------------------
 
 describe('encodePlanId / decodePlanId', () => {
   it('round-trips a (repo_id, path) pair through one URL-safe segment', () => {
@@ -210,7 +209,7 @@ const RUN_DTO = {
 
 describe('runFromDto', () => {
   it('maps state onto phase without re-casing it', () => {
-    // X4: the gears' set is lowercase and is NOT legacy's capitalised Argo phases.
+    // The gears' set is lowercase and is NOT legacy's capitalised Argo phases.
     // Re-casing would invent a phase legacy understood; `isActiveRun` learns the
     // real set instead.
     expect(runFromDto(RUN_DTO).phase).toBe('running');
@@ -237,7 +236,7 @@ describe('runFromDto', () => {
   });
 
   it('leaves product_key null rather than filling it', () => {
-    // §7.9: the gear sends nothing for this. Bind the field, do not invent a value.
+    // The gear sends nothing for this. Bind the field, do not invent a value.
     expect(runFromDto(RUN_DTO).product_key).toBeNull();
   });
 
@@ -250,7 +249,7 @@ describe('runFromDto', () => {
     expect(run.run_kind).toBe('custom_plan');
   });
 
-  // Task 10: `RunDto.result` is what lets the run list and detail view show a
+  // `RunDto.result` is what lets the run list and detail view show a
   // `succeeded` run's non-zero `skipped` instead of hiding it now that a skip
   // no longer fails the run. Passed straight through, not renamed or dropped.
   it('carries result straight through', () => {
@@ -282,7 +281,7 @@ describe('queueEntryFromDto', () => {
     } as never);
     expect(entry.platform).toBe('p1');
     expect(entry.workflow_name).toBe('r1');
-    // X4: `cancelled` with two `l`s on a queue row is deliberate and must NOT be
+    // `cancelled` with two `l`s on a queue row is deliberate and must NOT be
     // normalised onto the run's one-`l` `canceled`.
     expect(entry.state).toBe('cancelled');
     // `target_id` is a documented substitution, not a passthrough: `QueueEntryDto` has no
@@ -420,7 +419,7 @@ describe('scheduleReqFromForm', () => {
   });
 
   // Both of the next two assert the SAME correction, on the two functions that carried
-  // the same wrong guard. CONTRACT-DIFF row 3 read `Admission::Unqueued` as "never runs";
+  // the same wrong guard. The legacy contract read `Admission::Unqueued` as "never runs";
   // it means "dispatch inline, no queue row" (`launch.rs`'s `Unqueued` arm calls
   // `dispatch_and_report`, and `schedules.rs` says a platformless schedule can "succeed
   // every time"). A null platform is the "Default cluster" choice and must reach the wire.
@@ -485,11 +484,11 @@ describe('scheduleReqFromForm', () => {
 
 // `environmentFromDto` had no test at all until the 2026-08-28 review: this file had 103
 // tests and none of them called it, so a regression in the observation mapping would have
-// shipped green. What it maps changed at Task 19 -- the five `cluster_*` columns went and
+// shipped green. What it maps has changed -- the five `cluster_*` columns went and
 // the plugin's own `observed_attrs` took their place -- and these assert the new shape.
 describe('environmentFromDto', () => {
   // The four tests that stood here covered `EnvironmentDto.cluster` -- five
-  // `cluster_*` columns Task 19 dropped and user decision U4 declined to
+  // `cluster_*` columns the gear dropped and a product decision declined to
   // replace ("nodes ready" is not health for a SaaS tenant). What took their
   // place is a plugin verdict in `health_state` and a plugin-shaped map in
   // `observed_attrs`, and those are what these assert.
@@ -536,9 +535,9 @@ describe('environmentFromDto', () => {
 describe('createEnvironmentReqFromForm', () => {
   // These used to be nine tests about the pre-plugin `kubeconfig` field: base64
   // in, YAML out, and a single-line value routed to `kubeconfig_credstore_ref`
-  // instead. **Task 22 stopped sending that pair at all.** The dialog collects
+  // instead. **The UI no longer sends that pair at all.** The dialog collects
   // the fields the product's plugin declares and the adapter forwards them as
-  // `credentials`, the externally tagged map Task 18b Step 2 defined -- so the
+  // `credentials`, the externally tagged map the gear defines -- so the
   // base64 round trip, the document-versus-reference sniffing and the
   // varchar(1024) limit they were all about are no longer this adapter's
   // problem. `CredentialFields.test.ts` covers what replaced them.
@@ -551,7 +550,7 @@ describe('createEnvironmentReqFromForm', () => {
     });
 
     expect(req.credentials).toEqual({ kubeconfig: { material: 'apiVersion: v1\n' } });
-    // The whole point of this task: the pre-plugin pair is not sent.
+    // The whole point: the pre-plugin pair is not sent.
     expect(req).not.toHaveProperty('kubeconfig');
     expect(req).not.toHaveProperty('kubeconfig_credstore_ref');
   });
@@ -567,7 +566,7 @@ describe('createEnvironmentReqFromForm', () => {
     expect(Object.keys(req.credentials ?? {}).sort()).toEqual(['api_token', 'kubeconfig']);
   });
 
-  it('sends the product, which the gear requires since Task 20b', () => {
+  it('sends the product, which the gear requires', () => {
     const req = createEnvironmentReqFromForm({ ...baseForm, credentials: {} });
     expect(req.product_id).toBe('product-vhp');
   });
@@ -593,8 +592,8 @@ describe('updateEnvironmentReqFromForm', () => {
   });
 
   it('forwards a replacement reference as `kubeconfig_credstore_ref`', () => {
-    const req = updateEnvironmentReqFromForm({ kubeconfig: 'credstore://team-a/new' });
-    expect(req.kubeconfig_credstore_ref).toBe('credstore://team-a/new');
+    const req = updateEnvironmentReqFromForm({ kubeconfig: 'team-a-new' });
+    expect(req.kubeconfig_credstore_ref).toBe('team-a-new');
     expect(req.kubeconfig).toBeUndefined();
   });
 
@@ -736,8 +735,8 @@ describe('expandCustomPlanFiles', () => {
   it('stops on an include naming the plan being saved (the `expanded` seed guard)', async () => {
     // This one is caught by seeding `expanded` with the plan's own id, *before* `visit`
     // recurses at all — so it covers the seed and NOT the recursion guard. The two-id case
-    // below is what covers the recursion guard; review round 1 caught that this test alone
-    // asserted nothing about it.
+    // below is what covers the recursion guard; this test alone
+    // asserts nothing about it.
     const files = await expandCustomPlanFiles(
       { id: 'cp-cycle', tests: [], included_plans: ['cp-cycle'] },
       source
@@ -831,8 +830,8 @@ describe('dashboardFromDto', () => {
   } as never;
 
   it('omits the three fields the gear has no source for rather than zeroing them', () => {
-    // §8-C3: a plausible-looking 0 is worse than a missing panel, and nothing
-    // renders these any more (Task 8a replaced the strip with a labelled notice).
+    // A plausible-looking 0 is worse than a missing panel, and nothing
+    // renders these any more (the strip was replaced with a labelled notice).
     const stats = dashboardFromDto(dto);
     expect(stats.total_plans).toBeUndefined();
     expect(stats.total_schedules).toBeUndefined();
@@ -855,8 +854,8 @@ describe('dashboardFromDto', () => {
       path: 'plans/smoke.yaml',
     });
     expect(stats.failed_recent[0].workflow_name).toBe('r1');
-    // Fix round 2: this fixture's `failed_recent[0]` has always carried
-    // `environment_id: 'p1'` (Task 26 fix round 1's field rename), but nothing asserted
+    // This fixture's `failed_recent[0]` has always carried
+    // `environment_id: 'p1'` (the field's rename), but nothing asserted
     // it — `FailedTestCardDto` once declared a stale `platform_id?: string | null` in
     // the frozen generated schema, so a regression back to reading it would typecheck
     // clean and silently null out every card's environment. Proved by mutation: reverting
@@ -890,7 +889,7 @@ describe('parseRunLogSse', () => {
   });
 });
 
-// --- Plans (the five transforms review round 1 found untested) -------------------
+// --- Plans (the five transforms that were untested) -------------------
 
 const PLAN_DTO = {
   repo_id: '32656370-6be5-4445-99f3-cfa86195bbb3',
@@ -927,7 +926,7 @@ describe('planFromDto', () => {
   });
 
   it('omits timeout_seconds entirely when the gear sends null', () => {
-    // The defect review round 1 found: this was `?? 0`, and a `0` reads as "times out
+    // The defect: this was `?? 0`, and a `0` reads as "times out
     // immediately" to any future consumer. `types.ts`' own comment on
     // `TestPlan.timeout_seconds` names this exact value as the one not to write.
     const plan = planFromDto({ ...(PLAN_DTO as object), timeout_seconds: null } as never);
@@ -963,7 +962,7 @@ describe('planFromDto', () => {
     expect(plan.repo_name).toBe('smoke-repo');
     expect(plan.product_key).toBe('smoke-product');
     // Every repository in this deployment is a git repository — the archive-upload route
-    // does not exist (§8-C4) — so this is a deployment fact, not a default.
+    // does not exist — so this is a deployment fact, not a default.
     expect(plan.source).toBe('git');
   });
 });
@@ -981,9 +980,8 @@ describe('testFilesFromPlan', () => {
   });
 
   it('does NOT borrow the plan tags for the test file', () => {
-    // §8-C1: the catalog's per-file metadata has no gear source at all. The plan's tags are
-    // the *plan's*; attributing them to each of its files would be the fabrication §8-C1
-    // warns about, and it would look exactly like real data.
+    // The catalog's per-file metadata has no gear source at all. The plan's tags are
+    // the *plan's*; attributing them to each of its files would be a fabrication, and it would look exactly like real data.
     const rows = testFilesFromPlan(PLAN_DTO, PLAN_CTX);
     expect(PLAN_DTO as unknown as { tags: string[] }).toHaveProperty('tags', ['ci']);
     expect(rows[0].tags).toEqual([]);
@@ -1011,7 +1009,7 @@ describe('coveragePointsFromDto', () => {
   ] as never[];
 
   it('keeps only the asked-for product, so one card cannot chart another product', () => {
-    // Review round 1: the route answers one point per product for the WHOLE deployment,
+    // The route answers one point per product for the WHOLE deployment,
     // and the only consumer is a per-product card captioned "Coverage belongs to this
     // product…". Without this filter that caption is false.
     const points = coveragePointsFromDto(rows, { id: 'p-mine', key: 'mine' });
@@ -1034,7 +1032,7 @@ describe('coveragePointsFromDto', () => {
   });
 
   it('leaves run_name and collected_at empty rather than fabricating a measurement time', () => {
-    // §8-C8 / §11.9: `collected_at` is both sorted on and rendered as a date by
+    // `collected_at` is both sorted on and rendered as a date by
     // `ProductCoverageCard`, so a non-empty collection reads "Invalid Date" there. Filling
     // it with `Date.now()` would turn that visible gap into an invisible lie.
     const point = coveragePointsFromDto(rows, { id: 'p-mine', key: 'mine' })[0];
@@ -1070,7 +1068,7 @@ describe('openBugsQuery', () => {
 
 describe('analyticsPlanId', () => {
   it('unpacks the opaque id to the plan path the analytics routes match on', () => {
-    // X6's second half: the parameter keeps the NAME `plan_id` and changes its VALUE space
+    // The parameter keeps the NAME `plan_id` and changes its VALUE space
     // to the plan's path, matched across every repository the caller can see.
     expect(analyticsPlanId(encodePlanId('repo-1', 'plans/smoke.yaml'))).toBe('plans/smoke.yaml');
   });
@@ -1215,8 +1213,8 @@ describe('analyticsOverviewFromDto', () => {
     grouped: {
       component: [],
       tag: [],
-      // `GroupedSummariesDto` was itself renamed from a `platform`-keyed field at
-      // Task 25 (row `PlatformGroupSummaryDto` -> `EnvironmentGroupSummaryDto`); the
+      // `GroupedSummariesDto` was itself renamed from a `platform`-keyed field
+      // (row `PlatformGroupSummaryDto` -> `EnvironmentGroupSummaryDto`); the
       // schema once called both the array and its two id/name fields by the
       // retired names.
       environment: [

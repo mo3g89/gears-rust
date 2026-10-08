@@ -207,8 +207,8 @@ pub trait RunLogsRepository: Send + Sync {
     /// appending in Rust and writing it back would re-transfer the whole log on
     /// every flush and would lose a concurrent append.
     ///
-    /// There is no size cap: user decision, 2026-08-31, risk recorded in the
-    /// design's §8.
+    /// There is no size cap: user decision, 2026-08-31, taken with the risk
+    /// stated to the user.
     async fn append_log<C: DBRunner>(
         &self,
         runner: &C,

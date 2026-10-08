@@ -25,15 +25,15 @@ export function PlansPage() {
   const activeProduct = useActiveProduct();
 
   // **The Custom Plans tab is scoped exactly as the Standard Plans tab beside
-  // it is** (spec §4: "while a product is selected, no list surface shows a row
-  // belonging to a different product"). It was not, and a page whose two tabs
+  // it is** (the invariant: while a product is selected, no list surface shows a row
+  // belonging to a different product). It was not, and a page whose two tabs
   // disagree about what the switcher means is the divergence this work exists
-  // to end — §1's inventory was built from `hooks.ts` and missed this one,
+  // to end — an inventory of scoped lists built from `hooks.ts` missed this one,
   // because the scoping happens here rather than in a hook.
   //
   // Same resolver as the Runs and Schedules lists: a custom plan carries no
   // product key, so it is attributed through the repositories its tests name,
-  // and D4's hide applies — a plan with no resolvable tests, or with tests
+  // and the hide-unattributable rule applies — a plan with no resolvable tests, or with tests
   // spanning two products, is listed under no product. `undefined` while the
   // repositories are still loading, so the tab shows its spinner rather than a
   // list that is briefly scoped against an empty repository map.
@@ -70,6 +70,11 @@ export function PlansPage() {
         </TabsList>
 
         <TabsContent value="standard" className="mt-4 space-y-3">
+          <p className="text-xs text-muted-foreground">
+            Scoped to the selected product, filtered in your browser. Plans are listed per
+            repository, and the repository list is narrowed to the selected product here
+            because the server has no product filter for it.
+          </p>
           <div className="flex items-center justify-between gap-2">
             <BranchPicker
               value={branch}
@@ -113,7 +118,7 @@ export function PlansPage() {
           ) : (
             <div className="space-y-3">
               <p className="text-xs text-muted-foreground">
-                Scoped to the selected product. A custom plan carries no product of its
+                Scoped to the selected product, filtered in your browser. A custom plan carries no product of its
                 own, so it is attributed through the repositories its tests belong to — a
                 plan whose tests span two products, or whose repositories have all been
                 deleted, is listed under neither.

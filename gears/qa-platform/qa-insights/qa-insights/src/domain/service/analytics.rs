@@ -594,10 +594,12 @@ where
     ///
     /// [`BuildTestsQuery::into_overview`] supplies `None`/`None` for the two day
     /// counts, which is legacy's own construction (`:385-386`) and is forced by
-    /// D7: this endpoint takes legacy's parameter set verbatim and legacy's set
-    /// has no `days_trend`. So [`universe_window_start`] always resolves to the
-    /// **90-day** default here, while an overview served with `?days_trend=365`
-    /// computed its build distribution over 365 days.
+    /// the rule that `OData` applies only to the two flat result collections
+    /// (`api::rest`'s header): this endpoint takes legacy's parameter set
+    /// verbatim and legacy's set has no `days_trend`. So
+    /// [`universe_window_start`] always resolves to the **90-day** default here,
+    /// while an overview served with `?days_trend=365` computed its build
+    /// distribution over 365 days.
     ///
     /// **A bar there can therefore report tests this list cannot see.** Legacy
     /// has no window at all, so its drill-down always matched its bar; the
@@ -605,8 +607,9 @@ where
     /// why a bound exists. It is stated rather than papered over, and it is
     /// stated on the wire too — the endpoint description says the window is the
     /// default one regardless of what the overview was asked for. Widening it
-    /// means either accepting a ninth parameter D7 excludes or making the bound
-    /// configurable, and both are product decisions rather than this task's.
+    /// means either accepting a ninth parameter legacy's set excludes or making
+    /// the bound configurable, and both are product decisions rather than this
+    /// task's.
     ///
     /// Neither the grouped summaries nor the quality vectors are computed —
     /// legacy computes neither either (`:405-452` runs the filter, the snapshot
@@ -732,16 +735,16 @@ where
     /// clock once, and read `qa_test_results` for `plan_id` inside the default
     /// window.
     ///
-    /// # The window is this port's, and it is R21/R22's divergence again
+    /// # The window is this port's, and it is [`universe_window_start`]'s divergence again
     ///
-    /// Legacy's three statements are unwindowed — `ResultsRepository::list_for_plan`'s
-    /// doc gives the NFR argument for bounding a per-plan read on a table
-    /// `cpt-cf-qa-nfr-scale` sizes at 5M rows. `universe_window_start(today, 7,
-    /// 90)` is the same 90-day default [`BuildTestsQuery::into_overview`]
-    /// inherits under ruling R22, chosen here for the identical reason: there is
-    /// no `days_trend` on this endpoint's parameter set — it has *no* parameters
-    /// beside `plan_id` — so the default is the only bound expressible without
-    /// inventing a query parameter legacy does not have.
+    /// Legacy's three statements are unwindowed —
+    /// `ResultsRepository::list_for_plan`'s doc gives the NFR argument for
+    /// bounding a per-plan read on a table `cpt-cf-qa-nfr-scale` sizes at 5M
+    /// rows. `universe_window_start(today, 7, 90)` is the same 90-day default
+    /// [`BuildTestsQuery::into_overview`] inherits, chosen here for the identical
+    /// reason: there is no `days_trend` on this endpoint's parameter set — it has
+    /// *no* parameters beside `plan_id` — so the default is the only bound
+    /// expressible without inventing a query parameter legacy does not have.
     ///
     /// # `plan_id` is trimmed and refused blank — Phase B fix wave, Finding 9
     ///
@@ -898,11 +901,11 @@ where
     ///
     /// # Not windowed
     ///
-    /// Unlike [`Self::load_universe_and_rows`]' row read, this carries no
-    /// `since` bound — `qa_test_case_collect` is a snapshot table with one row
-    /// per `(repo_id, branch, test_file)`, so there is no history for ruling
-    /// R21's window to bound, and legacy's own read is the same: the whole
-    /// table for one branch, not a time slice of it.
+    /// Unlike [`Self::load_universe_and_rows`]' row read, this carries no `since`
+    /// bound — `qa_test_case_collect` is a snapshot table with one row per
+    /// `(repo_id, branch, test_file)`, so there is no history for
+    /// [`universe_window_start`]'s window to bound, and legacy's own read is the
+    /// same: the whole table for one branch, not a time slice of it.
     ///
     /// # Scoped to the universe's own repositories, not read unconditionally
     ///

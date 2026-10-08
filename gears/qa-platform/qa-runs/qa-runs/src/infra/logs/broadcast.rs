@@ -115,8 +115,8 @@ pub const DEFAULT_LOG_CHANNEL_CAPACITY: usize = 256;
 /// **A durable archive now exists**, in `qa_run_logs`
 /// (`infra::logs::RunLogArchive`, Task 2-5), and `api::rest::handlers::runs`
 /// reads it back through `RunsService::archived_log` before ever falling back
-/// to this tail. `qa_runs.log_storage_ref` stays unwritten regardless — design
-/// D-RLP-6: it is published in `RunDto` shaped like a fetchable URI, so an
+/// to this tail. `qa_runs.log_storage_ref` stays unwritten regardless, by
+/// decision: it is published in `RunDto` shaped like a fetchable URI, so an
 /// internal table reference (`db:qa_run_logs/{run_id}`) does not belong in it.
 /// That is a decision about one column, not a statement that no archive
 /// exists.
@@ -310,7 +310,7 @@ impl LogSubscription {
 ///
 /// **A durable archive now exists**, in `qa_run_logs`
 /// (`infra::logs::RunLogArchive`, Task 2-5). `qa_runs.log_storage_ref` is still
-/// unwritten - design D-RLP-6 keeps it that way deliberately, because it is
+/// unwritten - deliberately and permanently, because it is
 /// published in `RunDto` shaped like a fetchable URI and an internal table
 /// reference does not belong there - but the archive itself is real.
 ///
@@ -527,6 +527,14 @@ impl RunLogBroadcaster {
     /// live subscribers - see that constant for what the cap does and does not
     /// bound. The caller answers a resource-exhausted error; it must not retry
     /// in a loop.
+    ///
+    /// **`#[cfg(test)]` since finding #38's triage.** The SSE endpoint takes
+    /// [`Self::subscribe_with_replay`]; this no-replay form has no production
+    /// caller left, and with `infra` now `pub(crate)` the compiler reports it
+    /// as dead. Kept, rather than deleted, because the tests that pin this
+    /// type's two size bounds subscribe without wanting a replay — a `cfg`
+    /// says "test-only" in the type system where an allowance would not.
+    #[cfg(test)]
     #[must_use]
     pub fn subscribe(self: &Arc<Self>, run_id: Uuid) -> Option<LogSubscription> {
         let rx = {
@@ -653,6 +661,10 @@ impl RunLogBroadcaster {
     /// Drop `run_id`'s retained tail as well. Exists for tests and for a caller
     /// that knows a run's log will never be read again; nothing on the run path
     /// calls it, because "never read again" is not a thing this gear knows.
+    ///
+    /// **`#[cfg(test)]` since finding #38's triage**, for the reason
+    /// [`Self::subscribe`] carries: the hypothetical caller never arrived.
+    #[cfg(test)]
     pub fn forget(&self, run_id: Uuid) -> bool {
         self.lock().retained.remove(&run_id).is_some()
     }
@@ -679,7 +691,10 @@ impl RunLogBroadcaster {
     }
 
     /// How many runs currently have a **live** channel. The observable form of
-    /// "the map does not grow without bound".
+    /// "the map does not grow without bound", and read by the tests that assert
+    /// that bound and by nothing else — hence `#[cfg(test)]` since finding
+    /// #38's triage.
+    #[cfg(test)]
     #[must_use]
     pub fn active_channels(&self) -> usize {
         self.lock().channels.len()
@@ -687,6 +702,9 @@ impl RunLogBroadcaster {
 
     /// How many runs currently have a retained tail. The observable form of
     /// [`MAX_RETAINED_RUNS`], which is the only thing that bounds retention.
+    /// Read by the test that asserts it, and by nothing else — hence
+    /// `#[cfg(test)]` since finding #38's triage.
+    #[cfg(test)]
     #[must_use]
     pub fn retained_runs(&self) -> usize {
         self.lock().retained.len()

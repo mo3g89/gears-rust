@@ -20,7 +20,7 @@ use gix::bstr::BString;
 // `domain` and `infra` are `pub(crate)` (review finding #38); everything this
 // test needs is re-exported at the crate root, named there one item at a time.
 use qa_catalog::{
-    DomainError, GixSyncEngine, RepoSyncPort, branch_workdir, host_dir, parse_plan_yaml,
+    DomainError, GixSyncEngine, RepoSyncPort, SyncLimits, branch_workdir, host_dir, parse_plan_yaml,
 };
 
 const PLAN_YAML: &str = "name: smoke\ntags: [ci]\ntests:\n  - tests/test_login.py\n";
@@ -133,7 +133,7 @@ async fn sync_clone_fetch_and_discover_plans_end_to_end() {
     let (fixture, main_tip) = fixture_repo(fixture_dir.path());
     let url = fixture_dir.path().to_str().unwrap().to_owned();
 
-    let engine = GixSyncEngine;
+    let engine = GixSyncEngine::default();
     let repos_root = tempfile::tempdir().unwrap();
     let repo_id = uuid::Uuid::new_v4();
     let host = host_dir(repos_root.path(), repo_id);
@@ -221,7 +221,7 @@ async fn clone_of_an_unknown_branch_fails_instead_of_falling_back() {
     let (_fixture, _main_tip) = fixture_repo(fixture_dir.path());
     let url = fixture_dir.path().to_str().unwrap().to_owned();
 
-    let engine = GixSyncEngine;
+    let engine = GixSyncEngine::default();
     let repos_root = tempfile::tempdir().unwrap();
     // Never synced: `sync` takes the clone path, not the fetch path.
     let repo_id = uuid::Uuid::new_v4();
@@ -246,4 +246,170 @@ async fn clone_of_an_unknown_branch_fails_instead_of_falling_back() {
         !workdir.join("plan.yaml").is_file(),
         "no content may be checked out for a branch that does not exist"
     );
+}
+
+/// DESIGN §3.3's failure split through the real transport: a remote that answers `401` is a
+/// refused credential, whether none or a wrong one was configured, and a closed
+/// port is an outage. (Over this plain `http://` endpoint the wrong one is
+/// refused by gix itself, which never sends a credential in clear text; the
+/// `401` after a credential was sent is pinned by the adapter's unit tests.) A local endpoint answering every request `401` stands in
+/// for a git host rejecting a token. Bounded: it serves at most eight
+/// connections, then its thread ends.
+#[tokio::test]
+async fn ls_refs_tells_a_refused_credential_from_an_unreachable_remote() {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(8) {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"git\"\r\n\
+                  Content-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}/org/repo.git");
+    for credential in [None, Some("deploy:wrong-token")] {
+        let err = GixSyncEngine::default()
+            .list_remote_branches(&url, credential)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DomainError::CredentialRejected { .. }),
+            "credential {credential:?}: got {err:?}"
+        );
+    }
+
+    let closed = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    let err = GixSyncEngine::default()
+        .list_remote_branches(&format!("http://127.0.0.1:{closed}/org/repo.git"), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::SyncFailed { .. }), "got {err:?}");
+}
+
+/// A remote that accepts the connection and never answers: the listing gives
+/// up at its deadline instead of holding the read. Finite: the endpoint holds
+/// at most four connections for at most 15 s, then its thread ends — past the
+/// assertion's 10 s, so a listing without its deadline fails it, and short of
+/// reqwest's 30 s stall bound, so the detached listing thread the runtime
+/// waits for at shutdown ends with the endpoint.
+#[tokio::test]
+async fn a_listing_against_a_remote_that_never_answers_ends_at_its_deadline() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut held = Vec::new();
+        while std::time::Instant::now() < until {
+            match listener.accept() {
+                Ok((stream, _)) if held.len() < 4 => held.push(stream),
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        drop(held);
+    });
+    let engine = GixSyncEngine::new(SyncLimits {
+        ls_refs_timeout: std::time::Duration::from_secs(1),
+        ..SyncLimits::default()
+    });
+    let started = std::time::Instant::now();
+    let err = engine
+        .list_remote_branches(&format!("http://127.0.0.1:{port}/org/repo.git"), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::RemoteTimedOut { .. }),
+        "got {err:?}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+/// Pseudo-random printable text that deflate cannot shrink much: a pack of
+/// this blob stays near its size. Finite and deterministic (an LCG).
+fn incompressible(len: usize) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            ALPHABET[(state >> 58) as usize] as char
+        })
+        .collect()
+}
+
+/// A fixture whose `main` carries one 1 MiB blob, against 64 KiB budgets.
+fn oversized_fixture(dir: &Path) -> String {
+    let repo = gix::init(dir).unwrap();
+    let big = incompressible(1 << 20);
+    commit_tree(
+        &repo,
+        "main",
+        &[("data/big.txt", big.as_str()), ("plan.yaml", PLAN_YAML)],
+        None,
+        "big",
+    );
+    dir.to_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn a_clone_whose_pack_exceeds_the_budget_is_refused_and_leaves_nothing_behind() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let url = oversized_fixture(fixture_dir.path());
+    let repos_root = tempfile::tempdir().unwrap();
+    let repo_id = uuid::Uuid::new_v4();
+    let host = host_dir(repos_root.path(), repo_id);
+    let workdir = branch_workdir(repos_root.path(), repo_id, "main");
+    let engine = GixSyncEngine::new(SyncLimits {
+        max_fetch_bytes: 64 << 10,
+        ..SyncLimits::default()
+    });
+
+    let err = engine
+        .sync(&url, "main", None, &host, &workdir)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::SyncBudgetExceeded { .. }),
+        "got {err:?}"
+    );
+    assert!(
+        !host.parent().unwrap().exists(),
+        "the oversized clone is removed"
+    );
+}
+
+#[tokio::test]
+async fn a_branch_whose_checkout_exceeds_the_budget_is_refused_before_anything_is_written() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let url = oversized_fixture(fixture_dir.path());
+    let repos_root = tempfile::tempdir().unwrap();
+    let repo_id = uuid::Uuid::new_v4();
+    let host = host_dir(repos_root.path(), repo_id);
+    let workdir = branch_workdir(repos_root.path(), repo_id, "main");
+    let engine = GixSyncEngine::new(SyncLimits {
+        max_checkout_bytes: 64 << 10,
+        ..SyncLimits::default()
+    });
+
+    let err = engine
+        .sync(&url, "main", None, &host, &workdir)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::SyncBudgetExceeded { .. }),
+        "got {err:?}"
+    );
+    assert!(!workdir.exists(), "no part of the snapshot was written");
 }

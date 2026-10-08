@@ -108,7 +108,7 @@ use super::{actions, resources};
     dead_code,
     reason = "read under cfg(test) only - see this module's header"
 )]
-pub(crate) const ENFORCED: &[(&str, &str)] = &[
+pub const ENFORCED: &[(&str, &str)] = &[
     // `qa.test_result` - `results`, `dashboard` and `analytics` all read the
     // two result tables under one `list`, which is that action's own doc's
     // decision; `jira`'s pre-filing read joins them under the same pair.
@@ -171,7 +171,7 @@ pub(crate) const ENFORCED: &[(&str, &str)] = &[
 /// replaced with explicit equality against `resources::JIRA_BUG_NAME` and
 /// `resources::JIRA_CONFIG_NAME` earlier in this workstream.
 #[cfg(test)]
-pub(crate) const RESOURCE_TYPES: &[&str] = &[
+pub const RESOURCE_TYPES: &[&str] = &[
     resources::JIRA_BUG_NAME,
     resources::JIRA_CONFIG_NAME,
     resources::NOTIFICATION_CONFIG_NAME,

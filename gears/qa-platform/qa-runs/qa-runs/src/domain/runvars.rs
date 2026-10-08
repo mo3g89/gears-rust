@@ -20,11 +20,12 @@
 //!   variables (`argo.rs:493-496`, with the comment "Platform metadata should
 //!   win over generic pipeline variables when both are present"), so it
 //!   overrides a platform variable of that name while still losing to a run
-//!   parameter. It is not a reserved name (plan decision D3), so that last part
-//!   is reachable — a launch parameter really can redirect the run's base URL.
-//!   **That position is now [`RunVarInputs::plugin_env`]**: since Task 18 the
-//!   values in it are a product plugin's, and this module no longer knows their
-//!   names.
+//!   parameter. It is not a reserved name (`E2E_VHP_BASE_URL` is deliberately
+//!   overridable by a run parameter, `params::RESERVED_NAMES`' SECURITY NOTE),
+//!   so that last part is reachable — a launch parameter really can redirect
+//!   the run's base URL. **That position is now [`RunVarInputs::plugin_env`]**:
+//!   since Task 18 the values in it are a product plugin's, and this module no
+//!   longer knows their names.
 //! * **`KUBECONFIG` was pushed last of all**, after the run parameters
 //!   (`argo.rs:504-521`), so it won outright — and this module asserted the
 //!   *ordering* as well as the reserved-name check, so that neither alone held
@@ -122,7 +123,7 @@
 //!    `secretKeyRef` (`argo.rs:443-452`), so it cannot be expressed as an
 //!    [`RunVar`] without materialising the secret into the control plane's
 //!    memory. It is deliberately absent from this module's model: the executor
-//!    port (Task 11) must carry secret references alongside the assembled
+//!    port must carry secret references alongside the assembled
 //!    environment, and a task that "fixes" this by resolving the secret here
 //!    has widened the blast radius of a log line.
 
@@ -197,7 +198,7 @@ pub struct TieredRunVars {
 /// Split one `list_variables` response into its two precedence tiers.
 ///
 /// `qa_environments_sdk::Variable` carries the scope in `environment_id`
-/// (renamed from `environment_id`) (`None` = global pipeline variable, `Some(_)` =
+/// (renamed from `platform_id`) (`None` = global pipeline variable, `Some(_)` =
 /// per-platform), and `QaEnvironmentsClient::list_variables` returns both in
 /// one list with the comment "Precedence is applied by the caller (qa-runs),
 /// not here" — this is that caller.
@@ -283,8 +284,8 @@ pub struct RunVarInputs {
     /// shape too: it issues no platform query at all in that case
     /// (`argo.rs:489-492`).
     ///
-    /// **Names and values are the plugin's; the position is the platform's**
-    /// (**D8**). This module applies no blank guard to them and derives nothing
+    /// **Names and values are the plugin's; the position is the platform's**.
+    /// This module applies no blank guard to them and derives nothing
     /// from them: a plugin decides whether a value it could not detect is
     /// omitted or blank, and every guard the platform used to apply here
     /// (`E2E_VHP_BASE_URL`'s, `VPADM_BASE_DOMAIN`'s derivation,
@@ -563,8 +564,8 @@ mod tests {
             env.get("PRODUCT_ENDPOINT").map(String::as_str),
             Some("from-parameter"),
             "a plugin's name is reserved only if the plugin says so, and this one \
-             did not: a parameter overrides it (decision D3's exposure, carried \
-             forward)"
+             did not: a parameter overrides it (the exposure `RESERVED_NAMES`' \
+             SECURITY NOTE carries forward)"
         );
     }
 

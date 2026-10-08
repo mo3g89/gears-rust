@@ -67,16 +67,19 @@
 //! whose whole body is one HTTP POST to the manager API. Nothing in this module
 //! corresponds to it.
 //!
-//! **A skipped occurrence leaves no record an operator can query.**
-//! [`skipped_since`] computes the skipped times, and computing them in memory is
-//! not recording them. **No production code calls it** — [`next_due`] is the
-//! consumed half of this module (`domain::service::schedules`'s `outstanding`),
-//! and `skipped_since` is exercised only by this file's own tests. Even if the
-//! firing tick did call it, `claim_tick` writes a row for the one due time it
-//! claims and for nothing else, while `domain::repos::SchedulesRepository`
-//! exposes no tick read of any kind, as its own header says. So "why did my
-//! 03:00 run not happen?" has no answer in this system. That is a gap, not a
-//! design.
+//! **A skipped occurrence leaves no record an operator can query.** This
+//! module used to carry a `skipped_since` that enumerated the missed times in
+//! memory, with a `MAX_SKIPPED_REPORTED` cap and an `occurrence_after` helper
+//! behind it. It was **deleted in the finding-#38 triage**: nothing in
+//! production ever called it — [`next_due`] is the consumed half of this module
+//! (`domain::service::schedules`'s `outstanding`) — and computing the times is
+//! not recording them anyway. Even a firing tick that called it had nowhere to
+//! put the answer: `claim_tick` writes a row for the one due time it claims and
+//! for nothing else, and `domain::repos::SchedulesRepository` exposes no tick
+//! read of any kind, as its own header says. So "why did my 03:00 run not
+//! happen?" still has no answer in this system. That is a gap, and closing it
+//! is a feature — a tick record and a read over it — not a caller for a helper
+//! that was already written.
 //!
 //! # The interlock `claim_tick` depends on
 //!
@@ -177,14 +180,6 @@ const FIELD_COUNT: usize = 5;
 /// as safe to return and to log.
 const MAX_EXPRESSION_LEN: usize = 255;
 
-/// The ceiling on how many skipped occurrences [`skipped_since`] will return.
-///
-/// A cap rather than an honest full answer, because the inputs are a stored cron
-/// expression and a stored mark: `* * * * *` against a mark a year old is over
-/// half a million occurrences, and this function has no consumer whose need
-/// justifies allocating them. What it costs is stated at [`skipped_since`].
-pub const MAX_SKIPPED_REPORTED: usize = 1000;
-
 /// A five-field cron expression that has been validated and normalised.
 ///
 /// Opaque on purpose: it holds `cron::Schedule`s whose day-of-week ordinals are
@@ -232,19 +227,13 @@ impl CronSchedule {
         // choose, and a rare expression (`0 0 29 2 *`) costs the same as
         // `* * * * *`.
         //
-        // **`max`, and `min` in `occurrence_after`.** Union semantics reverse
-        // with the direction of travel, and swapping them is a silent
-        // wrong-days bug rather than a compile error.
+        // `max` because union semantics reverse with the direction of travel:
+        // the latest occurrence at-or-before `now` is the union's answer, and
+        // taking the earliest would be a silent wrong-days bug rather than a
+        // compile error.
         self.forms()
             .filter_map(|form| form.after(&now).next_back())
             .max()
-    }
-
-    /// The earliest occurrence strictly after `after`.
-    fn occurrence_after(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        self.forms()
-            .filter_map(|form| form.after(&after).next())
-            .min()
     }
 }
 
@@ -357,72 +346,6 @@ pub fn next_due(
         return Ok(None);
     }
     Ok(Some(due))
-}
-
-/// The occurrences between `since` and `now` that [`next_due`] will not fire,
-/// oldest first.
-///
-/// The most recent occurrence at or before `now` is excluded, because that is
-/// the one that fires. `since` itself is excluded, so passing a schedule's
-/// `last_fired_tick` reports exactly what the gap cost. An occurrence that
-/// satisfies both day fields of an either-matches expression appears **once**.
-///
-/// # What this is not
-///
-/// It is not a record. Nothing persists these times, no tick row exists for
-/// them, and no production caller asks for them — see the module header, which
-/// carries the consequence. ([`next_due`], the module's other half, is called
-/// on every schedule tick; this one is not.) It answers the question in memory
-/// for whoever asks it.
-///
-/// # Two ways the answer is incomplete
-///
-/// * At most [`MAX_SKIPPED_REPORTED`] entries. A longer gap yields its **oldest**
-///   that many occurrences, with no marker distinguishing a truncated answer from
-///   a complete one. A full-length result means *possibly* truncated and nothing
-///   more — it cannot be told apart from a gap of exactly that many, or of a
-///   million. No flag is returned because there is no consumer to need one.
-/// * An occurrence the `time` crate cannot represent ends the list early. The
-///   `cron` crate's years stop at 2100, so nothing reachable through
-///   [`parse_cron`] can trigger this.
-///
-/// # Errors
-///
-/// [`DomainError::InvalidCron`] if `expression` does not parse; see
-/// [`parse_cron`].
-pub fn skipped_since(
-    expression: &str,
-    since: OffsetDateTime,
-    now: OffsetDateTime,
-) -> Result<Vec<OffsetDateTime>, DomainError> {
-    let parsed = parse_cron(expression)?;
-    let (Some(since), Some(now)) = (to_chrono(since), to_chrono(now)) else {
-        return Ok(Vec::new());
-    };
-    let Some(fires) = parsed.occurrence_at_or_before(now) else {
-        return Ok(Vec::new());
-    };
-
-    // A cursor rather than an iterator chain, because the union of two forms has
-    // to come out ordered and deduplicated: `occurrence_after` answers with the
-    // earlier of the two, and advancing the cursor past it collapses an
-    // occurrence both forms match into one entry.
-    let mut skipped = Vec::new();
-    let mut cursor = since;
-    while skipped.len() < MAX_SKIPPED_REPORTED {
-        let Some(occurrence) = parsed.occurrence_after(cursor) else {
-            break;
-        };
-        if occurrence >= fires {
-            break;
-        }
-        let Some(converted) = from_chrono(occurrence) else {
-            break;
-        };
-        skipped.push(converted);
-        cursor = occurrence;
-    }
-    Ok(skipped)
 }
 
 /// The five fields of an expression, after day-of-week renumbering.
@@ -796,29 +719,6 @@ mod tests {
         );
     }
 
-    /// And the skipped ones are enumerable, so an operator can be told which
-    /// runs did not happen rather than being left to infer it.
-    #[test]
-    fn skipped_occurrences_are_reportable() {
-        let skipped = skipped_since(
-            hourly(),
-            datetime!(2026-08-13 06:00 UTC),
-            datetime!(2026-08-13 12:30 UTC),
-        )
-        .unwrap();
-        assert_eq!(
-            skipped,
-            vec![
-                datetime!(2026-08-13 07:00 UTC),
-                datetime!(2026-08-13 08:00 UTC),
-                datetime!(2026-08-13 09:00 UTC),
-                datetime!(2026-08-13 10:00 UTC),
-                datetime!(2026-08-13 11:00 UTC),
-            ],
-            "the most recent due time is fired, not skipped, so it is excluded"
-        );
-    }
-
     /// `now` exactly on an occurrence boundary is due, not pending — otherwise
     /// a tick that lands precisely on the minute silently waits a full period.
     #[test]
@@ -891,20 +791,8 @@ mod tests {
             "and one decades in the future answers about that one"
         );
 
-        // The same discrimination through the other two entry points, since a
-        // clock could be read in either of them just as easily.
-        assert_eq!(
-            skipped_since(
-                hourly(),
-                datetime!(1999-01-01 00:00 UTC),
-                datetime!(1999-01-01 03:30 UTC),
-            )
-            .unwrap(),
-            vec![
-                datetime!(1999-01-01 01:00 UTC),
-                datetime!(1999-01-01 02:00 UTC),
-            ]
-        );
+        // The same discrimination through the other entry point, since a clock
+        // could be read in it just as easily.
         assert_eq!(
             parse_cron(hourly())
                 .unwrap()
@@ -1107,36 +995,6 @@ mod tests {
         assert_eq!(
             next_due("0 3 * * 1", None, datetime!(2026-08-02 12:00 UTC)).unwrap(),
             Some(datetime!(2026-07-27 03:00 UTC))
-        );
-
-        // Forward, through `skipped_since`: 2026-08-01 (the 1st) and
-        // 2026-08-03 (a Monday) both precede the 2026-08-10 that fires, and
-        // they must come out oldest-first.
-        assert_eq!(
-            skipped_since(
-                both,
-                datetime!(2026-07-31 00:00 UTC),
-                datetime!(2026-08-13 12:00 UTC),
-            )
-            .unwrap(),
-            vec![
-                datetime!(2026-08-01 03:00 UTC),
-                datetime!(2026-08-03 03:00 UTC),
-            ],
-            "the union is enumerated in order, not one form then the other"
-        );
-
-        // An occurrence both forms match appears once. 2026-06-01 is a Monday
-        // and the 1st; 2026-06-08 is the Monday that fires.
-        assert_eq!(
-            skipped_since(
-                both,
-                datetime!(2026-05-31 00:00 UTC),
-                datetime!(2026-06-08 12:00 UTC),
-            )
-            .unwrap(),
-            vec![datetime!(2026-06-01 03:00 UTC)],
-            "a day matching both fields is one occurrence, not two"
         );
 
         // Inclusive at `now` for the union too, by way of the day-of-week form.
@@ -1527,64 +1385,13 @@ mod tests {
         assert!(err.to_string().len() < 200, "{}", err.to_string().len());
     }
 
-    /// `skipped_since` bounds what it allocates. Two days of a per-minute
-    /// schedule is more occurrences than the cap, and the answer is the oldest
-    /// of them with nothing marking it as partial — which is why the doc says
-    /// so and why this test exists rather than an assertion that it is
-    /// complete.
-    #[test]
-    fn a_very_long_gap_is_truncated_at_the_reporting_cap() {
-        let skipped = skipped_since(
-            "* * * * *",
-            datetime!(2026-08-11 12:00 UTC),
-            datetime!(2026-08-13 12:00 UTC),
-        )
-        .unwrap();
-        assert_eq!(skipped.len(), MAX_SKIPPED_REPORTED);
-        assert_eq!(
-            skipped.first(),
-            Some(&datetime!(2026-08-11 12:01 UTC)),
-            "truncation keeps the oldest, not the newest"
-        );
-    }
-
-    /// Nothing was skipped when nothing was missed, and the boundary at `since`
-    /// is exclusive so a mark is never reported as its own skip.
-    #[test]
-    fn a_schedule_that_missed_nothing_reports_nothing() {
-        assert!(
-            skipped_since(
-                hourly(),
-                datetime!(2026-08-13 11:00 UTC),
-                datetime!(2026-08-13 12:30 UTC),
-            )
-            .unwrap()
-            .is_empty(),
-            "11:00 is the mark and 12:00 is what fires, so nothing is skipped"
-        );
-        assert!(
-            skipped_since(
-                hourly(),
-                datetime!(2026-08-13 12:30 UTC),
-                datetime!(2026-08-13 12:45 UTC),
-            )
-            .unwrap()
-            .is_empty(),
-            "no occurrence lies in the window at all"
-        );
-    }
-
-    /// Both evaluators reject what `parse_cron` rejects, rather than one of
-    /// them treating an unparseable expression as "nothing due".
+    /// The evaluator rejects what `parse_cron` rejects, rather than treating an
+    /// unparseable expression as "nothing due".
     #[test]
     fn an_unparseable_expression_is_an_error_from_every_entry_point() {
         let now = datetime!(2026-08-13 12:30 UTC);
         assert!(matches!(
             next_due("nope", None, now),
-            Err(DomainError::InvalidCron { .. })
-        ));
-        assert!(matches!(
-            skipped_since("nope", now, now),
             Err(DomainError::InvalidCron { .. })
         ));
     }

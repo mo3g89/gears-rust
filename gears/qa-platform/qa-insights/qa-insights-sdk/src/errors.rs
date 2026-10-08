@@ -24,7 +24,7 @@
 //!
 //! * **`IngestConflict`** — a concurrent write to the same `(run_id, test_file,
 //!   test_name)` triple lost the delete-then-insert race that makes ingest
-//!   idempotent (design §4.4). Maps to [`CanonicalError::Aborted`]: the caller
+//!   idempotent. Maps to [`CanonicalError::Aborted`]: the caller
 //!   may retry, and the reconciler will in any case.
 //! * **`UnsupportedEgress`** — a notification was routed to a channel this
 //!   deployment has no adapter for. Maps to [`CanonicalError::Unimplemented`].

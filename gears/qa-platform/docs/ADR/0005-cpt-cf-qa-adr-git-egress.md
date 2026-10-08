@@ -64,6 +64,13 @@ failing closed would make the feature unusable on day one.
   trust the peer to be, not how we store secrets.
 * Good, because the exposure is written down in one place and the constant that sets it carries the
   same text, so nobody re-derives it from the flag.
+* Good, because every egress operation is bounded in time and size (DESIGN §3.3, "Limits on
+  talking to a remote"), so a tenant-supplied url cannot hold a request or the volume
+  indefinitely. A peer that trickles its handshake can still hold, for as long as it keeps
+  trickling, one listing thread per url, one sync thread per repository (holding that
+  repository's clone directory) and one waiting sync for up to `sync_timeout_seconds`. Further
+  listings of that url answer at once without a thread; that bound is keyed by the url, so it is
+  shared by every repository and tenant that names it.
 * Bad, because an on-path attacker can substitute a git remote and have the platform execute code
   of their choosing.
 * Bad, because an on-path attacker can capture the administrator credential the SSH session

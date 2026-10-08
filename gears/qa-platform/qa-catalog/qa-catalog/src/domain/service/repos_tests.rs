@@ -6,132 +6,28 @@
 //! programmed to succeed (optionally writing fixture files into the branch
 //! snapshot, like the real gix adapter does) or fail with a given message.
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::PolicyEnforcer;
-use credstore_sdk::CredStoreClientV1;
 use credstore_sdk::test_util::MockCredStoreClient;
+use credstore_sdk::{CredStoreClientV1, SharingMode};
 use qa_catalog_sdk::{NewTestRepository, TestRepositoryUpdate};
 use uuid::Uuid;
 
-use super::repos::ReposService;
+use super::branch_snapshot::BranchSync;
+use super::repos::{ReposService, UNREADABLE_CREDENTIAL_HINT};
 use super::sync_cache::SyncCache;
 use super::test_support::{
-    MockSshKeysRepository, MockTestReposRepository, PermissiveAuthZ, ctx, repo_fixture,
-    test_db_provider,
+    LsRefsFailure, MockRepoSyncPort, MockSshKeysRepository, MockTestReposRepository,
+    PermissiveAuthZ, SharingCredStore, StoredSecret, ctx, repo_fixture, test_db_provider,
 };
 use crate::domain::error::DomainError;
-use crate::domain::ports::repo_sync::{RepoSyncPort, SyncResult};
 
 // ---------------------------------------------------------------------------
 // Test doubles
 // ---------------------------------------------------------------------------
-
-enum SyncBehavior {
-    /// Return these branches and write `(relative path, content)` fixture
-    /// files into the branch snapshot first (mirrors a real materialization).
-    Succeed {
-        branches: Vec<String>,
-        files: Vec<(String, String)>,
-    },
-    /// Fail with this message (as the gix adapter would via `DomainError`).
-    Fail { message: String },
-}
-
-struct MockRepoSyncPort {
-    behavior: SyncBehavior,
-    seen_credentials: Mutex<Vec<Option<String>>>,
-    seen_urls: Mutex<Vec<String>>,
-}
-
-impl MockRepoSyncPort {
-    fn succeeding(branches: Vec<String>, files: Vec<(String, String)>) -> Self {
-        Self {
-            behavior: SyncBehavior::Succeed { branches, files },
-            seen_credentials: Mutex::new(Vec::new()),
-            seen_urls: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn failing(message: &str) -> Self {
-        Self {
-            behavior: SyncBehavior::Fail {
-                message: message.to_owned(),
-            },
-            seen_credentials: Mutex::new(Vec::new()),
-            seen_urls: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Every `credential` argument the engine was handed, in call order.
-    /// `Some(material)` proves the resolved credstore secret actually reached
-    /// the engine; `None` is a public-repository call.
-    fn seen_credentials(&self) -> Vec<Option<String>> {
-        self.seen_credentials.lock().unwrap().clone()
-    }
-
-    /// Every `url` the content-sync half was handed, in call order.
-    fn seen_urls(&self) -> Vec<String> {
-        self.seen_urls.lock().unwrap().clone()
-    }
-
-    /// The `list_remote_branches` (ls-refs) half of the double, used by the
-    /// branch-cache refresher tests. `Succeed`/`Fail` drive both halves.
-    fn remote_branches(&self) -> Result<Vec<String>, DomainError> {
-        match &self.behavior {
-            SyncBehavior::Succeed { branches, .. } => Ok(branches.clone()),
-            SyncBehavior::Fail { message } => Err(DomainError::Internal(message.clone())),
-        }
-    }
-}
-
-#[async_trait]
-impl RepoSyncPort for MockRepoSyncPort {
-    async fn sync(
-        &self,
-        url: &str,
-        _branch: &str,
-        credential: Option<&str>,
-        _host_dir: &Path,
-        branch_workdir: &Path,
-    ) -> Result<SyncResult, DomainError> {
-        self.seen_credentials
-            .lock()
-            .unwrap()
-            .push(credential.map(ToOwned::to_owned));
-        self.seen_urls.lock().unwrap().push(url.to_owned());
-        match &self.behavior {
-            SyncBehavior::Succeed { branches, files } => {
-                for (rel, content) in files {
-                    let path = branch_workdir.join(rel);
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent).unwrap();
-                    }
-                    std::fs::write(&path, content).unwrap();
-                }
-                Ok(SyncResult {
-                    branches: branches.clone(),
-                    head_commit: "deadbeef".to_owned(),
-                })
-            }
-            SyncBehavior::Fail { message } => Err(DomainError::Internal(message.clone())),
-        }
-    }
-
-    async fn list_remote_branches(
-        &self,
-        _url: &str,
-        credential: Option<&str>,
-    ) -> Result<Vec<String>, DomainError> {
-        self.seen_credentials
-            .lock()
-            .unwrap()
-            .push(credential.map(ToOwned::to_owned));
-        self.remote_branches()
-    }
-}
 
 /// Credstore double for tests that never resolve a credential
 /// (`credential_ref: None` fixtures): every call is a test bug.
@@ -153,8 +49,7 @@ impl CredStoreClientV1 for UnusedCredStore {
 /// The shared [`MockCredStoreClient`] covers the other three
 /// [`ReposService::resolve_credential`] arms (a hit via `with_secrets`, the
 /// `Ok(None)` miss via `empty`, and a backend fault via `always_failing`) but
-/// cannot express `AccessDenied` — the one arm that must surface as
-/// `Forbidden` rather than as a recorded sync failure.
+/// cannot express `AccessDenied`, which must be recorded exactly as a miss is.
 struct DenyingCredStore;
 
 #[async_trait]
@@ -165,6 +60,32 @@ impl CredStoreClientV1 for DenyingCredStore {
         _key: &credstore_sdk::SecretRef,
     ) -> Result<Option<credstore_sdk::GetSecretResponse>, credstore_sdk::CredStoreError> {
         Err(credstore_sdk::CredStoreError::AccessDenied)
+    }
+}
+
+/// Credstore double that holds nothing and counts its lookups — for the
+/// backoff tests that pin a credential fault is not re-resolved inside the
+/// window.
+#[derive(Default)]
+struct CountingEmptyCredStore {
+    gets: std::sync::Mutex<usize>,
+}
+
+impl CountingEmptyCredStore {
+    fn gets(&self) -> usize {
+        *self.gets.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl CredStoreClientV1 for CountingEmptyCredStore {
+    async fn get(
+        &self,
+        _ctx: &toolkit_security::SecurityContext,
+        _key: &credstore_sdk::SecretRef,
+    ) -> Result<Option<credstore_sdk::GetSecretResponse>, credstore_sdk::CredStoreError> {
+        *self.gets.lock().unwrap() += 1;
+        Ok(None)
     }
 }
 
@@ -247,6 +168,27 @@ async fn build_service_with_ssh_keys(
     )
 }
 
+/// A service over a caller-built sync cache and credstore, for the backoff
+/// tests.
+async fn build_service_with_cache(
+    repos: Arc<MockTestReposRepository>,
+    engine: Arc<MockRepoSyncPort>,
+    repos_dir: PathBuf,
+    credstore: Arc<dyn CredStoreClientV1>,
+    cache: SyncCache,
+) -> ReposService<MockTestReposRepository, MockSshKeysRepository> {
+    ReposService::new(
+        test_db_provider().await,
+        repos,
+        Arc::new(MockSshKeysRepository::none()),
+        credstore,
+        engine,
+        repos_dir,
+        Arc::new(cache),
+        PolicyEnforcer::new(Arc::new(PermissiveAuthZ)),
+    )
+}
+
 /// A never-synced repository fixture that carries a credstore reference, so
 /// the sync path has to resolve it.
 fn credentialed_repo(repo_id: Uuid) -> qa_catalog_sdk::TestRepository {
@@ -290,7 +232,8 @@ async fn sync_repo_updates_branch_cache_and_timestamp() {
     assert_eq!(updated.sync_error, None, "successful sync clears the error");
     assert_eq!(
         repos.recorded_branches(),
-        vec!["main".to_owned(), "dev".to_owned()],
+        // Ordered: the cache is a set, as `replace_branches` stores it.
+        vec!["dev".to_owned(), "main".to_owned()],
         "branch cache must be replaced with the engine's inventory"
     );
     assert!(
@@ -706,10 +649,125 @@ async fn sync_repo_records_an_unresolvable_credential_without_calling_the_engine
     assert!(message.contains(CRED_REF), "got {message}");
 }
 
-/// Arm 3 — credstore denies the read: `Forbidden`, not a recorded sync
-/// failure. A policy problem is the caller's, not the repository's state.
+/// An explicit sync reads the repository's credential as the qa-catalog system
+/// actor, the identity the background branch refresher reads it as, bound to
+/// the repository's owning tenant. So a secret with `private` sharing, readable
+/// by its owner only, fails the owner's own sync with the reason, instead of
+/// passing it and then failing every refresher pass. Authorization of the sync
+/// stays the caller's.
 #[tokio::test]
-async fn sync_repo_surfaces_credstore_access_denied_as_forbidden() {
+async fn an_explicit_sync_reads_the_credential_as_the_system_actor_and_names_sharing() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let owner = ctx(tenant_id);
+    let store = |sharing| -> Arc<dyn CredStoreClientV1> {
+        Arc::new(SharingCredStore::new(vec![StoredSecret {
+            reference: CRED_REF,
+            value: CRED_MATERIAL,
+            tenant: tenant_id,
+            owner: owner.subject_id(),
+            sharing,
+        }]))
+    };
+    let sync = |sharing| {
+        let owner = owner.clone();
+        async move {
+            let tmp = tempfile::tempdir().unwrap();
+            let repos = Arc::new(MockTestReposRepository::with_repo_in_tenant(
+                credentialed_repo(repo_id),
+                tenant_id,
+            ));
+            let engine = Arc::new(MockRepoSyncPort::succeeding(
+                vec!["main".to_owned()],
+                vec![],
+            ));
+            let svc = build_service_with_credstore(
+                Arc::clone(&repos),
+                Arc::clone(&engine),
+                tmp.path().to_path_buf(),
+                store(sharing),
+            )
+            .await;
+            let row = svc.sync_repo(&owner, repo_id, "", true).await;
+            (row, engine)
+        }
+    };
+
+    let (row, engine) = sync(SharingMode::Private).await;
+    let reason = row
+        .expect("an unreadable credential is a recorded sync failure, not an error")
+        .sync_error
+        .expect("the failure is recorded");
+    assert!(reason.contains(UNREADABLE_CREDENTIAL_HINT), "{reason}");
+    assert!(
+        reason.contains(CRED_REF),
+        "the reason still names the reference: {reason}"
+    );
+    assert!(
+        engine.seen_credentials().is_empty(),
+        "nothing reaches the remote"
+    );
+
+    let (row, engine) = sync(SharingMode::Tenant).await;
+    assert_eq!(row.expect("a tenant-shared secret syncs").sync_error, None);
+    assert_eq!(
+        engine.seen_credentials(),
+        vec![Some(CRED_MATERIAL.to_owned())]
+    );
+}
+
+/// The actor is bound to the tenant that **owns** the repository, the tenant
+/// the background refresher binds to, not to the caller's. A caller of another
+/// tenant whose scope reaches the repository (a parent tenant over its child)
+/// reads the owner's `tenant`-shared secret, exactly as the refresher does;
+/// bound to the caller's tenant, the read would miss in the sync and succeed in
+/// the refresh.
+#[tokio::test]
+async fn an_explicit_sync_by_a_caller_of_another_tenant_reads_the_credential_in_the_owning_tenant()
+{
+    let owning_tenant = Uuid::new_v4();
+    let caller_tenant = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo_in_tenant(
+        credentialed_repo(repo_id),
+        owning_tenant,
+    ));
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned()],
+        vec![],
+    ));
+    let svc = build_service_with_credstore(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(SharingCredStore::new(vec![StoredSecret {
+            reference: CRED_REF,
+            value: CRED_MATERIAL,
+            tenant: owning_tenant,
+            owner: Uuid::new_v4(),
+            sharing: SharingMode::Tenant,
+        }])),
+    )
+    .await;
+
+    let row = svc
+        .sync_repo(&ctx(caller_tenant), repo_id, "", true)
+        .await
+        .expect("the sync is authorized under the caller's own context");
+    assert_eq!(row.sync_error, None, "the owning tenant's secret is read");
+    assert_eq!(
+        engine.seen_credentials(),
+        vec![Some(CRED_MATERIAL.to_owned())]
+    );
+}
+
+/// Arm 3 — credstore denies the read: a recorded sync failure carrying the
+/// same reason as a miss, not `Forbidden`. The caller was authorized for the
+/// sync; what credstore refused is the gear's own read of a secret the
+/// repository names, which is a fact about the repository's configuration.
+#[tokio::test]
+async fn sync_repo_records_a_credstore_access_denied_as_the_unreadable_credential_reason() {
     let tenant_id = Uuid::new_v4();
     let repo_id = Uuid::new_v4();
     let tmp = tempfile::tempdir().unwrap();
@@ -726,16 +784,47 @@ async fn sync_repo_surfaces_credstore_access_denied_as_forbidden() {
     )
     .await;
 
-    let err = svc
+    let updated = svc
         .sync_repo(&ctx(tenant_id), repo_id, "", true)
         .await
-        .unwrap_err();
-    assert!(matches!(err, DomainError::Forbidden), "got {err:?}");
+        .expect("a refused credential read is recorded, not raised");
+    let sync_error = updated.sync_error.expect("the refusal is recorded");
+    assert!(sync_error.contains(CRED_REF), "got {sync_error}");
+    assert!(
+        sync_error.contains(UNREADABLE_CREDENTIAL_HINT),
+        "got {sync_error}"
+    );
+    assert!(engine.seen_credentials().is_empty());
+}
 
-    let repo = svc.get_repo(&ctx(tenant_id), repo_id).await.unwrap();
-    assert_eq!(
-        repo.sync_error, None,
-        "an authorization failure must not be recorded as a repository sync error"
+/// credstore's `NotFound` error is the same miss as `Ok(None)`: recorded with
+/// the reason, never a `CredStore` infrastructure error.
+#[tokio::test]
+async fn sync_repo_records_a_credstore_not_found_error_as_the_unreadable_credential_reason() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+
+    let repos = Arc::new(MockTestReposRepository::with_repo(credentialed_repo(
+        repo_id,
+    )));
+    let engine = Arc::new(MockRepoSyncPort::succeeding(vec![], vec![]));
+    let svc = build_service_with_credstore(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::erroring_not_found()),
+    )
+    .await;
+
+    let updated = svc
+        .sync_repo(&ctx(tenant_id), repo_id, "", true)
+        .await
+        .expect("a missing secret is recorded, not raised");
+    let sync_error = updated.sync_error.expect("the miss is recorded");
+    assert!(
+        sync_error.contains(UNREADABLE_CREDENTIAL_HINT),
+        "got {sync_error}"
     );
     assert!(engine.seen_credentials().is_empty());
 }
@@ -984,8 +1073,9 @@ async fn update_repo_replaces_mutable_fields_and_keeps_the_working_copy() {
 }
 
 /// Changing `url` (or `content_root`) invalidates the working copy: the synced
-/// state is cleared so reads fail closed with `RepoNotSynced` rather than
-/// serving content fetched from the OLD url.
+/// state is cleared so the read gate refuses what is on disk, and a read syncs
+/// the branch from the new location (`branch_snapshot`) rather than serving
+/// content fetched from the OLD url.
 #[tokio::test]
 async fn update_repo_invalidates_the_working_copy_when_the_content_location_changes() {
     let tenant_id = Uuid::new_v4();
@@ -1022,7 +1112,7 @@ async fn update_repo_invalidates_the_working_copy_when_the_content_location_chan
         let err = crate::domain::service::plans::require_synced(&updated, "main").unwrap_err();
         assert!(
             matches!(err, DomainError::RepoNotSynced { .. }),
-            "content reads must fail closed after invalidation, got {err:?}"
+            "content reads must not be served from the old snapshot, got {err:?}"
         );
     }
 }
@@ -1166,41 +1256,6 @@ async fn list_refresh_targets_reports_each_repo_with_its_owning_tenant() {
     );
 }
 
-/// The refresher writes branch rows under the tenant of the *context* it is
-/// called with (`crate::domain::system_actor::for_branch_refresh`), so a
-/// wrong-tenant regression here would file another tenant's branch cache.
-#[tokio::test]
-async fn refresh_branches_writes_under_the_context_tenant() {
-    let tenant_id = Uuid::new_v4();
-    let repo_id = Uuid::new_v4();
-    let tmp = tempfile::tempdir().unwrap();
-
-    let repos = Arc::new(MockTestReposRepository::with_repo_in_tenant(
-        repo_fixture(repo_id, true),
-        tenant_id,
-    ));
-    let engine = Arc::new(MockRepoSyncPort::succeeding(
-        vec!["main".to_owned(), "release/9.5".to_owned()],
-        vec![],
-    ));
-    let svc = build_service(Arc::clone(&repos), engine, tmp.path().to_path_buf()).await;
-
-    svc.refresh_branches(&ctx(tenant_id), repo_id)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        repos.recorded_branches(),
-        vec!["main".to_owned(), "release/9.5".to_owned()],
-        "the cache must be replaced with the ls-refs inventory"
-    );
-    assert_eq!(
-        repos.recorded_branch_tenant(),
-        Some(tenant_id),
-        "branch rows must be written under the context's tenant"
-    );
-}
-
 #[tokio::test]
 async fn refresh_branches_404s_on_a_repo_outside_the_scope() {
     let tenant_id = Uuid::new_v4();
@@ -1223,8 +1278,9 @@ async fn refresh_branches_404s_on_a_repo_outside_the_scope() {
         matches!(err, DomainError::NotFound { id } if id == missing_id),
         "expected NotFound, got {err:?}"
     );
-    assert!(
-        repos.recorded_branch_tenant().is_none(),
+    assert_eq!(
+        repos.replace_calls(),
+        0,
         "no branch rows may be written for an unresolvable repository"
     );
 }
@@ -1562,4 +1618,802 @@ async fn update_repo_accepts_the_ssh_urls_create_accepts() {
             .unwrap_or_else(|e| panic!("expected {url} to be accepted on update, got {e:?}"));
         assert_eq!(updated.url, url);
     }
+}
+
+// ---------------------------------------------------------------------------
+// The failure backoff (DESIGN §3.3 "Branch model and the first read of a branch")
+// ---------------------------------------------------------------------------
+
+/// DESIGN §3.3: a remote that failed to list is not asked again by every read
+/// inside the backoff window; an explicit sync is not held back by it, and its
+/// success ends the backoff.
+#[tokio::test]
+async fn a_remote_that_failed_to_list_is_not_asked_again_within_the_backoff() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, true,
+    )));
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::Unreachable),
+    );
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+    let repo = repos.current().unwrap();
+
+    for _ in 0..3 {
+        let err = svc
+            .sync_branch_for_read(&ctx(tenant_id), &repo, "main")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::SyncFailed { .. }), "got {err:?}");
+    }
+    assert_eq!(
+        engine.ls_refs_calls(),
+        1,
+        "a down remote is asked once per backoff window"
+    );
+
+    engine.set_ls_refs_failure(None);
+    svc.sync_repo(&ctx(tenant_id), repo_id, "main", true)
+        .await
+        .expect("the explicit sync is not behind the backoff");
+    svc.sync_branch_for_read(&ctx(tenant_id), &repo, "main")
+        .await
+        .expect("the successful sync ended the backoff");
+    assert_eq!(engine.ls_refs_calls(), 2);
+}
+
+/// `remote_failure_backoff_seconds: 0` asks the remote on every read.
+#[tokio::test]
+async fn a_zero_backoff_asks_the_remote_on_every_read() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, true,
+    )));
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::Unreachable),
+    );
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO),
+    )
+    .await;
+    let repo = repos.current().unwrap();
+
+    for _ in 0..2 {
+        svc.sync_branch_for_read(&ctx(tenant_id), &repo, "main")
+            .await
+            .unwrap_err();
+    }
+    assert_eq!(engine.ls_refs_calls(), 2);
+}
+
+/// The backoff a repository is in ends when what it failed with changes: a
+/// new credential is a new answer, so the next read asks the remote.
+#[tokio::test]
+async fn a_credential_change_ends_the_backoff() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(
+        qa_catalog_sdk::TestRepository {
+            credential_ref: Some("cred-old".to_owned()),
+            ..repo_fixture(repo_id, true)
+        },
+    ));
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::CredentialRejected),
+    );
+    let credstore = Arc::new(MockCredStoreClient::with_secrets(vec![
+        ("cred-old".to_owned(), "deploy:old-token".to_owned()),
+        ("cred-new".to_owned(), "deploy:new-token".to_owned()),
+    ]));
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        credstore,
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let row = svc
+            .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+            .await
+            .expect("a credential fault is answered as the recorded row");
+        assert!(row.sync_error.is_some());
+    }
+    assert_eq!(engine.ls_refs_calls(), 1);
+
+    let current = repos.current().unwrap();
+    svc.update_repo(
+        &ctx(tenant_id),
+        repo_id,
+        TestRepositoryUpdate {
+            product_id: current.product_id,
+            name: current.name.clone(),
+            url: current.url.clone(),
+            default_branch: current.default_branch.clone(),
+            content_root: current.content_root.clone(),
+            credential_ref: Some("cred-new".to_owned()),
+        },
+    )
+    .await
+    .unwrap();
+    engine.set_ls_refs_failure(None);
+
+    let row = svc
+        .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .expect("the new credential is tried at once");
+    assert_eq!(
+        engine.ls_refs_calls(),
+        2,
+        "the credential change ended the backoff"
+    );
+    assert_eq!(
+        row.sync_error, None,
+        "and the successful sync cleared the recorded fault"
+    );
+}
+
+/// A new url is a new remote: the backoff of the old one does not apply.
+#[tokio::test]
+async fn a_url_change_ends_the_backoff() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, true,
+    )));
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::Unreachable),
+    );
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+
+    svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .unwrap_err();
+    svc.update_repo(
+        &ctx(tenant_id),
+        repo_id,
+        update_fixture("test-repo", "https://example.com/org/moved.git"),
+    )
+    .await
+    .unwrap();
+    svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        engine.ls_refs_calls(),
+        2,
+        "the moved repository's remote is asked"
+    );
+}
+
+/// A forced sync is an operator asking for the remote now: it ends the backoff
+/// before it tries, whether or not it then succeeds.
+#[tokio::test]
+async fn a_forced_sync_ends_the_backoff_even_when_it_fails() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, true,
+    )));
+    let engine = Arc::new(
+        MockRepoSyncPort::failing_sync_of(
+            vec!["main".to_owned()],
+            "fetch failed: connection reset",
+        )
+        .with_ls_refs_failure(LsRefsFailure::Unreachable),
+    );
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+
+    svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .unwrap_err();
+    svc.sync_repo(&ctx(tenant_id), repo_id, "main", true)
+        .await
+        .expect("the failure is recorded on the returned row");
+    svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        engine.ls_refs_calls(),
+        2,
+        "the forced sync ended the backoff"
+    );
+}
+
+/// The refresher is not held back by the backoff, and its successful listing
+/// ends it: the remote just answered, so the next read asks it again instead of
+/// answering 503 for the rest of the window.
+#[tokio::test]
+async fn a_successful_refresh_ends_the_backoff() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, true,
+    )));
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::Unreachable),
+    );
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+
+    svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .unwrap_err();
+    engine.set_ls_refs_failure(None);
+    svc.refresh_branches(&ctx(tenant_id), repo_id)
+        .await
+        .expect("the refresher lists inside the backoff window");
+    svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .expect("the successful refresh ended the backoff");
+    assert_eq!(engine.ls_refs_calls(), 3);
+}
+
+/// An explicit sync the remote refuses the credential for records the fault
+/// and backs the repository off like the lazy read does: the next read answers
+/// the recorded reason without contacting the remote.
+#[tokio::test]
+async fn an_explicit_sync_whose_credential_is_refused_backs_the_reads_off() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, true,
+    )));
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::CredentialRejected),
+    );
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+
+    let row = svc
+        .sync_repo(&ctx(tenant_id), repo_id, "main", true)
+        .await
+        .expect("the failure is recorded on the returned row");
+    assert!(row.sync_error.is_some());
+    let row = svc
+        .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .expect("a credential fault is answered as the recorded row");
+    assert!(row.sync_error.is_some());
+    assert_eq!(
+        engine.ls_refs_calls(),
+        0,
+        "the read inside the backoff does not ask the remote"
+    );
+}
+
+/// A non-forced explicit sync that succeeds ends the backoff too: the remote
+/// just answered.
+#[tokio::test]
+async fn a_successful_explicit_sync_ends_the_backoff() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, true,
+    )));
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::Unreachable),
+    );
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+
+    svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .unwrap_err();
+    engine.set_ls_refs_failure(None);
+    svc.sync_repo(&ctx(tenant_id), repo_id, "main", false)
+        .await
+        .expect("the explicit sync is not behind the backoff");
+    svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .expect("the successful sync ended the backoff");
+    assert_eq!(engine.ls_refs_calls(), 2);
+}
+
+/// A credential the store cannot resolve backs the repository off too, whether
+/// a read or an explicit sync found it: inside the window, reads answer the
+/// recorded reason without looking the credential up again.
+#[tokio::test]
+async fn an_unresolvable_credential_is_not_looked_up_again_within_the_backoff() {
+    let tenant_id = Uuid::new_v4();
+    for explicit_first in [false, true] {
+        let repo_id = Uuid::new_v4();
+        let tmp = tempfile::tempdir().unwrap();
+        let repos = Arc::new(MockTestReposRepository::with_repo(
+            qa_catalog_sdk::TestRepository {
+                credential_ref: Some("cred-missing".to_owned()),
+                ..repo_fixture(repo_id, true)
+            },
+        ));
+        let engine = Arc::new(MockRepoSyncPort::succeeding(
+            vec!["main".to_owned()],
+            vec![],
+        ));
+        let credstore = Arc::new(CountingEmptyCredStore::default());
+        let svc = build_service_with_cache(
+            Arc::clone(&repos),
+            Arc::clone(&engine),
+            tmp.path().to_path_buf(),
+            Arc::clone(&credstore) as Arc<dyn CredStoreClientV1>,
+            SyncCache::new(std::time::Duration::ZERO)
+                .with_failure_backoff(std::time::Duration::from_secs(30)),
+        )
+        .await;
+
+        if explicit_first {
+            svc.sync_repo(&ctx(tenant_id), repo_id, "main", true)
+                .await
+                .expect("the failure is recorded on the returned row");
+        } else {
+            svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+                .await
+                .expect("a credential fault is answered as the recorded row");
+        }
+        for _ in 0..2 {
+            let row = svc
+                .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+                .await
+                .expect("a credential fault is answered as the recorded row");
+            assert!(
+                row.sync_error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("cred-missing")),
+                "{row:?}"
+            );
+        }
+        assert_eq!(
+            credstore.gets(),
+            1,
+            "explicit first: {explicit_first}: looked up once per backoff window"
+        );
+        assert_eq!(engine.ls_refs_calls(), 0);
+    }
+}
+
+/// A credential fixed while a read was listing the remote with the old one:
+/// the old credential's refusal is stale by the time it would be written. It is
+/// not written over the fixed row and does not back the repository off — the
+/// next read asks the remote with the new credential at once.
+#[tokio::test]
+async fn a_credential_fault_found_before_the_credential_changed_is_not_recorded() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(
+        qa_catalog_sdk::TestRepository {
+            credential_ref: Some("cred-old".to_owned()),
+            ..repo_fixture(repo_id, true)
+        },
+    ));
+    let repos_in_hook = Arc::clone(&repos);
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::CredentialRejected)
+            .with_ls_refs_hook(move || repos_in_hook.set_credential_ref(Some("cred-new"))),
+    );
+    let credstore = Arc::new(MockCredStoreClient::with_secrets(vec![
+        ("cred-old".to_owned(), "deploy:old-token".to_owned()),
+        ("cred-new".to_owned(), "deploy:new-token".to_owned()),
+    ]));
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        credstore,
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+
+    let row = svc
+        .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .expect("a stale fault is not an error either");
+    assert_eq!(row.sync_error, None, "the stale refusal is not answered");
+    assert_eq!(
+        repos.current().unwrap().sync_error,
+        None,
+        "nor written over the fixed row"
+    );
+
+    engine.set_ls_refs_failure(None);
+    let row = svc
+        .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .expect("the new credential is tried at once");
+    assert_eq!(
+        engine.ls_refs_calls(),
+        2,
+        "no backoff was left for the stale attempt"
+    );
+    assert_eq!(row.sync_error, None);
+}
+
+/// The branch refresher records nothing, so a credential fault it finds starts
+/// no backoff: with another branch's failure in `sync_error`, a read of a fresh
+/// branch must not be answered with that other branch's reason.
+#[tokio::test]
+async fn a_refresher_credential_fault_does_not_answer_reads_with_another_branchs_reason() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(
+        qa_catalog_sdk::TestRepository {
+            sync_error: Some(
+                "repository sync failed: branch '26.8' not found on the remote".to_owned(),
+            ),
+            ..repo_fixture(repo_id, true)
+        },
+    ));
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::CredentialRejected),
+    );
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+
+    svc.refresh_branches(&ctx(tenant_id), repo_id)
+        .await
+        .unwrap_err();
+    engine.set_ls_refs_failure(None);
+    let row = svc
+        .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .expect("the read asks the remote itself");
+    assert_eq!(engine.ls_refs_calls(), 2);
+    assert_eq!(
+        row.sync_error, None,
+        "and the successful sync clears 26.8's error"
+    );
+}
+
+/// A credential backoff answers only the reason it recorded. Once another
+/// failure has replaced that text in the repository-wide `sync_error`, the
+/// backoff no longer speaks for the row: the next read asks the remote.
+#[tokio::test]
+async fn a_credential_backoff_does_not_answer_a_reason_it_did_not_record() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, true,
+    )));
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::CredentialRejected),
+    );
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+
+    svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .expect("a credential fault is answered as the recorded row");
+    repos.set_sync_error(Some("another branch failed"));
+    engine.set_ls_refs_failure(None);
+
+    let row = svc
+        .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .expect("the remote is asked, not the backoff");
+    assert_eq!(engine.ls_refs_calls(), 2);
+    assert_eq!(row.sync_error, None);
+}
+
+/// The service a timed-out content sync is driven through: the remote lists
+/// `main`, and every content sync of it times out.
+async fn service_whose_sync_times_out(
+    backoff: std::time::Duration,
+) -> (
+    ReposService<MockTestReposRepository, MockSshKeysRepository>,
+    Arc<MockTestReposRepository>,
+    Arc<MockRepoSyncPort>,
+    tempfile::TempDir,
+) {
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, true,
+    )));
+    let engine = Arc::new(MockRepoSyncPort::failing_sync_with(
+        vec!["main".to_owned()],
+        || DomainError::RemoteTimedOut {
+            message: "sync did not finish within 300 s and was stopped".to_owned(),
+        },
+    ));
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO).with_failure_backoff(backoff),
+    )
+    .await;
+    (svc, repos, engine, tmp)
+}
+
+/// A content sync that timed out is recorded (the explicit-sync contract), so
+/// the read that ran it answers that reason, and it backs the repository off
+/// for that recorded reason: the next read inside the window answers the same
+/// recorded row (400 through `require_synced`) at once, with no listing and no
+/// sync — not another `sync_timeout_seconds` (DESIGN §3.3 "Limits on talking
+/// to a remote").
+#[tokio::test]
+async fn a_timed_out_sync_is_recorded_and_answered_from_the_record_within_the_backoff() {
+    let tenant_id = Uuid::new_v4();
+    let (svc, repos, engine, _tmp) =
+        service_whose_sync_times_out(std::time::Duration::from_secs(30)).await;
+
+    let first = svc
+        .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .unwrap();
+    let recorded = first.sync_error.clone();
+    assert!(
+        recorded
+            .as_deref()
+            .is_some_and(|e| e.contains("did not finish")),
+        "got {recorded:?}"
+    );
+    assert_eq!(engine.ls_refs_calls(), 1);
+    assert_eq!(engine.synced_branches().len(), 1);
+
+    let second = svc
+        .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .expect("a timed-out sync is answered from its record, not as an outage");
+    assert_eq!(second.sync_error, recorded);
+    assert_eq!(
+        engine.ls_refs_calls(),
+        1,
+        "the remote is not listed again inside the window"
+    );
+    assert_eq!(
+        engine.synced_branches().len(),
+        1,
+        "the content is not synced again inside the window"
+    );
+}
+
+/// Once the window ends, a read of a repository whose sync timed out asks the
+/// remote again: it lists and syncs.
+#[tokio::test]
+async fn a_timed_out_sync_is_retried_once_the_backoff_ends() {
+    let tenant_id = Uuid::new_v4();
+    let (svc, repos, engine, _tmp) =
+        service_whose_sync_times_out(std::time::Duration::from_millis(200)).await;
+
+    svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let row = svc
+        .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .unwrap();
+    assert!(row.sync_error.is_some());
+    assert_eq!(engine.ls_refs_calls(), 2);
+    assert_eq!(engine.synced_branches().len(), 2);
+}
+
+/// A branch listing that times out stays an outage: `503`, nothing recorded,
+/// and the next read inside the window answers `503` without listing again.
+#[tokio::test]
+async fn a_timed_out_listing_is_an_outage_and_records_nothing() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, true,
+    )));
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::TimedOut),
+    );
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let err = svc
+            .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::SyncFailed { .. }), "got {err:?}");
+    }
+    assert_eq!(engine.ls_refs_calls(), 1);
+    assert!(engine.synced_branches().is_empty());
+    assert_eq!(repos.current().unwrap().sync_error, None);
+}
+
+/// An over-budget repository is recorded and backed off as a configuration
+/// fault: the next read answers the recorded reason without fetching again.
+#[tokio::test]
+async fn an_over_budget_sync_is_recorded_and_answered_from_the_record_within_the_backoff() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, true,
+    )));
+    let engine = Arc::new(MockRepoSyncPort::failing_sync_with(
+        vec!["main".to_owned()],
+        || DomainError::SyncBudgetExceeded {
+            message: "the fetched pack grew past max_fetch_bytes (1073741824 bytes)".to_owned(),
+        },
+    ));
+    let svc = build_service_with_cache(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        Arc::new(MockCredStoreClient::empty()),
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let row = svc
+            .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+            .await
+            .unwrap();
+        assert!(
+            row.sync_error
+                .as_deref()
+                .is_some_and(|e| e.contains("max_fetch_bytes"))
+        );
+    }
+    assert_eq!(
+        engine.synced_branches().len(),
+        1,
+        "a too-large repository is not fetched again inside the window"
+    );
+    assert_eq!(engine.ls_refs_calls(), 1);
+}
+
+/// A listing of the old remote that fails after the repository moved must not
+/// back the moved repository off: the backoff generation the attempt carries
+/// is read before its row, so a url change (which ends the backoff) landing
+/// between the two leaves the attempt stale. Deterministic: the change lands
+/// inside the attempt's own row read.
+#[tokio::test]
+async fn a_listing_of_a_remote_the_repository_moved_away_from_does_not_back_the_new_one_off() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = Arc::new(
+        SyncCache::new(std::time::Duration::ZERO)
+            .with_failure_backoff(std::time::Duration::from_secs(30)),
+    );
+    let ending = Arc::clone(&cache);
+    // The url swap and the backoff's end are what `update_repo` does for a
+    // url change; both land right after the attempt has read the old row.
+    let repos = Arc::new(
+        MockTestReposRepository::with_repo_swapping_url(
+            repo_fixture(repo_id, true),
+            "https://example.com/org/moved.git",
+        )
+        .with_after_get_hook(move || async move { ending.clear_backoff(repo_id).await }),
+    );
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(vec!["main".to_owned()], vec![])
+            .with_ls_refs_failure(LsRefsFailure::Unreachable),
+    );
+    let port: Arc<dyn crate::domain::ports::repo_sync::RepoSyncPort> = engine.clone();
+    let svc = ReposService::new(
+        test_db_provider().await,
+        Arc::clone(&repos),
+        Arc::new(MockSshKeysRepository::none()),
+        Arc::new(MockCredStoreClient::empty()),
+        port,
+        tmp.path().to_path_buf(),
+        Arc::clone(&cache),
+        PolicyEnforcer::new(Arc::new(PermissiveAuthZ)),
+    );
+
+    let err = svc
+        .sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::SyncFailed { .. }), "got {err:?}");
+    assert!(
+        cache.backoff(repo_id).await.is_none(),
+        "the old remote's failure backed the moved repository off"
+    );
+    svc.sync_branch_for_read(&ctx(tenant_id), &repos.current().unwrap(), "main")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        engine.ls_refs_calls(),
+        2,
+        "the moved repository's remote is asked"
+    );
 }

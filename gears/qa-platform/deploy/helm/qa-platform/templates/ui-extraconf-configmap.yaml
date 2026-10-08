@@ -16,8 +16,8 @@
      `/admin/` USED TO BE A THIRD PREFIX AND IS DELIBERATELY GONE. It was
      justified as "the admin REST API is what reads back the
      qa-platform-workflow client secret", and that justification was simply
-     false: the secret is pinned by `workflow-oidc-secret.yaml` from
-     `argo.workflowClientSecret`, the same value the realm template writes, and
+     false: the secret is pinned by the realm template from
+     `argo.workflowClientSecret` (no Secret template reads it any more), and
      no part of this tree issues an HTTP request to Keycloak's admin API at
      all.
 

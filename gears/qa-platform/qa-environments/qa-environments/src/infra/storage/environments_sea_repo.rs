@@ -60,6 +60,22 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         Ok(found.map(environment_to_sdk))
     }
 
+    async fn owner_tenant<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<Uuid>, DomainError> {
+        let found = EnvironmentEntity::find()
+            .filter(sea_orm::Condition::all().add(EnvironmentColumn::Id.eq(id)))
+            .secure()
+            .scope_with(scope)
+            .one(runner)
+            .await
+            .map_err(db_err)?;
+        Ok(found.map(|row| row.tenant_id))
+    }
+
     async fn list_page<C: DBRunner>(
         &self,
         runner: &C,
@@ -277,7 +293,7 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
             // 18b, because nothing could write them: re-deriving `credentials`
             // needs a credential *key*, and taking one from a literal would
             // name one product's credential in the gear whose whole purpose is
-            // to stop doing that (ruling D-9).
+            // to stop doing that.
             //
             // Task 18b answered that without guessing: the product's own
             // plugin classifies its submitted fields, and the service hands
@@ -312,12 +328,11 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
         if let Some(description) = patch.description {
             am.description = ActiveValue::Set(description);
         }
-        // Task 18b: the credential columns move together or not at all. The
-        // legacy column is written from the same resolved value as the other
-        // two (`PersistedCredentials::legacy_ref`) rather than from
-        // `patch.kubeconfig_credstore_ref`, so the dual-write cannot drift --
-        // the patch's own credential fields are ignored here for
-        // `EnvironmentsRepository::create`'s reason.
+        // The credential columns (`credentials`, `config`) move together or
+        // not at all, written from the resolved `PersistedCredentials` rather
+        // than from the patch's own credential fields, for
+        // `EnvironmentsRepository::create`'s reason. `legacy_ref` is not
+        // written: Task 19 dropped its column.
         if let Some(credentials) = credentials {
             am.credentials = ActiveValue::Set(credentials_to_json(&credentials.credentials));
             am.config = ActiveValue::Set(credentials.config);
@@ -420,7 +435,8 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
     /// Through Phases D and E this method dual-wrote: a legacy half
     /// (`vhp_base_url`, the five `cluster_*` columns) beside a plugin-shaped
     /// half, with three paragraphs here about keeping the two from drifting.
-    /// `m20260903_000012` dropped all eight of those columns, and the method
+    /// `m20260903_000012` (folded into `migrations::m20260812_000001_initial`
+    /// by the docs squash) dropped all eight of those columns, and the method
     /// body names none of them. The paragraphs went with them.
     ///
     /// ## One `UPDATE`, chained
@@ -442,9 +458,10 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
     ///
     /// `credentials` and `config` are credential facts, not observations: one
     /// is written by the create path (and, for rows that predate the plugin
-    /// path, by `m20260903_000011`'s backfill), the other only by that same
-    /// backfill so far. An observation must not touch either, and this method
-    /// names neither column.
+    /// path, by the backfill in `m20260903_000011`, folded into
+    /// `migrations::m20260812_000001_initial` by the docs squash), the other
+    /// only by that same backfill so far. An observation must not touch
+    /// either, and this method names neither column.
     ///
     /// # Errors
     ///
@@ -502,14 +519,14 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
                     // A conclusive detection (Some) wins; an inconclusive one
                     // (None, i.e. SQL NULL) falls through to the stored value.
                     //
-                    // **E-23 is closed here rather than carried.** The dropped
-                    // `observed_namespace` was the mirror of this rule with
-                    // its arguments the other way round -- sticky, where
-                    // `observed_attrs` is overwritten -- so a redeployed
-                    // environment ran in its new namespace and displayed the
-                    // old one. Task 19 dropped the column, and the namespace
-                    // now has exactly one home: `observed_attrs`, surfaced
-                    // through `FieldRole::Namespace`.
+                    // **The sticky-namespace finding is closed here rather than
+                    // carried.** The dropped `observed_namespace` was the
+                    // mirror of this rule with its arguments the other way
+                    // round -- sticky, where `observed_attrs` is overwritten --
+                    // so a redeployed environment ran in its new namespace and
+                    // displayed the old one. Task 19 dropped the column, and
+                    // the namespace now has exactly one home: `observed_attrs`,
+                    // surfaced through `FieldRole::Namespace`.
                     .col_expr(
                         EnvironmentColumn::ObservedBaseUrl,
                         Func::coalesce([
@@ -559,9 +576,12 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
                 update
                     // `unknown`, not `down`: the read failed, so nothing is
                     // known about the target. `down` would assert a verdict
-                    // nobody reached -- the same distinction the legacy pair
-                    // draws between `Unreachable` and `Unhealthy`, and the
-                    // same one `m20260903_000011`'s backfill made.
+                    // nobody reached -- the same distinction the legacy
+                    // `cluster_status` drew between `Unreachable` and
+                    // `Unhealthy` before Task 19 dropped it, and the same
+                    // one `m20260903_000011`'s (folded into
+                    // `migrations::m20260812_000001_initial` by the docs
+                    // squash) backfill made.
                     .col_expr(
                         EnvironmentColumn::HealthState,
                         Expr::value(HealthState::Unknown.as_str().to_owned()),
@@ -570,11 +590,12 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
                     .col_expr(EnvironmentColumn::HealthCheckedAt, Expr::value(Some(now)))
             }
             // No read was attempted, so none of the health columns is named in
-            // the UPDATE at all -- not even a checked-at, in either set,
-            // because nothing checked. The row keeps whatever it already held;
+            // the UPDATE at all -- not even a checked-at, because nothing
+            // checked. The row keeps whatever it already held;
             // a row that was never checked stays never-checked, which is what
-            // makes the UI fall back to the reachability dot (D-CH-6) instead
-            // of rendering a manufactured status. This is NOT the Failed arm
+            // makes the UI fall back to the reachability dot for an environment
+            // no cycle has reached, instead of rendering a manufactured
+            // status. This is NOT the Failed arm
             // with the writes omitted: it must never clear a reading either,
             // so a build or a product that cannot look can neither invent nor
             // erase what an earlier one saw.
@@ -645,8 +666,9 @@ fn attrs_or_skip(
 /// with the outcome under test, then assert on the *difference* between the
 /// two rules rather than on either write in isolation. The exception is
 /// `a_failed_version_detection_leaves_a_successful_health_read_alone`, whose
-/// property (the two halves of one call are independent, D-CH-4) is fully
-/// exercised by a single call, so a second write would test nothing extra.
+/// property (the two halves of one call — version detection and the health
+/// read — are independent) is fully exercised by a single call, so a second
+/// write would test nothing extra.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod record_observation_tests {
@@ -818,7 +840,7 @@ mod record_observation_tests {
                 tenant,
                 new_environment(name),
                 PersistedCredentials {
-                    legacy_ref: "credstore://test".to_owned(),
+                    legacy_ref: "kc-test".to_owned(),
                     credentials: Vec::new(),
                     config: serde_json::json!({}),
                 },
@@ -872,16 +894,17 @@ mod record_observation_tests {
         assert_eq!(row.observed_build.as_deref(), Some("0"));
     }
 
-    // Six tests were deleted here by Task 19, with the columns they were
-    // about: `a_set_namespace_survives_detection_but_an_unset_one_is_filled`
-    // (the sticky `observed_namespace` rule -- finding E-23, discharged by the
-    // drop rather than fixed, because the namespace now has exactly one home
-    // in `observed_attrs`), `a_failed_health_read_clears_the_nodes_rather_
-    // than_keeping_them`, `a_freshly_created_environment_has_no_cluster_health_
-    // recorded`, `a_successful_health_read_clears_a_previous_unreachable_
-    // message`, `a_not_attempted_health_outcome_leaves_a_never_checked_
-    // environment_untouched` and `a_not_attempted_health_outcome_preserves_an_
-    // earlier_successful_read`.
+    // Six tests were deleted here by Task 19, with the columns they were about:
+    // `a_set_namespace_survives_detection_but_an_unset_one_is_filled` (the
+    // sticky `observed_namespace` rule -- a review finding, discharged by the
+    // drop rather than fixed, because the namespace now has exactly one home in
+    // `observed_attrs`),
+    // `a_failed_health_read_clears_the_nodes_rather_ than_keeping_them`,
+    // `a_freshly_created_environment_has_no_cluster_health_ recorded`,
+    // `a_successful_health_read_clears_a_previous_unreachable_ message`,
+    // `a_not_attempted_health_outcome_leaves_a_never_checked_ environment_untouched`
+    // and
+    // `a_not_attempted_health_outcome_preserves_an_ earlier_successful_read`.
     //
     // What replaced their properties, so none is silently lost: the health
     // half is now `health_state`/`health_detail`/`health_checked_at`, and
@@ -889,7 +912,7 @@ mod record_observation_tests {
     // `a_failed_version_detection_leaves_a_successful_health_read_alone`
     // (both kept, both rewritten onto those columns) are what hold the
     // independence rule the deleted three were about. The node inventory has
-    // no replacement **on purpose** -- user decision U4.
+    // no replacement **on purpose** -- the user's decision.
 
     /// `observed_base_url`: the STORED value must yield, and only to a
     /// CONCLUSIVE detection; an inconclusive one (`base_domain: None`, how a
@@ -1105,8 +1128,8 @@ mod record_observation_tests {
         ));
     }
 
-    /// D-CH-4: the halves are independent, so a failed health read must not
-    /// disturb a version that was detected in the same call.
+    /// The two halves of one call are independent, so a failed health read
+    /// must not disturb a version that was detected in the same call.
     #[tokio::test]
     async fn a_failed_health_read_leaves_the_observed_version_alone() {
         let db = inmem_db().await;

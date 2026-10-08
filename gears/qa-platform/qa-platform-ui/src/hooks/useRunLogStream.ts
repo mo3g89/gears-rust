@@ -58,14 +58,14 @@ export const MAX_UNSTABLE_RETRIES = 3;
  * (`broadcast.rs:102`) for no benefit. The jitter avoids every open tab reconnecting in
  * lockstep on the same schedule.
  *
- * **This is the only thing bounding the stable-reconnect path, and that is deliberate**
- * (review round 2, finding B). An earlier draft also added a `MAX_TOTAL_ATTEMPTS` ceiling
+ * **This is the only thing bounding the stable-reconnect path, and that is deliberate**.
+ * An earlier draft also added a `MAX_TOTAL_ATTEMPTS` ceiling
  * "independent of wasStable", reasoned against "an 8h run recycling every 60s is under
  * 500 reconnects" — but 8h at 60s is 480 reconnects, and the ceiling was 100, so the
  * comment's own arithmetic contradicted the number it was defending: the ceiling would
  * have fired on the exact legitimate case it claimed to exempt. Rather than pick a new
- * round number with the same problem, this floor is the actual fix for the hazard finding
- * 2 identified — hammering the gear's subscriber slots at zero delay — because it puts a
+ * round number with the same problem, this floor is the actual fix for the hazard of
+ * hammering the gear's subscriber slots at zero delay — because it puts a
  * hard rate limit on reconnect attempts (at most one roughly every 1-2s, the same floor
  * `backoffMs`'s first step already enforces on the instant-failure path). A connection
  * that keeps proving itself viable for `STABLE_CONNECTION_MS` before dropping is doing
@@ -97,9 +97,8 @@ function stableReconnectDelayMs(): number {
  * (`broadcast.rs:117-119`): "a caller that swallowed it would hand an operator a log
  * with an invisible hole in the middle, which is worse than a visibly truncated one".
  *
- * **Fires only when replacing a connection that was actually `STABLE_CONNECTION_MS` old**
- * (review round 2, finding A). The first draft keyed this on "has this hook ever
- * connected before", which fires on *every* reconnect including the instant-failure
+ * **Fires only when replacing a connection that was actually `STABLE_CONNECTION_MS` old**.
+ * The first draft keyed this on "has this hook ever connected before", which fires on *every* reconnect including the instant-failure
  * retries a finished run's empty stream produces — three or four false gap markers,
  * with no content ever missed, shown in place of the real (already-available) polled log
  * for the several seconds before the hook gives up. Gating on the same stable-duration

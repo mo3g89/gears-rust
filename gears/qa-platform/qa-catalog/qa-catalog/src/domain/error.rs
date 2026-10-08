@@ -23,11 +23,32 @@ pub enum DomainError {
     FileNotFound { path: String },
 
     /// The requested `(repo, branch)` has no synced content to read
-    /// plans/files from — either the repository has never synced
-    /// successfully (or its last sync failed), or the requested branch has
-    /// no materialized snapshot directory (see `infra::git::layout`).
-    #[error("repository {repo_id} has no synced content for branch '{branch}'")]
-    RepoNotSynced { repo_id: Uuid, branch: String },
+    /// plans/files from, and syncing it on read did not produce any — either
+    /// the repository's last sync failed, or the branch has no materialized
+    /// snapshot directory (see `infra::git::layout`) after the sync.
+    ///
+    /// `reason` is the repository's recorded `sync_error` when there is one.
+    /// That column is repository-wide, so the reason may come from another
+    /// branch's sync, and the message says so ("the repository's last sync
+    /// failed"). It is already sanitized when `ReposService` records it (userinfo and
+    /// credential material stripped), and it is the same text the repository
+    /// read model publishes, so it is safe to show the caller.
+    #[error(
+        "repository {repo_id} has no synced content for branch '{branch}'{}",
+        not_synced_reason_suffix(.reason.as_deref())
+    )]
+    RepoNotSynced {
+        repo_id: Uuid,
+        branch: String,
+        reason: Option<String>,
+    },
+
+    /// The repository's remote has no branch named `branch`: it is absent
+    /// from the cached branch list and from a fresh listing of the remote.
+    /// A read answers this instead of syncing, so a mistyped branch never
+    /// reaches the sync engine and never records a `sync_error`.
+    #[error("branch '{branch}' does not exist in repository {repo_id}")]
+    BranchNotFound { repo_id: Uuid, branch: String },
 
     #[error("validation failed on {field}: {message}")]
     Validation { field: String, message: String },
@@ -41,12 +62,13 @@ pub enum DomainError {
     ///
     /// It used to carry `Option<String>`, with `None` meaning "the product's
     /// `plugin_instance_id` is null" and a second 404 message telling an
-    /// operator to bind the product. `m20260903_000004` made the column
-    /// `NOT NULL` and the model followed, so that state is unconstructible —
-    /// the only producer is `QaProductRegistry::plugin_for`, which now always
-    /// has an id. The comment that kept the `Option` alive claimed
-    /// `qa-environments`' port also produced this variant; it does not and
-    /// cannot, because that is a different type
+    /// operator to bind the product. `m20260903_000004` (folded into
+    /// `migrations::m20260812_000002_initial` by the docs squash) made the
+    /// column `NOT NULL` and the model followed, so that state is
+    /// unconstructible — the only producer is `QaProductRegistry::plugin_for`,
+    /// which now always has an id. The comment that kept the `Option` alive
+    /// claimed `qa-environments`' port also produced this variant; it does not
+    /// and cannot, because that is a different type
     /// (`qa_environments::domain::ports::PluginUnavailable`) in a different
     /// crate (review finding IMPORTANT-5).
     ///
@@ -73,9 +95,6 @@ pub enum DomainError {
     #[error("ssh key '{name}' already exists")]
     SshKeyNameExists { name: String },
 
-    #[error("concurrent branch cache update for repository {repo_id}, retry")]
-    BranchCacheConflict { repo_id: Uuid },
-
     #[error("access denied")]
     Forbidden,
 
@@ -91,6 +110,34 @@ pub enum DomainError {
     /// it in `sync_error` (defense in depth).
     #[error("repository sync failed: {message}")]
     SyncFailed { message: String },
+
+    /// The remote refused the repository's configured credential, or
+    /// demanded one and none is configured, or the configured one cannot be
+    /// offered at all (a passphrase-protected ssh key). A configuration fault:
+    /// it does not go away on retry, so it is told apart from
+    /// [`Self::SyncFailed`] (DESIGN §3.3 "Branch model and the first read of a branch"). Produced only by the gix adapter;
+    /// `ReposService` records it in `sync_error` like any engine failure, and
+    /// the lazy read answers it as that recorded failure. Same text shape as
+    /// `SyncFailed`, and sanitized the same way before it is persisted.
+    #[error("repository sync failed: {message}")]
+    CredentialRejected { message: String },
+
+    /// A sync or a branch listing did not finish within its deadline
+    /// (`sync_timeout_seconds`, `ls_refs_timeout_seconds`) and was stopped.
+    /// 503 when it escapes. A listing that times out is an outage and backs
+    /// the repository off as one; a content sync that times out is recorded
+    /// in `sync_error` and backs it off for that recorded reason (400). See
+    /// DESIGN §3.3 "Limits on talking to a remote".
+    #[error("repository sync failed: {message}")]
+    RemoteTimedOut { message: String },
+
+    /// The fetched pack or the branch checkout is larger than the deployment
+    /// allows (`max_fetch_bytes`, `max_checkout_bytes`). A property of the
+    /// repository, not an outage: recorded and answered 400, and the
+    /// repository is backed off. See DESIGN §3.3 "Limits on talking to a
+    /// remote".
+    #[error("repository sync failed: {message}")]
+    SyncBudgetExceeded { message: String },
 
     /// Bundle blob store failure (local-fs `BundleStore` adapter, Task 9).
     #[error("bundle storage error: {0}")]
@@ -130,6 +177,16 @@ pub enum DomainError {
 
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+/// The `": the repository's last sync failed: …"` tail of
+/// [`DomainError::RepoNotSynced`]'s message, empty when no sync failure is
+/// recorded. Worded for the repository, not the branch: `sync_error` is
+/// repository-wide.
+fn not_synced_reason_suffix(reason: Option<&str>) -> String {
+    reason.map_or_else(String::new, |reason| {
+        format!(": the repository's last sync failed: {reason}")
+    })
 }
 
 impl DomainError {

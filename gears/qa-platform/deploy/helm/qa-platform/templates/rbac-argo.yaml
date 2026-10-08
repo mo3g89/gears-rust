@@ -16,16 +16,13 @@
        - cronworkflows: qa-runs owns its own leader-elected scheduler
          (ADR-0001), so it never creates a CronWorkflow.
 
-     ONE POD, ONE SERVICEACCOUNT: qa-platform-gears runs every gear in this
-     stack, including qa-environments, which is a DIFFERENT consumer of this
-     same Role with a genuine need for `secrets` -- see the separate rule
-     below and its own comment. qa-runs' own executor still never opens a
-     Secret's contents (run_executor.rs:85-86, "qa-runs never reads a
-     secret's contents" -- it only ever emits a secretKeyRef and lets the
-     KUBELET resolve it), so that claim about qa-runs' OWN code path stays
-     true; qa-runs' process merely gains an access its own code never
-     exercises, which is what sharing one ServiceAccount across every gear in
-     the pod costs here.
+     NO `secrets` HERE (finding #94). qa-platform-gears runs every gear in
+     this pod, and qa-runs' executor never opens a Secret (it only emits a
+     secretKeyRef and lets the KUBELET resolve it). qa-environments' D4
+     runner-credential writer, the one consumer that does write Secrets into
+     this namespace, authenticates as its own ServiceAccount,
+     qa-platform-secret-writer -- see the second Role/RoleBinding pair below
+     and secret-writer-serviceaccount.yaml.
 
      This Role/RoleBinding live in the ARGO namespace, not the release
      namespace -- Argo Workflows and the Workflows qa-runs creates live there
@@ -55,31 +52,6 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
-  {{/* qa-environments, NOT qa-runs -- decision D4's runner-credential writer
-       (`runner_secret_writer::ensure_runner_secret` in
-       qa-environments/src/infra/runner_secret_writer.rs) writes one
-       Secret per stored credential into THIS namespace (.Values.argo.namespace) via
-       `Api::<Secret>::namespaced(client, argo_namespace)` and a server-side
-       apply patch (`PatchParams::apply(FIELD_MANAGER)` /
-       `Patch::Apply(&secret)`). A deployment whose gears hold a cluster-admin
-       kubeconfig never surfaces a missing grant; with this scoped
-       ServiceAccount the write is Forbidden on every cycle, and the symptom
-       (job-db-migrate.yaml's sibling concern for the OTHER hook-ordering
-       race, D4's own design notes for this one) is every workflow run
-       hanging on FailedMount while observation keeps working and the stack
-       otherwise looks healthy -- nothing in this Role's other rules touches
-       this code path at all, so nothing else would ever surface it either.
-
-       ONLY create + patch, not get/update/delete: Kubernetes' own
-       server-side-apply RBAC rule is that a caller needs `patch` always,
-       plus `create` only for the FIRST apply against an object that does not
-       exist yet (confirmed by reading the exact call above -- a single
-       `Patch::Apply`, never a read-modify-write, so `get`/`update` add
-       nothing this writer's own code path uses; `delete` likewise, since
-       this writer never removes a Secret it manages). */}}
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -102,4 +74,87 @@ subjects:
     # subject's namespace to the RoleBinding's own -- silently binding a
     # ServiceAccount named qa-platform-gears that may not even exist in argo,
     # granting the real one nothing and failing in a way that names neither.
+    namespace: {{ .Release.Namespace }}
+---
+{{/* Decision D4's runner-credential writer
+     (`runner_secret_writer::ensure_runner_secret` in
+     qa-environments/src/infra/runner_secret_writer.rs) server-side-applies
+     one Secret per stored credential into THIS namespace
+     (.Values.argo.namespace). It authenticates as qa-platform-secret-writer,
+     not qa-platform-gears: the qa-environments fragment's
+     `argo.kubeconfig_path` (gears-argo-configmaps.yaml) points at a kubeconfig
+     whose tokenFile is this account's token (secret-writer-serviceaccount.yaml).
+
+     ONLY create + patch. A server-side apply is a PATCH request; `create` is
+     needed for the first apply against a Secret that does not exist yet. The
+     writer never reads, lists, updates or deletes a Secret, so nothing else
+     is granted.
+
+     NAMESPACE-WIDE IN RBAC, AND THAT IS A LIMIT RATHER THAN AN OVERSIGHT.
+     `create` cannot be narrowed by `resourceNames` at all, and the names
+     `patch` would need are derived at runtime per tenant and per credential
+     reference (`secret_name` in runner_secret_writer.rs: `argo.secret_prefix`,
+     tenant, reference, plus a digest), so no render-time list exists. On its
+     own this grant would let its holder create ANY Secret in the Argo
+     namespace or overwrite any existing one by name, though not read, list
+     or delete one. That includes minting a `kubernetes.io/service-account-token`
+     Secret for any ServiceAccount there (Argo's controller and server accounts
+     included), which the token controller then fills with a working token.
+
+     secret-writer-admission-policy.yaml closes that where the cluster serves
+     admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy (Kubernetes
+     1.30+). For this account it admits only Opaque Secrets whose names start
+     with the runner prefix. What the writer can still do there: create such a
+     Secret, or overwrite any tenant's runner-credential Secret by name (they
+     all share the prefix). On an older cluster the policy does not render and
+     the whole RBAC grant above applies, token minting included.
+
+     What finding #94 changed is WHO holds it. It used to be
+     qa-platform-gears, the ambient identity of every gear in the pod. It is
+     now a single-purpose account whose token only the D4 writer is
+     configured to read: its API requests are distinguishable in the audit
+     log (`system:serviceaccount:<release ns>:qa-platform-secret-writer`),
+     and it is revocable on its own by deleting
+     qa-platform-secret-writer-token. What it did NOT change: the token is
+     mounted into the same gears container, so a compromised gears process
+     holds this grant too. The separate, larger remaining gap is
+     qa-platform-gears-executor's `workflows: create` above. qa-runs needs it,
+     and it lets a compromised gears process submit a Workflow that mounts any
+     Secret in this namespace, and runs as any ServiceAccount here, and so
+     read them all (ADR-0008, "Consequences").
+
+     Without this grant the write is Forbidden on every cycle and every
+     workflow run hangs on FailedMount while observation keeps working and the
+     stack otherwise looks healthy; verify-k8s.sh's `k8s 3/4` asserts both
+     halves (writer=yes, qa-platform-gears=no). */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: qa-platform-secret-writer
+  namespace: {{ .Values.argo.namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: secret-writer
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: qa-platform-secret-writer
+  namespace: {{ .Values.argo.namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: secret-writer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: qa-platform-secret-writer
+subjects:
+  - kind: ServiceAccount
+    name: qa-platform-secret-writer
+    # Explicit and required, for the same reason as the binding above: the
+    # account lives in the RELEASE namespace, this binding in argo's.
     namespace: {{ .Release.Namespace }}

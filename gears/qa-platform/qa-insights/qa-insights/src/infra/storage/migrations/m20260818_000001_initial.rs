@@ -1,19 +1,21 @@
 //! Initial schema: results, the JIRA bug registry, saved views, the three
-//! configuration singletons, the notification tables, and the ingest
-//! watermarks.
+//! configuration singletons, the notification tables, the ingest watermarks,
+//! and the leader claims.
 //!
-//! Eleven tables. Ten are legacy tables (`manager/migrations/001_initial.sql`)
-//! with tenancy and UUID keys added; `qa_ingest_watermarks` is new and exists
-//! because this gear's projection is built by the reconcile sweep polling
-//! qa-runs on its own cadence, which needs a persisted high-water mark to
-//! resume from rather than re-scanning from the beginning on every restart
-//! (design §4.4, Task 15).
+//! Twelve tables. Ten are legacy tables (`manager/migrations/001_initial.sql`)
+//! with tenancy and UUID keys added; `qa_leader_claims` (one holder per role
+//! per tenant, `idx_qa_leader_claims_role`) is the second new one, and
+//! `qa_ingest_watermarks` is the first, which exists because this gear's
+//! projection is built by the reconcile sweep polling qa-runs on its own
+//! cadence, which needs a persisted high-water mark to resume from rather than
+//! re-scanning from the beginning on every restart (Task 15).
 //!
-//! Follows the three shipped sibling gears' migration shape — a backend `match`
-//! producing one `execute_unprepared` DDL blob per dialect. Column, index and
-//! table order is kept identical across `POSTGRES_UP`, `MYSQL_UP` and
-//! `SQLITE_UP`; the two parity tests at the bottom are what enforce that, not a
-//! human diff.
+//! Follows the sibling gears' migration shape — a backend `match` producing one
+//! `execute_unprepared` DDL blob per dialect — for two dialects, `PostgreSQL`
+//! and `SQLite`. There is no `MYSQL_UP`; the `MySql` arm refuses (see
+//! "So the `MySQL` arm refuses instead of executing"). Column, index and table
+//! order is kept identical across `POSTGRES_UP` and `SQLITE_UP`; the two parity
+//! tests at the bottom are what enforce that, not a human diff.
 //!
 //! ## Nothing links these names to anything at compile time
 //!
@@ -107,10 +109,10 @@
 //!
 //! **This is a trade, not a forced move, and an earlier draft of this section
 //! read as though it were forced.** `GENERATED ALWAYS AS (...) STORED` plus a
-//! unique index over the generated column is accepted *and* indexable by all
-//! three engines this file targets — `PostgreSQL` 16, `MySQL` 8 and `SQLite`
-//! 3.51 — so "no functional indexes" does not close the question the way the
-//! paragraph above implies on its own. It would also delete obligation #2
+//! unique index over the generated column is accepted *and* indexable by both
+//! dialects this file ships — `PostgreSQL` 16 and `SQLite` 3.51 — and by
+//! `MySQL` 8, which it does not ship, so "no functional indexes" does not
+//! close the question the way the paragraph above implies on its own. It would also delete obligation #2
 //! below outright, along with the only silent-correctness failure mode in this
 //! schema: a writer that forgets `plan_key` gets the `''` default and quietly
 //! collides a plan-scoped view with the owner's global view of the same name.
@@ -122,8 +124,9 @@
 //!    database is a different design, and picking it here would decide for
 //!    Task 12 rather than with it.
 //! 2. **It needs three concatenation spellings.** The generation expression is
-//!    `||` on Postgres and `SQLite` and `CONCAT(...)` on `MySQL`, so the three
-//!    blobs would stop being transcriptions of one another. That is the same
+//!    `||` on Postgres and `SQLite` and `CONCAT(...)` on `MySQL`, so a `MySQL`
+//!    blob, were one ever added, would stop being a transcription of the other
+//!    two. That is the same
 //!    objection this file already raises against a `CHECK` constraint
 //!    (obligation #2), and the identical-across-dialects discipline is what the
 //!    two parity tests rest on.
@@ -169,11 +172,11 @@
 //!
 //! ## `MySQL` key-width budget (`InnoDB`, `utf8mb4`, 3072-byte limit)
 //!
-//! **Five of the eighteen indexes here exceed it, which is why `up()` refuses
+//! **Five of the nineteen indexes here exceed it, which is why `up()` refuses
 //! `MySQL` outright** — see "So the `MySQL` arm refuses instead of executing"
-//! below. Nothing here is shipped-anyway: the blob exists, and no code path
-//! hands it to an engine. Here is the arithmetic (`VARCHAR(n)` costs `4n` bytes
-//! under `utf8mb4`; `TIMESTAMP` costs 4):
+//! below. There is no `MySQL` blob in this file to be shipped anyway; what
+//! follows is the arithmetic a future port would start from (`VARCHAR(n)` costs
+//! `4n` bytes under `utf8mb4`; `TIMESTAMP` costs 4):
 //!
 //! | Index | Bytes | Fits |
 //! |---|---|---|
@@ -192,6 +195,7 @@
 //! | the four singleton `(tenant_id)` uniques | 144 each | yes |
 //! | `idx_qa_run_notifications_claim` | 800 | yes |
 //! | `idx_qa_notification_log_tenant_created` | 148 | yes |
+//! | `idx_qa_leader_claims_role` | 144+256 = 400 | yes |
 //!
 //! Every overflowing index contains a path or a test name — `test_file`
 //! `VARCHAR(1024)`, `plan_path` `VARCHAR(1024)`, `test_name` `VARCHAR(512)`.
@@ -215,9 +219,9 @@
 //!   `idx_qa_jira_bugs_tenant_test_plan` — are plain `CREATE INDEX`, where a
 //!   prefix length is a pure selectivity choice with no semantic consequence,
 //!   so **prefix lengths remain available for those three**. Whichever way,
-//!   applying one now would make the three dialects declare different indexes,
-//!   which is exactly what `every_dialect_declares_the_same_indexes` exists to
-//!   forbid.
+//!   a prefix length in a future `MySQL` blob would make the dialects declare
+//!   different indexes, which is exactly what
+//!   `every_dialect_declares_the_same_indexes` exists to forbid.
 //!
 //!   (Corrected 2026-08-20: this bullet said "the three *unique* indexes" and
 //!   offered the strongest argument for five cases when it covers two. Counted,
@@ -246,23 +250,25 @@
 //! over-limit index qa-runs faced was in that position. Neither of the two
 //! over-limit **unique** indexes here is: `idx_qa_test_case_collect_target` is
 //! the conflict target the collect upsert runs against, and
-//! `idx_qa_analytics_saved_views_unique` *is* D4. There is nothing to decline.
+//! `idx_qa_analytics_saved_views_unique` *is* the saved-view name rule (one
+//! name per owner per scope, the tests below "What the schema accepts and
+//! refuses — saved-view names"). There is nothing to decline.
 //!
 //! ### So the `MySQL` arm refuses instead of executing
 //!
-//! **Measured, not assumed:** of the eleven `MYSQL_UP` blobs across the four
-//! qa-platform gears, ten execute cleanly against `MySQL` 8 and only this one
-//! fails — `ERROR 1071 (42000): Specified key was too long; max key length is
-//! 3072 bytes`, on the first table. So `MYSQL_UP` is **not** "a declaration
-//! mirror like the siblings'": theirs run, this one does not, and describing it
-//! as equivalent was materially untrue.
+//! **Measured, not assumed, when a `MYSQL_UP` blob still existed here:** of the
+//! eleven `MySQL` blobs then across the four qa-platform gears, ten executed
+//! cleanly against `MySQL` 8 and only this one failed — `ERROR 1071 (42000):
+//! Specified key was too long; max key length is 3072 bytes`, on the first
+//! table.
 //!
 //! `up()`'s `MySql` arm therefore returns a `DbErr` naming this section, rather
-//! than handing the engine DDL that will die on `ERROR 1071` with no gear name
-//! and no column in the message. The constant stays — the two parity tests read
-//! it, and it is the declaration of what a `MySQL` schema *would* be — but
-//! nothing will execute it. `the_mysql_arm_refuses_rather_than_executing`
-//! pins that.
+//! than handing the engine DDL that would die on `ERROR 1071` with no gear name
+//! and no column in the message. **The blob itself has since been deleted:
+//! no `MYSQL_UP` constant exists**, so the two parity tests compare
+//! `POSTGRES_UP` with `SQLITE_UP` and nothing else, and there is no `MySQL`
+//! declaration to keep in step. `the_mysql_arm_refuses_rather_than_executing`
+//! pins the refusal.
 //!
 //! This costs nothing today: the gear links `toolkit-db` with
 //! `features = ["sqlite", "pg"]` (see `Cargo.toml`), as all three siblings do,
@@ -348,7 +354,7 @@
 //!    (`DELETE FROM test_results WHERE run_id = $1 AND test_name = $2 AND
 //!    COALESCE(test_file, '') = $3` then an unconditional `INSERT`,
 //!    `manager/src/routes/runs.rs:1153-1185`), qa-runs records the identical
-//!    obligation at its own index, and design §4.4 states it for this gear. So
+//!    obligation at its own index, and this gear has the same one. So
 //!    the database will happily store the same outcome twice and every count
 //!    the analytics surface computes will be wrong, with nothing failing.
 //!
@@ -361,6 +367,10 @@
 //!    `a_repeated_result_tuple_is_accepted` pins the absence of the index, so
 //!    that "helpfully" adding one — which would break ingest *and* add a sixth
 //!    `MySQL` failure — turns a test red instead of shipping.
+//!
+//!    Two writers of one run are serialized by
+//!    `m20261007_000009_run_projection_locks`'s per-run lock row, not by an
+//!    index on this tuple.
 //!
 //! ## Two columns hold credential-equivalent material
 //!
@@ -612,7 +622,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_analytics_saved_views_unique ON qa_anal
 -- `manager/migrations/` holds exactly one file, so nothing adds the column
 -- later either. Auto-rerun is a *global* switch --
 -- `JiraPollerConfig::auto_rerun_on_resolve`, which `qa_jira_poller_config`
--- below carries -- and D8's point is that the rerun gate is the poller's, not
+-- below carries -- and the rerun gate is the poller's, not
 -- the bug's. If per-bug control is ever wanted it is an additive nullable
 -- column plus an SDK field.
 CREATE TABLE IF NOT EXISTS qa_jira_bugs (
@@ -647,7 +657,7 @@ CREATE INDEX IF NOT EXISTS idx_qa_jira_bugs_tenant_status ON qa_jira_bugs(tenant
 
 -- JIRA connection settings. Legacy `JiraConfig` (`manager/src/models.rs:678-685`,
 -- six fields), stored as a row in the untyped key/value `settings` table
--- (001_initial.sql:93) under the key `jira`. D6 replaces the JSON bag with typed
+-- (001_initial.sql:93) under the key `jira`. This table replaces the JSON bag with typed
 -- columns: same fields, same GET/PUT surface, one row per tenant instead of one
 -- row per installation.
 CREATE TABLE IF NOT EXISTS qa_jira_config (
@@ -686,7 +696,7 @@ CREATE TABLE IF NOT EXISTS qa_jira_poller_config (
     -- types it `u64`; the clamp stays in the domain, not the DDL.
     poll_interval_seconds BIGINT NOT NULL DEFAULT 300,
     -- Global gate on relaunching a run when a bug resolves. Legacy needs *both*
-    -- this and a new build (`jira_poller.rs:61-70`, D8). The resolution itself
+    -- this and a new build (`jira_poller.rs:61-70`). The resolution itself
     -- is recorded either way (`:59`, before the gate), so turning this off does
     -- not stop bugs closing.
     auto_rerun_on_resolve BOOLEAN NOT NULL DEFAULT TRUE,
@@ -770,7 +780,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_run_notifications_claim ON qa_run_notif
 
 -- Notification audit trail. Legacy `notification_log` (001_initial.sql:205-213),
 -- surfaced at `GET /api/settings/notifications/log`. Egress failures are
--- recorded here and never propagated to a caller (design 4.8), which makes this
+-- recorded here and never propagated to a caller, which makes this
 -- the only place an operator can see that Slack or SMTP is broken.
 CREATE TABLE IF NOT EXISTS qa_notification_log (
     id UUID PRIMARY KEY NOT NULL,
@@ -797,7 +807,7 @@ CREATE INDEX IF NOT EXISTS idx_qa_notification_log_tenant_created ON qa_notifica
 -- **New in this port; no legacy original.** This gear's projection is built
 -- by a periodic reconcile that polls qa-runs for runs finished since a
 -- persisted high-water mark, and by a sweep that retires stale in-progress
--- rows (design 4.4, Task 15). Both marks live here, one row per tenant, because
+-- rows (Task 15). Both marks live here, one row per tenant, because
 -- a mark held in memory would restart at zero on every deploy -- which is the
 -- failure this table exists to prevent.
 CREATE TABLE IF NOT EXISTS qa_ingest_watermarks (
@@ -823,16 +833,14 @@ CREATE TABLE IF NOT EXISTS qa_leader_claims (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_leader_claims_role ON qa_leader_claims(tenant_id, role);
 ";
 
-/// The `MySQL` schema this gear *would* have, and **which `up()` refuses to
-/// execute**.
+/// The `SQLite` schema, kept in step with `POSTGRES_UP` by the two parity tests
+/// at the bottom of this file.
 ///
-/// Five of its indexes exceed `InnoDB`'s 3072-byte key limit, so `MySQL` 8
-/// rejects the very first `CREATE TABLE` with `ERROR 1071 (42000)`. Kept
-/// because the two parity tests read it and because it is the declaration of
-/// what the schema would be; see this module's header,
-/// "`MySQL` key-width budget (`InnoDB`, `utf8mb4`, 3072-byte limit)", for the
-/// per-index arithmetic and for what a real `MySQL` port would have to decide.
-///
+/// There is no `MySQL` counterpart: five of this schema's indexes exceed
+/// `InnoDB`'s 3072-byte key limit, so `up()` refuses that backend. See this
+/// module's header, "`MySQL` key-width budget (`InnoDB`, `utf8mb4`, 3072-byte
+/// limit)", for the per-index arithmetic and for what a real `MySQL` port
+/// would have to decide.
 const SQLITE_UP: &str = r"
 CREATE TABLE IF NOT EXISTS qa_test_results (
     id TEXT PRIMARY KEY NOT NULL,
@@ -1029,8 +1037,8 @@ fn up_ddl(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
     match backend {
         sea_orm::DatabaseBackend::Postgres => Ok(POSTGRES_UP),
         sea_orm::DatabaseBackend::Sqlite => Ok(SQLITE_UP),
-        // **Refuses rather than narrates.** Handing `MYSQL_UP` to the engine
-        // produces `ERROR 1071 (42000): Specified key was too long; max key
+        // **Refuses rather than narrates.** Handing the engine a `MySQL`
+        // rendering of this schema produces `ERROR 1071 (42000): Specified key was too long; max key
         // length is 3072 bytes` on the first table -- a message carrying no
         // gear name, no index name and no column. Five of this schema's
         // indexes are over InnoDB's limit; three are fixable with a prefix
@@ -1103,12 +1111,11 @@ DROP TABLE IF EXISTS qa_test_results;
 /// on the `integration` feature, so a default `cargo test` does not run it:
 /// `cargo test -p qa-insights --features integration --lib`.
 ///
-/// What nothing covers is `MYSQL_UP`. It is never executed on any tier, by
-/// anything — `up()` refuses the `MySql` backend outright — so only its
-/// *declarations* are checked, by
+/// There is no `MYSQL_UP` to cover: `up()` refuses the `MySql` backend outright,
+/// and no `MySQL` blob is declared. What the parity tests
 /// `every_dialect_declares_the_same_columns_in_the_same_order` and
-/// `every_dialect_declares_the_same_indexes`. That is precisely why those two
-/// tests exist.
+/// `every_dialect_declares_the_same_indexes` guard is `POSTGRES_UP` against
+/// `SQLITE_UP`: the `SQLite` tier executes only one of them.
 ///
 /// ## Why this module talks to a raw `SeaORM` connection
 ///
@@ -1130,14 +1137,24 @@ mod tests {
 
     /// Tables in this gear's database that **this** migration does not own.
     ///
-    /// Empty: this gear's schema is declared by this one migration, so the
-    /// inventory assertions below are over the whole database and a stray
-    /// table fails them.
+    /// The inventory assertions below are over the whole database, so a stray
+    /// table fails them; this list is how a table another migration
+    /// legitimately creates is declared to them.
     ///
     /// A migration that adds a table adds a line here. That is deliberate
     /// friction: the alternative is filtering the inventory down to a prefix,
     /// which would stop these tests noticing a table nobody meant to create.
-    const TABLES_OWNED_BY_LATER_MIGRATIONS: [&str; 0] = [];
+    ///
+    /// **It was empty until `m20260929_000004_run_completed_notification_cutoff`**,
+    /// which is the first migration in this gear to create a table after the
+    /// initial one. This module's own header says that migration's existence
+    /// is why this constant exists at all; the friction worked exactly as
+    /// intended — adding the table turned both inventory tests red until it
+    /// was named here.
+    ///
+    /// `m20261007_000009_run_projection_locks` added the second.
+    const TABLES_OWNED_BY_LATER_MIGRATIONS: [&str; 2] =
+        ["qa_notification_cutoff", "qa_run_projection_locks"];
 
     /// The twelve tables, in the order `up()` declares them.
     const TABLES: [&str; 12] = [
@@ -1166,15 +1183,17 @@ mod tests {
     const TS: &str = "2026-08-18T00:00:00Z";
 
     // ---------------------------------------------------------------------
-    // Declaration parity — the only check `MYSQL_UP` ever gets
+    // Declaration parity — `POSTGRES_UP` against `SQLITE_UP`
     // ---------------------------------------------------------------------
 
     /// Every column name of every table, per dialect, in declaration order.
     ///
     /// Strips `--` comment lines and blank lines, then takes the leading
     /// identifier of each remaining line inside a `CREATE TABLE` body, skipping
-    /// the trailing constraint clauses (`UNIQUE`/`KEY`/`CONSTRAINT`/`FOREIGN`/
-    /// `PRIMARY`/`INDEX`) that `MySQL` declares inline and the others do not.
+    /// the trailing constraint clauses (`UNIQUE`/`CONSTRAINT`/`FOREIGN`/`PRIMARY`)
+    /// rather than treating them as columns. The MySQL-only inline `KEY`/`INDEX`
+    /// clauses are not skipped: neither shipped dialect can contain one, and
+    /// the test below asserts no column is named after either.
     ///
     /// Copied from `qa-runs`' `m20260813_000003_initial.rs`.
     fn columns_by_table(ddl: &str) -> Vec<(String, Vec<String>)> {
@@ -1200,7 +1219,7 @@ mod tests {
             let ident = line.split([' ', '(']).next().unwrap_or_default();
             if matches!(
                 ident.to_uppercase().as_str(),
-                "UNIQUE" | "KEY" | "CONSTRAINT" | "FOREIGN" | "PRIMARY" | "INDEX"
+                "UNIQUE" | "CONSTRAINT" | "FOREIGN" | "PRIMARY"
             ) {
                 continue;
             }
@@ -1209,13 +1228,13 @@ mod tests {
         out
     }
 
-    /// The three dialects declare the same tables with the same columns in the
+    /// The two dialects declare the same tables with the same columns in the
     /// same order.
     ///
-    /// Eleven tables across three dialects is 33 `CREATE TABLE` bodies and well
+    /// Twelve tables across two dialects is 24 `CREATE TABLE` bodies and well
     /// past what an eyeball diff can hold, and the blobs are not even
-    /// comparable by eye: `POSTGRES_UP` is mostly comment and the other two
-    /// carry almost none. This test makes comment density irrelevant.
+    /// comparable by eye: `POSTGRES_UP` is mostly comment and `SQLITE_UP`
+    /// carries almost none. This test makes comment density irrelevant.
     ///
     /// A column present in one blob and absent from another is the exact defect
     /// class this whole file's header is about — it compiles, and it fails only
@@ -1235,15 +1254,24 @@ mod tests {
             pg.iter().all(|(_, c)| c.len() >= 6),
             "the parser produced a suspiciously short column list: {pg:?}"
         );
+        for (dialect, tables) in [("POSTGRES_UP", &pg), ("SQLITE_UP", &sq)] {
+            for (table, cols) in tables {
+                assert!(
+                    !cols
+                        .iter()
+                        .any(|c| matches!(c.to_uppercase().as_str(), "KEY" | "INDEX")),
+                    "{dialect}.{table} has an inline KEY/INDEX clause, which the parser \
+                     no longer skips (it is MySQL-only syntax): {cols:?}"
+                );
+            }
+        }
         assert_eq!(pg, sq, "POSTGRES_UP and SQLITE_UP disagree");
     }
 
     /// Every index declared by a dialect, as `(name, unique, columns)`.
     ///
-    /// Two syntaxes to parse, which is the whole reason a divergence is easy to
-    /// miss by eye: Postgres and `SQLite` write `CREATE [UNIQUE] INDEX ... ON
-    /// t(cols)` as free-standing statements, `MySQL` writes `[UNIQUE] KEY name
-    /// (cols)` inline in the `CREATE TABLE` body.
+    /// Both dialects write `CREATE [UNIQUE] INDEX ... ON t(cols)` as
+    /// free-standing statements, which is the one syntax parsed here.
     ///
     /// Copied from `qa-runs`' `m20260813_000003_initial.rs`.
     fn indexes(ddl: &str) -> Vec<(String, bool, Vec<String>)> {
@@ -1281,30 +1309,11 @@ mod tests {
                 cols.split(',').map(|c| c.trim().to_owned()).collect(),
             ));
         }
-        for line in ddl.lines() {
-            let line = line.trim().trim_end_matches(',');
-            let (unique, rest) = if let Some(r) = line.strip_prefix("UNIQUE KEY ") {
-                (true, r)
-            } else if let Some(r) = line.strip_prefix("KEY ") {
-                (false, r)
-            } else {
-                continue;
-            };
-            let (name, cols) = rest.split_once(" (").expect("KEY clause has a column list");
-            out.push((
-                name.trim().to_owned(),
-                unique,
-                cols.trim_end_matches(')')
-                    .split(',')
-                    .map(|c| c.trim().to_owned())
-                    .collect(),
-            ));
-        }
         out.sort();
         out
     }
 
-    /// The three dialects declare the same indexes, with the same uniqueness
+    /// The two dialects declare the same indexes, with the same uniqueness
     /// and the same column order.
     ///
     /// The companion to the column test, and it is not redundant with it:
@@ -1686,7 +1695,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // What the schema accepts and refuses — D4
+    // What the schema accepts and refuses — saved-view names
     // ---------------------------------------------------------------------
 
     /// Insert a saved view. `plan_key` is passed explicitly because the
@@ -1703,8 +1712,8 @@ mod tests {
         )
     }
 
-    /// D4, first half: one owner keeps a global view and a plan-scoped view of
-    /// the same name.
+    /// Saved-view names, first half: one owner keeps a global view and a
+    /// plan-scoped view of the same name.
     ///
     /// Proven by insert, not by reading the index definition — the point of the
     /// exercise is what a caller can now do.
@@ -1729,7 +1738,8 @@ mod tests {
         );
     }
 
-    /// D4, second half — **the property the `COALESCE` actually buys.**
+    /// Saved-view names, second half — **the property the `COALESCE` actually
+    /// buys.**
     ///
     /// A unique index over a nullable `plan_id` would not catch this: SQL says
     /// `NULL != NULL`, so two global views named "My View" would both be
@@ -1772,7 +1782,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // What the schema accepts and refuses — D5 dedupe
+    // What the schema accepts and refuses — notification send-once dedupe
     // ---------------------------------------------------------------------
 
     fn claim(id: u128, tenant: u128, run: u128, kind: &str, event: &str) -> String {
@@ -1897,12 +1907,13 @@ mod tests {
 
     /// The **four** singleton tables hold exactly one row per tenant.
     ///
-    /// Three are the configuration tables of D6 — legacy's equivalent is a
-    /// single `settings` row per key for the whole installation, and the unique
-    /// index on `(tenant_id)` alone is what turns that into a per-tenant
-    /// singleton rather than a table anyone can append to. The fourth,
-    /// `qa_ingest_watermarks`, is not configuration at all but has the same
-    /// one-row-per-tenant shape and the same index, so it is covered here.
+    /// Three are the per-tenant typed configuration tables — legacy's
+    /// equivalent is a single `settings` row per key for the whole
+    /// installation, and the unique index on `(tenant_id)` alone is what turns
+    /// that into a per-tenant singleton rather than a table anyone can append
+    /// to. The fourth, `qa_ingest_watermarks`, is not configuration at all but
+    /// has the same one-row-per-tenant shape and the same index, so it is
+    /// covered here.
     ///
     /// (Corrected 2026-08-20: this said "three configuration tables" directly
     /// above a loop over four, and the test name carried the same error. The
@@ -2115,9 +2126,9 @@ mod tests {
 
     /// `up()` refuses `MySQL` instead of handing it DDL that cannot run.
     ///
-    /// Empirically, of the eleven `MYSQL_UP` blobs across the four qa-platform
-    /// gears, ten execute cleanly against `MySQL` 8 and this one dies on
-    /// `ERROR 1071 (42000)` at the first table. Since this gear cannot even be
+    /// Empirically, when a `MySQL` blob still existed, of the eleven across the
+    /// four qa-platform gears ten executed cleanly against `MySQL` 8 and this
+    /// one died on `ERROR 1071 (42000)` at the first table. Since this gear cannot even be
     /// built with a `MySQL` backend (`toolkit-db` features are `sqlite` and
     /// `pg`), the refusal will most likely never fire — which is exactly why it
     /// needs a test: an error path nobody executes is the same defect class as
@@ -2203,7 +2214,7 @@ mod tests {
     /// in a file whose thesis is that `cargo build` proves nothing about it,
     /// and for the one dialect this gear actually deploys (`toolkit-db` is
     /// linked with `sqlite` and `pg`). The parity tests do not close that hole:
-    /// they prove the three blobs *agree*, not that any of them *executes*. A
+    /// they prove the two blobs *agree*, not that either *executes*. A
     /// syntax error, a rejected default, or an index over a mistyped column in
     /// `POSTGRES_UP` alone would have shipped with the whole suite green.
     ///
@@ -2211,7 +2222,7 @@ mod tests {
     /// second hard-coded list is deliberate: a hand-copied expectation is one
     /// more thing to keep in step, and drifting it would silently weaken the
     /// test. This way `the_initial_migration_creates_every_table` remains the
-    /// single place the eleven names are written down.
+    /// single place the twelve names are written down.
     ///
     /// **Residual, stated rather than left implicit:** this compares index
     /// *names*, not their column lists. Column parity on Postgres rests on
@@ -2269,7 +2280,7 @@ mod tests {
         assert_eq!(
             pg_tables.len(),
             TABLES.len() + TABLES_OWNED_BY_LATER_MIGRATIONS.len(),
-            "expected this migration's eleven tables plus the later migrations' own"
+            "expected this migration's twelve tables plus the later migrations' own"
         );
 
         for table in TABLES {
@@ -2314,7 +2325,7 @@ mod tests {
         // Asserting "empty" was right while the gear had one migration and
         // became a false expectation the moment it had two; asserting the
         // remainder keeps the test measuring what it always meant, which is
-        // that `down()` drops **its own** eleven and touches nothing else.
+        // that `down()` drops **its own** twelve and touches nothing else.
         let mut remaining = table_names(&conn).await;
         remaining.sort();
         let mut expected = TABLES_OWNED_BY_LATER_MIGRATIONS.to_vec();

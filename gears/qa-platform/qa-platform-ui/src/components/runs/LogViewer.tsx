@@ -333,7 +333,7 @@ export function LogViewer({ runName, isTerminal = false }: LogViewerProps) {
   const { isConnected, messages: wsMessages, hasGivenUp } = useRunLogStream(
     isTerminal ? null : runName
   );
-  // Review round 1, finding 1: once the hook gives up (a finished run's empty stream, a
+  // Once the hook gives up (a finished run's empty stream, a
   // capped run, or a genuine lookup failure — see `useRunLogStream`'s own doc), this
   // switches the header below to the honest "Polling" branch instead of a permanent
   // "Connecting..." spinner that never resolves.

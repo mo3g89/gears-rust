@@ -8,12 +8,14 @@
 // because it never had a wire shape at all — a UI-only view model. Each hand-written type
 // below says which. Do not force a reshaped or UI-only type through the generated namespace:
 // hooks.ts and every component still construct and consume the shapes as written here, and
-// Task 10 — not this file — is where the gears' actual response gets adapted onto them.
+// the adapter (`adapters.ts`) — not this file — is where the gears' actual response gets adapted onto them.
 //
 // The runtime helpers at the bottom of this file (`getStatusColor`, `isActiveRun`) are not
-// wire types. `isActiveRun` was re-mapped onto qa-runs' lowercase state set by Task 10
-// (CONTRACT-DIFF X4); `getPhaseColor` was deleted by the same task because it had no
-// callers anywhere in `src`.
+// wire types. `isActiveRun` was re-mapped onto qa-runs' lowercase state set;
+// `getPhaseColor` was deleted with it because it had no callers anywhere in `src`.
+//
+// `gears/qa-platform/docs/DESIGN.md` §3.6 "qa-platform-ui" is the live account of how this
+// UI was ported onto the gears' contracts.
 import type { components } from './generated/openapi';
 
 type S = components['schemas'];
@@ -28,9 +30,9 @@ export interface TestPlan {
    *  absent description means to every reader of it (each one truthiness-checks it) — the
    *  same honest-absence spelling `TestResult.logs` uses. */
   description: string;
-  /* The four fields below are optional because Task 10's adapter leaves them absent
+  /* The four fields below are optional because the adapter leaves them absent
    * rather than filling them: a `validation: false` or a `timeout_seconds: 0` would be a
-   * claim about the plan manifest that nothing served (CONTRACT-DIFF row 2).
+   * claim about the plan manifest that nothing served.
    * `timeout_seconds` and `exclusive` ARE on `PlanDto`, but both are nullable there. */
   timeout_seconds?: number;
   node_selector?: Record<string, string>;
@@ -40,11 +42,11 @@ export interface TestPlan {
   exclusive?: boolean | null;
 }
 
-/** The shape Task 10's adapter returns to components. `PlanDto` covers `name`, `tags`,
+/** The shape the adapter returns to components. `PlanDto` covers `name`, `tags`,
  *  `timeout_seconds`, `exclusive` and `test_files`; everything else here (`dir_path`, `source`,
  *  `repo_name`, `product_id/key/name`, `versions`, `plan.description/node_selector/tolerations/
  *  validation`, `recent_runs`) is absent from the gear and plan identity itself changes from a
- *  synthetic `id` to `(repo_id, path)` — CONTRACT-DIFF row 2. */
+ *  synthetic `id` to `(repo_id, path)`. */
 export interface TestPlanInfo {
   id: string;
   dir_path: string;
@@ -63,7 +65,7 @@ export interface TestPlanInfo {
 
 /** The adapter's output envelope, not a wire shape — kept hand-written on purpose. The gears
  *  answer `Page<T>` = `{ items, page_info: { limit, next_cursor, prev_cursor } }`, with no
- *  `total` and no page number (CONTRACT-DIFF X2). Every hook Task 10 adapts keeps returning
+ *  `total` and no page number. Every hook the adapter adapts keeps returning
  *  *this* shape so no exported hook's return type changes; the cursor-to-page bookkeeping lives
  *  in `hooks.ts`, not here. */
 export interface PaginatedResponse<T> {
@@ -97,10 +99,10 @@ export interface RunResultCounts {
   total: number;
 }
 
-/** The shape Task 10's adapter returns to components. `RunDto` renames `phase` to `state` and
- *  changes it from capitalised Argo phases to qa-runs' lowercase set (CONTRACT-DIFF X4),
- *  restructures `plan_id`/`run_kind` into `target{}` (X6), and drops `duration`, `product_key`,
- *  `repo_name`, `source_ref(_kind)` and every `slack_*` field entirely — CONTRACT-DIFF row 5. */
+/** The shape the adapter returns to components. `RunDto` renames `phase` to `state` and
+ *  changes it from capitalised Argo phases to qa-runs' lowercase set,
+ *  restructures `plan_id`/`run_kind` into `target{}`, and drops `duration`, `product_key`,
+ *  `repo_name`, `source_ref(_kind)` and every `slack_*` field entirely. */
 export interface WorkflowRun {
   name: string;
   plan_id: string;
@@ -116,7 +118,7 @@ export interface WorkflowRun {
   platform: string | null;
   product_key: string | null;
   /** Optional now: it is required on `RunDto`, but the dashboard's ten-field
-   *  `DashboardRunDto` projection drops it (CONTRACT-DIFF row 1), and a `false` there would
+   *  `DashboardRunDto` projection drops it, and a `false` there would
    *  be a claim that a run is *not* a validation run rather than "unknown". Both readers
    *  (`RunsTable.tsx:88,101`, `RunsPage.tsx:143,165`) already truthiness-check it, and both
    *  are fed from `useRuns`, where the real value is present. */
@@ -134,7 +136,7 @@ export interface WorkflowRun {
   parameters?: RunParameter[];
   /** Effective platform exclusivity of this run. null = the run predates the flag. */
   exclusive?: boolean | null;
-  /** The run's five outcome counters, notably `skipped` (Task 10, ratified 2026-08-28: a
+  /** The run's five outcome counters, notably `skipped` (ratified 2026-08-28: a
    *  skipped test no longer fails a run, so the run list and detail view are what makes a
    *  `succeeded` run with a non-zero skip count visible instead — see `RunsTable.tsx` and
    *  `RunDetailPage.tsx`). Optional for the same reason `is_validation` is: `RunDto` always
@@ -150,15 +152,15 @@ export interface WorkflowRun {
 export type RunParameter = S['RunParameterDto'];
 
 /** A single recent run of one test (by file): the test's status in that run,
- *  the run's version + platform (target), and a short error. The shape Task 10's adapter
+ *  the run's version + platform (target), and a short error. The shape the adapter
  *  returns to components — `Page<TestResultDto>` renames `workflow_name`→`run_id`,
  *  `platform`→`platform_id`, `app_version`→`product_version`, `test_version`→`branch`, and has
- *  no `phase`, `short_error` or `reportportal_url` at all (CONTRACT-DIFF row 7). */
+ *  no `phase`, `short_error` or `reportportal_url` at all. */
 export interface TestRunResult {
   workflow_name: string;
   plan_id: string;
   /** Nullable now: `TestResultDto` carries no run phase, and there is nothing to derive
-   *  one from on a per-result row (CONTRACT-DIFF row 7). */
+   *  one from on a per-result row. */
   phase: string | null;
   status: string;
   started_at: string | null;
@@ -170,11 +172,11 @@ export interface TestRunResult {
   reportportal_url: string | null;
 }
 
-/** The shape Task 10's adapter returns to components. `ScheduleDto` renames `schedule`→`cron`,
+/** The shape the adapter returns to components. `ScheduleDto` renames `schedule`→`cron`,
  *  **inverts** `suspended`→`enabled`, changes `include_tags`/`exclude_tags` from a comma-string
  *  to a real array, and turns the nullable-boolean `exclusive` into a three-valued
  *  `exclusive_choice: "true" | "false" | "auto"`; `description`, `plan_name`, `product_key`,
- *  `product_name` and `recent_runs` are absent — CONTRACT-DIFF row 18. */
+ *  `product_name` and `recent_runs` are absent. */
 export interface ScheduleInfo {
   name: string;
   schedule_id: string;
@@ -207,7 +209,7 @@ export interface ScheduleInfo {
 }
 
 /** UI-only view model for the schedule list's "recent runs" strip. `ScheduleDto` carries no
- *  `recent_runs` field at all (CONTRACT-DIFF row 18); the strip is rebuilt client-side (§7) from
+ *  `recent_runs` field at all; the strip is rebuilt client-side from
  *  a separate runs query, not deserialized off this shape. */
 export interface ScheduleRunBrief {
   workflow_name: string;
@@ -223,11 +225,10 @@ export interface ScheduleRunBrief {
   total: number;
 }
 
-/** The shape the Create Schedule form builds and Task 10's adapter must translate.
+/** The shape the Create Schedule form builds and the adapter must translate.
  *  `NewScheduleReq` renames `cron_expr`→`cron`, drops `schedule_id` (server-assigned) and
  *  `description` (no such field on the DTO), requires `enabled`, and carries no `slack_*`
- *  fields at all — a create that sets them needs a follow-up `PUT .../notifications`
- *  (CONTRACT-DIFF row 19). */
+ *  fields at all — a create that sets them needs a follow-up `PUT .../notifications`. */
 export interface CreateScheduleForm {
   plan_id: string;
   schedule_id: string;
@@ -246,18 +247,17 @@ export interface CreateScheduleForm {
 
 /** Dead: `grep -rn "UpdateScheduleForm" src` finds only this declaration.
  *  `useUpdateSchedule` (`hooks.ts:875`) actually takes a `CreateScheduleForm` — this type
- *  was never wired to it. Kept rather than deleted; pruning untouched legacy exports is not
- *  this task's job (same policy as `apiPostFormData` in `client.ts`) and is logged as a
- *  deferred minor for the final whole-branch review. */
+ *  was never wired to it. Kept rather than deleted; pruning untouched legacy exports is left
+ *  out of scope here (same policy as `apiPostFormData` in `client.ts`) as a deferred
+ *  cleanup. */
 export interface UpdateScheduleForm {
   cron_expr: string;
 }
 
-/** The shape Task 10's adapter must translate onto `PUT .../notifications`'s
+/** The shape the adapter must translate onto `PUT .../notifications`'s
  *  `{slack_enabled, slack_channel, slack_events}`: `enabled`→`slack_enabled`,
  *  `channel`→`slack_channel`, `events`→`slack_events`, and `slack_enabled`/`slack_events` are
- *  required on the gear side where this form's `channel`/`events` are optional
- *  (CONTRACT-DIFF row 24). */
+ *  required on the gear side where this form's `channel`/`events` are optional. */
 export interface UpdateScheduleNotificationsForm {
   enabled: boolean;
   channel?: string | null;
@@ -269,7 +269,7 @@ export interface UpdateScheduleNotificationsForm {
  *  and `created_at`, which every consumer here already ignores). Status values:
  *  PASSED | FAILED | SKIPPED | XFAIL | XPASS | ERROR. `ticket` is the key (e.g. "VHP-980")
  *  extracted from an xfail/skip reason, if any. Recoverable from
- *  `GET /qa/v1/test-case-results?$filter=run_id eq …` — CONTRACT-DIFF §8-C2.
+ *  `GET /qa/v1/test-case-results?$filter=run_id eq …`.
  *  Safe to alias: `TestCase` has zero by-name importers repo-wide — it reaches components only
  *  through `TestResult.cases?: TestCase[]` (`:243` below) — and both structural readers
  *  (`TestResultsTable.tsx:108-195`, `AnalyticsDashboard.tsx:289,370-393`) are read-only
@@ -277,11 +277,11 @@ export interface UpdateScheduleNotificationsForm {
  *  required fields the generated type adds cost nothing at either site. */
 export type TestCase = S['TestCaseResultDto'];
 
-/** The shape Task 10's adapter returns to components — the per-run test list inside
+/** The shape the adapter returns to components — the per-run test list inside
  *  `RunDetails` below. `RunTestResultDto` renames `name`→`test_name` and adds `test_file`,
  *  `run_id`, `created_at`/`updated_at`, but carries neither `logs` nor `cases`: this gear's
  *  only source of run outcomes has no per-test log slice, a real parity gap rather than a
- *  design choice (CONTRACT-DIFF §8-C2). `cases` is separately recoverable (see `TestCase`
+ *  design choice. `cases` is separately recoverable (see `TestCase`
  *  above); `logs` is not recoverable at all. */
 export interface TestResult {
   name: string;
@@ -295,15 +295,15 @@ export interface TestResult {
   cases?: TestCase[];
 }
 
-/** The shape Task 10's adapter returns to components. `DashboardStatsDto` has no
- *  `total_plans`, `total_schedules` or `platforms_summary` (CONTRACT-DIFF §8-C3), and its
+/** The shape the adapter returns to components. `DashboardStatsDto` has no
+ *  `total_plans`, `total_schedules` or `platforms_summary`, and its
  *  `recent_runs`/`active_runs_list` come back as a ten-field `DashboardRunDto[]` projection
  *  losing `plan_id`, `run_kind`, `finished_at`, `message`, `app_build`, `test_version`,
- *  `is_validation`, `exclusive` and every `slack_*` — row 1. */
+ *  `is_validation`, `exclusive` and every `slack_*`. */
 export interface DashboardStats {
   /** Optional: `DashboardStatsDto` has no such field, and a `0` beside a "Total plans"
-   *  label is a confident false claim rather than an empty state (CONTRACT-DIFF §8-C3).
-   *  Nothing renders it — Task 8a's KPI strip never bound it. */
+   *  label is a confident false claim rather than an empty state.
+   *  Nothing renders it — the KPI strip never bound it. */
   total_plans?: number;
   total_runs: number;
   active_runs: number;
@@ -321,7 +321,7 @@ export interface DashboardStats {
   flaky_tests: FlakyTestCard[];
   /** Optional: qa-environments observes nothing about the cluster behind an environment, so
    *  there is no healthy/degraded/unhealthy/unreachable count to serve and no defensible
-   *  default for one (CONTRACT-DIFF §8-C3). Task 8a replaced the strip that rendered it
+   *  default for one. The strip that rendered it was replaced
    *  with a labelled-unavailable card, so nothing reads it. */
   platforms_summary?: PlatformsSummary;
   quality_vectors_pass_rate: QualityVectorPassRate[];
@@ -336,10 +336,9 @@ export interface DashboardStats {
  *  field-for-field identical (all required, no renames). */
 export type QualityVectorPassRate = S['QualityVectorPassRateDto'];
 
-/** The shape Task 10's adapter returns to components. `FailedTestCardDto` renames
+/** The shape the adapter returns to components. `FailedTestCardDto` renames
  *  `workflow_name`→`run_id` (uuid), `plan_id`→`repo_id`+`plan_path`, `platform`→`platform_id`,
- *  and makes `test_file`/`platform_id` optional where this type requires them
- *  (CONTRACT-DIFF row 1). */
+ *  and makes `test_file`/`platform_id` optional where this type requires them. */
 export interface FailedTestCard {
   test_name: string;
   test_file: string | null;
@@ -351,9 +350,9 @@ export interface FailedTestCard {
   launch_id: string | null;
 }
 
-/** The shape Task 10's adapter returns to components. `FlakyTestCardDto` renames
+/** The shape the adapter returns to components. `FlakyTestCardDto` renames
  *  `plan_id`→`repo_id`+`plan_path` and makes them optional where this type requires
- *  `plan_id` (CONTRACT-DIFF row 1). */
+ *  `plan_id`. */
 export interface FlakyTestCard {
   test_name: string;
   test_file: string | null;
@@ -365,7 +364,7 @@ export interface FlakyTestCard {
 
 /** UI-only view model. `DashboardStatsDto` has no environment-health rollup at all — qa-environments
  *  models an environment's availability as a single `available: boolean` and observes nothing about
- *  the cluster behind it (CONTRACT-DIFF §8-C3). */
+ *  the cluster behind it. */
 export interface PlatformsSummary {
   total: number;
   healthy: number;
@@ -375,7 +374,7 @@ export interface PlatformsSummary {
   items: PlatformBrief[];
 }
 
-/** UI-only view model — see `PlatformsSummary` above (§8-C3). */
+/** UI-only view model — see `PlatformsSummary` above. */
 export interface PlatformBrief {
   name: string;
   status: string;
@@ -398,20 +397,20 @@ export interface DashboardRunTestTrendPoint {
 /** Generated — `DailyStatusPointDto` is `{day, passed, failed}`, field-for-field identical. */
 export type DashboardDailyStatusPoint = S['DailyStatusPointDto'];
 
-/** The shape Task 10's adapter returns to components. `RunDetailDto` is `RunDto` flattened
+/** The shape the adapter returns to components. `RunDetailDto` is `RunDto` flattened
  *  (no `run` wrapper) plus a `result` summary and `test_results: RunTestResultDto[]`; there is
- *  no `reportportal_url` at all (Task 8 stripped that surface) — CONTRACT-DIFF row 9. */
+ *  no `reportportal_url` at all (that surface is gone). */
 export interface RunDetails {
   run: WorkflowRun;
   test_results: TestResult[];
-  /** Optional: the gear has no such field and Task 8 removed the surface that rendered
-   *  it, so the adapter omits it rather than sending `''` (CONTRACT-DIFF row 9). */
+  /** Optional: the gear has no such field and the surface that rendered
+   *  it is gone, so the adapter omits it rather than sending `''`. */
   reportportal_url?: string;
 }
 
 /** UI-only view model. The gears publish no test-file catalog anywhere: `PlanDto.test_files`
  *  gives paths only, and `title`, `component`, `description`, `tags`, `quality_vectors`,
- *  `versions` and `loc` have no source in any gear (CONTRACT-DIFF §8-C1). */
+ *  `versions` and `loc` have no source in any gear. */
 export interface TestFileInfo {
   plan_id: string;
   plan_name: string;
@@ -432,20 +431,18 @@ export interface TestFileInfo {
   loc?: number;
 }
 
-/** The shape Task 10's adapter returns to components. `UpsertCustomPlanReq`/`CustomPlanDto`
- *  restructure `{plan_id, test_file}[]` into `files: {repo_id, plan_path, path}[]`
- *  (CONTRACT-DIFF row 42, X6). */
+/** The shape the adapter returns to components. `UpsertCustomPlanReq`/`CustomPlanDto`
+ *  restructure `{plan_id, test_file}[]` into `files: {repo_id, plan_path, path}[]`. */
 export interface CustomPlanTest {
   plan_id: string;
   test_file: string;
 }
 
-/** UI-only. No gear type carries a `run_if` or any other DAG concept — CONTRACT-DIFF §8-C6. */
+/** UI-only. No gear type carries a `run_if` or any other DAG concept. */
 export type RunIf = 'succeeded' | 'always';
 
 /** UI-only view model — the custom-plan dependency graph. `CustomPlanDto` is a flat list of
- *  files; no gear type carries a node graph, a dependency edge, or a `run_if`
- *  (CONTRACT-DIFF §8-C6). */
+ *  files; no gear type carries a node graph, a dependency edge, or a `run_if`. */
 export interface PlanNode {
   id: string;
   /** Include a whole plan's tests (mutually exclusive with `tests`). */
@@ -456,16 +453,14 @@ export interface PlanNode {
   run_if?: RunIf;
 }
 
-/** The shape Task 10's adapter returns to components. `CustomPlanDto` renames `tests`→`files`
- *  (row 42) and has no `included_plans`, `nodes` or `parallelism` (§8-C6) and no `product_id`
- *  or `description` (§8-C7) — everything a custom plan's product scoping and DAG features
+/** The shape the adapter returns to components. `CustomPlanDto` renames `tests`→`files` and has no `included_plans`, `nodes` or `parallelism` and no `product_id`
+ *  or `description` — everything a custom plan's product scoping and DAG features
  *  need is simply absent from the gear. */
 export interface CustomPlan {
   id: string;
   name: string;
   /* No `description`: `CustomPlanDto` has no such field, so anything typed into one
-   * was dropped without an error. Removed rather than defaulted — see
-   * `REMOVED-SURFACES.md` (Task 8a, C7). */
+   * was dropped without an error. Removed rather than defaulted. */
   tests: CustomPlanTest[];
   included_plans?: string[];
   nodes?: PlanNode[];
@@ -476,7 +471,7 @@ export interface CustomPlan {
 
 /** The shape the Create/Edit Custom Plan form builds. `UpsertCustomPlanReq` has no
  *  `description`, `product_id`, `included_plans`, `nodes` or `parallelism` field — a create
- *  that sets them loses them silently (CONTRACT-DIFF row 46). */
+ *  that sets them loses them silently. */
 export interface CreateCustomPlanForm {
   name: string;
   tests: CustomPlanTest[];
@@ -500,17 +495,17 @@ export interface RunTestForm {
 //
 // They were hand-written mirrors of `ClusterHealthDto`/`NodeSummaryDto`/
 // `NodeCountsDto`, reachable only from `ClusterHealthCard.tsx` and
-// `clusterHealthFromDto` — both deleted by Task 21 under user decision U4,
-// along with the five `cluster_*` columns Task 19 dropped. `EnvironmentDto`
+// `clusterHealthFromDto` — both deleted by decision (the node inventory is not replaced),
+// along with the five `cluster_*` columns the gear dropped. `EnvironmentDto`
 // has no `cluster` field any more; a product's own facts arrive through
-// `observed_attrs` and its verdict through `health_state`. The whole-branch
-// review found the three types still here with no consumer (m-8).
+// `observed_attrs` and its verdict through `health_state`. The three types were
+// found still here with no consumer.
 
-/** The shape Task 10's adapter returns to components. `EnvironmentDto` renames
- *  `version`→`observed_version`, `build`→`observed_build` (CONTRACT-DIFF row 50);
- *  `version_detected_at` and `version_detect_error` are served directly (Task 7/9).
+/** The shape the adapter returns to components. `EnvironmentDto` renames
+ *  `version`→`observed_version`, `build`→`observed_build`;
+ *  `version_detected_at` and `version_detect_error` are served directly.
  *  The product-specific fields that used to sit here — `observed_namespace`,
- *  `vhp_base_url` and the `cluster` object — are gone: Task 19 dropped their
+ *  `vhp_base_url` and the `cluster` object — are gone: the gear dropped their
  *  columns, and what a product observes now arrives in `observed_attrs`, keyed
  *  by its plugin's own `observed_schema()`. */
 export interface EnvironmentInfo {
@@ -524,7 +519,7 @@ export interface EnvironmentInfo {
   version: string | null;
   build: string | null;
   /** The operator-set availability toggle: an unavailable environment accepts
-   *  no new leases. Carried since Task 21, which made it one of the four fixed
+   *  no new leases. It is one of the four fixed
    *  leading columns -- it is a fact every product has, unlike the two it
    *  replaced. `environmentFromDto`'s own doc used to say `available` "has no
    *  legacy field and is not carried"; that was true of the legacy UI, not of
@@ -533,13 +528,15 @@ export interface EnvironmentInfo {
   /** The plugin's observed attributes, keyed by `FieldDesc.key` and bounded by
    *  `retain_declared` — every key here was declared in the product plugin's
    *  `observed_schema()`. The environments table renders one column per
-   *  `in_table` descriptor from this map (Task 21), which is what replaced the
+   *  `in_table` descriptor from this map, which is what replaced the
    *  hardcoded "Namespace" and "VHP URL" columns. */
   observed_attrs: Record<string, string>;
   /** The plugin's health verdict: `ok`, `degraded`, `down` or `unknown`. It
-   *  replaced the five `cluster_*` columns, which Task 19 dropped. */
-  health_state: string;
-  /** Classified text explaining the verdict, never a formatted error (D12). */
+   *  replaced the five `cluster_*` columns, which the gear dropped. Aliased onto the
+   *  gear's `HealthStateDto` enum (the third pass), so a gear-side change to the set
+   *  fails `tsc` in the `switch`es that read it. */
+  health_state: S['HealthStateDto'];
+  /** Classified text explaining the verdict, never a formatted error. */
   health_detail: string | null;
   version_detected_at: string | null;
   version_detect_error: string | null;
@@ -553,10 +550,10 @@ export interface EnvironmentInfo {
   default_branch: string | null;
 }
 
-/** The shape Task 10's adapter returns to components for the environment detail page.
- *  Was, until Task 6, a hand-duplicated copy of `EnvironmentInfo` plus a set of dead optional
+/** The shape the adapter returns to components for the environment detail page.
+ *  Was once a hand-duplicated copy of `EnvironmentInfo` plus a set of dead optional
  *  cluster-shaped fields (`status?`, `node_count?`, …) that qa-environments had no source
- *  for and nothing here ever populated (CONTRACT-DIFF row 51, §8-C3). Those stand-ins are
+ *  for and nothing here ever populated. Those stand-ins are
  *  gone; what an environment observes reaches this shape through the same
  *  `observed_attrs`/`health_state` pair `EnvironmentInfo` carries. */
 export interface EnvironmentDetails {
@@ -568,7 +565,7 @@ export interface EnvironmentDetails {
   version: string | null;
   build: string | null;
   /** The operator-set availability toggle: an unavailable environment accepts
-   *  no new leases. Carried since Task 21, which made it one of the four fixed
+   *  no new leases. It is one of the four fixed
    *  leading columns -- it is a fact every product has, unlike the two it
    *  replaced. `environmentFromDto`'s own doc used to say `available` "has no
    *  legacy field and is not carried"; that was true of the legacy UI, not of
@@ -577,13 +574,15 @@ export interface EnvironmentDetails {
   /** The plugin's observed attributes, keyed by `FieldDesc.key` and bounded by
    *  `retain_declared` — every key here was declared in the product plugin's
    *  `observed_schema()`. The environments table renders one column per
-   *  `in_table` descriptor from this map (Task 21), which is what replaced the
+   *  `in_table` descriptor from this map, which is what replaced the
    *  hardcoded "Namespace" and "VHP URL" columns. */
   observed_attrs: Record<string, string>;
   /** The plugin's health verdict: `ok`, `degraded`, `down` or `unknown`. It
-   *  replaced the five `cluster_*` columns, which Task 19 dropped. */
-  health_state: string;
-  /** Classified text explaining the verdict, never a formatted error (D12). */
+   *  replaced the five `cluster_*` columns, which the gear dropped. Aliased onto the
+   *  gear's `HealthStateDto` enum (the third pass), so a gear-side change to the set
+   *  fails `tsc` in the `switch`es that read it. */
+  health_state: S['HealthStateDto'];
+  /** Classified text explaining the verdict, never a formatted error. */
   health_detail: string | null;
   version_detected_at: string | null;
   version_detect_error: string | null;
@@ -593,16 +592,17 @@ export interface EnvironmentDetails {
   is_default: boolean;
 }
 
-/** The shape the Create Environment form builds. `CreateEnvironmentReq` now takes **either** a
- *  raw `kubeconfig` or a `kubeconfig_credstore_ref` (X7 — the gear does the credstore
- *  write itself), and has no `namespace` or `vhp_base_url` (CONTRACT-DIFF row 52). */
+/** The shape the Create Environment form builds. `CreateEnvironmentReq` takes the plugin-shaped
+ *  `credentials` map (the gear does the credstore write itself); it still accepts the pre-plugin
+ *  `kubeconfig`/`kubeconfig_credstore_ref` pair for other clients, and has no `namespace` or
+ *  `vhp_base_url`. */
 export interface CreateEnvironmentForm {
   name: string;
   /** The credentials the product's plugin declares, keyed by `FieldDesc.key`.
    *
-   *  **Replaced the single `kubeconfig` string at Task 22.** That field was
+   *  **Replaced the single `kubeconfig` string.** That field was
    *  VHP's one credential with its name in a form every product shares; the
-   *  gear has taken a keyed map since Task 18b, and this is its first UI
+   *  gear takes a keyed map, and this is its first UI
    *  caller. `createEnvironmentReqFromForm` sends it as `credentials` and no
    *  longer sends the pre-plugin `kubeconfig`/`kubeconfig_credstore_ref` pair
    *  at all. */
@@ -616,8 +616,8 @@ export interface CreateEnvironmentForm {
 }
 
 /** The shape the Edit Environment form builds. The gear's `UpdateEnvironmentReq` is a `PATCH`
- *  (legacy was `PUT`). The form's own `namespace`/`vhp_base_url` fields are gone at
- *  Task 22: they never had a gear field to send to, and Task 19 dropped the columns they
+ *  (legacy was `PUT`). The form's own `namespace`/`vhp_base_url` fields are gone:
+ *  they never had a gear field to send to, and the gear dropped the columns they
  *  were named after. */
 export interface UpdateEnvironmentForm {
   /** A replacement kubeconfig document, or a credstore reference to one. Absent leaves the
@@ -633,20 +633,20 @@ export interface UpdateEnvironmentForm {
 }
 
 // Product types
-/** The shape Task 10's adapter returns to components. `ProductDto` renames
+/** The shape the adapter returns to components. `ProductDto` renames
  *  `tests_folder`→`folder` **and flips its nullability**: required on this type, nullable on
- *  the gear's (CONTRACT-DIFF row 58). */
+ *  the gear's. */
 export interface Product {
   id: string;
   name: string;
   key: string;
   description: string;
   /** The GTS instance id of the product plugin that owns this product's
-   *  behaviour. Required on the gear since Task 20a; `null` here only if a
+   *  behaviour. Required on the gear; `null` here only if a
    *  deployment predating that answers without the field.
    *
    *  This is what resolves a product to the `observed_schema` the environments
-   *  table renders its columns from (Task 21). */
+   *  table renders its columns from. */
   plugin_instance_id: string | null;
   tests_folder: string;
   created_at: string;
@@ -654,16 +654,15 @@ export interface Product {
 }
 
 /** The shape the Create/Edit Product form builds. `CreateProductReq` renames
- *  `tests_folder`→`folder` (nullable, optional) and, unlike this form, requires `description`
- *  (CONTRACT-DIFF row 62).
+ *  `tests_folder`→`folder` (nullable, optional) and, unlike this form, requires `description`.
  *
  *  `plugin_instance_id` is a plain `string`, not `string | null` like `Product`'s: it is the
  *  Combobox's current selection, and a controlled input needs a string even when nothing is
  *  picked (`''`). That is a fact about the *form field*, not about what gets sent — an edit
  *  form can and does hold `''` (a legacy or deregistered binding, `openEditDialog`), and on
- *  create Step 3's guard is what keeps it non-empty by submit time, not this type. Whether
+ *  create the create dialog's guard is what keeps it non-empty by submit time, not this type. Whether
  *  the value is sent, and to what, is `productReqFromForm`'s `currentBinding` parameter
- *  (ruling **G-2**) — see it for why an edit that never touches this field must not resend
+ *  — see it for why an edit that never touches this field must not resend
  *  it either. */
 export interface CreateProductForm {
   name: string;
@@ -673,10 +672,9 @@ export interface CreateProductForm {
   plugin_instance_id: string;
 }
 
-/** The shape Task 10's adapter returns to components. `TestRepositoryDto` renames
+/** The shape the adapter returns to components. `TestRepositoryDto` renames
  *  `tests_root`→`content_root`, replaces `ssh_key_id`+`has_token` with a single nullable
- *  `credential_ref` (X7), and has no `source_type`, `archive_file_name` or `ssh_key_name`
- *  (CONTRACT-DIFF row 29). */
+ *  `credential_ref`, and has no `source_type`, `archive_file_name` or `ssh_key_name`. */
 export interface TestRepository {
   id: string;
   name: string;
@@ -706,9 +704,9 @@ export interface TestRepository {
 }
 
 /** The shape the Create/Edit Test Repository form builds. `CreateTestRepoReq` replaces
- *  `token`/`ssh_key_id` with a single `credential_ref` (X7 — a pasted token becomes a
+ *  `token`/`ssh_key_id` with a single `credential_ref` (a pasted token becomes a
  *  credstore reference), renames `tests_root`→`content_root`, and requires `default_branch`
- *  where this form's is optional (CONTRACT-DIFF row 33). */
+ *  where this form's is optional. */
 export interface CreateTestRepositoryForm {
   name: string;
   url: string;
@@ -719,8 +717,8 @@ export interface CreateTestRepositoryForm {
   ssh_key_id?: string;
 }
 
-/** The shape Task 10's adapter returns to components. `SshKeyDto` has no `updated_at` and
- *  adds a `fingerprint` this type doesn't carry (CONTRACT-DIFF row 38). */
+/** The shape the adapter returns to components. `SshKeyDto` has no `updated_at` and
+ *  adds a `fingerprint` this type doesn't carry. */
 export interface SshKeyInfo {
   id: string;
   name: string;
@@ -729,18 +727,16 @@ export interface SshKeyInfo {
 }
 
 /** The shape the Create SSH Key form builds. `CreateSshKeyReq` renames
- *  `private_key`→`private_key_pem` (X7 — the name is load-bearing: PEM specifically)
- *  (CONTRACT-DIFF row 39). */
+ *  `private_key`→`private_key_pem` (the name is load-bearing: PEM specifically). */
 export interface CreateSshKeyForm {
   name: string;
   private_key: string;
 }
 
 // Analytics types
-/** The shape Task 10's adapter returns to components. `PlanTestAnalyticsDto` renames
+/** The shape the adapter returns to components. `PlanTestAnalyticsDto` renames
  *  `last_run_name`→`last_run_id` (uuid) and adds `last_platform_id` beside `last_platform`;
- *  the read is also bounded to the trailing 90 days, where this type had no window
- *  (CONTRACT-DIFF row 67). */
+ *  the read is also bounded to the trailing 90 days, where this type had no window. */
 export interface TestAnalytics {
   test_name: string;
   last_platform: string | null;
@@ -754,26 +750,26 @@ export interface TestAnalytics {
 }
 
 /** Generated — `PlanBuildDistributionDto` is `{build, total, passed, failed, skipped}`,
- *  field-for-field identical, all `int64` (CONTRACT-DIFF row 68). */
+ *  field-for-field identical, all `int64`. */
 export type BuildDistribution = S['PlanBuildDistributionDto'];
 
-/** The shape Task 10's adapter returns to components (nested in `TestHistory` below).
+/** The shape the adapter returns to components (nested in `TestHistory` below).
  *  `PlanTestHistoryEntryDto` renames `run_name`→`run_id` (uuid); `status` is unchanged, and
  *  `build` flips from required (`string | null` here) to optional-and-nullable
- *  (`build?: string | null` there) — CONTRACT-DIFF row 69. */
+ *  (`build?: string | null` there). */
 export interface TestHistoryEntry {
   build: string | null;
   status: string;
   run_name: string;
 }
 
-/** The shape Task 10's adapter returns to components — see `TestHistoryEntry` above. */
+/** The shape the adapter returns to components — see `TestHistoryEntry` above. */
 export interface TestHistory {
   test_name: string;
   results: TestHistoryEntry[];
 }
 
-/** Generated (Task 20): `AnalyticsOverviewDto.scope` publishes `"all" | "plan"` as a
+/** Generated: `AnalyticsOverviewDto.scope` publishes `"all" | "plan"` as a
  *  schema-level enum now, so this is aliased onto it rather than re-declared by hand, and
  *  `analyticsOverviewFromDto` assigns the echo without a cast.
  *
@@ -782,8 +778,10 @@ export interface TestHistory {
  *  on the wire: the gear accepts those trimmed and case-insensitively
  *  (`domain::analytics::query::parse_scope`), which no schema enum describes, so this alias
  *  narrows what the client *sends* to a subset of what the server accepts. That is the safe
- *  direction. `AnalyticsGroupBy` below has no generated counterpart at all —
- *  `AnalyticsOverviewDto.group_by` is still a `String` — and stays hand-written.
+ *  direction. `AnalyticsGroupBy` below is aliased the same way onto
+ *  `S['AnalyticsGroupByDto']`, the four-value enum `AnalyticsOverviewDto.group_by` now
+ *  publishes (it was a `String` until the third pass); the request's `group_by` is still a
+ *  plain `string` on the wire, for the scope's reason.
  *
  *  The saved-view scope (`SavedViewDto.scope`, `S['SavedViewScopeDto']`) is a **separate**
  *  schema with the same value space: it mirrors `qa_insights_sdk::SavedViewScope` where this
@@ -791,12 +789,12 @@ export interface TestHistory {
  *  without a cast because they are structurally identical, and they are kept apart because
  *  they are not the same contract. */
 export type AnalyticsScope = S['AnalyticsScopeDto'];
-export type AnalyticsGroupBy = 'none' | 'component' | 'tag' | 'environment';
+export type AnalyticsGroupBy = S['AnalyticsGroupByDto'];
 
 /** UI-only: a client-side query-parameter builder, not a response body — OpenAPI does not
  *  publish path/query parameters as reusable named schemas, so there is nothing to alias onto.
- *  Parameter names and the three required ones (`product_id`, `version`, `scope`) survive; see
- *  CONTRACT-DIFF §2 fact 4 and row 70 for the `plan_id` value-space change (X6). */
+ *  Parameter names and the three required ones (`product_id`, `version`, `scope`) survive;
+ *  `plan_id` keeps its name but its value is now a plan path. */
 export interface AnalyticsOverviewQuery {
   product_id: string;
   version: string;
@@ -811,7 +809,7 @@ export interface AnalyticsOverviewQuery {
 }
 
 /** UI-only query-parameter builder — see `AnalyticsOverviewQuery` above. Same eight parameters
- *  plus the required `build` (CONTRACT-DIFF row 71). */
+ *  plus the required `build`. */
 export interface AnalyticsBuildTestsQuery {
   product_id: string;
   version: string;
@@ -823,9 +821,9 @@ export interface AnalyticsBuildTestsQuery {
   build: string;
 }
 
-/** The shape Task 10's adapter returns to components. `BuildTestDetailDto` renames
+/** The shape the adapter returns to components. `BuildTestDetailDto` renames
  *  `run_name`→`run_id` (uuid) and makes `run_finished_at` required and non-null, unlike
- *  `TestResultDto`'s (CONTRACT-DIFF row 71). */
+ *  `TestResultDto`'s. */
 export interface BuildTestDetailItem {
   test_file: string;
   test_name: string;
@@ -836,10 +834,10 @@ export interface BuildTestDetailItem {
   tags: string[];
 }
 
-/** The shape Task 10's adapter returns to components. `AnalyticsListItemDto` restructures
- *  `plan_id`→`repo_id`+`plan_path` (X6), `last_run_name`→`last_run_id` (uuid), adds
+/** The shape the adapter returns to components. `AnalyticsListItemDto` restructures
+ *  `plan_id`→`repo_id`+`plan_path`, `last_run_name`→`last_run_id` (uuid), adds
  *  `last_platform_id`, and makes `case_status`/`case_tickets` required (`case_tickets`
- *  non-null) where this type has them optional (CONTRACT-DIFF row 70). */
+ *  non-null) where this type has them optional. */
 export interface AnalyticsListItem {
   test_file: string;
   test_name: string;
@@ -863,14 +861,13 @@ export interface AnalyticsListItem {
   case_tickets?: string[];
 }
 
-/** The shape Task 10's adapter returns to components. `AnalyticsOverviewDto` has no
+/** The shape the adapter returns to components. `AnalyticsOverviewDto` has no
  *  `product_key`; renames `build_distribution[].latest_run_name`→`latest_run_id`,
  *  `lists[].plan_id`→`repo_id`+`plan_path`, `lists[].last_run_name`→`last_run_id`; adds
  *  `lists[].last_platform_id`; and reshapes `grouped.platform[]` to carry `platform`+
  *  `platform_id` where `grouped.component`/`.tag` keep a bare `value`. `summary`, `heatmap`,
- *  `trend`, `flaky` and `quality_vectors` are otherwise field-identical (CONTRACT-DIFF row
- *  70). See `pages/AnalyticsPage.tsx`'s "no execution data" banner (CONTRACT-DIFF §9) for why
- *  the values, not just the shape, need a human decision Task 11 owns. */
+ *  `trend`, `flaky` and `quality_vectors` are otherwise field-identical. See `pages/AnalyticsPage.tsx`'s "no execution data" banner for why
+ *  the values, not just the shape, need a human decision that belongs to the analytics page. */
 export interface AnalyticsOverview {
   product_id: string;
   product_key: string;
@@ -968,9 +965,9 @@ export interface AnalyticsOverview {
   };
 }
 
-/** The shape Task 10's adapter returns to components. `SavedViewDto` restructures
- *  `plan_id`→`plan_path`+`repo_id` (X6); `query_json` stays opaque and unreconciled with the
- *  new vocabulary (CONTRACT-DIFF row 72). */
+/** The shape the adapter returns to components. `SavedViewDto` restructures
+ *  `plan_id`→`plan_path`+`repo_id`; `query_json` stays opaque and unreconciled with the
+ *  new vocabulary. */
 export interface AnalyticsSavedView {
   id: string;
   owner_id: string;
@@ -982,8 +979,7 @@ export interface AnalyticsSavedView {
   updated_at: string;
 }
 
-/** The shape the Create/Edit Saved View form builds — see `AnalyticsSavedView` above
- *  (CONTRACT-DIFF row 73). */
+/** The shape the Create/Edit Saved View form builds — see `AnalyticsSavedView` above. */
 export interface AnalyticsSavedViewPayload {
   name: string;
   scope: AnalyticsScope;
@@ -992,11 +988,10 @@ export interface AnalyticsSavedViewPayload {
 }
 
 // JIRA types
-/** The shape Task 10's adapter returns to components. `JiraSettingsDto` renames
- *  `api_token`→`api_token_credstore_ref` (X7 — the form field that accepts a pasted API token
- *  becomes a credstore write); `issue_type` is optional both sides but nullable only on the
- *  gear (`issue_type?: string | null` there vs `issue_type?: string` here) — CONTRACT-DIFF
- *  row 76. */
+/** The shape the adapter returns to components. `JiraSettingsDto` renames
+ *  `api_token`→`api_token_credstore_ref` (the form field holds a credential-store reference,
+ *  never a token); `issue_type` is optional both sides but nullable only on the
+ *  gear (`issue_type?: string | null` there vs `issue_type?: string` here). */
 export interface JiraConfig {
   url: string;
   project_key: string;
@@ -1006,12 +1001,11 @@ export interface JiraConfig {
   enabled: boolean;
 }
 
-/** The shape Task 10's adapter returns to components. `JiraBugDto` changes `id` from a
- *  number to a uuid string and restructures `plan_id`→`repo_id`+`plan_path` (X6),
- *  `platform`→`platform_id`; the rest is unchanged (CONTRACT-DIFF row 97). */
+/** The shape the adapter returns to components. `JiraBugDto` changes `id` from a
+ *  number to a uuid string and restructures `plan_id`→`repo_id`+`plan_path`,
+ *  `platform`→`platform_id`; the rest is unchanged. */
 export interface JiraBug {
-  /** A uuid string, not a number: `JiraBugDto.id` is `string(uuid)` (CONTRACT-DIFF
-   *  row 97). */
+  /** A uuid string, not a number: `JiraBugDto.id` is `string(uuid)`. */
   id: string;
   jira_key: string;
   test_name: string;
@@ -1024,13 +1018,11 @@ export interface JiraBug {
   resolved_at: string | null;
 }
 
-/** Generated — `JiraBugFilingDto` is `{jira_key, created}`, field-for-field identical
- *  (CONTRACT-DIFF row 96). */
+/** Generated — `JiraBugFilingDto` is `{jira_key, created}`, field-for-field identical. */
 export type JiraCreateResponse = S['JiraBugFilingDto'];
 
-/** The shape Task 10's adapter returns to components. `QueueEntryDto` renames
- *  `platform`→`platform_id`, `workflow_name`→`run_id` (uuid), and has no `target_id`
- *  (CONTRACT-DIFF row 14). `ttl_expires_at`/`blocked_by` are already field-identical. */
+/** The shape the adapter returns to components. `QueueEntryDto` renames
+ *  `platform`→`platform_id`, `workflow_name`→`run_id` (uuid), and has no `target_id`. `ttl_expires_at`/`blocked_by` are already field-identical. */
 export interface RunQueueEntry {
   id: string;
   platform: string;
@@ -1038,12 +1030,12 @@ export interface RunQueueEntry {
   target_id: string;
   source: string;
   exclusive: boolean;
-  /** Generated (Task 20): `QueueEntryDto.state` publishes the seven frozen queue-state
+  /** Generated: `QueueEntryDto.state` publishes the seven frozen queue-state
    *  names as a schema-level enum now, so this is aliased onto it rather than re-typed by
    *  hand. The union was previously copied here literally and reached through an `as`
    *  cast in `queueEntryFromDto`; the alias is what makes a gear-side change to the set
    *  a `tsc` failure here instead of a silent divergence. Note `cancelled`, two `l`s —
-   *  the *run* state's spelling is `canceled` and X4 records that as deliberate. */
+   *  the *run* state's spelling is `canceled`, deliberately. */
   state: S['QueueStateDto'];
   workflow_name: string | null;
   error: string | null;
@@ -1061,27 +1053,27 @@ export interface RunQueueEntry {
 /** The shape `VariablesEditor.tsx` still renders — kept hand-written, not aliased. `VariableDto`
  *  is `{id, environment_id, name, value}` and carries no `secure` field, and neither does the model
  *  behind it: values are stored and returned in cleartext, with no masking, no credstore
- *  reference and no encrypted column on this surface (unlike every other secret X7 covers).
- *  Task 8a already closed the confidentiality hazard that gap implied — the editor's old
+ *  reference and no encrypted column on this surface (unlike every other secret on the settings surfaces, which go through the credstore).
+ *  The confidentiality hazard that gap implied is already closed — the editor's old
  *  "Secured" checkbox, password input and padlock are gone, replaced by an `UnavailableNotice`
- *  telling the user not to put a credential in a variable (`VariablesEditor.tsx:10-14`, §8-C10). */
+ *  telling the user not to put a credential in a variable (`VariablesEditor.tsx:10-14`). */
 export interface PipelineVariable {
   name: string;
   value: string;
   /* No `secure` flag: nothing behind this type stores, masks or encrypts one, so a
    * variable is held and returned in cleartext. The field was removed rather than
-   * defaulted — see `REMOVED-SURFACES.md` (Task 8a, C10). */
+   * defaulted. */
 }
 
-/** The shape Task 10's adapter returns to components. The envelope itself differs completely:
+/** The shape the adapter returns to components. The envelope itself differs completely:
  *  `PUT /qa/v1/variables` upserts one row (plus `DELETE .../{id}`) where this type's `PUT`
- *  replaced the whole set — CONTRACT-DIFF row 83. See `PipelineVariable` above for the `secure`
- *  gap (§8-C10). */
+ *  replaced the whole set. See `PipelineVariable` above for the `secure`
+ *  gap. */
 export interface PipelineVariablesConfig {
   variables: PipelineVariable[];
 }
 
-/** UI-only: the six event tokens are unchanged on the gear side (CONTRACT-DIFF row 24), but
+/** UI-only: the six event tokens are unchanged on the gear side, but
  *  they appear only as inline `string` properties on generated DTOs, not as a standalone
  *  schema — there is nothing to alias onto. This is the literal union client code narrows to. */
 export type ScheduledRunNotificationEvent =
@@ -1093,19 +1085,20 @@ export type ScheduledRunNotificationEvent =
   | 'skipped';
 
 /** Generated — `ScheduledRunSlackTemplateDto` is `{enabled, status_icon?, header?, summary?,
- *  results?, body?, footer?}`, field-for-field identical (CONTRACT-DIFF row 86). */
+ *  results?, body?, footer?}`, field-for-field identical. */
 export type ScheduledRunSlackTemplate = S['ScheduledRunSlackTemplateDto'];
 
 /** Generated — `ScheduledRunSlackTemplatesDto` is the same six event keys, field-for-field
- *  identical (CONTRACT-DIFF row 86). */
+ *  identical. */
 export type ScheduledRunSlackTemplatesConfig = S['ScheduledRunSlackTemplatesDto'];
 
-/** The shape Task 10's adapter returns to components. `NotificationConfigDto` renames
- *  `slack_webhook_url`→`slack_webhook_credstore_ref` (X7) and adds a required
- *  `run_queue_queued_slack_enabled`; every other field, including the whole
- *  `scheduled_run_slack_templates` tree, is field-identical (CONTRACT-DIFF row 86). */
+/** The shape the adapter returns to components. `NotificationConfigDto` renames
+ *  legacy's `slack_webhook_url`→`slack_webhook_credstore_ref` — this shape carries
+ *  the new name too, because the field holds a credential-store reference, never a URL —
+ *  and adds a required `run_queue_queued_slack_enabled`; every other field, including the whole
+ *  `scheduled_run_slack_templates` tree, is field-identical. */
 export interface NotificationsConfig {
-  slack_webhook_url: string;
+  slack_webhook_credstore_ref: string;
   slack_channel: string;
   manager_ui_base_url: string;
   slack_enabled: boolean;
@@ -1127,7 +1120,7 @@ export interface NotificationsConfig {
 
 /** The shape the notification preview/test forms build. Request shape matches
  *  `NotificationPreviewReq`/`NotificationTestReq` modulo `config`'s own difference — see
- *  `NotificationsConfig` above (CONTRACT-DIFF rows 89, 90). */
+ *  `NotificationsConfig` above. */
 export interface ScheduledRunNotificationPreviewRequest {
   config: NotificationsConfig;
   event: ScheduledRunNotificationEvent;
@@ -1135,10 +1128,10 @@ export interface ScheduledRunNotificationPreviewRequest {
 
 /** The shape `SlackMessagePreview.tsx` (`blocks?: Array<Record<string, unknown>> | null`)
  *  needs — kept hand-written rather than aliased to `NotificationPreviewDto`, which is
- *  field-for-field the same names (CONTRACT-DIFF row 89) but **not** the same types:
+ *  field-for-field the same names but **not** the same types:
  *  `blocks: unknown[]` there is not assignable to that component's prop type, and `event` is a
  *  plain `string` there rather than this file's literal union. Aliasing would fail `tsc` at
- *  that component without touching it, which this task may not do. */
+ *  that component without touching it, which the adapter layer must not do. */
 export interface ScheduledRunNotificationPreviewResponse {
   event: ScheduledRunNotificationEvent;
   event_label: string;
@@ -1148,18 +1141,18 @@ export interface ScheduledRunNotificationPreviewResponse {
 }
 
 /** Generated — `JiraPollerConfigDto` is `{poll_interval_seconds, auto_rerun_on_resolve}`,
- *  field-for-field identical, both required (CONTRACT-DIFF row 92). */
+ *  field-for-field identical, both required. */
 export type JiraPollerConfig = S['JiraPollerConfigDto'];
 
 // Coverage types
 /** Generated — `CoverageSummaryDto` is `{line_pct, branch_pct, function_pct}`, field-for-field
- *  identical (CONTRACT-DIFF row 60). */
+ *  identical. */
 export type CoverageSummary = S['CoverageSummaryDto'];
 
-/** The shape Task 10's adapter returns to components. `CoverageBuildDto` has no `product_id`,
+/** The shape the adapter returns to components. `CoverageBuildDto` has no `product_id`,
  *  `run_name` or `collected_at` (the last is what `ProductCoverageCard.tsx:18` sorts by) and
  *  adds `build` (the product key and version joined by a slash); `coverage` itself is
- *  unchanged (CONTRACT-DIFF row 60, §8-C8). The array is empty in every deployment today —
+ *  unchanged. The array is empty in every deployment today —
  *  nothing in this system measures a coverage point yet. */
 export interface ProductCoveragePoint {
   product_id: string;
@@ -1177,7 +1170,7 @@ export interface ProductCoveragePoint {
 // declaration and one comment and nothing else, so teaching it the gears' state set
 // would have been teaching a function with no callers. Its live counterpart is
 // `isActiveRun` below, and the per-page phase-to-colour maps the pages hold themselves
-// (e.g. `PlanDetailPage`'s `runPhaseDot`) — those are Task 11's, not this file's.
+// (e.g. `PlanDetailPage`'s `runPhaseDot`) — those belong to the pages, not this file.
 
 export function getStatusColor(status: string): string {
   switch (status) {
@@ -1204,7 +1197,7 @@ export function getStatusColor(status: string): string {
 /**
  * Is this run still going to change state on its own?
  *
- * Re-mapped, not re-cased (CONTRACT-DIFF X4). Legacy tested `phase === "Running" ||
+ * Re-mapped, not re-cased. Legacy tested `phase === "Running" ||
  * phase === "Pending"` against Argo's capitalised phases; qa-runs' set is lowercase and
  * is a genuinely different set — `RunDto.state`'s own doc says a client ported from
  * legacy *"must re-map, not merely re-case"*. Legacy had no `created`, `queued`,
@@ -1212,8 +1205,8 @@ export function getStatusColor(status: string): string {
  * finished yet" are the ones enumerated here.
  *
  * `canceled` (one `l`) is deliberately absent: a cancelled run is finished. It is spelled
- * with one `l` on a run and with two (`cancelled`) on a queue row, and X4 records that
- * difference as intentional — do not normalise the two together.
+ * with one `l` on a run and with two (`cancelled`) on a queue row, and that
+ * difference is intentional — do not normalise the two together.
  *
  * The full run set, for reference: `created | queued | dispatching | running | succeeded |
  * failed | canceled | timed_out | expired | error`.
@@ -1231,7 +1224,7 @@ export function isActiveRun(run: WorkflowRun): boolean {
  * Is this a collect-only enumeration run rather than a test run?
  *
  * `run_kind` is `RunTargetDto.kind` as `runFromDto` carried it over
- * (`adapters.ts`, CONTRACT-DIFF row 5's `run_kind -> target.kind`), so the one
+ * (`adapters.ts`'s `run_kind -> target.kind`), so the one
  * value that matters here is qa-runs' own `"collect"` spelling
  * (`RunKind::as_str`, qa-runs-sdk/src/models.rs).
  *
@@ -1248,17 +1241,16 @@ export function isCollectRun(run: WorkflowRun): boolean {
   return run.run_kind === 'collect';
 }
 
-/** The shape Task 10's adapter returns to components. `NotificationLogEntryDto` changes `id`
+/** The shape the adapter returns to components. `NotificationLogEntryDto` changes `id`
  *  from a number to a uuid string and renames `workflow_name`→`run_id` (a nullable uuid) — the
- *  log line loses its human-readable run name and needs a separate lookup to render one
- *  (CONTRACT-DIFF row 91). `channel`, `event_type`, `outcome`, `detail`, `created_at` unchanged. */
+ *  log line loses its human-readable run name and needs a separate lookup to render one. `channel`, `event_type`, `outcome`, `detail`, `created_at` unchanged. */
 export interface NotificationLogEntry {
-  /** A uuid string, not a number (CONTRACT-DIFF row 91). */
+  /** A uuid string, not a number. */
   id: string;
   created_at: string;
   /** The run's uuid, or null: `NotificationLogEntryDto` carries `run_id` and no run name
    *  at all, so the log line loses its human-readable label and rendering one would need
-   *  a per-line lookup (CONTRACT-DIFF row 91). */
+   *  a per-line lookup. */
   workflow_name: string | null;
   channel: string;
   event_type: string;

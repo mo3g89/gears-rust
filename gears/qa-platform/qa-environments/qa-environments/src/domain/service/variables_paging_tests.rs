@@ -45,7 +45,7 @@ const PAGE_DEFAULT: usize = 200;
 
 fn new_environment(name: &str) -> NewEnvironment {
     NewEnvironment {
-        kubeconfig_credstore_ref: Some("credstore://test".to_owned()),
+        kubeconfig_credstore_ref: Some("kc-test".to_owned()),
         credentials: std::collections::BTreeMap::new(),
         name: name.to_owned(),
         product_id: Uuid::from_u128(0x9001),

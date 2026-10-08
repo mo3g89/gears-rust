@@ -105,7 +105,7 @@ states the boundary precisely.
 | `cpt-cf-qa-fr-insights-history` | `p1` | `qa_test_results` (per file) and `qa_test_case_results` (per case) with OData query surface |
 | `cpt-cf-qa-fr-insights-dashboard` | `p1` | `DashboardService` aggregates recent runs, counts, pass rates and active/queued; `GET /qa/v1/dashboard` |
 | `cpt-cf-qa-fr-insights-analytics` | `p1` | Eight-section overview, per-build breakdown, per-test history, export, saved views |
-| `cpt-cf-qa-fr-insights-collect` | `p1` | `--collect-only` case counts per `(repo, branch, file)` in `qa_test_case_collect`, launched via `POST /qa/v1/collect/{repo_id}` |
+| `cpt-cf-qa-fr-insights-collect` | `p1` | `--collect-only` case counts per `(repo, branch, file)` in `qa_test_case_collect`, launched by the hourly collect cycle or `POST /qa/v1/analytics/collect`, and reported back by the runner to `POST /qa/v1/collect/{repo_id}` |
 | `cpt-cf-qa-fr-insights-jira` | `p1` | JIRA client through OAGW; `qa_jira_bugs` correlation; poller with optional auto-rerun on resolve |
 | `cpt-cf-qa-fr-insights-notifications` | `p1` | Slack and email channels, per-tenant config, `qa_notification_log` audit, `qa_run_notifications` idempotency |
 | `cpt-cf-qa-fr-ui` | `p1` | React SPA: dashboard, runs, plans, custom plans, environments, products, schedules, analytics, settings |
@@ -120,7 +120,7 @@ states the boundary precisely.
 | `cpt-cf-qa-nfr-result-latency` | A result is visible ≤ 5 s p95 after the runner reports it | qa-runs ingestion path | Event-driven ingestion, no polling; one upsert per event | Latency assertion in the e2e harness |
 | `cpt-cf-qa-nfr-dispatch-latency` | A queued run starts ≤ 10 s p95 after its environment frees. **Measured 2026-09-21** — see §3.11, "The dispatch-latency window, and the measurement that was retracted" | qa-runs dispatcher | Interval sweep at 5 s; the ≈4.75 s design argument assumed a single queued run per environment and did not account for `max_concurrent_runs` being checked *before* the per-environment FIFO, nor for genuine multi-run backlog per environment | `qa_runs_free_to_start_duration_seconds` is the row's own quantity, anchored on `qa_environment_leases.freed_at` — the lease-release instant the retracted 2026-09-18 measurement lacked. Two 600 s windows differing only in per-environment backlog (2 vs 5): n = 214 and 239, every sample ≤ 10 s, p95 4.21 s and 4.51 s by per-sample SQL, while `qa_runs_queue_wait_duration_seconds` over the same drains moved 7.7× — which is what says the number is not queue depth. `qa_runs_free_to_start_unanchored_total` publishes the coverage. §3.11 has the method and the three things it does not settle |
 | `cpt-cf-qa-nfr-log-latency` | A log line reaches a viewer ≤ 2 s p95 | qa-runs + `SseBroadcaster` | Executor log stream bridged to SSE with no buffering threshold | e2e streaming test |
-| `cpt-cf-qa-nfr-tenant-isolation` | No row crosses a tenant boundary | every gear, infra/storage | `SecureORM` with a tenant column on all 27 tables; per-gear `tests_tenant_scoping` suites | Tenant-scoping test module per gear |
+| `cpt-cf-qa-nfr-tenant-isolation` | No row crosses a tenant boundary | every gear, infra/storage | `SecureORM` with a tenant column on all 30 tables; per-gear `tests_tenant_scoping` suites | Tenant-scoping test module per gear |
 | `cpt-cf-qa-nfr-credential-containment` | Credential material never reaches a published surface | `qa-product-sdk`, plugins, connectors | Nothing derived from credential material is formatted; `PluginFailure::detail` is `&'static str`; keys travel credstore → memory → pipe → short-lived ssh-agent; secrets reach remote commands on stdin | `assert_no_leak` drives every plugin with planted material and fails the build if any of it surfaces |
 | `cpt-cf-qa-nfr-infra-agnostic` | A default build has no Kubernetes dependency | qa-runs, qa-environments, qa-connector-k8s | The Argo adapter is behind qa-runs' non-default `argo` feature and the runner-`Secret` writer is behind qa-environments' own, independently-switched, non-default `runner-secret` feature; `qa-connector-k8s` carries `kube`/`k8s-openapi` unconditionally but is linked only by the plugins that need a cluster, not by a default gear build | `cargo tree -p qa-runs -i kube -e normal` prints nothing, and `cargo tree -p qa-environments -i kube` errors (`kube` is not in the graph at all) without `--features runner-secret` |
 | `cpt-cf-qa-nfr-ingest-recovery` | Ingestion recovers within 60 s of a control-plane restart | qa-insights | `qa_ingest_watermarks` records the last reconciled `finished_at`; the reconcile sweep resumes from it | Restart test asserting watermark advance |
@@ -206,6 +206,9 @@ No gear branches on a product. Product-specific behaviour is reached only throug
 
 No value derived from credential material is rendered — not through `Display`, not through `Debug`,
 not into a message, a log line or a DTO. The one sanctioned exception is text a remote sent back.
+A credential-store reference is, in every gear, exactly what credstore's `SecretRef` accepts:
+letters, digits, `_` and `-`, 1 to 255 characters, with no scheme prefix. A malformed reference is
+refused at write as a `400` naming the field.
 
 #### Semantics are specified, not inferred
 
@@ -257,6 +260,18 @@ single tenant. Multi-team tenancy is configuration, not new code.
 
 Test repositories are pytest-based and keep the `plan.yaml` / `TEST_META` conventions. Case counts
 come from `--collect-only`; per-case identity is a pytest `nodeid`.
+
+#### The subsystem's checks run in the repository's shared CI
+
+There is no separate workflow for qa-platform. Its checks are steps in the shared `.github/workflows/ci.yml`, and three of them are paid for by pull requests that never touch `gears/qa-platform`:
+
+* the `integration` job runs `make test-qa-runs-pg`, `test-qa-insights-pg`, `test-qa-catalog-pg`, `test-qa-catalog-git` and `test-qa-platform-features` whenever its `rust` filter matches, and that filter matches a Rust or Cargo change anywhere in the repository; the Postgres tiers run in Docker containers, which that job has;
+* the `lint` job runs `make helm-tests`, `helm lint` and kubeconform over the chart on every run, with no path filter at all;
+* the `test` job runs `make qa-openapi-check` on Linux.
+
+In the other direction, the workflow-level `paths` and the `rust` filter both re-include qa-platform's Markdown, TypeScript, shell, chart and config files (the citation guards read them), so a documentation-only change to this subsystem runs the full Rust test job, which a documentation-only change elsewhere does not.
+
+The cost, stated as it was when the first of these steps landed: added wall-clock on unrelated pull requests, and a qa-platform regression turns an unrelated pull request red. Gating the three jobs' qa-platform steps behind a `gears/qa-platform/**` path filter would remove it; it has not been done, and doing it would mean a change elsewhere that breaks qa-platform (a toolkit or workspace dependency bump) is no longer caught on that change's own pull request.
 
 ## 3. Technical Architecture
 
@@ -353,7 +368,7 @@ Registry of the places tests run, and the only gear that talks to a live product
 | `environments` | CRUD, product scoping, `is_default` resolution per product, observation orchestration |
 | `environment_credentials` | Validates a submitted credential form through the product plugin, then writes secret fields to credstore and keeps only references |
 | `leases` | Acquire / release / inspect, shared and exclusive, optimistic on `version` |
-| `variables` | Per-environment and subsystem-wide variable CRUD |
+| `variables` | Per-environment and subsystem-wide variable CRUD. An upsert of one name that races another both succeed, and the later value wins. |
 
 #### Ports
 
@@ -372,6 +387,9 @@ An environment nothing has observed yet is an ordinary shape, not an error: `obs
 `None` and dispatch omits the variables that would have come from it.
 
 A background cycle re-observes on an interval; `POST /qa/v1/environments/{id}/refresh` forces one.
+Both are bounded by `observation.observe_timeout_seconds` (default 300 s, the default poll
+interval): a plugin that has not answered by then is abandoned and the environment records a
+`Timeout` failure for both halves, like any other failed observation.
 Both are measured by `qa_environments_observation_cycle_*` and `qa_environments_observation_*`.
 
 #### Credential handling
@@ -381,6 +399,14 @@ The **gear**, not the plugin, writes credstore — only the gear holds the tenan
 submitted key (which fields are secret), never anything credstore-shaped, because the plugin runs
 before that write happens and cannot know a reference.
 
+Every read of an environment's credential — an observation, whether a refresh or the background
+cycle, and the runner `Secret` write on create, update and self-heal — runs as the qa-environments
+system actor, bound to the tenant that owns the environment (the tenant the background cycle binds
+to), not to the caller's. A refresh therefore cannot succeed on a secret the background cycle cannot
+read: a reference to a secret with `private` sharing, which only its owner can read, fails both, and
+the recorded reason says to store it with `tenant` sharing. The caller is authorized first under its
+own context.
+
 #### Endpoints
 
 | Method | Path | Purpose |
@@ -389,8 +415,8 @@ before that write happens and cannot know a reference.
 | GET, PATCH, DELETE | `/qa/v1/environments/{id}` | Read, update, delete |
 | GET | `/qa/v1/environments/{id}/lease` | Current lease holders and mode |
 | POST | `/qa/v1/environments/{id}/refresh` | Force an observation |
-| GET, POST | `/qa/v1/variables` | Pipeline variables: list and create |
-| GET, PATCH, DELETE | `/qa/v1/variables/{id}` | Read, update, delete |
+| GET, PUT | `/qa/v1/variables` | Pipeline and per-environment variables: list, and create or update by natural key |
+| DELETE | `/qa/v1/variables/{id}` | Delete a variable |
 
 ### 3.3 qa-catalog
 
@@ -427,24 +453,144 @@ A synced work tree is walked under the repository's `content_root`. Plan identit
 rendered as a string. Case counts per file come from pytest `--collect-only` and are the
 `qa-catalog` half of what qa-insights stores as `ExpectedCaseCount`.
 
+#### Branch model and the first read of a branch
+
+Each branch has its own work tree, materialized by a sync of that branch. A read of a branch's
+content — `GET /qa/v1/plans`, a single plan, `TEST_META`, and the build of a test bundle — goes
+through one step:
+
+1. If the repository has synced successfully (`last_synced_at` set, `sync_error` clear) and the
+   branch's work tree is on disk, the read is served from it. No sync, no network.
+2. Otherwise the read syncs the branch first. It always confirms the branch on the remote before
+   that: the branch list is refreshed (a ref listing, no content fetch) and the branch must appear
+   in it. The cached list alone never decides, because it lags the remote in both directions.
+   A listing that fails is answered by whose fault it is. A configuration fault — the
+   repository's credential cannot be resolved in credstore, or the remote refuses it, or demands
+   one and none is configured, or an ssh key is passphrase-protected, or a credential is
+   configured for a plain `http://` remote, which never sends one in clear text — is recorded in
+   `sync_error` (sanitized) and answered `400` with that reason, exactly as an explicit sync
+   records it. Any other failure (unreachable, timing out, failing) is `503` and records nothing.
+   An HTTP `403` from the remote is in this second class, not the first: hosts answer `403` for
+   missing permissions and for rate limits alike, and only `401` reliably means the credential
+   was refused. Either failure backs the repository off for `remote_failure_backoff_seconds`
+   (default 30 s): every read of that repository that would sync it gives the same answer — the
+   recorded reason as `400`, or `503` — without contacting the remote. A credential backoff
+   answers only while `sync_error` still holds the reason it recorded; once another failure has
+   replaced that text, reads ask the remote again. An explicit sync that records a credential
+   fault starts the same backoff. The backoff is in memory and per replica. A successful listing
+   or sync, a forced sync, and a change of the repository's `url` or `credential_ref` end it
+   early, and a failure found by an attempt that began before such a change neither starts one
+   nor, for a credential fault, is recorded. Neither the explicit sync nor the branch-cache
+   refresher is held back by it; the refresher records nothing and so never starts one, though
+   its successful listing ends one. A
+   branch the remote does not have is `404` (`BranchNotFound`, naming the branch), and the sync
+   engine is never called for it. A sync failure records `sync_error` on the repository, which
+   every branch of that repository reads as "not synced", so a mistyped or deleted branch must not
+   reach the engine. A branch the remote has is synced without `force`: the freshness cache and the
+   per-repository and per-branch sync locks apply, so concurrent first reads of one branch fetch
+   its content once. While `sync_error` is set the freshness window does not short-circuit: a
+   branch synced inside it is fetched again, because only a successful sync clears the error,
+   and without that a branch synced a minute ago would be refused with another branch's failure
+   for the rest of the window. So while one branch keeps failing, reads of the repository's other
+   branches are full fetches whatever the TTL: each successful one clears the error, and the next
+   failure sets it again. The branch cache both of them rewrite is updated as an idempotent diff —
+   names already cached are kept, names the listing lacks are removed, new names are inserted
+   unless another writer inserted them first — so concurrent reads, syncs and refreshes of one
+   repository never fail on each other's write. Surrounding whitespace in the branch name is
+   ignored, as in an explicit sync.
+3. If the work tree is still unavailable afterwards, the answer is `400` (`RepoNotSynced`) carrying
+   the repository's recorded sync failure, which is repository-wide and so may be another branch's.
+   A fetch that fails after a successful listing, and a configuration fault found while listing,
+   end here, as `400`.
+
+A manual `POST /qa/v1/test-repos/{id}/sync` is therefore not a precondition of reading or launching
+on a non-default branch. It stays the way to force a fetch.
+
+The sync in step 2 runs under the reader's own security context and needs `SYNC` on the repository,
+exactly as an explicit sync does; a reader without it gets `403`. The repository's credential,
+though, is read from credstore as the qa-catalog system actor, bound to the tenant that owns the
+repository — the identity and the tenant the background branch refresher reads it as — on an
+explicit sync and on a read alike. A credential stored with `private` sharing, which only its owner
+can read, is therefore a configuration fault for everyone, recorded with a reason that says to store
+it with `tenant` sharing, rather than working for its owner and failing every refresh. A credential
+read that credstore refuses outright is recorded the same way. Only step 1 needs no `SYNC`: the
+branch has a work tree and `sync_error` is clear. While `sync_error` is set, every read takes
+step 2.
+
+The analytics universe walk, which reads every repository of a product in one call, does not use
+this step. It skips a repository that is not synced (`last_synced_at` unset or `sync_error` set) or
+has no work tree for the selected branch, and never syncs it, so one unreachable remote cannot blank the overview.
+
+#### Limits on talking to a remote
+
+Every remote operation is bounded, because a test repository's url is tenant input. A sync
+(clone or fetch, then checkout) runs under `sync_timeout_seconds` (default 300 s) and a branch
+listing under `ls_refs_timeout_seconds` (default 30 s). At the deadline the work is interrupted:
+gix stops at its next read of the pack or during checkout, and the catalog waits up to 30 s
+for that before it answers. A handshake has no such checkpoint: a peer that trickles it, a byte
+inside every stall bound, keeps an abandoned operation's blocking thread for as long as it keeps
+trickling. Per replica that is at most one listing thread per url, one sync thread per repository
+(holding that repository's clone directory), and one waiter: the next sync of that repository
+waits for the clone directory on a blocking thread of its own, but only until its own deadline,
+so for up to `sync_timeout_seconds`. Further listings do not add to it: a listing of a url whose
+previous listing was abandoned and still runs answers `503` at once, without contacting the
+remote. That bound is keyed by the url alone, so it is shared by every repository and every
+tenant that names the same url: while one is held, all of them answer `503` for it. A
+timeout backs the repository off (`remote_failure_backoff_seconds`). A branch listing that times
+out is an outage: it answers `503`, and reads inside the backoff answer `503` without contacting
+the remote. A content sync that times out is recorded in `sync_error`, so the read that ran it
+answers `400` with that reason, and it is backed off as that recorded reason, like a size fault:
+reads inside the backoff answer the same `400` at once, without contacting the remote, so a
+remote that trickles its content does not cost every read another `sync_timeout_seconds`.
+An update that changes a repository's `url`, `content_root` or `credential_ref` (a
+credential-only change included) takes the per-repository sync lock, so it waits for an in-flight
+sync of that repository to answer: up to `sync_timeout_seconds` plus the 30 s grace.
+
+The transports carry their own bounds as well. Over HTTP(S) the reqwest backend connects within
+20 s and fails a body read that stalls for 30 s. gix's `http.lowSpeedLimit`,
+`http.lowSpeedTime` and `gitoxide.http.connectTimeout` are not set, because that backend ignores
+them. Every ssh remote runs `ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15
+-o ServerAliveCountMax=4`, with or without a key.
+
+One clone or fetch may add at most `max_fetch_bytes` (default 1 GiB) to the repository's pack
+directory, and one branch checkout may write at most `max_checkout_bytes` (default 512 MiB).
+Over the first, the fetch is stopped and the repository's working area removed. Over the
+second, nothing is written. Either is a property of the repository, not an outage: it is
+recorded in `sync_error`, answered `400`, and backed off; reads inside the backoff answer the
+recorded reason without fetching again. The defaults keep one fetch to 5 % of the chart's 20 GiB
+volume, which every clone, snapshot and bundle shares. A snapshot is what every runner pod
+downloads, so a larger one is past useful for a test suite. A `0` disables any of the four
+limits. The budgets bound the pack and the blobs, not everything a sync costs: the advertised
+refs and the tracking refs written outside `objects/pack` are not counted, gix holds a single
+object in memory while it receives the pack, and line-ending or filter conversion can write a
+checkout somewhat larger than the sum of its blob sizes.
+
+#### Reads do not serialize against a snapshot rewrite
+
+The per-repository and per-branch sync locks serialize writers only. Plan discovery, `TEST_META` reads and bundle packing walk a branch's work tree with no lock, and a sync rewrites that work tree in place: `infra::git::gix_sync` clears the directory and writes the tip's content into it, because gix's checkout writes only index entries and would otherwise leave files deleted upstream behind. A read that overlaps a sync of the same branch can therefore see a partial or an empty tree. That is a transient wrong answer, not corruption; the next read is whole.
+
+This is at parity with the source system, whose readers also walk the checkout unlocked while only its writers take a lock, so two concurrent launches on one `(repo, branch)` race there exactly as they do here. One difference is of degree: the source system updates a branch through `git worktree`, rewriting files in place, while this gear clears first, so it can also expose an *empty* read where the source exposes only a partial one.
+
+**No new snapshot machinery is added.** qa-runs closes only the widened part: a bundle build that fails right after the dispatch step's own force-sync is retried once (`domain::service::dispatch_spec`, `build_bundle`). Once, not in a loop, so a group that genuinely cannot be built — a deleted path, a branch without the files — fails its run instead of holding the dispatcher. The fixes on record, if the race ever bites, are a per-branch read lock (readers share, a sync excludes) or generation-numbered snapshot directories behind an atomic "current" pointer, so a reader finishes on the generation it opened. Neither is built.
+
 #### Endpoints
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET, POST | `/qa/v1/products` | List and create |
-| GET, PATCH, DELETE | `/qa/v1/products/{id}` | Read, update, delete |
+| PUT, DELETE | `/qa/v1/products/{id}` | Update, delete |
 | GET | `/qa/v1/product-plugins` | Registered plugin instances and their credential/observed schemas |
 | GET | `/qa/v1/product-folders` | Folder tree used by the plans browser |
 | GET, POST | `/qa/v1/test-repos` | List and create |
-| GET, PATCH, DELETE | `/qa/v1/test-repos/{id}` | Read, update, delete |
+| GET, PUT, DELETE | `/qa/v1/test-repos/{id}` | Read, replace, delete |
 | GET | `/qa/v1/test-repos/{id}/branches` | Cached branch list |
 | POST | `/qa/v1/test-repos/{id}/sync` | Fetch and refresh the work tree and branch cache |
-| GET | `/qa/v1/plans` | Discovered plans, filterable by repository and branch |
+| GET | `/qa/v1/plans` | Discovered plans, filterable by repository and branch; syncs a branch that has no work tree yet, `404` for a branch the remote lacks |
 | GET, POST | `/qa/v1/custom-plans` | List and create |
-| GET, PATCH, DELETE | `/qa/v1/custom-plans/{id}` | Read, update, delete |
+| GET, PUT, DELETE | `/qa/v1/custom-plans/{id}` | Read, replace, delete |
 | GET, POST | `/qa/v1/ssh-keys` | List and create |
-| GET, DELETE | `/qa/v1/ssh-keys/{id}` | Read and delete |
-| GET | `/qa/v1/test-bundles/{id}` | Bundle metadata and fetch reference |
+| DELETE | `/qa/v1/ssh-keys/{id}` | Delete |
+| GET | `/qa/v1/test-bundles/{id}` | Download a bundle; anonymous, authorised by the per-bundle HMAC tag in `?sig=` (§3.13 `bundle_download_signing_secret`) |
 
 ### 3.4 qa-runs
 
@@ -558,16 +704,17 @@ constraint would remain.
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET, POST | `/qa/v1/runs` | List (OData) and launch |
-| GET, DELETE | `/qa/v1/runs/{id}` | Read and delete |
+| GET | `/qa/v1/runs/{id}` | Read |
 | POST | `/qa/v1/runs/{id}/cancel` | Cancel a live run |
 | POST | `/qa/v1/runs/{id}/rerun` | Re-launch the run's resolved target |
 | GET | `/qa/v1/runs/{id}/logs` | `text/event-stream` of log lines |
 | GET | `/qa/v1/queue` | Queue entries, filterable by environment |
-| GET, DELETE | `/qa/v1/queue/{id}` | Read and dequeue |
+| DELETE | `/qa/v1/queue/{id}` | Dequeue a row still `queued` |
 | POST | `/qa/v1/queue/{id}/force-start` | Bypass the FIFO for one entry |
 | GET, POST | `/qa/v1/schedules` | List and create |
-| GET, PATCH, DELETE | `/qa/v1/schedules/{id}` | Read, update, delete |
-| GET, PUT | `/qa/v1/schedules/{id}/notifications` | Per-schedule Slack settings |
+| GET, PUT, DELETE | `/qa/v1/schedules/{id}` | Read, replace, delete |
+| GET | `/qa/v1/schedules/{id}/ticks` | A schedule's fire history |
+| PUT | `/qa/v1/schedules/{id}/notifications` | Replace a schedule's Slack settings |
 
 ### 3.5 qa-insights
 
@@ -600,6 +747,36 @@ run path makes no call into qa-insights, so analytics can be down, slow or resta
 effect on a launch. Recovery after a restart is the watermark, which is why
 `cpt-cf-qa-nfr-ingest-recovery` is a property of a table rather than of a retry policy.
 
+**One sweep is bounded, and a window wider than that bound drains across ticks.** A sweep starts
+at `watermark - reconcile_lookback_seconds`, deliberately behind its own mark, and walks at most 50
+pages of `reconcile_page_size` — 10,000 runs at the defaults. A pass that spends that budget before
+catching up persists a **resume cursor** (`qa_ingest_watermarks.sweep_cursor_*`: the
+`(finished_at, id)` key of the last run it fully consumed, and the floor it walked from), and the
+next tick resumes after it instead of repeating the pass. The watermark moves once the drain passes
+it. A pass honours a stored cursor only when that cursor vouches for its window — the stored floor at
+or before the floor it derives, the stored position at or after it — so a floor that moved forward
+during a drain keeps the cursor, and a replica carrying a wider lookback (an earlier floor) discards
+it and walks the band before it. A pass that catches up erases the cursor, so the tick after a drain
+is back to `watermark - lookback` and re-reads the whole lookback.
+
+The alarm follows the drain rather than fighting it: a pass that leaves the watermark unmoved while
+not caught up counts as a stall **unless its resume cursor rose past the highest cursor that
+ticker has seen under the same mark**. A healthy drain therefore never escalates; `gear::stall_of`
+escalates the tenant to `ERROR` after three passes on which the watermark stood still *and* the
+cursor high-water stopped rising — a wedge, including the one two replicas on different lookbacks
+can form when the band only the wider one covers holds more than one pass' budget. The stall `WARN`
+and the `ERROR` both carry `sweep_cursor_at`.
+
+**What a drain costs late runs.** While a drain resumes across a moving floor, no pass re-reads the
+band behind its cursor, so the effective late-arrival lookback shrinks by however far the drain
+moved the mark. A run written into that band after the pass that listed it, and older than
+`watermark_at_catch_up - reconcile_lookback_seconds`, is outside every later window: the recovery is
+`POST /qa/v1/insights/rebuild` over it, which pages under its own budget and reports where to
+resume — including when qa-runs stops answering part way through. Raising `reconcile_page_size`
+shortens a drain but is capped at the 500-row page qa-runs' finished-since listing serves; a
+configured `0` is raised to `1`, since a zero-row page reads as caught up and would silence the
+sweep.
+
 Three roles are eligible for leadership — the reconciler, the JIRA poller and the collect cycle —
 but only one of them needs a real one. `qa_leader_claims` backs `ClaimRowElector`, and only the
 JIRA poller runs under it: its effect is a **launch**, through the normal admission path, and
@@ -608,15 +785,129 @@ twice. The reconciler and the collect cycle run under `NoopLeaderElector` instea
 is the leader — because their writes converge on their own: `upsert_run_results` is
 delete-then-insert per run and a watermark never moves backwards, so two replicas sweeping the same
 tenant concurrently produce a correct projection, and election there is an optimisation (fewer
-redundant cross-gear reads), not a correctness requirement. Notification dispatch's claim
-lifecycle is designed not to need leader-gating either: `qa_run_notifications`' unique index is
-what would stop a re-swept run from re-notifying, independent of which replica reconciled it, if
-anything drove that path. Nothing does today — `NotifyService::notify_run_completed` ships, is
-tested, and has no production caller in this gear: the transactional broker consumer that would
-have routed `run.canceled`, `run.queue_expired` and `schedule.fired` into it went with the
-event-broker dependency, and no replacement producer is planned. Neither this document nor
-`PRD.md` promises those three anywhere, so nothing is owed — `cpt-cf-qa-interface-events` (§3.4,
-"Execution events") is a separate, live contract over four events, all of them routed.
+redundant cross-gear reads), not a correctness requirement. Two reprojections of one run never
+both keep their rows: each takes the run's `qa_run_projection_locks` row first (§3.8).
+Notification dispatch's claim lifecycle does not need leader-gating either, and that now matters in
+production rather than in principle: **the sweep is the run-completed notification's producer.**
+`ReconcileService::reproject` calls `NotifyService::notify_run_completed` once a run's projection
+transaction has committed — after the commit, never inside it, because the call ends in an SMTP
+conversation or a Slack webhook and an open transaction held across network egress pins a
+connection for the length of a relay timeout. `qa_run_notifications`' unique index on
+`(tenant_id, run_id, notification_kind, event_type)` is what stops a re-swept run from
+re-notifying, independent of which replica reconciled it, which is exactly the property that lets
+this loop stay un-leader-gated while sending mail.
+
+**What actually notifies** is decided by `domain::notify::routing::route`, from four inputs: the
+tenant's notification config, the event, the run's schedule settings if it has any, and the run's
+own outcome. In order:
+
+* **The outcome policy, which gates both channels.** The run's results are classified the same
+  three ways its message headline is — failed, succeeded, or neither (no results, or only statuses
+  that are neither) — by one function, `render::run_completed_outcome`, from which the headline is
+  then derived, so the gate and the message cannot disagree. A failed run notifies if
+  `notify_on_failure` is set, a passing one if `notify_on_success` is, and one that is neither if
+  *either* is, since no policy speaks about it. With both off, nothing notifies.
+* **`ScheduleNotificationSettings::slack_enabled` gates Slack, and only Slack** — the flag does
+  what its name says. A run with no `schedule_id`, or whose schedule cannot be resolved, has
+  nothing to narrow with and routes on the tenant's settings alone.
+* Then `slack_enabled`/`email_enabled` and the per-channel destination checks apply.
+* `notify_on_schedule_completion` is stored, round-tripped through the settings API and the UI, and
+  **read by nothing** — here and in the source system alike, where a repository-wide search finds
+  only the struct, its `Default` and one snapshot literal.
+
+**Three of those were the opposite until 2026-09-29, and all three were faithful ports.** The source
+system gates its whole run-completed path on `is_scheduled_run` first — an ad-hoc run logged a skip
+and returned before any channel flag was consulted — and its single
+`scheduled_completion_notifications_enabled` gate returns before the email branch as well, so one
+flag named for Slack silenced mail too (this gear exposes that flag as the schedule's Slack switch,
+`slack_enabled`, which qa-insights reads over the qa-runs SDK). Its
+`notify_on_failure`/`notify_on_success` are read nowhere. The owner ruled all three reversed,
+accepting both the divergence and the extra mail. `notify_on_schedule_completion` was left out of
+the ruling because the source system's nearest equivalent is a per-run computation, not this
+tenant-wide field, so reviving it would mean inventing a meaning for it.
+
+**The narrowing half is worth stating separately**: the config default is `notify_on_failure` on
+and `notify_on_success` off, so a deployment that never sets the latter stops announcing passing
+runs it used to announce. The settings page grew both switches in the same change.
+
+Every non-send claims its dedupe slot, so a later configuration change cannot make a rebuild
+announce a run this deployment already decided about — which is also what bounds the widening
+above: a run this deployment has already considered holds both claims whatever it decided, and one
+older than the cutoff is declined before routing is reached, so the runs that newly notify are only
+the ones nothing had looked at yet. Every *send* is audited on both outcomes (`failed`, or
+`unsupported_egress` when the deployment has no adapter for the channel). Every decision
+`notify_run_completed` makes is enumerated here, with whether it writes a `qa_notification_log`
+row.
+
+*Audited* (the row is under channel `run` unless stated):
+
+* a run that finished before the notification cutoff: `skipped`, "it is history and was not
+  announced" (the run is neither routed nor claimed);
+* a run that is not ingested yet or not visible to the caller: `skipped`;
+* a run or schedule read, or a results read, that fails for any other reason: `failed`; a results
+  read that finds the run not ingested is `skipped`;
+* a channel send that loses its claim to an earlier one, on either channel: `skipped`, "Already
+  sent (duplicate reservation)", under that channel;
+* a Slack decline that routing made, the first time it is made for a run, and only when routing's
+  answer was not the source system's silent one (`slack_skip_is_audited`: the schedule's Slack
+  switch blocked it, or `slack_enabled` is on — so an outcome-policy decline is visible to a tenant
+  who uses Slack): channel `slack`, `skipped`.
+
+*Silent*, on purpose or by construction:
+
+* routing wanted Slack but `slack_enabled` is false;
+* routing wanted Slack and the webhook reference is empty (`slack_capable` is false): the claim is
+  taken, no row is written;
+* **every** email skip, routing's or the capability gate's, because the source system's email
+  branch has no `else`;
+* the same Slack decline seen again on a later sweep tick (`first_time` is false);
+* a run whose every channel was already decided (`already_decided`), which returns before any read.
+
+A send that **fails** is audited on both channels, and its claim is released so a rebuild can
+re-attempt it.
+
+**A deployment upgrading into this does not get its history mailed**, and it takes two migrations
+rather than one. `m20260929_000004_run_completed_notification_cutoff` records the instant this
+deployment began notifying, in one row of its own table, and `notify_run_completed` declines any
+run that finished before it. `m20260929_000003_seed_run_completed_notification_claims` writes one
+claim row per already-projected run per run-completed channel, so every run this gear had already
+ingested also reads as already-sent through the send-once index — the table *is* the record of
+what has been notified, so that is the correct statement of "already dealt with" rather than a
+suppression window.
+
+Neither is redundant. The claim seed can only name runs that left rows in `qa_test_results`, and a
+run that finished with **zero** results leaves none — measured on the dev stand on 2026-09-29,
+1095 of 2326 finished runs. Those are exactly the runs the sweep re-projects on every pass (§3.5,
+and `domain::service::reconcile`'s header), so they reach the producer every time and only the
+cutoff silences them. In the other direction the cutoff cannot judge a run whose `finished_at`
+lands just after the migration's own clock through skew, and there the claim row answers.
+
+The cutoff is a **persisted** instant rather than one computed at boot, for two reasons that are
+both silent failures: a restart would move it forward and re-open the window, and every replica
+sweeps under `NoopLeaderElector`, so per-process instants would disagree and the effective cutoff
+would be whichever pod restarted least recently.
+
+**A third migration handles the opposite hazard**, added when the outcome policy went live.
+`m20260929_000007_opt_existing_tenants_into_success_notifications` sets `notify_on_success = TRUE`
+for every tenant that already had a notification config when it ran. Only a build from the window
+between `c5bcf0a24` (the reconcile sweep first calls `notify_run_completed`, 2026-09-29 14:32) and
+`4d563bb3f` (the outcome flags become gates, 2026-09-29 23:22) ever ran with the flag inert and
+notifications live: there every scheduled run notified whatever its outcome. Before `c5bcf0a24`
+nothing was notified at all, and Slack could not deliver until 2026-09-30 (ADR-0011's amendment).
+Making the flag a gate without touching stored rows would have *silenced* the passing runs of a
+tenant on that intermediate build, which is a reduction where the ruling was to widen; for a
+deployment upgrading from before it, the opt-in decides what it starts receiving. The column's
+default stays `FALSE`, so a tenant onboarded afterwards is not opted in — "do not change what an
+existing deployment does" and "what should someone new get" are different questions and get
+different answers. Its own header carries why the default was not flipped instead, and why its
+re-execution guard is the migration ledger rather than a `WHERE` clause.
+
+The three alerts that are *not* a run completing — `run.canceled`, `run.queue_expired` and
+`schedule.fired` — still have no producer. The transactional broker consumer that would have
+routed them went with the event-broker dependency, and no replacement is planned. Neither this
+document nor `PRD.md` promises those three anywhere, so nothing is owed —
+`cpt-cf-qa-interface-events` (§3.4, "Execution events") is a separate, live contract over four
+events, all of them routed.
 
 #### Two granularities, one key shape
 
@@ -642,7 +933,35 @@ client can bind it; no producer exists.
 - [ ] `p1` - **ID**: `cpt-cf-qa-contract-egress`
 
 Every outbound **HTTP** call from this gear — JIRA and Slack — goes through the platform's Outbound
-API Gateway, which resolves the credential from credstore and controls egress. The subsystem's
+API Gateway, which controls egress. For JIRA the gateway also resolves the credential from credstore
+and injects it as a header. A JIRA failure is classified as a Slack failure is (`UpstreamEgress`,
+`channel = "jira"`): JIRA's `401`/`403` is `Authentication`, meaning the secret behind
+`api_token_credstore_ref` was refused; the gateway answering for an unreachable JIRA is
+`Unreachable`; a deadline is `Timeout`; any other refusal is `Rejected`. The JIRA poller counts a
+refused credential as `qa_insights_jira_bug_total{outcome="status_check_refused"}`, apart from
+`status_check_failed`, and logs it at error. `POST /qa/v1/jira/bugs` tries the failed tests in
+`test_name` order and logs each test it cannot file. The first `Unreachable`, `Timeout` or
+`Authentication` failure stops the attempts (one endpoint and one credential per tenant; the rest
+are logged once as not attempted), while a `Rejected` one does not. Within one attempt, a dedupe
+search that meets such a failure ends the attempt with it and no create is sent; any other failed
+search still falls through to the create, so a duplicate issue is filed rather than a report lost. When no test was filed or
+found, it answers `503` naming the `jira` channel and the class of the failure that stopped the
+attempts (else the first `Rejected` one); when one was filed or found, it answers `200` with those
+entries. **Slack's credential cannot be injected that way**: an incoming
+webhook's secret is its URL *path*, and every gateway auth plugin writes a header. So
+`infra::notify::slack_oagw` resolves the secret named by `slack_webhook_credstore_ref` — which holds
+the full `https://hooks.slack.com/services/…` URL — from credstore itself, as the qa-insights
+system actor bound to the sending tenant — the settings test send included, so a secret stored with
+`private` sharing, which only its owner can read, fails the test exactly as it would fail every real
+send, and the refusal says to store it with `tenant` sharing; refuses anything that is not such a
+URL before dialling; provisions a per-tenant no-auth upstream `hooks.slack.com` with one route
+`POST /services`; and proxies the path through it.
+The host is fixed by code, and no error the adapter returns carries the path (a failure of the send
+is `UpstreamEgress` with fixed detail, because the audit log stores its text; an unusable
+reference is `Validation` (400) and a credential-store outage is `Internal` (500)) — ADR-0011's
+2026-09-30 amendment. Each JIRA call, Slack send and SMTP send is bounded at ten seconds, and the
+bound starts before the credential lookup and the gateway provisioning, not after them. The
+subsystem's
 egress contract permits exactly one direct-HTTP exception and it belongs to qa-catalog's git
 transport, so a `reqwest` dependency in qa-insights would itself be the violation.
 
@@ -650,12 +969,33 @@ transport, so a `reqwest` dependency in qa-insights would itself be the violatio
 ([ADR-0011](./ADR/0011-cpt-cf-qa-adr-smtp-egress.md)). OAGW cannot proxy a stateful,
 server-greets-first protocol that upgrades to TLS mid-stream, so `infra::notify::mail_smtp` opens
 the connection itself with `lettre`, and this gear resolves the relay password from credstore
-directly — the only credential it ever holds in plaintext. TLS is mandatory (465 implicit,
-otherwise `STARTTLS` required), the send is bounded at ten seconds, and the destination is
+directly, as the same actor — one of the only two credentials it ever holds in plaintext, the other being the Slack
+webhook URL above. TLS is mandatory (465 implicit,
+otherwise `STARTTLS` required), the send — password lookup included — is bounded at ten seconds,
+and the destination is
 constrained by `QaInsightsConfig::smtp_allowed_hosts` rather than by a `NetworkPolicy`: all four
 gears share one pod whose egress already has to permit arbitrary git remotes and arbitrary tenant
 management nodes, and the relay host is a per-tenant column a chart cannot know. The ADR carries
 that argument in full.
+
+**A failed run-completed send is not retried automatically, and recovery is an operator
+rebuild.** When Slack or the relay refuses a message, `notify_run_completed` records the failure
+in `qa_notification_log` (`outcome = failed`, or `unsupported_egress` when the deployment has no
+adapter for the channel) and *releases* the claim it took, so the slot is free for another
+attempt. Nothing in the sweep makes that attempt: `ReconcileService` re-projects only runs absent
+from `qa_test_results`, so a run that projected at least one result row is never revisited, and
+only a run with genuinely zero result rows is re-tried on the next tick by accident of that diff.
+For everything else the recovery is `POST /qa/v1/insights/rebuild` over the window that failed,
+which re-projects every run in it and re-attempts exactly the sends whose claims were released
+(§3.9). Watch `GET /qa/v1/settings/notifications/log` for `failed` rows to know a window needs
+one. Building a real retry queue would need durable per-attempt state this schema does not have,
+and it is recorded here as absent rather than implied to exist.
+
+**Delivery is at-least-once when the outcome is ambiguous.** A send that timed out may still have
+reached Slack or the relay, and its claim is released like any other failure's, so the run can be
+announced twice: on the next sweep for a run with zero result rows, or by the rebuild that
+re-attempts released claims. Keeping the claim on a timeout would instead lose, without a trace,
+every notification that genuinely never left; the gear accepts the duplicate.
 
 #### Endpoints
 
@@ -673,10 +1013,10 @@ that argument in full.
 | GET | `/qa/v1/analytics/export` | Export of the current query |
 | POST | `/qa/v1/analytics/collect` | Trigger a collect run |
 | GET, POST | `/qa/v1/analytics/views` | Saved views: list and create |
-| GET, PATCH, DELETE | `/qa/v1/analytics/views/{id}` | Read, update, delete |
-| POST | `/qa/v1/collect/{repo_id}` | Collect case counts for a repository |
+| PUT, DELETE | `/qa/v1/analytics/views/{id}` | Replace, delete |
+| POST | `/qa/v1/collect/{repo_id}` | The runner's report of one file's exact case count; anonymous, HMAC-verified (§3.13 `collect_report_signing_secret`) |
 | POST | `/qa/v1/insights/rebuild` | Re-derive the read model |
-| GET | `/qa/v1/jira/bugs` | Correlated bugs |
+| POST | `/qa/v1/jira/bugs` | File, or find, a JIRA bug for each failed test of a run |
 | GET | `/qa/v1/jira/open-bugs` | Open bugs only |
 | GET, PUT | `/qa/v1/settings/jira` | JIRA connection settings |
 | GET, PUT | `/qa/v1/settings/jira-poller` | Poll interval and auto-rerun toggle |
@@ -745,9 +1085,8 @@ byte-for-byte expected render of the template.
 
 #### `qa-product-sdk`
 
-Declares `QaProductPluginV1` and the value types around it. The trait groups its eight methods as
-two for declaration, three for environment/run lifecycle, two for dispatch, and one defaulted
-health check:
+Declares `QaProductPluginV1` and the value types around it. The trait has seven methods, none defaulted:
+two for declaration, three for environment/run lifecycle, and two for dispatch:
 
 | Method | Called by | Purpose |
 |--------|-----------|---------|
@@ -758,7 +1097,6 @@ health check:
 | `prepare_run_access(&EnvironmentHandle)` | qa-runs | Mounts, environment bindings and a service account for a run |
 | `runner(Option<&ObservedAttrs>) -> RunnerSpec` | qa-runs | Runner image and command for this product's run, optionally informed by the last observation |
 | `env_contract() -> RunVarContract` | qa-runs | Run-variable names this plugin reserves beyond the platform's own floor |
-| `health_check() -> Result<HealthState, PluginFailure>` | qa-product-sdk test support | Cheap liveness check, independent of any environment. **Defaulted** — a plugin overrides it only if it has a cheaper probe than a full observation |
 
 `prepare_run_access` **must work from credstore references alone.** It reads `credstore_ref`, never
 `resolved`: dispatch calls it without resolving anything, precisely so no plaintext credential is
@@ -803,6 +1141,16 @@ decision the platform should be able to re-bind underneath a plugin. See
   never `argv`, never an environment variable.
 * A secret reaches a remote command on **stdin**, because `sshd`'s `AcceptEnv` discards the
   environment channel and `argv` is world-readable through `/proc`.
+* A command's output is read up to 1 MiB of stdout and 64 KiB of stderr; past that the command is
+  killed and the observation records a `Malformed` failure.
+
+`qa-connector-k8s` reads a tenant's API server, so every read is bounded: lists go a page of 250
+at a time; more than 5000 nodes fails the health read rather than computing it from part of the
+list, more than 10 000 namespaces leaves the count unknown, a list still handing out continue
+tokens past the pages its cap needs is abandoned (a node list fails, a namespace count is left
+unknown), and the cluster-wide ConfigMap scan asks for 16 and does not page; no response body over 8 MiB is buffered; each request has a 10 s
+connect and 30 s read/write timeout. These are constants of the connector, not configuration —
+the deadline for a whole observation is qa-environments' `observation.observe_timeout_seconds`.
 
 ### 3.8 Database Schemas & Tables
 
@@ -810,10 +1158,11 @@ Each gear owns its own schema and no gear reads another's tables; cross-gear rea
 clients. Every table carries `tenant_id` and every query runs through `SecureORM` with that column
 as the tenant scope.
 
-Every gear's schema is declared by **one** migration. That is a property of a platform that
-installs from scratch rather than a rule for the future: the chains were collapsed before the
-first installation, when no deployment had run any of them, and from that point each list is
-append-only again. What the collapse removed was the record of how the schema was reached — a
+Every gear's schema was declared by **one** migration at the first installation, and each list has
+been append-only since: qa-runs is at four, qa-insights at seven, qa-environments and qa-catalog at
+two. The collapse to one was a property of a platform that installed from scratch rather than a
+rule for the future — the chains were collapsed when no deployment had run any of them, and
+nothing has been collapsed since. What the collapse removed was the record of how the schema was reached — a
 table rename, an expand/contract pair around the plugin columns, a dozen single-column
 additions — none of which a new database performs.
 
@@ -869,6 +1218,7 @@ Helm chart runs; SQLite is what the test tier uses.
 | `mode` | text | `shared` or `exclusive` |
 | `holders` | jsonb | run ids currently holding |
 | `version` | bigint | optimistic concurrency token |
+| `freed_at` | timestamptz? | the instant the lease was last released, stamped inside the release compare-and-swap; the anchor `qa_runs_free_to_start_duration_seconds` measures from (`m20260921_000002_lease_freed_at`) |
 | `updated_at` | timestamptz | |
 
 **`qa_environment_variables`** — `id`, `tenant_id`, `environment_id`, `name`,
@@ -884,11 +1234,14 @@ Subsystem-wide; merged under per-environment variables at dispatch.
 `created_at`, `updated_at`.
 
 **`qa_test_repositories`** — `id`, `tenant_id`, `product_id`, `name`, `url`, `default_branch`,
-`content_root`, `credential_ref?` (credstore), `last_synced_at?`, `sync_error?`, `created_at`,
+`content_root`, `credential_ref?` (credstore), `head_commit?` (the commit the last sync
+resolved; `m20260921_000003_repo_head_commit`), `last_synced_at?`, `sync_error?`, `created_at`,
 `updated_at`.
 
 **`qa_repo_branches`** — `id`, `tenant_id`, `repo_id`, `name`, `refreshed_at`. The branch cache
-refreshed by sync.
+refreshed by sync and by the branch-cache refresher. A row carries its repository's owning tenant,
+whoever's request wrote it; `refreshed_at` is when the name was first listed, since a refresh keeps
+rows the listing still names.
 
 **`qa_custom_plans`** — `id`, `tenant_id`, `name`, `files` (jsonb), `tags` (jsonb),
 `timeout_seconds?`, `created_at`, `updated_at`.
@@ -932,6 +1285,7 @@ private key is never in this table.
 | `started_at`, `finished_at` | timestamptz? | |
 | `error` | text? | |
 | `passed`, `failed`, `skipped`, `in_progress`, `total` | int | tallies folded by ingest |
+| `xfail`, `xpass` | int | expected-failure and unexpected-pass tallies, folded by ingest alongside the five above; added by `m20260921_000005_run_xfail_counter` and `m20260921_000006_run_xpass_counter`, default `0` |
 | `created_at`, `updated_at` | timestamptz | |
 
 **`qa_run_queue`** — `id`, `tenant_id`, `environment_id`, `run_id`, `run_kind`,
@@ -945,7 +1299,13 @@ private key is never in this table.
 **`qa_run_logs`** — the durable copy of a finished run's log: `run_id` (PK), `tenant_id`, `text`
 (Text), `lines`, `updated_at`.
 
-**`qa_schedules`** — `id`, `tenant_id`, `name`, `run_kind`, the same four target columns,
+**`qa_run_log_positions`** — one execution node's most recent archived line's kubelet emission
+instant, the resume anchor for a re-followed pod log: `run_id`, `tenant_id`, `node`,
+`last_emitted_at`, `updated_at`; PK `(run_id, node)`, and `(run_id, tenant_id)` cascades from
+`qa_runs` (`m20260918_000004_run_log_positions`).
+
+**`qa_schedules`** — `id`, `tenant_id`, `name`, `run_kind`, the same five target columns (`target_repo_id`, `target_path`, `target_test_file`,
+`target_custom_plan_id`, and `target_collect_url` — the collect target, which carries no environment),
 `environment_id?`, `branch?`, `cron`, `exclusive_choice`, `enabled`, `include_tags`, `exclude_tags`,
 `parameters`, `slack_notifications_enabled`, `slack_channel?`, `slack_notification_events`,
 `last_fired_tick?`, `created_at`, `updated_at`.
@@ -974,13 +1334,24 @@ SERIAL), which is why it is absent from `domain::analytics::ExecRow` and from
 **`qa_test_case_results`** — per test **case**: `id`, `tenant_id`, `run_id`, `test_file`, `nodeid`,
 `name`, `status`, `duration?`, `reason?`, `ticket?`, `created_at`, `updated_at`.
 
+**`qa_run_projection_locks`** — `id`, `tenant_id`, `run_id`, `projected_at`; unique on
+`(tenant_id, run_id)`. Every write of a run's results upserts this row first, in the same
+transaction, so two writers of one run — two replicas' sweeps, or a sweep and a rebuild — run one
+after the other and the later batch replaces the earlier one.
+
 **`qa_test_case_collect`** — expected case counts: `id`, `tenant_id`, `repo_id`, `branch`,
 `test_file`, `case_count`, `collected_at`, `created_at`, `updated_at`.
 
-**`qa_ingest_watermarks`** — `id`, `tenant_id`, `last_reconciled_finished_at?`, `last_swept_at?`,
-`created_at`, `updated_at`. The recovery point for the reconcile sweep.
+**`qa_ingest_watermarks`** — `id`, `tenant_id`, `last_reconciled_finished_at?`,
+`sweep_cursor_at?`, `sweep_cursor_run_id?`, `sweep_cursor_floor?`, `created_at`, `updated_at`. The
+recovery point for the reconcile sweep. The three `sweep_cursor_*` columns are the within-window
+resume cursor (§3.5), added by `m20260929_000006_ingest_watermarks_sweep_cursor`; they are `NULL`
+together, and `NULL` is the steady state. Unlike the watermark they are not monotonic — a pass that
+catches up erases them. (A `last_swept_at` column for a
+stale-in-progress sweep was dropped by `m20260929_000005_drop_ingest_watermarks_last_swept_at`; no such sweep exists.)
 
-**`qa_leader_claims`** — the per-tenant claim that backs `ClaimRowElector`. Only the JIRA poller
+**`qa_leader_claims`** — `id`, `tenant_id`, `role`, `holder`, `claimed_at`, `expires_at`, with a
+unique index on `(tenant_id, role)`. The per-tenant claim that backs `ClaimRowElector`. Only the JIRA poller
 runs under it (§3.5); the reconciler and the collect cycle run under `NoopLeaderElector` and never
 read this table.
 
@@ -997,21 +1368,43 @@ per test identity.
 **`qa_jira_poller_config`** — `id`, `tenant_id`, `poll_interval_seconds`,
 `auto_rerun_on_resolve`, timestamps.
 
-**`qa_notification_config`** — per-tenant singleton: `slack_webhook_credstore_ref`,
+**`qa_notification_config`** — per-tenant singleton: `id`, `tenant_id`, `slack_webhook_credstore_ref`,
 `slack_channel`, `manager_ui_base_url`, `slack_enabled`, `notify_on_failure`,
 `notify_on_success`, `notify_on_schedule_completion`, `scheduled_run_slack_enabled`,
 `scheduled_run_slack_templates` (jsonb), `run_queue_queued_slack_enabled`, `email_smtp_host`,
 `email_smtp_port`, `email_smtp_username`, `email_smtp_credstore_ref`, `email_from`,
-`email_recipients`, `email_enabled`, timestamps. The last two SMTP columns are added by
-`m20260921_000002_smtp_credentials`, this gear's only migration after its initial one;
+`email_recipients`, `email_enabled`, timestamps. Three of these columns are stored and read by
+nothing — `notify_on_schedule_completion`, `scheduled_run_slack_enabled` and
+`run_queue_queued_slack_enabled` (of the scheduled-run pair, only `scheduled_run_slack_templates`
+is read, by the preview and test send);
+`notify_on_failure` and `notify_on_success` joined the live ones on 2026-09-29 and are now the
+outcome policy, see §3.5, "What actually notifies" — where
+`m20260929_000007_opt_existing_tenants_into_success_notifications` is also why an upgrading
+deployment's stored `notify_on_success` is not the column default. The last two SMTP columns are
+added by `m20260921_000002_smtp_credentials`, the first of this gear's seven migrations after its
+initial one;
 `email_smtp_credstore_ref` is a reference and never a password, and `email_smtp_port` also selects
 the TLS mode (465 implicit, otherwise `STARTTLS` required) — [ADR-0011](./ADR/0011-cpt-cf-qa-adr-smtp-egress.md).
+`m20261007_000008_bare_credstore_refs` rewrote any stored `cred://`-prefixed reference in the three
+reference columns to its bare name.
 
 **`qa_notification_log`** — `id`, `tenant_id`, `run_id?`, `channel`, `event_type`, `outcome`,
-`detail`, timestamps. One row per send attempt.
+`detail`, timestamps. One row per send attempt, and one per audited non-send — written the first
+time a run and channel are decided, not once per sweep tick that re-projects the run.
+
+**`qa_notification_cutoff`** — a **deployment-wide** singleton: one row, written by the migration
+with `tenant_id = Uuid::nil()`, which every read looks up (a tenant onboarded later does not get its
+own). The table is per-tenant-*capable* (unique on `tenant_id`) but that is schema shape, not
+semantics: `id`, `tenant_id`, `cutoff_at`, `created_at`, `updated_at`. The instant this deployment began sending run-completed
+notifications; `notify_run_completed` declines a run that finished before it
+(`m20260929_000004_run_completed_notification_cutoff`).
 
 **`qa_run_notifications`** — `id`, `tenant_id`, `run_id`, `notification_kind`, `event_type`,
-`sent_at`, timestamps. The idempotency record that stops a re-swept run from re-notifying.
+`sent_at`, timestamps. The record of what this deployment has **decided** about a run, one row per
+run and kind: written when a notification is sent, and equally when one is deliberately not sent
+(routing declined the channel, or no destination is configured for it). Deleted again only when a
+send was attempted and failed, so that attempt can be retried. It is what stops a re-swept or
+rebuilt run from re-notifying — §3.9, "Reconciling into analytics".
 
 ### 3.9 Interactions & Sequences
 
@@ -1026,6 +1419,7 @@ sequenceDiagram
     participant HUB as ClientHub
     participant P as Product plugin
     participant CS as credstore
+    participant TK as observation ticker
 
     Op->>UI: choose product, open "new environment"
     UI->>CAT: GET /qa/v1/product-plugins
@@ -1039,10 +1433,21 @@ sequenceDiagram
     ENV->>CS: write the secret fields
     CS-->>ENV: credstore refs
     ENV->>ENV: persist refs + non-secret fields
-    ENV->>P: observe(handle)
-    P-->>ENV: attributes + health
-    ENV->>ENV: persist observed_* and health_*
-    ENV-->>UI: 201 environment
+    ENV-->>UI: 201 environment (never observed yet)
+
+    Note over ENV,P: Creating an environment does not observe it.<br/>Observation runs on the ticker or on demand.
+    alt observation ticker, every interval_seconds
+        TK->>ENV: observe_environment(id)
+        ENV->>P: observe(handle)
+        P-->>ENV: attributes + health
+        ENV->>ENV: persist observed_* and health_*
+    else operator asks
+        Op->>ENV: POST /qa/v1/environments/{id}/refresh
+        ENV->>P: observe(handle)
+        P-->>ENV: attributes + health
+        ENV->>ENV: persist observed_* and health_*
+        ENV-->>UI: 200 environment
+    end
 ```
 
 #### Launching a run
@@ -1057,25 +1462,56 @@ sequenceDiagram
     participant EX as RunExecutor
 
     Eng->>RUNS: POST /qa/v1/runs {target, environment}
-    RUNS->>CAT: resolve target (plan / file / custom plan)
+    RUNS->>CAT: resolve target (plan / file / custom plan), syncing the branch if it has no work tree
     CAT-->>RUNS: repo, path, exclusivity hint
     RUNS->>ENV: read environment + variables
     ENV-->>RUNS: observed attrs, credstore refs, variables
-    RUNS->>RUNS: decide_admission
+    RUNS->>RUNS: create the run row, then decide_admission
     alt environment free
         RUNS->>RUNS: state = dispatching (claims the environment)
+        RUNS->>CAT: force-sync, build bundle from the synced work tree
+        CAT-->>RUNS: bundle ids + checksums
+        RUNS->>P: prepare_run_access(handle)  %% credstore refs only
+        P-->>RUNS: mounts, env bindings, service account
+        RUNS->>EX: start(RunSpec)
+        EX-->>RUNS: ExecutionRef
+        RUNS->>RUNS: persist execution_ref
+        RUNS-->>Eng: 200 run
     else environment busy
         RUNS->>RUNS: enqueue; state = queued
-        Note over RUNS: dispatcher sweep picks it up when the environment frees
+        RUNS-->>Eng: 202 {run_id, queue_id}
+        Note over RUNS: the dispatcher sweep starts it when the environment frees,<br/>with the same sync, bundle, access and start steps
     end
-    RUNS->>CAT: build bundle from the synced work tree
-    CAT-->>RUNS: bundle ids + checksums
-    RUNS->>P: prepare_run_access(handle)  %% credstore refs only
-    P-->>RUNS: mounts, env bindings, service account
-    RUNS->>EX: start(RunSpec)
-    EX-->>RUNS: ExecutionRef
-    RUNS->>RUNS: persist execution_ref
 ```
+
+A launch on a branch that has never been synced needs no manual sync: resolving the target is a
+read of that branch, so qa-catalog syncs it first (see §3.3, "Branch model and the first read of a
+branch"). For an API launch the resolve step runs under the launching user's security context, so
+that user needs `SYNC` on the repository for the first launch on a branch. Scheduled fires and queue
+dispatch resolve under system actors (`for_schedule_fire`, `for_dispatch`) instead.
+
+Schedule create and update check the target the same way, but a missing plan or branch is a `400`
+field validation on `target.path`, not a `404`.
+
+**Launch errors from qa-catalog.** qa-runs answers a refusal from qa-catalog as qa-catalog worded
+it, not as an opaque `500`:
+
+| qa-catalog answer | qa-runs answer |
+|---|---|
+| `NotFound` (for example a branch the remote lacks) | `404`, the catalog's resource type and sentence |
+| `FailedPrecondition` (for example no synced content, with the recorded sync failure, which includes a rejected or unresolvable credential), `InvalidArgument` | `400` with the catalog's sentence |
+| `PermissionDenied` | `403` |
+| anything else, including `ServiceUnavailable` (a remote the catalog cannot reach, or one inside its backoff for that) | opaque `500`; the cause is logged, not returned |
+
+The same mapping applies at dispatch of a queued run and a force-start, which read the catalog
+again, so `POST /qa/v1/queue/{id}/force-start` can answer `400` or `404` with the catalog's
+sentence. What a run **records** is narrower than what a caller is **answered**: the run's `Error`
+(and a schedule tick's error) carries a fixed sentence naming the refusal's category — no synced
+content for the branch, an invalid `plan.yaml`, a missing repository/branch/plan/file, a malformed
+request — never the catalog's own sentence. That sentence can carry the repository's recorded sync
+failure, and those columns are read by principals who need no read access to the repository,
+whichever actor read the catalog. The detail is in qa-catalog (the repository's sync status) and in
+the service log.
 
 #### Watching and ingesting
 
@@ -1086,20 +1522,21 @@ sequenceDiagram
     participant ING as ingest service
     participant DB as qa-runs DB
     participant SSE as SseBroadcaster
+    participant ENV as qa-environments
 
     W->>EX: watch(execution_ref, resume)
     loop until Finished
         EX-->>W: Started | TestResult | Log | Finished
+        W->>ING: apply(event)
         alt Log
-            W->>SSE: publish line
-            W->>DB: append to run log archive
+            ING->>SSE: publish line
+            ING->>DB: buffer line for the run log archive (flushed in batches)
         else TestResult
-            W->>ING: apply(event)
             ING->>DB: SERIALIZABLE upsert result + tally
         else Finished
-            W->>ING: apply(Finished{outcome})
             ING->>DB: derive terminal state, set finished_at
-            ING->>DB: release environment lease
+            ING->>ENV: release environment lease
+            ING->>DB: mark the queue claim done
         end
     end
 ```
@@ -1111,21 +1548,55 @@ sequenceDiagram
     participant INS as qa-insights
     participant RUNS as qa-runs SDK
     participant DB as qa-insights DB
+    participant EGR as Slack / SMTP
 
     loop sweep interval, every replica
-        INS->>DB: read last_reconciled_finished_at
-        INS->>RUNS: runs finished after watermark
+        INS->>DB: read the watermark (floor = watermark - lookback) and sweep cursor
+        INS->>RUNS: runs finished since the floor, oldest first, one page at a time
         RUNS-->>INS: finished runs + per-file results
-        INS->>DB: write qa_test_results + qa_test_case_results
-        INS->>DB: advance watermark
+        INS->>DB: diff the page against the runs already ingested
+        INS->>DB: each missing run: qa_test_results + qa_test_case_results (one tx)
+        INS->>DB: claim in qa_run_notifications
+        INS->>EGR: run-completed notification
+        INS->>DB: append to qa_notification_log
+        INS->>DB: advance the watermark; persist or erase the cursor
     end
-    Note over INS,DB: NotifyService::notify_run_completed ships, is tested, and would claim<br/>in qa_run_notifications before sending -- but nothing in this loop calls it (§3.5, "Ingestion")
+    Note over INS,EGR: The claim and the send happen AFTER the per-run projection<br/>transaction commits -- an SMTP conversation inside an open<br/>transaction would hold it across network I/O (§3.5, "Ingestion")
 ```
 
 Every replica runs this loop under `NoopLeaderElector`; concurrent replicas converge because the
-write is delete-then-insert per run and the watermark never moves backwards (§3.5). The JIRA
-poller runs a separate, `qa_leader_claims`-gated loop not shown here, because its effect — a
-launch — does not converge the same way.
+write is delete-then-insert per run and the watermark never moves backwards (§3.5), and because
+the notification's claim is a unique-index insert that only one replica can win. The JIRA poller
+runs a separate, `qa_leader_claims`-gated loop not shown here, because its effect — a launch —
+does not converge the same way.
+
+`POST /qa/v1/insights/rebuild` replays the same per-run path, including the notification: it
+re-projects **every** run in the operator's window rather than only the missing ones, so what a
+rebuild does *not* re-send rests entirely on `qa_run_notifications` and `qa_notification_cutoff`.
+Three things put a run out of its reach, and together they are exhaustive:
+
+* **The cutoff.** A run that finished before this deployment began notifying is declined on every
+  path, sweep and rebuild alike, and is never claimed — so an operator who deliberately wants a
+  pre-upgrade window announced can move `qa_notification_cutoff` and rebuild.
+* **The seeded claims** (`m20260929_000003`), which cover a run this deployment had already
+  ingested at the upgrade even when its recorded finish instant is a little later than the
+  migration's own clock.
+* **The claim every *considered* run takes.** A channel that is not sent on — routing declined it,
+  or no webhook/SMTP destination is configured — claims its slot all the same, because
+  `qa_run_notifications` is the record of what has been *decided*, not only of what was
+  transmitted. Both of a run's kinds (`run_completed_slack`, `run_completed_email`) are claimed
+  independently, so a decision about one channel never spends the other's slot.
+
+So a rebuild announces exactly two classes: a run this deployment has never considered before
+(one qa-runs has since made visible, say), and a run whose send was **attempted and failed** —
+that claim is released, which makes an operator rebuild the retry for a transient Slack or SMTP
+outage (§3.5, "Egress").
+
+The consequence is deliberate and worth stating plainly: **enabling a channel does not
+retroactively announce the runs that were declined while it was off.** Turning Slack on, setting
+a webhook, configuring SMTP or flipping a schedule's notification toggle changes what happens to
+runs that finish afterwards; it is not a request to be told about the ones that already finished,
+and a rebuild run to repair a projection gap will not turn into one.
 
 #### Cancelling
 
@@ -1137,12 +1608,26 @@ sequenceDiagram
     participant ENV as qa-environments
 
     Eng->>RUNS: POST /qa/v1/runs/{id}/cancel
-    RUNS->>RUNS: state machine guard (running -> canceled)
-    RUNS->>EX: cancel(execution_ref)
-    EX-->>RUNS: ok
-    RUNS->>ENV: release lease
-    RUNS-->>Eng: 202
+    alt run already terminal
+        RUNS-->>Eng: 204 (idempotent, nothing to do)
+    else dispatching or running
+        RUNS->>EX: cancel(execution_ref) -- fire-and-forget
+        EX-->>RUNS: ok
+        RUNS->>RUNS: state machine guard, then persist canceled
+        RUNS-->>Eng: 204
+    else queued
+        RUNS->>RUNS: persist canceled and drop the queue row (one transaction)
+        RUNS-->>Eng: 204
+    else the run moved between the read and the write
+        RUNS-->>Eng: 409 (IllegalTransition, or QueueRowNotQueued for a queued row)
+        Note over RUNS,EX: For a running run cancel() was already delivered,<br/>so the execution is stopping; a repeated cancel is safe
+    end
+    Note over RUNS,ENV: Cancel releases nothing. The lease is released when the end is observed:<br/>the ingest Finished branch, or the dispatcher tick's claim reconciliation<br/>(a cancelled run's environment stays held for up to one tick).
 ```
+
+The `409` is the only non-`204` answer a cancel of an existing run gives: the run changed state
+between the cancel's read and its guarded write. `RunsService::cancel`'s doc records why the
+executor is asked first and the window is accepted.
 
 ### 3.10 Authorization Surface
 
@@ -1161,8 +1646,8 @@ ids each gear already publishes on its RFC-9457 error surface, except
 error surface and were minted with the stubs.
 
 The `qa-environments` entity token remains `platform` rather than `environment`:
-the D5 aggregate rename did not reach these ids, and moving a published id is a
-separate change.
+the rename of the platform aggregate to environment did not reach these ids, and
+moving a published id is a separate change.
 
 A second, narrower follow-up is named here for the same reason: the scan's shape 1 could be
 narrowed so it stops reporting one spurious action pair. It is deliberately not done, because the
@@ -1241,7 +1726,7 @@ paragraph above says why:
 | `qa_insights_collect_duration_seconds` | insights | a collect run |
 | `qa_insights_collect_report_total` | insights | collect reports accepted from a runner |
 | `qa_insights_collect_total` | insights | a collect run |
-| `qa_insights_jira_bug_total` | insights | bugs observed by the JIRA loop |
+| `qa_insights_jira_bug_total` | insights | bugs observed by the JIRA loop, by `outcome`; `status_check_refused` is JIRA refusing the tenant's credential, `status_check_failed` is JIRA or the gateway unreachable or slow |
 | `qa_insights_jira_poll_duration_seconds` | insights | a JIRA poll |
 | `qa_insights_jira_poll_total` | insights | a JIRA poll |
 | `qa_insights_jira_rerun_total` | insights | reruns the JIRA loop triggered |
@@ -1340,14 +1825,19 @@ The Helm chart at `deploy/helm/qa-platform` deploys the subsystem onto Kubernete
 | Template | Deploys |
 |----------|---------|
 | `gears-deployment.yaml`, `gears-service.yaml`, `gears-serviceaccount.yaml`, `gears-pvc.yaml` | the four gears in one process, with a PVC for work trees and bundles |
-| `gears-config-configmap.yaml`, `gears-argo-configmaps.yaml` | gear configuration and the Argo executor settings |
+| `gears-config-secret.yaml`, `gears-argo-configmaps.yaml` | gear configuration and the Argo executor settings |
 | `ui-deployment.yaml`, `ui-service.yaml`, `ui-extraconf-configmap.yaml` | the SPA behind nginx |
 | `postgres-statefulset.yaml`, `postgres-service.yaml`, `postgres-secret.yaml`, `postgres-initdb-configmap.yaml` | Postgres and the per-gear database creation |
 | `keycloak-deployment.yaml`, `keycloak-service.yaml`, `keycloak-admin-secret.yaml`, `keycloak-realm-secret.yaml` | the identity provider and its realm |
-| `job-db-migrate.yaml` | migrations, run before the gears start |
+| `job-db-migrate.yaml` | migrations, run as a post-install hook after the gears have started — see "A fresh install CrashLoops, and that is expected" below |
 | `job-tenant-seed.yaml`, `seed-scripts-configmap.yaml` | the designated tenant |
 | `certs-job.yaml`, `certs-scripts-configmap.yaml` | TLS material for Keycloak and the UI |
-| `rbac-argo.yaml`, `deploy/argo/qa-runs-rbac.yaml` | the RBAC the Argo executor needs to submit and watch workflows |
+| `rbac-argo.yaml`, `deploy/argo/qa-runs-rbac.yaml` | the RBAC the Argo executor needs to submit and watch workflows (`qa-platform-gears-executor`, bound to `qa-platform-gears`, with no `secrets` verb), and the separate `qa-platform-secret-writer` Role — exactly `create`/`patch` on Secrets in the Argo namespace — for the runner-`Secret` writer |
+| `argo-runner-serviceaccount.yaml`, `rbac-argo-runner.yaml` | the runner pod's declared identity in the Argo namespace (`argo.workflowServiceAccount`, named as `spec.serviceAccountName` on every Workflow qa-runs submits), and its `qa-platform-runner` Role and RoleBinding — `create`/`patch` on `workflowtaskresults` only, which is what Argo's executor container needs to report a step's result |
+| `runner-networkpolicy.yaml` | `qa-platform-runner-isolation`, in the Argo namespace: default-deny ingress, and egress limited to DNS, the gears Service, the Kubernetes API server (`argo.apiServerClusterIP`) and addresses outside the cluster's own pod and Service CIDRs (the run's target environment is tenant-supplied and cannot be named statically). Selects on the `qa-platform/network-isolated` label qa-runs stamps on every runner pod |
+| `secret-writer-serviceaccount.yaml` | the `qa-platform-secret-writer` ServiceAccount the runner-`Secret` writer authenticates as, and its `kubernetes.io/service-account-token` Secret; the gears Deployment mounts that token and `gears-argo-configmaps.yaml` renders the kubeconfig that reads it. See ADR-0008 for what this separation does and does not contain |
+| `secret-writer-admission-policy.yaml` | a cluster-scoped ValidatingAdmissionPolicy and binding, `qa-platform-secret-writer-guard-<release namespace>`, limiting that ServiceAccount to `Opaque` Secrets named with the runner prefix. Rendered only where `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy is served (Kubernetes 1.30+) |
+| `_helpers.tpl`, `NOTES.txt` | shared template helpers (public host, issuer, selector labels, runner `Secret` prefix, and the image reference helper that pins every image by digest) and the post-install notes; neither renders a Kubernetes object |
 
 #### A fresh install CrashLoops, and that is expected
 
@@ -1391,12 +1881,13 @@ limitation awaiting a fix.
 Every object the chart creates in the release namespace carries a hardcoded `qa-platform-*` name —
 the PVC (`deploy/helm/qa-platform/templates/gears-pvc.yaml:12`), the Postgres Secret
 (`templates/postgres-secret.yaml:4`), the gears ServiceAccount
-(`templates/gears-serviceaccount.yaml:21`), the Argo RBAC (`templates/rbac-argo.yaml:43`) and
+(`templates/gears-serviceaccount.yaml`), the runner-`Secret` writer's ServiceAccount
+(`templates/secret-writer-serviceaccount.yaml`; its admission policy is cluster-scoped and carries the release namespace in its name), the Argo RBAC (`templates/rbac-argo.yaml`) and
 thirty-odd more. The chart has no `fullname`/`nameOverride` helper, and `.Release.Name` appears on
 exactly one line of it: `templates/_helpers.tpl:46`, the `app.kubernetes.io/instance` selector
 label. A second `helm install` into the same namespace therefore collides on object-name ownership.
 In-cluster DNS is hardcoded the same way (`templates/ui-deployment.yaml:123`,
-`templates/gears-config-configmap.yaml:99`), so even templated names would leave a second release's
+`templates/gears-config-secret.yaml`'s `$collectTo`), so even templated names would leave a second release's
 pods resolving the first release's Services.
 
 `app.kubernetes.io/instance` on every workload and Service selector
@@ -1417,10 +1908,19 @@ stack whose gears Deployment is capped at one replica anyway. Revisit only if tw
 namespace are actually needed, and then as `fullname` templating **and** templated in-cluster DNS
 together, in one maintenance window.
 
+#### What the dev stand has verified
+
+A deployment is checked by `deploy/remote/verify-k8s.sh`, which `deploy-k8s.sh` runs on the node after every install. It proves the install is wired: every Deployment rolled to the built tag, the Argo executor selected and connected, the persistent credstore backend and its migration, the VHP plugin registered, observation and health written to the real database with the leak canary clean, the runner-`Secret` write into the Argo namespace, the Keycloak realm and discovery through nginx, and the metric catalog scraped and moving. It does not launch a run.
+
+Runs have executed on the dev stand: the dispatch-latency windows of 2026-09-21 (§3.11, "The dispatch-latency window, and the measurement that was retracted") and the zero-result count of 2026-09-29 (§3.5) were measured there. The scenarios in `E2E-SCENARIOS.md` have no automated runner, and no run of the whole set on the stand is recorded.
+
 ### 3.13 Configuration
 
 `config/qa-platform.yaml` and `config/qa-platform-stack.yaml` carry the subsystem's settings. The
-ones that change behaviour rather than endpoints:
+ones that change behaviour rather than endpoints. The table is not exhaustive; every key it omits
+has a `serde(default)`, so leaving it out is safe, and `check_design_config_keys.py` checks that
+every key it *does* name exists where it says (§3.13 is checked against the config structs, nesting
+included):
 
 | Setting | Gear | Effect |
 |---------|------|--------|
@@ -1432,25 +1932,35 @@ ones that change behaviour rather than endpoints:
 | `queue_ttl_seconds`, `queue_max_depth` | runs | queue-wait bound and depth cap |
 | `max_concurrent_runs` | runs | dispatch ceiling |
 | `default_timeout_seconds`, `max_timeout_seconds` | runs | the execution deadline and its cap. `default_timeout_seconds` applies to every run kind including `collect`, whose 600 s is a fallback under it rather than a fixed value — see "The collect deadline diverges from the source system" below |
-| `log_buffer_lines`, `log_follow_idle_seconds` | runs | live-stream buffering and follow behaviour |
+| `log_buffer_lines` | runs | how many live-stream lines are buffered |
 | `argo.namespace`, `argo.runner_image`, `argo.runner_command`, `argo.image_pull_policy` | runs | the workflow the adapter submits |
-| `argo.workflow_ttl_seconds`, `argo.status_poll_seconds` | runs | workflow lifetime and poll period |
+| `argo.workflow_ttl_seconds`, `argo.status_poll_seconds`, `argo.log_follow_idle_seconds` | runs | workflow lifetime, status-poll period, and how long a pod-log follow may go without a single line before it gives up. The follow bound belongs to the **executor** block: `QaRunsConfig` is `deny_unknown_fields` too, so writing it beside `log_buffer_lines` at the gear's top level is a startup parse failure |
 | `argo.workflow_service_account`, `argo.secret_name_prefix`, `argo.secret_key` | runs | identity and secret naming for the workflow |
-| `argo.bundle_base_url`, `argo.bundle_auth` | runs | where the runner fetches bundles, and how it authenticates |
+| `argo.run_as_user`, `argo.fs_group` | runs | The runner pod's non-root posture: `runAsUser` and `fsGroup`, both default `65534` (`nobody`). `fs_group` is what makes a mounted `Secret` file readable to that uid; without it the file is `root:root` and a suite reading its SSH key fails with `PermissionError` |
+| `argo.runner_resources.cpu_request`, `.memory_request`, `.cpu_limit`, `.memory_limit` | runs | The runner container's requests and limits (defaults `100m`, `256Mi`, `1`, `1Gi`); deployment-level only, no product override |
+| `argo.kubeconfig_path` | runs | Kubeconfig the adapter reaches the API server with, for a deployment whose host kubeconfig names a loopback the container cannot reach; unset uses in-cluster credentials |
+| `argo.bundle_base_url` | runs | Base URL a **workflow pod** uses to reach this subsystem's HTTP API when downloading a node's test bundle; unset submits no `TEST_BUNDLE_URL`. There is no companion credential block: the pod authorises itself with the per-bundle HMAC tag qa-catalog mints, rendered into that URL's `?sig=`, not with a client-credentials exchange of its own. `ArgoExecutorConfig` is `deny_unknown_fields`, so a leftover `argo.bundle_auth` mapping from before that change is a startup parse failure, not an ignored key |
 | `max_variables` | environments | Max variables returned per env-assembly query (default 500) |
-| `argo.kubeconfig_path`, `argo.namespace`, `argo.secret_prefix`, `argo.secret_key` | environments | Only meaningful under the non-default `runner-secret` cargo feature: how the runner-`Secret` writer reaches the Argo cluster and names what it writes |
-| `observation.enabled`, `observation.poll_interval_seconds` | environments | Whether the background observation ticker runs, and how often (floored at 60 s) |
+| `argo.kubeconfig_path`, `argo.namespace`, `argo.secret_prefix`, `argo.secret_key` | environments | Only meaningful under the non-default `runner-secret` cargo feature: how the runner-`Secret` writer reaches the Argo cluster and names what it writes. Defaults: `namespace` `argo`, `secret_prefix` `qa-platform-`, `secret_key` `value`. The Helm chart sets `kubeconfig_path` to `/etc/qa-platform/secret-writer-kubeconfig.yaml`, a kubeconfig for the `qa-platform-secret-writer` ServiceAccount, because the pod's own `qa-platform-gears` account holds no `secrets` grant; unset falls back to `Config::infer()` |
+| `observation.enabled`, `observation.poll_interval_seconds`, `observation.observe_timeout_seconds` | environments | Whether the background observation ticker runs (default `true`), how often (default 300 s, floored at 60 s), and how long one environment's observation may take before it is recorded as a timeout, on the ticker and on refresh alike (default 300 s, floored at 1 s) |
+| `vendor`, `priority` | vhp-plugin | The VHP plugin's selection keys under `qa-vhp-product-plugin.config`: `vendor` is matched by exact string equality when a deployment selects between product plugins, and the lower `priority` wins (defaults `virtuozzo-vhp` and 100). Nothing else about the plugin is configurable, and any other key is a startup parse failure |
+| `vendor`, `priority` | vhi-plugin | The same two keys under `qa-vhi-product-plugin.config` (defaults `virtuozzo-vhi` and 100) |
 | `repos_dir`, `bundles_dir` | catalog | Working directory for synced repositories, and for bundle blobs |
 | `bundle_ttl_seconds` | catalog | Bundle time-to-live (default 3600 s) |
 | `branch_refresh_interval_seconds` | catalog | Branch-cache refresh interval; `0` disables the background task (default 900 s) |
-| `branch_freshness_ttl_seconds` | catalog | How long a materialized branch snapshot is trusted before a content read re-syncs; `0` disables the cache. The launch path force-syncs regardless (default 300 s) |
-| `reconcile_interval_seconds`, `reconcile_lookback_seconds`, `reconcile_page_size` | insights | The reconcile sweep's cadence, lookback window and page size |
+| `branch_freshness_ttl_seconds` | catalog | How long a branch's last successful sync counts as fresh: a non-forced sync inside the window fetches nothing, and a read that syncs a branch is non-forced — a branch with no work tree, and every read while the repository's `sync_error` is set. A recorded `sync_error` overrides the window: such a read fetches the branch again even inside it, because only a successful sync clears the error. `0` disables the cache. The explicit sync and the launch path's dispatch step force-sync regardless (default 300 s) |
+| `remote_failure_backoff_seconds` | catalog | After a read finds a repository's remote cannot be listed (unreachable, timing out, failing, HTTP `403`) or its credential cannot be used (unresolvable, refused, passphrase-protected, or configured for a plain `http://` remote, which never sends it in clear text) — or a sync, explicit or a read's, records a credential fault, a timeout or a repository past `max_fetch_bytes`/`max_checkout_bytes` — how long further reads of that repository that would sync it give the same answer — `503`, or `400` with the reason recorded in `sync_error`, while `sync_error` still holds that reason — without contacting the remote (a listing that timed out is backed off as `503`; a content sync that timed out and an over-budget one are backed off as their recorded reason, `400`); in memory and per replica. A successful listing or sync, a forced sync, and a change of the repository's `url` or `credential_ref` end it early; the explicit sync and the branch-cache refresher are not held back by it, and the refresher never starts it. `0` disables it (default 30 s) |
+| `sync_timeout_seconds`, `ls_refs_timeout_seconds` | catalog | Deadlines of one sync (clone or fetch, then checkout) and one branch listing; at the deadline the work is interrupted and the failure is a timeout, and the repository is backed off. A branch listing that times out answers `503`, and reads inside the backoff answer `503` without contacting the remote. A content sync that times out is recorded in `sync_error`, so the read that ran it answers `400` with that reason, and the backoff is armed for that recorded reason: reads inside it answer the same `400` at once, without contacting the remote or running another sync. `0` disables each (defaults 300 s and 30 s). See §3.3 "Limits on talking to a remote" |
+| `max_fetch_bytes`, `max_checkout_bytes` | catalog | Most bytes one clone or fetch may add to a repository's pack directory, and one branch checkout may write. Over either the sync fails with the reason recorded in `sync_error`, answered `400` and backed off; an oversized fetch also removes the repository's working area. `0` disables each (defaults 1 GiB and 512 MiB) |
+| `bundle_download_signing_secret` | catalog | HMAC-SHA256 root every per-bundle download tag is HKDF-derived from — **the sole access control** on `GET /qa/v1/test-bundles/{id}`, which is registered anonymous by design because its caller is a workflow pod with no session to borrow. No default that could work: the chart declares `bundleDownloadSigningSecret` `required`, so a `helm install`/`upgrade` that omits it renders nothing and fails with that name in the message. A gear started without it anyway boots, warns once at `init`, and then **fails closed** — empty, or shorter than 16 characters once trimmed, refuses *every* download with `Forbidden`, including a correctly computed one, so no run executes a single test. Rotating it invalidates every outstanding tag at once; the window is bounded by `bundle_ttl_seconds` |
+| `reconcile_interval_seconds`, `reconcile_lookback_seconds`, `reconcile_page_size` | insights | The reconcile sweep's cadence, lookback window and page size. The lookback and the page size are **one setting with two halves**: a lookback window holding more than 50 pages of `reconcile_page_size` runs drains across ticks through the sweep's resume cursor, the watermark moving once the drain passes it, and a late run older than the lookback that drain has shrunk is recovered by a rebuild — see §3.5. `reconcile_page_size` is clamped to `1..=500`, 500 being the cap qa-runs' finished-since listing serves |
 | `default_collect_branch` | insights | Branch the hourly collect cycle and an unqualified Analytics trigger use (default `main`) |
 | `collect_report_base_url` | insights | Scheme-and-host at which the runner reaches this gear's own `POST /qa/v1/collect/{repo_id}` callback |
 | `collect_report_signing_secret` | insights | HMAC-SHA256 key that route verifies against — **the sole access control** on an anonymously-reachable route |
 | `collect_interval_seconds` | insights | The hourly collect cycle's cadence (default 3600 s, floored at 300 s) |
 | `jira_poller_interval_seconds` | insights | How often the JIRA poller ticker passes over every tenant's open bugs (default 300 s) |
 | `enable_tickers` | insights | Master switch for all three tickers (reconciler, JIRA poller, collect); an operator running a read-only replica sets it `false` |
+| `smtp_allowed_hosts` | insights | Relay hostnames this deployment is willing to open an SMTP connection to, matched ASCII-case-insensitively against the tenant's own `email_smtp_host` — the egress control the network layer cannot be (see "SMTP is not an HTTP call" above and ADR-0011). Names, not CIDRs or patterns, and there is no wildcard. Empty is the default and is not "mail off": it binds `UnsupportedMailClient`, which **fails** every send with `unsupported_egress`, warns once at `init`, and audits each refusal; the settings `/test` route answers `501` |
 | `max_page_size` | insights | Max rows an analytics query returns before paging; not currently wired to the unbounded array endpoints it was intended for (open NFR question, not a bug — see `config.rs`'s own doc on this field) |
 
 #### The collect deadline diverges from the source system

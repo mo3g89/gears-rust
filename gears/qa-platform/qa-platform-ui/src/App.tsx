@@ -30,21 +30,20 @@ import { NotificationsSlackPage } from './pages/notifications/NotificationsSlack
 import { AuthProvider, AuthCallbackPage, LoginPage, RequireAuth } from './auth';
 import { queryClient } from './api/queryClient';
 
-/** `/platforms` -> `/environments` (D5's route rename), kept reachable so a
+/** `/platforms` -> `/environments` (the route rename), kept reachable so a
  *  bookmarked or shared link still lands.
  *
  *  A named component rather than a `<Navigate>` written inline in the route,
  *  **so that a test can pin the real one**. The first version of `App.test.ts`
  *  re-implemented this redirect inside the test and therefore asserted against
- *  its own copy: changing the route's actual target here survived all 231 tests
- *  (re-review, N-1). `RedirectToEnvironmentDetail` below was always imported and
+ *  its own copy: changing the route's actual target here survived every test. `RedirectToEnvironmentDetail` below was always imported and
  *  was never exposed to that. */
 export function RedirectToEnvironments() {
   return <Navigate to="/environments" replace />;
 }
 
 /** `/platforms/:name` -> `/environments/:name`, preserving the path parameter so a
- *  bookmarked or shared link to one environment's detail page still lands (D5's
+ *  bookmarked or shared link to one environment's detail page still lands (the
  *  route rename). Separate from [`RedirectToEnvironments`] only because this one
  *  needs the segment carried over rather than dropped. */
 export function RedirectToEnvironmentDetail() {
@@ -87,9 +86,9 @@ function App() {
                 `if (isLoading)` branch to a false "No test runs found" on every visit
                 before `/products` resolved, and permanently on a deployment with no
                 products at all. The earlier claim that these lists are tenant-wide is
-                withdrawn — see REMOVED-SURFACES.md's closing C7 entry.
-                `/runs/:name` is deliberately NOT gated: spec D4 hides an unattributable
-                run from the list and keeps it reachable by direct URL, and the detail
+                withdrawn.
+                `/runs/:name` is deliberately NOT gated: an unattributable
+                run is hidden from the list but stays reachable by direct URL, and the detail
                 page reads no product-scoped hook. */}
             <Route path="/runs" element={<RequireProduct><RunsPage /></RequireProduct>} />
             <Route path="/runs/:name" element={<RunDetailPage />} />

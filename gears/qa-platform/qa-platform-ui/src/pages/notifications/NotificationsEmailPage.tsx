@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
+import { CREDSTORE_REF_PLACEHOLDERS } from '@/lib/credstoreRef';
 import { useNotificationsForm } from './notificationsShared';
 
 export function NotificationsEmailPage() {
@@ -14,7 +15,9 @@ export function NotificationsEmailPage() {
       <CardHeader>
         <CardTitle>Email Delivery</CardTitle>
         <CardDescription>
-          SMTP-based notification settings shared by manual and scheduled run completion events.
+          SMTP-based notification settings for run completions, whether a schedule launched the run
+          or someone started it by hand. Which runs are announced at all is Run Completion Policy,
+          above.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
@@ -24,7 +27,8 @@ export function NotificationsEmailPage() {
               Enable Email Notifications
             </Label>
             <p className="text-sm text-muted-foreground">
-              Turn on email delivery for the shared completion triggers below.
+              Turn on email delivery for the run completions the policy above admits. Unlike Slack,
+              a schedule's own notification switch does not silence email.
             </p>
           </div>
           <Switch
@@ -89,7 +93,7 @@ export function NotificationsEmailPage() {
                   email_smtp_credstore_ref: e.target.value,
                 }))
               }
-              placeholder="qa-smtp-password"
+              placeholder={CREDSTORE_REF_PLACEHOLDERS.smtpPassword}
             />
             <p className="text-xs text-muted-foreground">
               The name of a credential-store secret holding the password — never the password

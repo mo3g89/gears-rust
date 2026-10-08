@@ -419,7 +419,7 @@ where
         // carry one. `qa_schedules.target_collect_url` exists anyway, because
         // this table shares the run's target codec and the alternative is a
         // `target_to_columns` output the schedule writer silently discards
-        // (`m20260818_000006_collect_target`). Representable, and refused here:
+        // (`m20260818_000006_collect_target` (folded into `migrations::m20260813_000003_initial` by the docs squash)). Representable, and refused here:
         // the column keeps the codec honest, this check keeps the behaviour
         // legacy's.
         if matches!(new.target.kind(), qa_runs_sdk::RunKind::Collect) {
@@ -448,20 +448,20 @@ where
     ///
     /// Every other column width in this gear is enforced at the REST boundary,
     /// and that module's own doc admits what it costs: *"`QaRunsLocalClient`
-    /// hands an `sdk::NewSchedule` from an in-process caller straight to
-    /// [the service] and never passes through a DTO at all"*. For the schedule
-    /// name that leniency is bounded — the in-process caller is this gear's own
-    /// test support. For **these** settings the in-process caller is the point:
-    /// D9 exists so that qa-insights can read and (in principle) drive them over
-    /// the SDK. A check only an HTTP caller met would be a check the primary
-    /// caller skips.
+    /// hands an `sdk::NewSchedule` from an in-process caller straight to [the
+    /// service] and never passes through a DTO at all"*. For the schedule name
+    /// that leniency is bounded — the in-process caller is this gear's own test
+    /// support. For **these** settings the in-process caller is the point: they
+    /// exist so that qa-insights can read and (in principle) drive them over the
+    /// SDK. A check only an HTTP caller met would be a check the primary caller
+    /// skips.
     ///
     /// # Why the event vocabulary is closed
     ///
     /// Legacy's form deserializes straight into `ScheduledRunNotificationEvent`
     /// (`manager/src/models.rs:291-299`), so an unrecognised event name is a 422
     /// there — it is not stored. Storing one here would be a subscription that
-    /// silently never fires, because the routing core in qa-insights (Task 36)
+    /// silently never fires, because the routing core in qa-insights
     /// can only act on names it knows. The accepted set is
     /// [`SLACK_NOTIFICATION_EVENTS`], which is in the SDK precisely so that both
     /// gears read one list.
@@ -655,7 +655,7 @@ where
             .ok_or(DomainError::ScheduleNotFound { id })
     }
 
-    /// Edit the three Slack notification settings, and nothing else (D9).
+    /// Edit the three Slack notification settings, and nothing else.
     ///
     /// # Legacy is a delete-and-recreate; this is an `UPDATE`, and nothing is
     /// lost by that
@@ -1178,7 +1178,8 @@ where
                 // `recorded_text`, because this string is written to a column and
                 // read back by a human: a `Database`, an `Environments` or an
                 // `ExecutorFailed` cause carries another system's vocabulary and
-                // is redacted. The WARN above keeps the full text, which is where
+                // is redacted, and a `CatalogRefused` is recorded by its category, not
+                // by the catalog's sentence. The WARN above keeps the full text, which is where
                 // it belongs.
                 self.settle(ctx, fire, tick_id, None, Some(&error.recorded_text()))
                     .await;

@@ -53,6 +53,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::migration_citations_tests::is_migration_name;
+
 /// Citations that deliberately name something the tree does not contain.
 ///
 /// Each entry needs a reason, and the reasons fall into three kinds: the
@@ -280,7 +282,14 @@ fn citations(source: &str) -> Vec<(String, &'static str)> {
     for chunk in joined.split('`').skip(1).step_by(2) {
         let token = despace(chunk);
         let token = token.trim_end_matches("()");
-        if is_snake_ident(token) && token.matches('_').count() >= 4 && !token.starts_with("idx_") {
+        if is_snake_ident(token)
+            && token.matches('_').count() >= 4
+            && !token.starts_with("idx_")
+            // A migration name is judged by
+            // `migration_citations_tests::every_migration_citation_is_live_or_marked`,
+            // which is not gated on underscore count.
+            && !is_migration_name(token)
+        {
             found.push((token.to_owned(), "backticked identifier"));
         }
     }

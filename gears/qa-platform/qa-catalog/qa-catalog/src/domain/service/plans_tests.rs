@@ -9,10 +9,16 @@ use std::sync::Arc;
 use authz_resolver_sdk::PolicyEnforcer;
 use uuid::Uuid;
 
+use super::branch_snapshot::BranchSync;
 use super::plans::PlansService;
+use super::repos::UNREADABLE_CREDENTIAL_HINT;
+use super::sync_cache::SyncCache;
 use super::test_support::{
-    MockTestReposRepository, PermissiveAuthZ, ctx, repo_fixture, test_db_provider,
+    LsRefsFailure, MockRepoSyncPort, MockTestReposRepository, PermissiveAuthZ, SelectiveGrantAuthZ,
+    SharingCredStore, StoredSecret, branch_sync_over, branch_sync_over_an_empty_remote,
+    branch_sync_with, branch_sync_with_credstore, ctx, repo_fixture, test_db_provider,
 };
+use super::{actions, resources};
 use crate::domain::error::DomainError;
 use crate::domain::parsing::plan_yaml::DEFAULT_TIMEOUT_SECONDS;
 
@@ -36,13 +42,25 @@ fn write(root: &Path, rel: &str, content: &str) {
     std::fs::write(&path, content).unwrap();
 }
 
+/// A `PlansService` whose lazy sync sees a remote with no branches, so a
+/// read of a branch without a snapshot is `BranchNotFound` and never syncs.
+/// The lazy-sync tests use [`build_service_with_sync`].
 async fn build_service(
     repos: Arc<MockTestReposRepository>,
     repos_dir: PathBuf,
 ) -> PlansService<MockTestReposRepository> {
+    let branch_sync = branch_sync_over_an_empty_remote(Arc::clone(&repos), repos_dir.clone()).await;
+    build_service_with_sync(repos, repos_dir, branch_sync).await
+}
+
+async fn build_service_with_sync(
+    repos: Arc<MockTestReposRepository>,
+    repos_dir: PathBuf,
+    branch_sync: Arc<dyn BranchSync>,
+) -> PlansService<MockTestReposRepository> {
     let enforcer = PolicyEnforcer::new(Arc::new(PermissiveAuthZ));
     let db = test_db_provider().await;
-    PlansService::new(db, repos, repos_dir, enforcer)
+    PlansService::new(db, repos, repos_dir, branch_sync, enforcer)
 }
 
 /// Whether mode bits actually deny access on this host.
@@ -461,8 +479,12 @@ async fn normalized_test_paths_still_fail_traversal_validation() {
     );
 }
 
+/// A branch with no snapshot that the remote does not have either must
+/// fail, not return an empty plan list — an empty list would make a mistyped
+/// branch name look like a repository with no tests. (A branch the remote
+/// does have is synced on first read; see the lazy-sync tests below.)
 #[tokio::test]
-async fn list_plans_requires_synced_repo_and_materialized_snapshot() {
+async fn list_plans_without_a_snapshot_of_a_branch_the_remote_lacks_is_branch_not_found() {
     let tenant_id = Uuid::new_v4();
     let repo_id = Uuid::new_v4();
 
@@ -477,14 +499,12 @@ async fn list_plans_requires_synced_repo_and_materialized_snapshot() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, DomainError::RepoNotSynced { .. }),
+        matches!(err, DomainError::BranchNotFound { .. }),
         "got {err:?}"
     );
 
     // The repository synced successfully, but this branch was never
-    // materialized, so no snapshot directory exists for it. Reading it must
-    // fail, not return an empty plan list — an empty list would make a
-    // mistyped branch name look like a repository with no tests.
+    // materialized, so no snapshot directory exists for it.
     let (tmp, repos, _workdir) = synced_fixture(repo_id);
     let svc = build_service(repos, tmp.path().to_path_buf()).await;
     let err = svc
@@ -492,7 +512,7 @@ async fn list_plans_requires_synced_repo_and_materialized_snapshot() {
         .await
         .expect_err("a branch with no snapshot must not read as empty");
     assert!(
-        matches!(err, DomainError::RepoNotSynced { .. }),
+        matches!(err, DomainError::BranchNotFound { .. }),
         "got {err:?}"
     );
 }
@@ -1180,7 +1200,8 @@ async fn list_universe_without_a_branch_uses_the_repository_default() {
 }
 
 /// An unsynced repository is skipped, not fatal. `list_plans` on the same
-/// repository *does* error (`RepoNotSynced`) — the asymmetry is deliberate:
+/// repository *does* error (here `BranchNotFound`, the remote double having
+/// no branches) — the asymmetry is deliberate:
 /// one broken repository must not blank the whole-product overview, which is
 /// legacy's posture too (`analytics.rs:856-865`).
 #[tokio::test]
@@ -1206,7 +1227,7 @@ async fn an_unsynced_repository_contributes_nothing_instead_of_failing_the_call(
             svc.list_plans(&ctx(tenant_id), repo_id, "main")
                 .await
                 .unwrap_err(),
-            DomainError::RepoNotSynced { .. }
+            DomainError::BranchNotFound { .. }
         ),
         "the targeted read still errors; only the universe walk degrades"
     );
@@ -1552,5 +1573,817 @@ async fn list_plans_and_get_plan_agree_after_a_product_reassignment() {
     assert_eq!(
         listed[0].product_id, got.product_id,
         "list_plans and get_plan must agree about the same plan's product id"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A branch without a snapshot is synced on first read
+// ---------------------------------------------------------------------------
+
+/// The plan file and test file the lazy-sync engine double materializes.
+fn lazy_branch_files() -> Vec<(String, String)> {
+    vec![
+        ("plans/smoke.yaml".to_owned(), VALID_PLAN_A.to_owned()),
+        ("tests/test_a.py".to_owned(), META.to_owned()),
+    ]
+}
+
+/// The freshness TTL the lazy-sync tests run under: non-zero, as deployed,
+/// so a second reader finds a branch the first one synced fresh.
+const FRESHNESS_TTL: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// `main` synced and on disk; `26.7` exists on the remote, is in the branch
+/// cache, and has never been materialized — the dev-stand state where a
+/// launch on `26.7` used to fail with `RepoNotSynced`.
+#[tokio::test]
+async fn listing_plans_on_an_unsynced_existing_branch_syncs_it_once_and_returns_its_plans() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _main) = synced_fixture(repo_id);
+    repos.set_cached_branches(&["main", "26.7"]);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned(), "26.7".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc = build_service_with_sync(repos, tmp.path().to_path_buf(), branch_sync).await;
+
+    let plans = svc
+        .list_plans(&ctx(tenant_id), repo_id, "26.7")
+        .await
+        .expect("a branch the remote has is synced on first read");
+    assert_eq!(plans.len(), 1, "the synced branch's plans are returned");
+    assert_eq!(plans[0].path, "plans/smoke.yaml");
+    assert_eq!(plans[0].branch, "26.7");
+
+    // A second read is served from the snapshot the first one materialized.
+    svc.list_plans(&ctx(tenant_id), repo_id, "26.7")
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.synced_branches(),
+        vec!["26.7".to_owned()],
+        "one sync, of the requested branch, across both reads"
+    );
+    assert_eq!(
+        engine.ls_refs_calls(),
+        1,
+        "a branch without a snapshot is confirmed on the remote once, even when cached"
+    );
+}
+
+/// Two readers arriving together at a branch without a snapshot fetch it
+/// once: the second waits on the sync locks and then finds the branch fresh.
+#[tokio::test]
+async fn two_concurrent_first_reads_of_a_branch_sync_it_once() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _main) = synced_fixture(repo_id);
+    repos.set_cached_branches(&["main", "26.7"]);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned(), "26.7".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc = build_service_with_sync(repos, tmp.path().to_path_buf(), branch_sync).await;
+
+    let ctx = ctx(tenant_id);
+    let (first, second) = tokio::join!(
+        svc.list_plans(&ctx, repo_id, "26.7"),
+        svc.list_plans(&ctx, repo_id, "26.7"),
+    );
+
+    assert_eq!(first.unwrap().len(), 1);
+    assert_eq!(second.unwrap().len(), 1);
+    assert_eq!(
+        engine.synced_branches(),
+        vec!["26.7".to_owned()],
+        "concurrent first reads must collapse onto one sync"
+    );
+}
+
+/// Surrounding whitespace in a branch name means what it means to
+/// an explicit sync (`sync_repo` trims) and to the snapshot layout
+/// (`layout::branch_dir_name` trims): the branch, not a branch the remote lacks.
+#[tokio::test]
+async fn a_branch_name_with_surrounding_whitespace_reads_as_that_branch() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _main) = synced_fixture(repo_id);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned(), "26.7".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc = build_service_with_sync(repos, tmp.path().to_path_buf(), branch_sync).await;
+
+    let plans = svc
+        .list_plans(&ctx(tenant_id), repo_id, " 26.7 ")
+        .await
+        .expect("the trimmed branch exists on the remote");
+    assert_eq!(plans.len(), 1);
+    assert_eq!(engine.synced_branches(), vec!["26.7".to_owned()]);
+}
+
+/// A branch the remote does not have is a 404 naming the branch, and the
+/// sync engine never sees it: a failed sync would record `sync_error`, which
+/// every branch reads as "not synced", so a typo would break `main` too.
+#[tokio::test]
+async fn an_unknown_branch_is_branch_not_found_and_never_reaches_the_sync_engine() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, main) = synced_fixture(repo_id);
+    write(&main, "plans/smoke.yaml", VALID_PLAN_A);
+    repos.set_cached_branches(&["main"]);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    let err = svc
+        .list_plans(&ctx(tenant_id), repo_id, "26.9-typo")
+        .await
+        .expect_err("a branch the remote does not have must not read as anything");
+    let DomainError::BranchNotFound {
+        repo_id: reported_repo,
+        branch,
+    } = err
+    else {
+        panic!("expected BranchNotFound, got {err:?}");
+    };
+    assert_eq!(reported_repo, repo_id);
+    assert_eq!(branch, "26.9-typo");
+
+    assert!(
+        engine.synced_branches().is_empty(),
+        "the sync engine must never be asked for a branch the remote does not have"
+    );
+    assert_eq!(
+        engine.ls_refs_calls(),
+        1,
+        "a branch missing from the cache is checked against the remote once"
+    );
+    assert_eq!(
+        repos.current().unwrap().sync_error,
+        None,
+        "nothing may be recorded in the repository-wide sync_error"
+    );
+    assert_eq!(
+        svc.list_plans(&ctx(tenant_id), repo_id, "main")
+            .await
+            .expect("the other branches stay readable")
+            .len(),
+        1
+    );
+}
+
+/// The branch cache can lag the remote (the refresher runs on an interval):
+/// a branch it does not name yet is looked up on the remote, then synced.
+#[tokio::test]
+async fn a_branch_missing_from_the_cache_but_present_on_the_remote_is_refreshed_then_synced() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _main) = synced_fixture(repo_id);
+    repos.set_cached_branches(&["main"]);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned(), "26.7".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    let plans = svc
+        .list_plans(&ctx(tenant_id), repo_id, "26.7")
+        .await
+        .expect("a branch the remote has is synced even when the cache lags");
+
+    assert_eq!(plans.len(), 1);
+    assert_eq!(
+        engine.ls_refs_calls(),
+        1,
+        "the branch list is refreshed once"
+    );
+    assert_eq!(engine.synced_branches(), vec!["26.7".to_owned()]);
+    assert!(
+        repos.recorded_branches().contains(&"26.7".to_owned()),
+        "the refreshed list is written back to the cache"
+    );
+}
+
+/// A branch that exists but cannot be fetched is `RepoNotSynced` carrying
+/// the recorded (sanitized) engine reason — a state the caller can act on —
+/// not an internal error.
+#[tokio::test]
+async fn a_failed_lazy_sync_is_not_synced_with_the_engine_reason_not_an_internal_error() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _main) = synced_fixture(repo_id);
+    repos.set_cached_branches(&["main", "26.7"]);
+    let engine = Arc::new(MockRepoSyncPort::failing_sync_of(
+        vec!["main".to_owned(), "26.7".to_owned()],
+        "fetch of https://deploy:s3cr3t@git.example/r.git failed: connection reset",
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc = build_service_with_sync(repos, tmp.path().to_path_buf(), branch_sync).await;
+
+    let err = svc
+        .list_plans(&ctx(tenant_id), repo_id, "26.7")
+        .await
+        .expect_err("a failed sync leaves nothing to read");
+    let DomainError::RepoNotSynced {
+        branch,
+        reason: Some(reason),
+        ..
+    } = &err
+    else {
+        panic!("expected RepoNotSynced with the engine reason, got {err:?}");
+    };
+    assert_eq!(branch, "26.7");
+    assert!(
+        reason.contains("connection reset"),
+        "the engine's reason reaches the caller: {reason}"
+    );
+    assert!(
+        !reason.contains("s3cr3t"),
+        "the reason is the sanitized one recorded in sync_error: {reason}"
+    );
+    assert_eq!(engine.synced_branches(), vec!["26.7".to_owned()]);
+}
+
+/// The universe walk keeps its skip-on-unsynced posture: it reads every
+/// repository of a product in one call, so it must not fetch them, and one
+/// unreachable remote must not blank the overview.
+#[tokio::test]
+async fn the_universe_walk_still_skips_an_unsynced_branch_without_syncing() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _main) = synced_fixture(repo_id);
+    repos.set_cached_branches(&["main", "26.7"]);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned(), "26.7".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc = build_service_with_sync(repos, tmp.path().to_path_buf(), branch_sync).await;
+
+    let universe = svc
+        .list_universe(&ctx(tenant_id), None, Some("26.7"))
+        .await
+        .unwrap();
+
+    assert!(
+        universe.is_empty(),
+        "the unsynced branch contributes nothing"
+    );
+    assert!(
+        engine.synced_branches().is_empty(),
+        "the universe walk never syncs"
+    );
+    assert_eq!(engine.ls_refs_calls(), 0, "nor lists the remote");
+}
+
+/// A repository that never synced is not trusted to have a current branch
+/// cache — a `url` change clears the synced state but not the list, which
+/// may name the old remote's branches. The remote is asked first, so a
+/// branch only the stale list names never reaches the sync engine.
+#[tokio::test]
+async fn a_never_synced_repository_checks_the_remote_before_trusting_its_branch_cache() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(repo_fixture(
+        repo_id, false,
+    )));
+    repos.set_cached_branches(&["main", "old-remote-only"]);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    let err = svc
+        .list_plans(&ctx(tenant_id), repo_id, "old-remote-only")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::BranchNotFound { .. }),
+        "got {err:?}"
+    );
+    assert!(engine.synced_branches().is_empty());
+    assert_eq!(engine.ls_refs_calls(), 1);
+
+    // The branch the remote does have is synced on first read, and that
+    // first sync is what makes the repository readable at all.
+    assert_eq!(
+        svc.list_plans(&ctx(tenant_id), repo_id, "main")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(engine.synced_branches(), vec!["main".to_owned()]);
+    assert!(repos.current().unwrap().last_synced_at.is_some());
+}
+
+/// The branch cache lags the remote in both directions: a branch deleted on
+/// the remote stays cached until the next refresh. A read of such a branch
+/// has no snapshot, so it is confirmed against the remote before any sync —
+/// otherwise the engine's "branch not found" would be recorded in the
+/// repository-wide `sync_error` and every other branch would stop reading.
+#[tokio::test]
+async fn a_branch_cached_but_deleted_on_the_remote_is_branch_not_found_and_never_reaches_the_sync_engine()
+ {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, main) = synced_fixture(repo_id);
+    write(&main, "plans/smoke.yaml", VALID_PLAN_A);
+    repos.set_cached_branches(&["main", "26.6-deleted"]);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    let err = svc
+        .list_plans(&ctx(tenant_id), repo_id, "26.6-deleted")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, DomainError::BranchNotFound { branch, .. } if branch == "26.6-deleted"),
+        "got {err:?}"
+    );
+    assert!(
+        engine.synced_branches().is_empty(),
+        "a branch the remote no longer has must never reach the sync engine"
+    );
+    assert_eq!(engine.ls_refs_calls(), 1, "the remote is asked once");
+    assert_eq!(repos.current().unwrap().sync_error, None);
+    assert_eq!(
+        svc.list_plans(&ctx(tenant_id), repo_id, "main")
+            .await
+            .expect("the other branches stay readable")
+            .len(),
+        1
+    );
+}
+
+/// A snapshot on disk does not prove the branch still exists. While the
+/// repository-wide `sync_error` is set — possibly by another branch — every
+/// read takes the sync path, and a branch deleted on the remote but still in
+/// the branch cache must be confirmed there first: syncing it would hit the
+/// engine, overwrite `sync_error`, and repeat on every read.
+#[tokio::test]
+async fn a_deleted_branch_with_a_snapshot_behind_a_sync_error_is_branch_not_found_and_never_synced()
+{
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let gone = crate::infra::git::layout::branch_workdir(tmp.path(), repo_id, "26.6-deleted");
+    write(&gone, "plans/smoke.yaml", VALID_PLAN_A);
+    let repos = Arc::new(MockTestReposRepository::with_repo(
+        qa_catalog_sdk::TestRepository {
+            sync_error: Some("another branch failed".to_owned()),
+            ..repo_fixture(repo_id, true)
+        },
+    ));
+    repos.set_cached_branches(&["main", "26.6-deleted"]);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    let err = svc
+        .list_plans(&ctx(tenant_id), repo_id, "26.6-deleted")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, DomainError::BranchNotFound { branch, .. } if branch == "26.6-deleted"),
+        "got {err:?}"
+    );
+    assert!(
+        engine.synced_branches().is_empty(),
+        "a branch the remote no longer has must never reach the sync engine"
+    );
+    assert_eq!(engine.ls_refs_calls(), 1, "the remote is asked once");
+    assert_eq!(
+        repos.current().unwrap().sync_error.as_deref(),
+        Some("another branch failed"),
+        "the recorded sync_error is left as it was"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// How a lazy read answers what goes wrong (DESIGN §3.3 "Branch model and the first read of a branch")
+// ---------------------------------------------------------------------------
+
+/// A remote that cannot be listed is
+/// `SyncFailed` (503) on the lazy path, and nothing is recorded — the
+/// repository's `sync_error` stays exactly as it was.
+#[tokio::test]
+async fn an_unreachable_remote_on_the_lazy_path_is_unavailable_and_records_nothing() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _main) = synced_fixture(repo_id);
+    repos.set_sync_error(Some(
+        "repository sync failed: branch '26.8' not found on the remote",
+    ));
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(
+            vec!["main".to_owned(), "26.7".to_owned()],
+            lazy_branch_files(),
+        )
+        .with_ls_refs_failure(LsRefsFailure::Unreachable),
+    );
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    let err = svc
+        .list_plans(&ctx(tenant_id), repo_id, "26.7")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::SyncFailed { .. }), "got {err:?}");
+    assert!(engine.synced_branches().is_empty());
+    assert_eq!(
+        repos.current().unwrap().sync_error.as_deref(),
+        Some("repository sync failed: branch '26.8' not found on the remote"),
+        "an outage is not a fact about the repository and must not be written over it"
+    );
+}
+
+/// A credential the store cannot resolve is a configuration fault — recorded
+/// in `sync_error` and answered as that recorded failure (400), exactly as an
+/// explicit sync records it. The remote is never contacted.
+#[tokio::test]
+async fn an_unresolvable_credential_on_the_lazy_path_is_recorded_and_answered_as_not_synced() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(crate::infra::git::layout::branch_workdir(
+        tmp.path(),
+        repo_id,
+        "main",
+    ))
+    .unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo(
+        qa_catalog_sdk::TestRepository {
+            credential_ref: Some("cred-missing".to_owned()),
+            ..repo_fixture(repo_id, true)
+        },
+    ));
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned(), "26.7".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    let err = svc
+        .list_plans(&ctx(tenant_id), repo_id, "26.7")
+        .await
+        .unwrap_err();
+    let DomainError::RepoNotSynced {
+        reason: Some(reason),
+        ..
+    } = &err
+    else {
+        panic!("expected RepoNotSynced with the recorded reason, got {err:?}");
+    };
+    assert!(
+        reason.contains("credential 'cred-missing' is not accessible in credstore"),
+        "{reason}"
+    );
+    assert_eq!(
+        repos.current().unwrap().sync_error.as_deref(),
+        Some(reason.as_str())
+    );
+    assert_eq!(engine.ls_refs_calls(), 0, "nothing to list the remote with");
+    assert!(engine.synced_branches().is_empty());
+}
+
+/// The lazy read resolves the repository's credential as the qa-catalog system
+/// actor too, bound to the repository's owning tenant — the identity and the
+/// tenant the background branch refresher reads it as. A secret with `private`
+/// sharing, owned by the very reader, is therefore the configuration fault of
+/// the test above: recorded, answered 400 with the reason naming sharing, and
+/// the remote never listed.
+#[tokio::test]
+async fn a_lazy_read_reads_the_credential_as_the_system_actor_and_names_sharing() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let reader = ctx(tenant_id);
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(crate::infra::git::layout::branch_workdir(
+        tmp.path(),
+        repo_id,
+        "main",
+    ))
+    .unwrap();
+    let repos = Arc::new(MockTestReposRepository::with_repo_in_tenant(
+        qa_catalog_sdk::TestRepository {
+            credential_ref: Some("qa-catalog-repo-token".to_owned()),
+            ..repo_fixture(repo_id, true)
+        },
+        tenant_id,
+    ));
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned(), "26.7".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_with_credstore(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+        Arc::new(SharingCredStore::new(vec![StoredSecret {
+            reference: "qa-catalog-repo-token",
+            value: "x-access-token:ghp_lazy",
+            tenant: tenant_id,
+            owner: reader.subject_id(),
+            sharing: credstore_sdk::SharingMode::Private,
+        }])),
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    let err = svc.list_plans(&reader, repo_id, "26.7").await.unwrap_err();
+    let DomainError::RepoNotSynced {
+        reason: Some(reason),
+        ..
+    } = &err
+    else {
+        panic!("expected RepoNotSynced with the recorded reason, got {err:?}");
+    };
+    assert!(reason.contains(UNREADABLE_CREDENTIAL_HINT), "{reason}");
+    assert_eq!(
+        repos.current().unwrap().sync_error.as_deref(),
+        Some(reason.as_str()),
+        "the reason is recorded on the row"
+    );
+    assert_eq!(engine.ls_refs_calls(), 0, "nothing to list the remote with");
+    assert!(engine.synced_branches().is_empty());
+}
+
+/// A remote that refuses the credential is the same configuration fault:
+/// recorded (sanitized) and answered 400. It is behind the backoff too: the
+/// next read inside the window answers the recorded reason again without
+/// asking the remote, and without writing the reason again.
+#[tokio::test]
+async fn a_rejected_credential_on_the_lazy_path_is_recorded_and_answered_as_not_synced() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _main) = synced_fixture(repo_id);
+    let engine = Arc::new(
+        MockRepoSyncPort::succeeding(
+            vec!["main".to_owned(), "26.7".to_owned()],
+            lazy_branch_files(),
+        )
+        .with_ls_refs_failure(LsRefsFailure::CredentialRejected),
+    );
+    let branch_sync = branch_sync_with(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        SyncCache::new(FRESHNESS_TTL).with_failure_backoff(std::time::Duration::from_secs(30)),
+        Arc::new(PermissiveAuthZ),
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    for _ in 0..2 {
+        let err = svc
+            .list_plans(&ctx(tenant_id), repo_id, "26.7")
+            .await
+            .unwrap_err();
+        let DomainError::RepoNotSynced {
+            reason: Some(reason),
+            ..
+        } = &err
+        else {
+            panic!("expected RepoNotSynced with the recorded reason, got {err:?}");
+        };
+        assert!(
+            reason.contains("were not accepted by the remote"),
+            "{reason}"
+        );
+    }
+    assert_eq!(
+        engine.ls_refs_calls(),
+        1,
+        "a refused credential is asked once per backoff window"
+    );
+    assert!(engine.synced_branches().is_empty());
+    assert!(repos.current().unwrap().sync_error.is_some());
+}
+
+/// The lazy sync runs under the reader's own
+/// context, so a reader holding `TEST_REPO/GET` but not `SYNC` is refused —
+/// before the remote is contacted.
+#[tokio::test]
+async fn a_reader_without_sync_is_refused_on_the_lazy_path_before_the_remote_is_asked() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _main) = synced_fixture(repo_id);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned(), "26.7".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_with(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        SyncCache::new(FRESHNESS_TTL),
+        Arc::new(SelectiveGrantAuthZ::granting(
+            resources::TEST_REPO_NAME,
+            actions::GET,
+        )),
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    let err = svc
+        .list_plans(&ctx(tenant_id), repo_id, "26.7")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::Forbidden), "got {err:?}");
+    assert_eq!(engine.ls_refs_calls(), 0);
+    assert!(engine.synced_branches().is_empty());
+}
+
+/// Restores the test 06217d2d1 deleted (it pinned that a successful re-sync clears the error): a
+/// branch with a snapshot, refused only because the repository-wide
+/// `sync_error` is set, is re-synced — confirmed on the remote first, as every
+/// lazy sync is since 06217d2d1 — and the successful sync clears the error.
+#[tokio::test]
+async fn a_snapshot_behind_a_recorded_sync_error_is_resynced_and_the_sync_clears_it() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let tmp = tempfile::tempdir().unwrap();
+    let main = crate::infra::git::layout::branch_workdir(tmp.path(), repo_id, "main");
+    write(&main, "plans/smoke.yaml", VALID_PLAN_A);
+    let repos = Arc::new(MockTestReposRepository::with_repo(
+        qa_catalog_sdk::TestRepository {
+            sync_error: Some("another branch failed".to_owned()),
+            ..repo_fixture(repo_id, true)
+        },
+    ));
+    repos.set_cached_branches(&["main"]);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    svc.list_plans(&ctx(tenant_id), repo_id, "main")
+        .await
+        .expect("a successful re-sync makes the branch readable again");
+
+    assert_eq!(engine.ls_refs_calls(), 1, "confirmed on the remote once");
+    assert_eq!(engine.synced_branches(), vec!["main".to_owned()]);
+    assert_eq!(repos.current().unwrap().sync_error, None);
+}
+
+/// Branch 26.7 synced a moment ago; then branch 26.8's sync fails
+/// and sets the repository-wide `sync_error`. A read of 26.7 inside its
+/// freshness window used to take the non-forced fast path, get the row back
+/// with 26.8's error still on it, and answer 400 with 26.8's reason for the
+/// rest of the TTL. A recorded error now overrides the window: 26.7 is synced
+/// again, and that successful sync clears the error.
+#[tokio::test]
+async fn a_fresh_branch_reads_again_after_another_branch_failed_to_sync() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    let (tmp, repos, _main) = synced_fixture(repo_id);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned(), "26.7".to_owned()],
+        lazy_branch_files(),
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        FRESHNESS_TTL,
+    )
+    .await;
+    let svc =
+        build_service_with_sync(Arc::clone(&repos), tmp.path().to_path_buf(), branch_sync).await;
+
+    svc.list_plans(&ctx(tenant_id), repo_id, "26.7")
+        .await
+        .expect("the first read syncs 26.7");
+    repos.set_sync_error(Some(
+        "repository sync failed: branch '26.8' not found on the remote",
+    ));
+
+    let plans = svc
+        .list_plans(&ctx(tenant_id), repo_id, "26.7")
+        .await
+        .expect(
+            "a branch synced inside its window must not be refused with another branch's failure",
+        );
+    assert_eq!(plans.len(), 1);
+    assert_eq!(
+        repos.current().unwrap().sync_error,
+        None,
+        "the re-sync of 26.7 clears the repository-wide error"
+    );
+    assert_eq!(
+        engine.synced_branches(),
+        vec!["26.7".to_owned(), "26.7".to_owned()]
     );
 }

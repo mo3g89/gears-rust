@@ -2,21 +2,32 @@
      gears' rendered config, at the QA_RUNS_ARGO_ANCHOR and
      QA_ENVIRONMENTS_ARGO_ANCHOR comment lines in
      gears/qa-platform/config/qa-platform-stack.yaml (this chart's copy of it,
-     see gears-config-configmap.yaml).
+     see gears-config-secret.yaml).
 
-     NEITHER FRAGMENT BELOW CARRIES `kubeconfig_path`, and that is deliberate.
-     Handing the gears a kubeconfig file is what a deployment running them
-     OUTSIDE the cluster has to do (and it then has to rewrite that file's
-     `server:` away from 127.0.0.1, which inside a container names the
-     container). Inside a pod none of that applies: an ABSENT kubeconfig_path
-     means both qa-runs' and qa-environments' Argo
-     clients fall back to `Config::infer()`, which finds the projected
-     ServiceAccount token gears-serviceaccount.yaml's `qa-platform-gears`
-     account mounts automatically, and the in-cluster API server address
-     baked into every pod's environment
-     (KUBERNETES_SERVICE_HOST/KUBERNETES_SERVICE_PORT). That IS the in-cluster
-     credential path this whole task exists to wire up -- not a fallback to
-     work around.
+     THE qa-runs FRAGMENT CARRIES NO `kubeconfig_path`, and that is
+     deliberate. Handing the gears a kubeconfig file is what a deployment
+     running them OUTSIDE the cluster has to do (and it then has to rewrite
+     that file's `server:` away from 127.0.0.1, which inside a container names
+     the container). Inside a pod none of that applies: an ABSENT
+     kubeconfig_path means qa-runs' Argo client falls back to
+     `Config::infer()`, which finds the projected ServiceAccount token
+     gears-serviceaccount.yaml's `qa-platform-gears` account mounts
+     automatically, and the in-cluster API server address baked into every
+     pod's environment (KUBERNETES_SERVICE_HOST/KUBERNETES_SERVICE_PORT).
+
+     THE qa-environments FRAGMENT DOES CARRY ONE (finding #94), and it is
+     still in-cluster -- just a different identity. qa-environments' only
+     Kubernetes client is the D4 runner-credential writer, which needs
+     create+patch on Secrets in the Argo namespace, and that grant now
+     belongs to `qa-platform-secret-writer`
+     (secret-writer-serviceaccount.yaml, rbac-argo.yaml), not to
+     qa-platform-gears. A projected token is always the pod's own account, so
+     the writer reads the second account's token from a mounted
+     `kubernetes.io/service-account-token` Secret through the
+     `secret-writer-kubeconfig.yaml` key below: server
+     https://kubernetes.default.svc, `certificate-authority` and `tokenFile`
+     under /var/run/secrets/qa-platform/secret-writer (gears-deployment.yaml
+     mounts both).
 
      entrypoint.sh (gears/qa-platform/deploy/docker/entrypoint.sh) still
      refuses to start if QA_RUNS_ARGO_CONFIG is set without
@@ -92,7 +103,7 @@
         # HMAC tag qa-runs renders into TEST_BUNDLE_URL's `?sig=`. The tag rides
         # ExecutionNode, not this config, so there is nothing to put here. The
         # root secret is qa-catalog's own `bundle_download_signing_secret` (see
-        # gears-config-configmap.yaml), and NetworkPolicy egress rule 5 --
+        # gears-config-secret.yaml), and NetworkPolicy egress rule 5 --
         # Keycloak -- went with it.
 {{- end }}
 {{- define "qa-platform.gearsArgoQaEnvironmentsFragment" }}
@@ -106,12 +117,20 @@
       # ConfigMap are lost. Inserted into the gears' rendered config after
       # the QA_ENVIRONMENTS_ARGO_ANCHOR line by deploy/docker/entrypoint.sh.
       argo:
-        # NO kubeconfig_path -- see this file's header comment. Falls back to
-        # Config::infer(), same as the qa-runs fragment above.
+        # The D4 writer's OWN identity, qa-platform-secret-writer, not the
+        # pod's qa-platform-gears -- see this file's header comment. The
+        # path is where gears-deployment.yaml mounts this ConfigMap's
+        # secret-writer-kubeconfig.yaml key.
+        kubeconfig_path: /etc/qa-platform/secret-writer-kubeconfig.yaml
         # Must equal the qa-runs fragment's argo.namespace: the runner pod's
-        # kubeconfig Secret (decision D4) has to land in the namespace its
+        # kubeconfig Secret has to land in the namespace its
         # Workflow runs in.
         namespace: {{ .Values.argo.namespace }}
+        # Rendered, not left to the Rust default, because
+        # secret-writer-admission-policy.yaml denies the writer any Secret
+        # name outside it -- both read the qa-platform.runnerSecretPrefix
+        # helper, so they cannot drift apart.
+        secret_prefix: {{ include "qa-platform.runnerSecretPrefix" . | quote }}
 {{- end }}
 ---
 apiVersion: v1
@@ -133,3 +152,26 @@ metadata:
     app.kubernetes.io/component: gears
 data:
   qa-environments-argo.yaml: {{ include "qa-platform.gearsArgoQaEnvironmentsFragment" . | trimPrefix "\n" | toJson }}
+  # Read by qa-environments' D4 writer only (argo.kubeconfig_path above). No
+  # credential in it: both paths are files of the qa-platform-secret-writer-token
+  # Secret, which the token controller populates. kube-client re-reads
+  # tokenFile, so a rotated token needs no pod restart.
+  secret-writer-kubeconfig.yaml: |
+    apiVersion: v1
+    kind: Config
+    clusters:
+      - name: in-cluster
+        cluster:
+          server: https://kubernetes.default.svc
+          certificate-authority: /var/run/secrets/qa-platform/secret-writer/ca.crt
+    users:
+      - name: qa-platform-secret-writer
+        user:
+          tokenFile: /var/run/secrets/qa-platform/secret-writer/token
+    contexts:
+      - name: qa-platform-secret-writer
+        context:
+          cluster: in-cluster
+          user: qa-platform-secret-writer
+          namespace: {{ .Values.argo.namespace }}
+    current-context: qa-platform-secret-writer

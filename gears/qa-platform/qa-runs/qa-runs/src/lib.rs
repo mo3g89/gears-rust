@@ -8,54 +8,81 @@
 
 pub mod api;
 pub mod config;
-pub mod domain;
+pub(crate) mod domain;
 pub mod gear;
 pub mod gts;
-pub mod infra;
+pub(crate) mod infra;
 
 pub use gear::QaRuns;
 
-// === `domain` and `infra` stay `pub` here — review finding #38, measured ===
+/// Needed by `tests/mock_executor_control_surface.rs`, which asserts the
+/// failure variant the mock executor reports for an unknown run.
+pub use domain::error::DomainError;
+/// The executor port and its value types, driven by both integration test
+/// crates (`tests/mock_executor_control_surface.rs`, `tests/argo_cluster.rs`).
+pub use domain::ports::run_executor::{
+    ExecutionEvent, ExecutionNode, ExecutionRef, NodeOutcome, RunAccess, RunEnv, RunExecutor,
+    RunSpec, RunnerSpec,
+};
+/// The log cursor both integration test crates pass to `stream_logs`.
+pub use domain::repos::LogResume;
+/// The outcome both integration test crates match a finished run against.
+pub use domain::state_machine::ExecutorOutcome;
+/// The Argo adapter under test in `tests/argo_cluster.rs`, and the dynamic
+/// object that test deletes the workflow through.
+#[cfg(feature = "argo")]
+pub use infra::executor::argo::{ArgoRunExecutor, workflow_resource};
+/// The mock adapter under test in `tests/mock_executor_control_surface.rs`.
+pub use infra::executor::mock::MockRunExecutor;
+
+// === `domain` and `infra` are crate-internal — review finding #38 ===
 //
-// Finding #38 asks for `pub(crate) mod domain` / `pub(crate) mod infra` in all
-// four gears, so SeaORM entities and repository traits stop being part of the
-// crate's public API. It landed that way in `qa-catalog` and
-// `qa-environments`. **It does not land here as a visibility-only change**,
-// which is what the finding is scoped to.
+// Both used to be `pub mod`, which made every SeaORM entity, every repository
+// trait and every service struct part of this crate's public API: a consumer
+// could name `qa_runs::infra::storage::entity::*` and pin itself to this
+// gear's schema. Only `gear` (and the SDK) is the contract. The precedent for
+// the shape is `gears/system/oagw/oagw/src/lib.rs:16-17`; `qa-catalog` and
+// `qa-environments` landed it first.
 //
-// Measured rather than guessed: the change was made, the compiler run, and
-// then reverted. With both modules `pub(crate)`, this crate reports 16 groups
-// of newly-dead code — items nothing outside its own `#[cfg(test)]` modules
-// reaches, which `pub mod` was keeping the compiler quiet about.
+// The `pub use`s above are the exceptions the compiler named, one per item an
+// integration-test crate in `tests/` genuinely needs. Those tests compile as
+// separate crates, so `pub(crate)` would otherwise break them — and an
+// integration test is a real consumer, not a visibility inconvenience: none
+// was deleted, gated away, or moved into `src/` to shrink this list.
 //
-// They are scattered rather than one subsystem: `domain::cron`'s
-// skip-reporting helpers, `domain::repos::log_line`'s archive-side constants,
-// `domain::state_machine`'s terminal-state helpers, four
-// `infra::logs::broadcast` methods, and several unused re-exports in
-// `domain::repos` and `infra::logs`.
+// **It did not land here as a visibility-only change**, which is what the
+// finding is scoped to. Closing the modules surfaced **16 groups** of code
+// nothing outside this crate's own `#[cfg(test)]` modules reached, and each
+// was adjudicated rather than allowed:
 //
-// None of that is a visibility question. Each item is a decision — delete it
-// and the tests that cover it, or wire the feature.
+// * **Five deleted, with their tests.** `domain::cron`'s `skipped_since`,
+//   `occurrence_after` and `MAX_SKIPPED_REPORTED` — that module's own header
+//   already said no production code called them and that recording a skipped
+//   occurrence is a feature nobody built; `SchedulesRepository::get_by_name`
+//   and its `OrmSchedulesRepository` half, a by-name read whose only named
+//   caller ("a REST create checking its own tenant's names") never arrived;
+//   and `PluginUnavailable::NoProduct`, which `infra::product_plugin`
+//   constructs from nowhere because every catalog-side failure maps to
+//   `Unresolvable`.
+// * **Seven kept with a per-item `#[allow(dead_code, reason = …)]`.**
+//   `domain::metrics`' `COUNTERS` and `DURATIONS`, the four
+//   `domain::ports::metrics` `ALL` catalogs, and
+//   `domain::state_machine::TERMINAL_STATES`. Each is a declared set that is
+//   its own oracle, read only by the naming and exhaustiveness tests; deleting
+//   one deletes a gate, not a redundancy. `qa-catalog` and `qa-environments`
+//   carry the same allowance on the same constants, worded the same way.
+// * **Two marked `#[cfg(test)]`** — `domain::state_machine`'s
+//   `is_immutable_terminal` and `infra::logs::RunLogBroadcaster`'s
+//   `subscribe`/`forget`/`active_channels`/`retained_runs`. Both are read only
+//   by tests, and a `cfg` says so in the type system where an allowance would
+//   only say "do not ask".
+// * **Two were unused facade re-exports** (`domain::repos`, `infra::logs`),
+//   narrowed to what is named rather than allowed.
 //
-// **Two ways of not making that decision were weighed and rejected.** The
-// blunt one is an `#[allow(dead_code)]` over a whole subsystem: it trades a
-// real signal for a green build, and it goes on hiding the next dead thing to
-// land there. The sharp one is per-item `#[expect(dead_code, reason = "…")]`,
-// which is already how this repo records a deliberately-unused item
-// (`infra::storage::entity::mod`, `api::rest::dto`) and which keeps the
-// signal, because `expect` starts warning the moment the item stops being
-// dead. It was rejected here for one reason only: it is not a way to *defer*
-// the decision. A `reason` written on each of these items records an
-// adjudication nobody has made, and reads to the next reader as though one
-// had. Where the follow-up's answer turns out to be "keep, deliberately
-// unused", `#[expect(dead_code, reason = "…")]` is exactly what should land —
-// it is that task's likely output, not a substitute for doing it.
-//
-// Making the modules private also turns every `pub(crate)` item inside them
-// into a `clippy::redundant_pub_crate` error (103 sites here), which is denied
-// repo-wide; that part is mechanical, the dead code is not.
-//
-// Left as its own task, with the count above as the size estimate.
+// One class is feature-conditional rather than dead: the write-side half of
+// `domain::repos::log_line` is reached from the `argo`-gated adapter and from
+// tests, so its allowance is `cfg_attr`-conditional on that feature — an
+// `argo` build still reports it the moment the adapter stops reading it.
 
 /// Every identifier this crate's prose cites must exist. Crate-wide rather than
 /// per-module, because the defect it guards has landed in several unrelated
@@ -65,6 +92,13 @@ pub use gear::QaRuns;
 #[path = "doc_citations_tests.rs"]
 mod doc_citations_tests;
 
+/// Every migration name a gear's comments cite is live, or says it was folded
+/// away. Shared: the other three qa gears include this same file.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "migration_citations_tests.rs"]
+mod migration_citations_tests;
+
 /// Every `path/to/file.rs:N` citation under `gears/qa-platform` names a file
 /// that exists. A second guard rather than part of the one above: that one
 /// checks identifiers and explicitly not paths, and covers this crate only.
@@ -73,6 +107,21 @@ mod doc_citations_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "file_citations_tests.rs"]
 mod file_citations_tests;
+
+/// No tracked file under `gears/qa-platform` or `apps/cf-gears-example-server`
+/// cites a document the repository does not hold (an untracked spec's section, a ruling label). Hosted here
+/// with the subsystem's other citation guards.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "untracked_citations_tests.rs"]
+mod untracked_citations_tests;
+
+/// No tracked file spells a credential reference with a scheme prefix outside
+/// the files that test or describe its refusal.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "credential_reference_spelling_tests.rs"]
+mod credential_reference_spelling_tests;
 
 // No crate-level `test_support`: the plan's file list named one, and the two
 // harnesses this crate needs already exist closer to what they serve -

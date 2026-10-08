@@ -29,10 +29,9 @@
 //! (`:2392`), `load_universe_and_rows` (`:745`) and
 //! `apply_universe_group_filter` before it reaches [`build_test_details`] — and
 //! every one of those was Task 25's, as was the production `CatalogReader`
-//! adapter without which no route here could serve. [`build_test_details`] is the
-//! fold at `:425-452` and nothing more; **Task 25b registered the route over it**
-//! (`GET /qa/v1/analytics/build-tests`) under controller ruling R10, beside the
-//! overview's.
+//! adapter without which no route here could serve. [`build_test_details`] is
+//! the fold at `:425-452` and nothing more; **Task 25b registered the route
+//! over it** (`GET /qa/v1/analytics/build-tests`), beside the overview's.
 //!
 //! # The pipeline, in the order a caller must run it
 //!
@@ -135,7 +134,7 @@
 //! * **`case_expected`.** Legacy fills it in the handler, not in `build_summary`
 //!   (`:769-779`), from `load_collect_counts` (`:2672-2693`) with
 //!   `UniverseTest::static_case_count` as the per-file fallback. That fold is
-//!   [`expected_cases`](super::universe::expected_cases) (Task 29), which
+//!   [`expected_cases`](super::universe::expected_cases), which
 //!   lives beside the rest of the universe's pure folds in
 //!   [`super::universe`] and is called from
 //!   `domain::service::analytics::AnalyticsService::overview`, after this
@@ -146,13 +145,14 @@
 //!
 //! # Five status rules meet in this file and none of them is the others
 //!
-//! `domain::service::ingest`'s header tabulates the seven classifications legacy
-//! contains — five until Task 21b's Step 0 found the sixth and six until Task
-//! 24's found the seventh, and this heading said three, then four, before it said
-//! five. **Four of the seven partition a status and a fifth only ranks one**; the
-//! table below is the four, and the paragraph after it is the fifth, which is why
-//! the heading counts five and the table has four rows. The whole reason
-//! [ruling R5](crate::domain::service::ingest::classify) exists is that they look
+//! `domain::service::ingest`'s header tabulates the seven classifications
+//! legacy contains — five until Task 21b's Step 0 found the sixth and six until
+//! Task 24's found the seventh, and this heading said three, then four, before
+//! it said five. **Four of the seven partition a status and a fifth only ranks
+//! one**; the table below is the four, and the paragraph after it is the fifth,
+//! which is why the heading counts five and the table has four rows. The whole
+//! reason the [status-classification table](crate::domain::service::ingest)
+//! in `domain::service::ingest`'s header exists is that they look
 //! interchangeable:
 //!
 //! | Where | Rule | Third class |
@@ -162,12 +162,12 @@
 //! | [`effective_case_status`] (`:1271`) | a six-candidate *severity* pick | not a bucket at all |
 //! | [`latest_per_test_snapshot`] (`:1633-1639`) | `PASSED` / `FAILED`+`ERROR` / `SKIPPED` / **everything else verbatim** | kept, as itself |
 //!
-//! **The fifth is [`build_status_rank`]** (`:1948-1955`), and it is deliberately
-//! not a row above because it partitions nothing: it never merges two statuses'
-//! counts, it only decides which is drawn first. It is a row of ruling R5's index
-//! because it does read a status vocabulary, and the vocabulary it reads is the
-//! fourth row's — its `other => 3` arm exists precisely because that row passes
-//! an unknown status through.
+//! **The fifth is [`build_status_rank`]** (`:1948-1955`), and it is
+//! deliberately not a row above because it partitions nothing: it never merges
+//! two statuses' counts, it only decides which is drawn first. It is a row of
+//! the status-classification table because it does read a status vocabulary,
+//! and the vocabulary it reads is the fourth row's — its `other => 3` arm
+//! exists precisely because that row passes an unknown status through.
 //!
 //! **The first two are the same partition under two names**, and the universe
 //! module's header claimed otherwise — it said `build_stats_map` "counts a
@@ -197,11 +197,12 @@
 //! row and calls it only transitively, through two latest maps of its own.
 //!
 //! **And a sixth classification is Task 23's without appearing in this file at
-//! all.** The *dashboard's* flaky fold counts under ruling R5's sixth row — the
-//! `PASSED`+`FAILED`+`ERROR` denominator — and groups by `test_name`, so it is
-//! neither this file's grain nor this file's partition. [`build_flaky`]'s header
-//! states the difference; `crate::domain::service::dashboard`'s `kpi_of` is where
-//! that rule already lives.
+//! all.** The *dashboard's* flaky fold counts under the status-classification
+//! table's sixth row — the `PASSED`+`FAILED`+`ERROR` denominator — and groups
+//! by `test_name`, so it is neither this file's grain nor this file's
+//! partition. [`build_flaky`]'s header states the difference;
+//! `crate::domain::service::dashboard`'s `kpi_of` is where that rule already
+//! lives.
 //!
 //! **Task 24 added a seventh, and it is the fourth row above rather than an
 //! absentee.** [`latest_per_test_snapshot`] is a *second* latest-per-file scan
@@ -329,7 +330,7 @@ pub struct OverviewSummary {
     ///
     /// **Always zero out of [`summarize`], exactly as it is out of legacy's
     /// `build_summary` (`:1264`).** [`expected_cases`](super::universe::expected_cases)
-    /// (Task 29) is what fills it, over its own collect-table read; this
+    /// is what fills it, over its own collect-table read; this
     /// module's header says why that fold is not here.
     pub case_expected: usize,
 }
@@ -544,11 +545,11 @@ pub struct AnalyticsListItem {
     /// records why the `Option` survives this far and
     /// [`collapse_build`](super::universe::collapse_build) is where it collapses.
     ///
-    /// **This field had no doc at all until controller ruling R15**, which is how
-    /// a live parity gap sat behind it: the port rendered `null` where legacy
-    /// renders `"unknown"`. The remaining question on it is a *label*, not a
-    /// value — whether the UI should be shown the word `unknown` at all — and
-    /// **Task 25b answered it: yes.**
+    /// **This field had no doc at all until a review gave it one**, which is
+    /// how a live parity gap sat behind it: the port rendered `null` where
+    /// legacy renders `"unknown"`. The remaining question on it is a *label*,
+    /// not a value — whether the UI should be shown the word `unknown` at all —
+    /// and **Task 25b answered it: yes.**
     /// [`crate::api::rest::dto::AnalyticsListItemDto::last_build`] renders the
     /// label verbatim, so `null` there means "no latest row at all" and nothing
     /// else, which is legacy's own distinction.
@@ -846,7 +847,7 @@ pub fn summarize<S: BuildHasher>(
         case_xpass: cases.xpass,
         // Filled by the caller after this function returns —
         // `AnalyticsService::overview` calls `expected_cases` over its own
-        // collect-table read (Task 29). Legacy's `build_summary` leaves it at
+        // collect-table read. Legacy's `build_summary` leaves it at
         // zero too (`:1264`); this module's header says why it is not here.
         case_expected: 0,
     }
@@ -1090,7 +1091,7 @@ pub struct TrendData {
 /// clamp changes both charts and nothing fails.
 /// `the_heatmap_and_trend_windows_clamp_differently` straddles both boundaries.
 ///
-/// # The default is `7`, and it lives in [`super::query`] (Task 25a)
+/// # The default is `7`, and it lives in [`super::query`]
 ///
 /// Legacy clamps **twice**: `normalize_overview_query` maps the absent query
 /// parameter to `7` and clamps it (`:2426`, `clamp_days(query.days_heatmap
@@ -1340,8 +1341,8 @@ pub fn build_heatmap(
 ///
 /// The three-way match is legacy's own literals (`:1519-1521`), matching
 /// [`bucketize_status`](super::universe::bucketize_status)' output rather than
-/// re-deriving it — ruling R5's distinction, and the reason a `SKIPPED` row is a
-/// `not_run` test here and not a fourth counter.
+/// re-deriving it — the status-classification table's third row, and the reason
+/// a `SKIPPED` row is a `not_run` test here and not a fourth counter.
 #[must_use]
 pub fn build_trend(
     universe: &[UniverseTest],
@@ -1509,14 +1510,15 @@ pub fn flaky_cutoff(today: Date, days: usize) -> Date {
 /// [`ExecRow::repo_id`](super::ExecRow::repo_id) exists to close.
 ///
 /// Legacy has **two** flaky folds and they agree on nothing but the word. This
-/// one keys on `(repo_id, test_file)` and uses the three-way split; the dashboard's
-/// (`manager/src/routes/dashboard.rs:379-405`) groups by `tr.test_name,
-/// rr.plan_id` and counts under ruling R5's *sixth* classification, whose
-/// denominator excludes everything that is not `PASSED`, `FAILED` or `ERROR`.
-/// [`ExecRow`]'s header records the grain half and
-/// [`crate::domain::service::ingest`]'s R5 table the classification half. They
-/// are deliberately **not** unified here; `qa_insights_sdk::FlakyTestCard` is the
-/// other one's output shape and this type is this one's.
+/// one keys on `(repo_id, test_file)` and uses the three-way split; the
+/// dashboard's (`manager/src/routes/dashboard.rs:379-405`) groups by
+/// `tr.test_name, rr.plan_id` and counts under the status-classification
+/// table's *sixth* row, whose denominator excludes everything that is not
+/// `PASSED`, `FAILED` or `ERROR`. [`ExecRow`]'s header records the grain half
+/// and [`crate::domain::service::ingest`]'s status-classification table the
+/// classification half. They are deliberately **not** unified here;
+/// `qa_insights_sdk::FlakyTestCard` is the other one's output shape and this
+/// type is this one's.
 ///
 /// **The other one is shipped**, by Task 23b:
 /// [`crate::domain::repos::ResultsRepository::flaky_groups`] is the read and
@@ -2038,7 +2040,7 @@ fn group_map_to_vec(values: BTreeMap<&str, GroupCounters>) -> Vec<GroupSummary> 
 ///
 /// Legacy's `GroupBy` (`analytics.rs:313-318`), four variants, four variants.
 ///
-/// Parsed out of the query string by [`super::query::parse_group`] (Task 25a),
+/// Parsed out of the query string by [`super::query::parse_group`],
 /// which returns **this** enum rather than declaring a second one — the group
 /// vocabulary has one home and the parser and this fold cannot drift.
 /// [`Default`] is [`Self::None`] because legacy defaults the absent parameter to
@@ -2123,13 +2125,13 @@ pub fn apply_universe_group_filter(
 /// The newest row per universe file, with the build it ran against.
 ///
 /// Legacy's private `LatestBuildTestSnapshot` (`analytics.rs:1607-1613`), field
-/// for field with ruling R12's one substitution, plus [`Self::repo_id`], a
-/// fix-round addition legacy's shape has no analogue of — legacy has one
-/// repository's worth of tests to key on and this port does not. It is `pub` here where legacy's
-/// is private because both of its consumers' *outputs* —
-/// [`BuildLastRunDistribution`] and [`BuildTestDetail`] — are shaped by it and
-/// the DTOs a task later are written over those; a private type would force the
-/// two folds into one function to keep it so.
+/// for field with one substitution (a run id for the run name, below), plus
+/// [`Self::repo_id`], a fix-round addition legacy's shape has no analogue of —
+/// legacy has one repository's worth of tests to key on and this port does not.
+/// It is `pub` here where legacy's is private because both of its consumers'
+/// *outputs* — [`BuildLastRunDistribution`] and [`BuildTestDetail`] — are
+/// shaped by it and the DTOs a task later are written over those; a private
+/// type would force the two folds into one function to keep it so.
 ///
 /// # It is not [`LatestInfo`](super::universe::LatestInfo), and the difference is
 /// # the status
@@ -2163,16 +2165,17 @@ pub struct LatestBuildTestSnapshot {
     /// The run the newest row came from.
     ///
     /// **Legacy carries `workflow_name`, a display string, and this is a
-    /// `Uuid`** — [`ExecRow`](super::ExecRow) has no run name to carry. Ruling
-    /// R12: the same substitution
-    /// [`LatestInfo::run_id`](super::universe::LatestInfo::run_id) already makes,
-    /// and the same open obligation. It reaches the UI as
+    /// `Uuid`** — [`ExecRow`](super::ExecRow) has no run name to carry. It is
+    /// the same substitution
+    /// [`LatestInfo::run_id`](super::universe::LatestInfo::run_id) already
+    /// makes, and the same open obligation. It reaches the UI as
     /// `BuildLastRunDistribution::latest_run_name` (`:171`) and
-    /// `BuildTestDetailItem::run_name` (`:181`) in legacy, so **Task 25**, which
-    /// owns the DTOs, was where the name had to come from or the field had to be
-    /// renamed. **Task 25b renamed**, for the reason
-    /// [`ExecRow::run_id`](super::ExecRow::run_id) now records: there is no bulk
-    /// run-name read in this gear. Nothing here `Display`s the id into a name.
+    /// `BuildTestDetailItem::run_name` (`:181`) in legacy, so **Task 25**,
+    /// which owns the DTOs, was where the name had to come from or the field
+    /// had to be renamed. **Task 25b renamed**, for the reason
+    /// [`ExecRow::run_id`](super::ExecRow::run_id) now records: there is no
+    /// bulk run-name read in this gear. Nothing here `Display`s the id into a
+    /// name.
     pub run_id: Uuid,
     /// The row's effective instant, `run_finished_at ?? run_created_at`, already
     /// coalesced into [`ExecRow::ts`](super::ExecRow::ts).
@@ -2201,20 +2204,22 @@ pub struct LatestBuildTestSnapshot {
 ///   [`collapse_build`](super::universe::collapse_build) —
 ///   [`UNKNOWN_BUILD`](super::universe::UNKNOWN_BUILD) for an absent or blank
 ///   label, trimmed otherwise. This is **one of two** collapse sites, not the
-///   only reader of the field: [`build_latest_map`](super::universe::build_latest_map)
-///   is the other (`universe.rs`' `build` field, legacy `:1203`), and the belief
-///   that this fold was the only one is what hid the parity gap ruling R15
-///   closed. Legacy collapses once, at row construction (`:1032-1033`), which is
-///   why both consumers have to.
+///   only reader of the field:
+///   [`build_latest_map`](super::universe::build_latest_map) is the other
+///   (`universe.rs`' `build` field, legacy `:1203`), and the belief that this
+///   fold was the only one is what hid the parity gap a review closed. Legacy
+///   collapses once, at row construction (`:1032-1033`), which is why both
+///   consumers have to.
 /// * **The status is this fold's own mapping** (`:1633-1639`): `PASSED` stays
 ///   `PASSED`, `FAILED` and `ERROR` both become `FAILED`, `SKIPPED` stays
 ///   `SKIPPED`, and **anything else is passed through verbatim**. That is a
-///   fourth classification — ruling R13's seventh row of
-///   [`domain::service::ingest`](crate::domain::service::ingest)'s table — and it
-///   is neither [`bucketize_status`](super::universe::bucketize_status), which
-///   collapses `SKIPPED` and the unknowns into one `NOT_RUN`, nor
-///   [`build_status_rank`], which ranks the passed-through value in its `other`
-///   arm and is why the two must stay separate functions.
+///   fourth classification — the seventh row of
+///   [`domain::service::ingest`](crate::domain::service::ingest)'s
+///   status-classification table — and it is neither
+///   [`bucketize_status`](super::universe::bucketize_status), which collapses
+///   `SKIPPED` and the unknowns into one `NOT_RUN`, nor [`build_status_rank`],
+///   which ranks the passed-through value in its `other` arm and is why the two
+///   must stay separate functions.
 ///
 ///   Legacy's first and third arms are redundant with its catch-all — the whole
 ///   match reduces to `"FAILED" | "ERROR" => "FAILED", other => other` — and are
@@ -2232,17 +2237,17 @@ pub struct LatestBuildTestSnapshot {
 /// both sort keys keep their arrival order.
 ///
 /// This port returns them ordered by `(repo_id, test_file)` instead, which is
-/// ruling R14. **It is not a parity break**: legacy's pick among exact ties is
+/// deliberate. **It is not a parity break**: legacy's pick among exact ties is
 /// arbitrary rather than specified, so no particular legacy output is
-/// contradicted. It is a testability requirement — a non-reproducible
-/// aggregate cannot be pinned, and this crate has to pin it. The `>`
-/// comparison in the consumer is kept verbatim so the *rule* still reads as
-/// legacy's; only the tie-break becomes nameable.
+/// contradicted. It is a testability requirement — a non-reproducible aggregate
+/// cannot be pinned, and this crate has to pin it. The `>` comparison in the
+/// consumer is kept verbatim so the *rule* still reads as legacy's; only the
+/// tie-break becomes nameable.
 /// `the_build_tests_snapshots_come_back_in_test_file_order` and
 /// `the_build_distribution_picks_the_latest_run_id_by_a_strictly_greater_scan`
-/// are the two tests, and the first is unaffected by the repository joining
-/// the key: every fixture in this module holds one repository, so ordering by
-/// the pair and ordering by the path alone agree.
+/// are the two tests, and the first is unaffected by the repository joining the
+/// key: every fixture in this module holds one repository, so ordering by the
+/// pair and ordering by the path alone agree.
 ///
 /// # Keyed on `(repo_id, test_file)`, not `test_file` alone
 ///
@@ -2261,7 +2266,7 @@ pub fn latest_per_test_snapshot(
         .map(|test| (test.repo_id, test.test_file.as_str()))
         .collect();
 
-    // A `BTreeMap` rather than legacy's `HashMap` is the whole of ruling R14's
+    // A `BTreeMap` rather than legacy's `HashMap` is the whole of this fold's
     // determinism: the key is `(repo_id, test_file)`, so `into_values` yields
     // the snapshots in that order instead of the hasher's.
     let mut latest: BTreeMap<(Uuid, &str), LatestBuildTestSnapshot> = BTreeMap::new();
@@ -2309,7 +2314,7 @@ fn snapshot_status(status: &str) -> &str {
 /// One build's bar in the last-run distribution.
 ///
 /// Legacy's `BuildLastRunDistribution` (`analytics.rs:168-175`), five fields,
-/// five fields — the second with ruling R12's substitution.
+/// five fields — the second with the run-id-for-run-name substitution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildLastRunDistribution {
     /// The build, [`UNKNOWN_BUILD`] included. Sorted newest-first across the
@@ -2319,12 +2324,12 @@ pub struct BuildLastRunDistribution {
     /// The run behind the newest snapshot in this build.
     ///
     /// **Legacy's is `latest_run_name: Option<String>`** (`:171`, from
-    /// `snapshot.workflow_name` at `:1578`). Ruling R12: this gear's rows carry
-    /// no run name, and **Task 25** — the DTO owner — was where the name is
-    /// resolved or the field renamed; **Task 25b renamed**, and
-    /// [`ExecRow::run_id`](super::ExecRow::run_id) carries why. `Option` because
-    /// legacy's is, and for the same reason: the aggregate is built empty and
-    /// filled by the scan.
+    /// `snapshot.workflow_name` at `:1578`). This gear's rows carry no run
+    /// name, and **Task 25** — the DTO owner — was where the name is resolved
+    /// or the field renamed; **Task 25b renamed**, and
+    /// [`ExecRow::run_id`](super::ExecRow::run_id) carries why. `Option`
+    /// because legacy's is, and for the same reason: the aggregate is built
+    /// empty and filled by the scan.
     pub latest_run_id: Option<Uuid>,
     /// Tests whose latest row under this build passed.
     pub passed: usize,
@@ -2450,10 +2455,11 @@ fn aggregate_builds(snapshots: Vec<LatestBuildTestSnapshot>) -> HashMap<String, 
             _ => {}
         }
 
-        // `is_none_or` is legacy's `match entry.latest_ts { Some(ts) =>
-        // snapshot.ts > ts, None => true }` (`:1572-1575`) — clippy rejects the
-        // `match` as `option_if_let_else`. The `>` is verbatim, which is the half
-        // ruling R14 requires be recognizable.
+        // `is_none_or` is legacy's
+        // `match entry.latest_ts { Some(ts) => snapshot.ts > ts, None => true }`
+        // (`:1572-1575`) — clippy rejects the `match` as `option_if_let_else`.
+        // The `>` is verbatim, which is the half of legacy's scan this port
+        // keeps recognizable.
         if entry
             .latest_ts
             .is_none_or(|latest_ts| snapshot.ts > latest_ts)
@@ -2469,8 +2475,8 @@ fn aggregate_builds(snapshots: Vec<LatestBuildTestSnapshot>) -> HashMap<String, 
 /// The sort rank of a status on the build-tests list: failures first.
 ///
 /// `build_status_rank` (`analytics.rs:1948-1955`) verbatim — `FAILED` 0,
-/// `PASSED` 1, `SKIPPED` 2, everything else 3. Ruling R5's **fifth** row, which
-/// names this task its porter.
+/// `PASSED` 1, `SKIPPED` 2, everything else 3. The status-classification
+/// table's **fifth** row, which names this task its porter.
 ///
 /// The `other => 3` arm is reachable only because
 /// [`latest_per_test_snapshot`]'s mapping passes an unrecognized status through
@@ -2507,11 +2513,11 @@ pub struct BuildTestDetail {
     /// The run behind the snapshot.
     ///
     /// **Legacy's is `run_name: String`** (`:181`, filled at `:434` from
-    /// `item.workflow_name`).
-    /// Ruling R12, as on [`LatestBuildTestSnapshot::run_id`]: this gear's rows
-    /// carry no run name, and **Task 25b renamed the wire field** rather than
-    /// resolving one — [`ExecRow::run_id`](super::ExecRow::run_id) carries why.
-    /// Not an `Option`, because a snapshot exists only where a row did.
+    /// `item.workflow_name`). The same substitution as on
+    /// [`LatestBuildTestSnapshot::run_id`]: this gear's rows carry no run name,
+    /// and **Task 25b renamed the wire field** rather than resolving one —
+    /// [`ExecRow::run_id`](super::ExecRow::run_id) carries why. Not an
+    /// `Option`, because a snapshot exists only where a row did.
     pub run_id: Uuid,
     /// The snapshot's instant, `run_finished_at ?? run_created_at`.
     ///
@@ -2560,10 +2566,11 @@ pub struct BuildTestDetail {
 ///   exists so this join can tell them apart.
 /// * **The sort is stable** (`:444-452`), so two entries agreeing on both keys
 ///   keep [`latest_per_test_snapshot`]'s order — reachable, because legacy keys
-///   the universe on `(source, repo_id, test_file)` (`:899-903`) and two distinct
-///   files can therefore share a `test_name`, and pinned by
-///   `build_tests_tied_on_both_sort_keys_keep_the_snapshot_order`. Ruling R14 made
-///   deterministic, so this list is reproducible where legacy's was not.
+///   the universe on `(source, repo_id, test_file)` (`:899-903`) and two
+///   distinct files can therefore share a `test_name`, and pinned by
+///   `build_tests_tied_on_both_sort_keys_keep_the_snapshot_order`. This port
+///   made it deterministic, so this list is reproducible where legacy's was
+///   not.
 ///
 /// Legacy's `filter_map` drops a snapshot whose file is absent from the map
 /// (`:429`, `let universe_item = universe_map.get(..)?`). Ported, and

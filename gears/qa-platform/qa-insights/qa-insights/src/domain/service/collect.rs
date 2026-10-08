@@ -234,11 +234,11 @@
 //! it: the governing principle is to preserve legacy's *behavior*, not its
 //! *bugs*, and adapt the implementation to this architecture.
 //!
-//! **Decided here: `branch` moves to a query parameter — `POST
-//! /qa/v1/collect/{repo_id}?branch=&tenant_id=&sig=` — exactly Task 27's R41
-//! shape, for the same reasons and one more.** The constraint that narrows the
-//! decision beyond Task 27's case: *this gear controls both ends* of this
-//! particular URL. Task 27's `plan_path` is read by a human or a client
+//! **Decided here: `branch` moves to a query parameter —
+//! `POST /qa/v1/collect/{repo_id}?branch=&tenant_id=&sig=` — exactly the shape
+//! Task 27 chose, for the same reasons and one more.** The constraint that
+//! narrows the decision beyond Task 27's case: *this gear controls both ends*
+//! of this particular URL. Task 27's `plan_path` is read by a human or a client
 //! composing a request by hand; this callback URL is built once, here, by
 //! [`CollectService::collect_url`], and handed to qa-runs, which hands it to
 //! the runner verbatim — nothing ever composes it by hand and nothing needs to
@@ -451,7 +451,7 @@ fn normalize_branch(value: Option<&str>) -> Option<&str> {
               see collect_url's own reason (before this fix wave's extraction) for why a silent \
               fallback on this path is worse than a panic that can never trigger."
 )]
-pub(crate) fn encode_collect_report_query(branch: &str, tenant_id: Uuid, sig: String) -> String {
+pub fn encode_collect_report_query(branch: &str, tenant_id: Uuid, sig: String) -> String {
     #[derive(serde::Serialize)]
     struct Query<'a> {
         branch: &'a str,
@@ -597,7 +597,7 @@ const MIN_SIGNING_SECRET_LEN: usize = 16;
 /// one predicate closes the gap the way a shared floor should: the two call
 /// sites cannot drift again because there is only one definition of
 /// "configured" to drift from.
-pub(crate) fn signing_secret_is_configured(secret: &str) -> bool {
+pub fn signing_secret_is_configured(secret: &str) -> bool {
     secret.trim().len() >= MIN_SIGNING_SECRET_LEN
 }
 
@@ -1030,7 +1030,7 @@ where
     }
 
     /// Build the URL this gear hands the runner (via qa-runs'
-    /// `VHP_COLLECT_URL`, D2) to report exact case counts back to.
+    /// `VHP_COLLECT_URL`) to report exact case counts back to.
     ///
     /// See this module's header, "The branch-in-path hazard", for why `branch`
     /// rides a query parameter rather than a second path segment, and
@@ -1067,7 +1067,7 @@ where
     /// format cannot be confused across two different `(repo_id, branch,
     /// tenant_id)` triples.
     ///
-    /// **Task 7: the HMAC key is `tenant_id`'s own key, HKDF-derived from
+    /// **The HMAC key is `tenant_id`'s own key, HKDF-derived from
     /// `collect_report_signing_secret`** — see [`derive_signing_key`] for the
     /// construction and what it does and does not mitigate — rather than
     /// `collect_report_signing_secret` used directly as the key for every
@@ -1174,7 +1174,7 @@ where
 /// and its whole reason for existing is that this information must not leave
 /// the process through the response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SignatureRefusal {
+pub enum SignatureRefusal {
     /// `collect_report_signing_secret` is absent, or shorter than
     /// [`MIN_SIGNING_SECRET_LEN`] once trimmed. Fail-closed: this refuses
     /// every report, including a correctly computed one.
@@ -1224,11 +1224,11 @@ impl From<SignatureRefusal> for CollectReportOutcome {
 /// warning `signing_payload`'s format carries.
 const COLLECT_SIGNING_HKDF_SALT: &[u8] = b"qa-insights/collect-report-signing/v1";
 
-/// Task 7: HKDF-derive tenant `tenant_id`'s own HMAC-SHA256 key from the one
+/// HKDF-derive tenant `tenant_id`'s own HMAC-SHA256 key from the one
 /// root `collect_report_signing_secret` a deployment configures, so that
 /// secret is no longer the HMAC key every tenant's tag is computed under.
 ///
-/// # Why this closes the single-point-of-compromise the task names
+/// # What the derivation buys, and what it does not close
 ///
 /// Before this task, `collect_report_signing_secret` itself was the HMAC
 /// key, for every tenant. Whoever held that one string could sign a tag for
@@ -1237,10 +1237,11 @@ const COLLECT_SIGNING_HKDF_SALT: &[u8] = b"qa-insights/collect-report-signing/v1
 /// authenticated by anything outside the tag itself. After this task, the
 /// same leak (this one root secret) still lets an attacker derive tenant
 /// `T`'s key for a `T` of their choosing — the root secret remains the one
-/// thing a deployment must protect — but that is unavoidable for *any*
-/// scheme that derives every tenant's key from a single configured value
-/// without an out-of-band per-tenant secret store, which this task's brief
-/// does not ask for (the config surface stays one value). What the
+/// thing a deployment must protect — but that is inherent in deriving every
+/// tenant's key from a single configured value, and it is accepted on one
+/// precondition (ADR-0008, "Consequences", the entry on the two HMAC roots):
+/// before the platform serves any tenant other than the operator's own, each
+/// root becomes per-tenant and moves into the credential store. What the
 /// derivation actually buys, stated precisely: a root secret is a
 /// deployment-wide operational credential an operator types into
 /// configuration once; a *derived* tenant key is not that same credential,

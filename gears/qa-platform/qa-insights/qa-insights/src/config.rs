@@ -14,22 +14,22 @@
 //!
 //! | Knob | Consumer | State |
 //! |---|---|---|
-//! | `reconcile_lookback_seconds` | `AppServices` → `ReconcileService`, via `gear::reconcile_lookback` | **live** (Task 16), and **clamped** — see below |
-//! | `reconcile_page_size` | `AppServices` → `ReconcileService`; bounds both the sweep's page and the rebuild's window | **live** (Task 16), unclamped |
-//! | `reconcile_interval_seconds` | the reconciler ticker, via `gear::Cadence::reconciler` | **live** (Task 40); `0` disables |
-//! | `default_collect_branch` | `AppServices` → `analytics::AnalyticsService` and, since Task 30, `collect::CollectService`, via `ServiceDeps::default_collect_branch` | **live** (Task 29) |
-//! | `collect_report_base_url` | `AppServices` → `collect::CollectService`, via `ServiceDeps::collect_report_base_url` | **live** (Task 30); `gear::init` warns once if empty (fix round 1) |
+//! | `reconcile_lookback_seconds` | `AppServices` → `ReconcileService`, via `gear::reconcile_lookback` | **live**, and **clamped** — see below |
+//! | `reconcile_page_size` | `AppServices` → `ReconcileService`; bounds both the sweep's page and the rebuild's window | **live**, and **clamped** to `1..=MAX_FINISHED_RUNS_PAGE` ([`crate::domain::ports::MAX_FINISHED_RUNS_PAGE`]) by [`QaInsightsConfig::effective_reconcile_page_size`] — see that method |
+//! | `reconcile_interval_seconds` | the reconciler ticker, via `gear::Cadence::reconciler` | **live**; `0` disables |
+//! | `default_collect_branch` | `AppServices` → `analytics::AnalyticsService` and, since Task 30, `collect::CollectService`, via `ServiceDeps::default_collect_branch` | **live** |
+//! | `collect_report_base_url` | `AppServices` → `collect::CollectService`, via `ServiceDeps::collect_report_base_url` | **live**; `gear::init` warns once if empty (fix round 1) |
 //! | `collect_report_signing_secret` | `AppServices` → `collect::CollectService`, via `ServiceDeps::collect_report_signing_secret` | **live** (Task 30 fix round 1); `gear::init` warns once if empty or shorter than `collect::MIN_SIGNING_SECRET_LEN` once trimmed (Phase B fix wave, Finding 1 — the boot check now shares `collect::signing_secret_is_configured` with the request-time refusal so the two cannot drift apart again) |
-//! | `collect_interval_seconds` | the collect ticker, via `gear::Cadence::collect` | **live** (Task 40); `0` disables, and non-zero is floored at [`MIN_COLLECT_INTERVAL_SECONDS`] by [`QaInsightsConfig::effective_collect_interval_seconds`] |
+//! | `collect_interval_seconds` | the collect ticker, via `gear::Cadence::collect` | **live**; `0` disables, and non-zero is floored at [`MIN_COLLECT_INTERVAL_SECONDS`] by [`QaInsightsConfig::effective_collect_interval_seconds`] |
 //! | `jira_poller_interval_seconds` | the JIRA poller ticker, via `gear::Cadence::jira_poller` | **live** (Task 40, which also added the field); `0` disables |
-//! | `enable_tickers` | all three tickers, in `gear::QaInsights::serve` | **live** (Task 40) |
+//! | `enable_tickers` | all three tickers, in `gear::QaInsights::serve` | **live** |
 //! | `max_page_size` | the analytics collection reads | forecast — Tasks 24-27 (**not** Task 17; see below). **That forecast has expired**: Tasks 24-27 have all shipped and none consumes this knob (Phase B fix wave, Finding 2) — whether and how to bound these reads is a product/NFR decision under `cpt-cf-qa-nfr-scale`, escalated to a human rather than decided here, so this field is left unwired |
 //!
 //! Both live values are resolved to their final form in `init` and handed to the
 //! services, so nothing re-reads a knob per request.
 //!
-//! # There is one ceiling, and it is **not** here — read this before adding an
-//! # accessor
+//! # There are three ceilings; one of them is **not** here — read this before
+//! # adding an accessor
 //!
 //! `reconcile_lookback_seconds` already has a ceiling: `MAX_LOOKBACK_SECONDS`
 //! (ten years) and `reconcile_lookback` in [`crate::gear`], which clamp it and
@@ -44,6 +44,16 @@
 //! exists to avoid. Task 16 landed the ceiling and this pointer together
 //! precisely so Task 40 does not read the section below, conclude that no clamp
 //! exists, and add one.
+//!
+//! The other two ceilings *are* here, as accessors, and each is called exactly
+//! once at `init`: [`QaInsightsConfig::effective_collect_interval_seconds`] and
+//! [`QaInsightsConfig::effective_reconcile_page_size`]. The rule the three
+//! placements follow is the one this module already states below — *where a
+//! value is clamped is settled by where it is first consumed* — and it puts
+//! the lookback in [`crate::gear`], where the number becomes a `Duration` whose
+//! subtraction can panic, and the page size here, where the number is read,
+//! because the bound on it is a property of the **port** rather than of any one
+//! of its two consumers.
 //!
 //! ## No `effective_*` accessors here, and the reason is not "later"
 //!
@@ -86,6 +96,8 @@
 
 use serde::Deserialize;
 
+use crate::domain::ports::MAX_FINISHED_RUNS_PAGE;
+
 /// Typed configuration for the qa-insights gear (YAML section `qa-insights`).
 ///
 /// `#[serde(default)]` so an absent section is the default configuration, and
@@ -120,14 +132,46 @@ pub struct QaInsightsConfig {
     /// A sweep starts at `watermark - lookback`, *behind* its own mark, so this
     /// window is re-read on every pass. Widening it is not free — it is more
     /// runs inside the page bound on every tick.
+    ///
+    /// # A window wider than one pass drains across ticks
+    ///
+    /// Second review, finding #122. A sweep walks at most
+    /// `MAX_PAGES_PER_SWEEP * `[`Self::reconcile_page_size`] runs (50 pages, so
+    /// 10,000 at the defaults). If more runs than that finished inside this
+    /// window, one pass spends its whole budget *before* reaching the mark, and
+    /// `WatermarkRepository::advance` is monotonic, so the mark does not move
+    /// on that pass. It used to be that the next tick derived the same floor
+    /// and repeated the pass forever; now the pass persists a resume cursor and
+    /// the next tick continues after it, so the window drains in
+    /// `ceil(window / budget)` ticks and the mark moves once the drain passes
+    /// it. The cursor is honoured across a floor that moved forward during the
+    /// drain, and a pass that catches up erases it
+    /// (`domain::service::reconcile`'s `first_page_of`).
+    ///
+    /// The alarm distinguishes a drain from a wedge: `gear::stall_of` counts a
+    /// pass with an unmoved mark and `caught_up = false` as a stall only when
+    /// the resume cursor's high-water has stopped rising too, and escalates to
+    /// `ERROR` after `WEDGED_PASSES_BEFORE_ERROR` such passes.
+    ///
+    /// # What a drain costs this window's purpose
+    ///
+    /// While a drain resumes across a moving floor, no pass re-reads the band
+    /// behind its cursor, so **the effective late-arrival lookback shrinks** by
+    /// however far the drain moved the mark, until the drain catches up and the
+    /// next tick walks from `mark - lookback` again. A run *written* into that
+    /// band after the pass that listed it, and older than
+    /// `mark_at_catch_up - reconcile_lookback_seconds`, is outside every later
+    /// window: replay it with `POST /qa/v1/insights/rebuild`, which pages under
+    /// its own budget and tells you where to resume. Raising
+    /// [`Self::reconcile_page_size`] shortens a drain, up to the port's cap.
     pub reconcile_lookback_seconds: u64,
     /// Rows per reconciler page.
     ///
-    /// **This must comfortably exceed the number of runs that finish within
-    /// [`Self::reconcile_lookback_seconds`]**, and that is a correctness
-    /// constraint rather than a tuning preference. At the defaults — 200 rows
-    /// against a one-hour lookback — that means a sustained rate well under 200
-    /// finished runs per hour.
+    /// **This should comfortably exceed the number of runs that finish within
+    /// [`Self::reconcile_lookback_seconds`].** It was a correctness constraint
+    /// while the sweep read one page per tick; it is a cost one now, for the
+    /// reasons below. At the defaults — 200 rows against a one-hour lookback —
+    /// that means a sustained rate well under 200 finished runs per hour.
     ///
     /// The sweep pages forward until it catches up
     /// (`domain::service::reconcile::ReconcileService::sweep`, whose doc carries
@@ -135,7 +179,17 @@ pub struct QaInsightsConfig {
     /// way it did for three days on the dev stand. What it still costs is work:
     /// every tick re-walks the whole lookback window in pages of this size, and
     /// one tick will walk at most `MAX_PAGES_PER_SWEEP * reconcile_page_size`
-    /// runs before leaving the rest to the next one.
+    /// runs before it stops.
+    ///
+    /// What is left over is the next tick's: a pass that spends that budget
+    /// persists a resume cursor and the next tick continues after it (second
+    /// review, finding #122). See [`Self::reconcile_lookback_seconds`], "A
+    /// window wider than one pass drains across ticks", for how that interacts
+    /// with the mark and the alarm, and for what a drain costs late runs.
+    ///
+    /// **At least one.** A configured `0` is raised to `1` with a warning by
+    /// [`Self::effective_reconcile_page_size`]: a page of zero rows reads as
+    /// caught up, which would silence the sweep.
     ///
     /// **Every shape is walkable, including a tie group wider than a page.**
     /// This paragraph said the opposite until 2026-09-21 — that
@@ -143,8 +197,29 @@ pub struct QaInsightsConfig {
     /// be stepped over and that raising this value was the operational escape.
     /// That was true of the instant-only cursor the sweep shipped with and is
     /// not true of the `(finished_at, id)` keyset one that replaced it, which
-    /// steps over a tie group of any width at any page size. Raising this value
-    /// is a throughput knob and nothing more.
+    /// steps over a tie group of any width at any page size.
+    ///
+    /// # **It is bounded by the port's page cap**, and it is not a free knob
+    ///
+    /// The sentence this replaces read *"Raising this value is a throughput
+    /// knob and nothing more"*, and it was an invitation to reproduce the
+    /// outage the rest of this doc is about — second review, finding #121.
+    /// qa-runs serves at most [`crate::domain::ports::MAX_FINISHED_RUNS_PAGE`]
+    /// runs per finished-since listing, whatever a caller asks for, and it
+    /// returns the cut page with nothing on it to say it was cut. A sweep
+    /// configured above that cap therefore gets a full page every time,
+    /// measures it as short of what it asked for, concludes it has caught up,
+    /// and — because `gear::stall_of` requires `!caught_up` before it will
+    /// escalate — wedges with no `WARN` and no `ERROR`. That is the same
+    /// silent shape that froze this gear's projection for three days, with
+    /// configuration as the only ingredient.
+    ///
+    /// So the value is clamped: [`Self::effective_reconcile_page_size`] lowers
+    /// it at `init` and warns once when it does, and
+    /// `reconcile::ReconcileService::new` bounds what it stores so no
+    /// constructed service can hold a page the port will not serve. Raising
+    /// this above the cap does not raise throughput; it is the one setting
+    /// here that used to be able to stop ingest altogether.
     ///
     /// It bounds `POST /qa/v1/insights/rebuild` too, the same way and no longer
     /// any harder: that endpoint pages on the same cursor under its own
@@ -161,7 +236,7 @@ pub struct QaInsightsConfig {
     /// Base URL at which the test runner can reach **this gear's own**
     /// `POST /qa/v1/collect/{repo_id}` route — the scheme-and-host half of
     /// the collect callback [`crate::domain::service::collect::CollectService`]
-    /// hands the runner through qa-runs' `VHP_COLLECT_URL` (D2).
+    /// hands the runner through qa-runs' `VHP_COLLECT_URL`.
     ///
     /// Legacy's `MANAGER_INTERNAL_URL` (`manager/src/main.rs:46`), read from
     /// the environment with a same-cluster default —
@@ -343,7 +418,7 @@ pub struct QaInsightsConfig {
     /// constant's own doc carries the full argument.
     ///
     /// This field's *own* description is "max rows any analytics query returns
-    /// before paging", and the analytics reads (Tasks 24-27) are non-`OData`
+    /// before paging", and the analytics reads are non-`OData`
     /// aggregate endpoints with no `LimitCfg` near them. It is re-forecast to them
     /// rather than consumed by Task 17, which is a decision and not an oversight.
     ///
@@ -440,6 +515,66 @@ impl QaInsightsConfig {
         }
         self.collect_interval_seconds
     }
+
+    /// `reconcile_page_size`, bounded by
+    /// [`crate::domain::ports::MAX_FINISHED_RUNS_PAGE`], warning once when it
+    /// lowers.
+    ///
+    /// # This is a correctness bound, not a resource one
+    ///
+    /// See [`Self::reconcile_page_size`] for the whole of finding #121. In one
+    /// line: qa-runs truncates a finished-since listing at that constant and
+    /// says nothing about having done so, and the sweep's only test for "is
+    /// there more after this page" is `page.len() >= page_size` — so a
+    /// configured page above the cap turns every full page into a page the
+    /// walk reads as short, which is a `caught_up` sweep that has caught up
+    /// with nothing and an alarm that will not fire.
+    ///
+    /// # Call this exactly once, at `init`
+    ///
+    /// [`Self::effective_collect_interval_seconds`]' discipline, for its
+    /// reason: it warns, and a warning re-emitted from a serve loop is a
+    /// warning per tick. `gear::QaInsights::init` is the one caller, and the
+    /// resolved `u32` is what reaches `ServiceDeps`.
+    ///
+    /// # And floored at one
+    ///
+    /// `0` is raised to `1`, with a warning — finding #122's residual C. This
+    /// paragraph used to read "**No floor**", on the grounds that `0` was a
+    /// coherent if useless request both walks had an answer for. The sweep's
+    /// answer was the problem: a listing asked for zero rows comes back empty,
+    /// an empty page is `caught_up`, and a caught-up pass is one
+    /// `gear::stall_of` will never count — so a single line of configuration
+    /// stopped this deployment's projection with no alarm at all. One row per
+    /// page is slow and walks; zero is silent and does not.
+    /// `reconcile::ReconcileService::new` applies the same floor to what it
+    /// stores, for the reason it applies the ceiling.
+    #[must_use]
+    pub fn effective_reconcile_page_size(&self) -> u32 {
+        if self.reconcile_page_size == 0 {
+            tracing::warn!(
+                configured_page_size = self.reconcile_page_size,
+                raised_to = 1,
+                "reconcile_page_size is 0; raising it to 1. A sweep asking for pages of zero \
+                 runs reads every empty listing as caught up and stops advancing this \
+                 deployment's projection without raising an alarm.",
+            );
+            return 1;
+        }
+        if self.reconcile_page_size > MAX_FINISHED_RUNS_PAGE {
+            tracing::warn!(
+                configured_page_size = self.reconcile_page_size,
+                lowered_to = MAX_FINISHED_RUNS_PAGE,
+                "reconcile_page_size is above the page qa-runs will serve; lowering it. \
+                 qa-runs caps a finished-since listing at that size and does not report the \
+                 cut, so a sweep asking for more would read every full page as a short one, \
+                 report itself caught up, and stop advancing this deployment's projection \
+                 without raising an alarm.",
+            );
+            return MAX_FINISHED_RUNS_PAGE;
+        }
+        self.reconcile_page_size
+    }
 }
 
 impl Default for QaInsightsConfig {
@@ -458,5 +593,79 @@ impl Default for QaInsightsConfig {
             // Empty: no SMTP egress unless a deployment asks for it by name.
             smtp_allowed_hosts: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QaInsightsConfig;
+    use crate::domain::ports::MAX_FINISHED_RUNS_PAGE;
+
+    /// A `reconcile_page_size` qa-runs will not serve. 800 rather than
+    /// `MAX_FINISHED_RUNS_PAGE + 1`, so the fixture reads as a number an
+    /// operator would plausibly type while tuning for throughput.
+    const ABOVE_THE_CAP: u32 = 800;
+
+    /// **Finding #121.** A configured page above the port's own cap is lowered
+    /// to it, because the sweep compares the rows it got against the rows it
+    /// asked for and qa-runs will not serve more than
+    /// [`MAX_FINISHED_RUNS_PAGE`] however much a caller asks for.
+    ///
+    /// Left alone, the setting is silently self-defeating in the one direction
+    /// that cannot be observed from outside the process: every page comes back
+    /// full-and-cut, the walk reads it as short, `caught_up` goes `true`, and
+    /// `gear::stall_of` — which requires `!caught_up` — never escalates. That
+    /// is the 2026-09-18 outage's exact shape, reachable from a single line of
+    /// YAML.
+    #[test]
+    fn a_page_size_above_the_port_cap_is_lowered_to_it() {
+        let cfg = QaInsightsConfig {
+            reconcile_page_size: ABOVE_THE_CAP,
+            ..QaInsightsConfig::default()
+        };
+
+        assert_eq!(
+            cfg.effective_reconcile_page_size(),
+            MAX_FINISHED_RUNS_PAGE,
+            "a page qa-runs will not serve must never reach the sweep"
+        );
+    }
+
+    /// Anything from one up to the cap — including the default — is carried
+    /// through exactly as configured. `0` is not in the list any more; see
+    /// `a_page_size_of_zero_is_raised_to_one`.
+    #[test]
+    fn a_page_size_the_port_honours_is_carried_through_unchanged() {
+        for configured in [1, 200, MAX_FINISHED_RUNS_PAGE] {
+            let cfg = QaInsightsConfig {
+                reconcile_page_size: configured,
+                ..QaInsightsConfig::default()
+            };
+            assert_eq!(cfg.effective_reconcile_page_size(), configured);
+        }
+        assert_eq!(
+            QaInsightsConfig::default().reconcile_page_size,
+            200,
+            "premise: the default is well inside the cap, so no deployment that \
+             sets nothing is warned at"
+        );
+    }
+
+    /// **A page size of `0` cannot silence the sweep** — finding #122's
+    /// residual C.
+    ///
+    /// `0` used to be passed through. A listing that honours a limit of zero
+    /// comes back empty, the sweep reads an empty page as caught up, and so it
+    /// reported itself caught up on nothing, every tick, with no `WARN` and no
+    /// `ERROR` — the silent shape `gear::stall_of` exists to end, reachable
+    /// from one line of YAML. It is raised to one, with a warning.
+    #[test]
+    fn a_page_size_of_zero_is_raised_to_one() {
+        let cfg = QaInsightsConfig {
+            reconcile_page_size: 0,
+            ..QaInsightsConfig::default()
+        };
+
+        assert_eq!(cfg.effective_reconcile_page_size(), 1);
     }
 }

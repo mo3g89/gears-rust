@@ -1,4 +1,15 @@
-//! `SeaORM` entities, one per table in `m20260818_000001_initial`.
+//! `SeaORM` entities, one per table in this gear's schema.
+//!
+//! **This said "one per table in `m20260818_000001_initial`" while that was the
+//! whole schema.** `m20260929_000004_run_completed_notification_cutoff` adds
+//! `qa_notification_cutoff`, the first table a later migration creates, and its
+//! entity belongs here for the reason every other one does: it is read on a
+//! production path (`NotifyRepository::run_completed_cutoff`), so the three
+//! suites below are exactly the evidence its column names and types need.
+//! `crate::infra::leader::claim_row`'s entity stays outside this module and is
+//! the contrast that makes the rule readable — that table is one elector's
+//! private mechanism which nothing ever reads, and it carries its own warning
+//! that a read added to it would fail on the unit tier.
 //!
 //! # Nothing links these structs to the schema at compile time
 //!
@@ -11,11 +22,13 @@
 //!
 //! `tests::round_trip_every_entity` is the evidence: it applies the **real**
 //! `Migrator` and then inserts and reads back one row through each of the
-//! eleven entities. That is the only thing that exercises all eleven table
-//! names and every one of their 123 column names at once — 123 counted from the
+//! thirteen entities. That is the only thing that exercises all thirteen table
+//! names and every one of their 132 column names at once — 132 counted from the
 //! DDL, not estimated (120 at Task 11, plus `qa_test_results.app_build` and
 //! `qa_test_results.ingest_ordinal` from Task 12, plus
-//! `qa_test_results.run_created_at` from Task 21b). It runs on **both**
+//! `qa_test_results.run_created_at` from Task 21b, plus
+//! `qa_notification_cutoff`'s five, plus `qa_run_projection_locks`' four). It
+//! runs on **both**
 //! tiers, from the same fixtures:
 //!
 //! * `tests::every_entity_round_trips_through_the_migrated_schema` —
@@ -36,16 +49,23 @@
 //! # Tenancy is an annotation, and getting it wrong is silent
 //!
 //! Each entity carries `#[derive(Scopable)]` and a `#[secure(...)]` attribute.
-//! Ten of the eleven read
+//! Twelve of the thirteen read
 //! `tenant_col = "tenant_id", resource_col = "id", no_owner, no_type`;
 //! [`saved_view`] alone reads `owner_col = "owner_id"` in place of `no_owner`,
 //! because a saved view is genuinely owned and its unique index keys on the
 //! owner. There is no third shape: no table here has a type dimension, and
-//! every one of the eleven has a `tenant_id`.
+//! every one of the thirteen has a `tenant_id`.
+//!
+//! [`notification_cutoff`] is the one whose `tenant_id` is always the **nil**
+//! UUID, because the row is deployment-wide rather than per-tenant. That is a
+//! fact about the values, not about the annotation — the column is real, the
+//! dimension is declared the same way, and the read is still scoped to a
+//! tenant (`AccessScope::for_tenant(nil)`, never `allow_all()`). See that
+//! module's header.
 //!
 //! A wrong annotation is a cross-tenant leak that compiles and unit-tests
 //! green, so `tests::every_entity_names_the_tenancy_columns_its_table_has`
-//! asserts the **column names** of all four dimensions, for all eleven
+//! asserts the **column names** of all four dimensions, for all thirteen
 //! entities, through `ScopableEntity`.
 //!
 //! **The name half is the load-bearing half, and an earlier version of this
@@ -64,8 +84,10 @@ pub mod jira_bug;
 pub mod jira_config;
 pub mod jira_poller_config;
 pub mod notification_config;
+pub mod notification_cutoff;
 pub mod notification_log;
 pub mod run_notification;
+pub mod run_projection_lock;
 pub mod saved_view;
 pub mod test_case_collect;
 pub mod test_case_result;
@@ -91,11 +113,12 @@ pub mod test_result;
 // and `allow-expect-in-tests` workspace-wide. Under `expect` they would not
 // have compiled.
 //
-// `cognitive_complexity`: `round_trip_every_entity` scores 52 with **no control
-// flow at all** -- no `if`, no `match`, no loop -- only eleven independent
-// insert-then-read blocks; the score is entirely the `assert*!` macros' expanded
-// branches. Splitting it into eleven functions would move the fixture ids into
-// eleven signatures and buy nothing the numbered section comments do not.
+// `cognitive_complexity`: `round_trip_every_entity` scored 52 at twelve blocks
+// with **no control flow at all** -- no `if`, no `match`, no loop -- only
+// independent insert-then-read blocks, thirteen of them now; the score is
+// entirely the `assert*!` macros' expanded branches. Splitting it into thirteen
+// functions would move the fixture ids into thirteen signatures and buy nothing
+// the numbered section comments do not.
 #[expect(
     clippy::disallowed_methods,
     clippy::too_many_lines,
@@ -114,8 +137,8 @@ mod tests {
 
     use super::{
         ingest_watermark, jira_bug, jira_config, jira_poller_config, notification_config,
-        notification_log, run_notification, saved_view, test_case_collect, test_case_result,
-        test_result,
+        notification_cutoff, notification_log, run_notification, run_projection_lock, saved_view,
+        test_case_collect, test_case_result, test_result,
     };
 
     /// Deterministic fixture ids, so a failure names a stable value.
@@ -154,7 +177,7 @@ mod tests {
     }
 
     /// **The point of this module.** Every table name and every column name in
-    /// all eleven entities, exercised by a real INSERT and a real SELECT
+    /// all thirteen entities, exercised by a real INSERT and a real SELECT
     /// against the real migration.
     ///
     /// Every field of every `ActiveModel` is named explicitly rather than
@@ -378,7 +401,7 @@ mod tests {
             url: ActiveValue::Set("https://jira.example.com".to_owned()),
             project_key: ActiveValue::Set("VHP".to_owned()),
             email: ActiveValue::Set("qa@example.com".to_owned()),
-            api_token_credstore_ref: ActiveValue::Set("cred://jira-token".to_owned()),
+            api_token_credstore_ref: ActiveValue::Set("jira-token".to_owned()),
             issue_type: ActiveValue::Set(Some("Bug".to_owned())),
             enabled: ActiveValue::Set(true),
             created_at: ActiveValue::Set(now()),
@@ -395,7 +418,7 @@ mod tests {
             .expect("the jira config must read back");
         assert!(jira.enabled);
         assert_eq!(
-            jira.api_token_credstore_ref, "cred://jira-token",
+            jira.api_token_credstore_ref, "jira-token",
             "this column holds a reference and never token material"
         );
 
@@ -427,7 +450,7 @@ mod tests {
         notification_config::ActiveModel {
             id: ActiveValue::Set(uuid(17)),
             tenant_id: ActiveValue::Set(tenant),
-            slack_webhook_credstore_ref: ActiveValue::Set("cred://slack-hook".to_owned()),
+            slack_webhook_credstore_ref: ActiveValue::Set("slack-hook".to_owned()),
             slack_channel: ActiveValue::Set("#qa".to_owned()),
             manager_ui_base_url: ActiveValue::Set("https://qa.example.com".to_owned()),
             slack_enabled: ActiveValue::Set(true),
@@ -532,7 +555,12 @@ mod tests {
             id: ActiveValue::Set(uuid(20)),
             tenant_id: ActiveValue::Set(tenant),
             last_reconciled_finished_at: ActiveValue::Set(Some(now())),
-            last_swept_at: ActiveValue::Set(None),
+            // The sweep's within-window resume point, written here so this
+            // fixture proves all three column names rather than only the two
+            // it needed before `m20260929_000006_ingest_watermarks_sweep_cursor`.
+            sweep_cursor_at: ActiveValue::Set(Some(now())),
+            sweep_cursor_run_id: ActiveValue::Set(Some(uuid(22))),
+            sweep_cursor_floor: ActiveValue::Set(Some(now())),
             created_at: ActiveValue::Set(now()),
             updated_at: ActiveValue::Set(now()),
         }
@@ -546,14 +574,62 @@ mod tests {
             .unwrap()
             .expect("the watermark must read back");
         assert_eq!(mark.last_reconciled_finished_at, Some(now()));
+        assert_eq!(mark.sweep_cursor_at, Some(now()));
+        assert_eq!(mark.sweep_cursor_run_id, Some(uuid(22)));
+        assert_eq!(mark.sweep_cursor_floor, Some(now()));
+
+        // ---- 12. qa_notification_cutoff -----------------------------------
+        //
+        // The migration already wrote this table's one production row, under
+        // the **nil** tenant. This fixture writes a second under `tenant`,
+        // which `idx_qa_notification_cutoff_tenant` permits because the tenant
+        // differs -- so the insert proves the column names without disturbing
+        // the row the notification path reads.
+        notification_cutoff::ActiveModel {
+            id: ActiveValue::Set(uuid(21)),
+            tenant_id: ActiveValue::Set(tenant),
+            cutoff_at: ActiveValue::Set(now()),
+            created_at: ActiveValue::Set(now()),
+            updated_at: ActiveValue::Set(now()),
+        }
+        .insert(conn)
+        .await
+        .unwrap();
+
+        let cutoff = notification_cutoff::Entity::find_by_id(uuid(21))
+            .one(conn)
+            .await
+            .unwrap()
+            .expect("the cutoff must read back");
         assert_eq!(
-            mark.last_swept_at, None,
-            "NULL means 'never swept' and must not decay into the epoch, which \
-             would mean 'swept up to 1970'"
+            cutoff.cutoff_at,
+            now(),
+            "the instant must survive the round trip exactly -- this is the value the \
+             notification path compares a run's finished_at against, and a lossy decode \
+             would move the history boundary"
         );
+
+        // ---- 13. qa_run_projection_locks ----------------------------------
+        run_projection_lock::ActiveModel {
+            id: ActiveValue::Set(uuid(23)),
+            tenant_id: ActiveValue::Set(tenant),
+            run_id: ActiveValue::Set(run_id),
+            projected_at: ActiveValue::Set(now()),
+        }
+        .insert(conn)
+        .await
+        .unwrap();
+
+        let lock = run_projection_lock::Entity::find_by_id(uuid(23))
+            .one(conn)
+            .await
+            .unwrap()
+            .expect("the projection lock must read back");
+        assert_eq!(lock.run_id, run_id);
+        assert_eq!(lock.projected_at, now());
     }
 
-    /// The `SQLite` tier: eleven entities against the real `Migrator`,
+    /// The `SQLite` tier: thirteen entities against the real `Migrator`,
     /// in-memory.
     #[tokio::test]
     async fn every_entity_round_trips_through_the_migrated_schema() {
@@ -561,7 +637,7 @@ mod tests {
         round_trip_every_entity(&conn).await;
     }
 
-    /// The same eleven entities against **real Postgres**, which is the dialect
+    /// The same thirteen entities against **real Postgres**, which is the dialect
     /// this gear deploys.
     ///
     /// Not redundant with the `SQLite` tier, and the difference is exactly
@@ -645,7 +721,7 @@ mod tests {
             [tenant, resource, owner, ty].map(|c| c.map(str::to_owned))
         }
 
-        // Ten of eleven: tenant + resource by name, no owner, no type.
+        // Twelve of thirteen: tenant + resource by name, no owner, no type.
         let plain = expect(Some("tenant_id"), Some("id"), None, None);
         assert_eq!(dims::<test_result::Entity>(), plain, "qa_test_results");
         assert_eq!(
@@ -684,6 +760,20 @@ mod tests {
             dims::<ingest_watermark::Entity>(),
             plain,
             "qa_ingest_watermarks"
+        );
+        assert_eq!(
+            dims::<run_projection_lock::Entity>(),
+            plain,
+            "qa_run_projection_locks"
+        );
+        // Deployment-wide *by value* -- its `tenant_id` is always nil -- but
+        // declared exactly like the others, which is what keeps the read
+        // scoped rather than unrestricted. `IS_UNRESTRICTED` is asserted false
+        // for every entity by `dims` itself.
+        assert_eq!(
+            dims::<notification_cutoff::Entity>(),
+            plain,
+            "qa_notification_cutoff"
         );
 
         // The one exception, and the reason it is one: `qa_analytics_saved_views`

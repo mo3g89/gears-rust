@@ -16,11 +16,12 @@
 //!
 //! # No scope, no validation, no status-code decision
 //!
-//! `handlers::analytics`' and `handlers::saved_views`' discipline, restated
-//! for a third resource: [`crate::domain::service::jira::JiraService`] owns
-//! the authorization decision (`bug_scope`, over
-//! [`crate::domain::service::resources::JIRA_BUG`]), the R85 pairing rule on
-//! `open_bugs`, and the R80/R84 decisions inside `file_bugs`. Each handler
+//! `handlers::analytics`' and `handlers::saved_views`' discipline, restated for
+//! a third resource: [`crate::domain::service::jira::JiraService`] owns the
+//! authorization decision (`bug_scope`, over
+//! [`crate::domain::service::resources::JIRA_BUG`]), the together-or-neither
+//! `repo_id`/`plan_path` pairing rule on `open_bugs`, and the re-file probe and
+//! detail-text decisions inside `file_bugs` (that module's header). Each handler
 //! here is a decode, a call and a render — the same shape
 //! [`crate::api::rest::handlers::settings`] already uses for this service's
 //! other two operations.
@@ -67,7 +68,10 @@ pub async fn list_open_bugs(
 /// partial success is still `200` with fewer entries than failed tests —
 /// [`JiraService::file_bugs`]'s own doc states exactly what is swallowed and
 /// what is not, and this handler makes no attempt to tell the two apart on
-/// the wire: legacy's own response carries no such signal either.
+/// the wire: legacy's own response carries no such signal either. A JIRA
+/// outage that left nothing filed or found is the service's
+/// [`DomainError::UpstreamEgress`](crate::domain::error::DomainError::UpstreamEgress),
+/// which `as_jira_error` passes through as `503`.
 ///
 /// # `req` is skipped on the span
 ///

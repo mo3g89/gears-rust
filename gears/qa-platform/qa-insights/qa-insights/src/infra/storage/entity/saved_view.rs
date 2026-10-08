@@ -23,10 +23,11 @@
 //! owner's global view of the same name.
 //!
 //! Task 12 discharged it in exactly one place —
-//! `crate::infra::storage::mapper::plan_key`, which both writers *and* the
-//! natural-key probe in `saved_views_sea_repo` derive it through, so a probe
-//! cannot disagree with what a write would produce. The three tests that go red
-//! if any of those call sites stops using it are
+//! `crate::infra::storage::mapper::plan_key`, which every derivation in
+//! `saved_views_sea_repo` goes through: `key_for` for insert and update, and
+//! `key_for_plan` for a plan-scoped `list`. A second spelling of the rule would
+//! let a list filter disagree with what a write stored. The three tests that go
+//! red if any of those call sites stops using it are
 //! `a_plan_scoped_and_a_global_view_of_one_name_both_persist_and_both_list`,
 //! `updating_a_view_into_a_plan_scope_rewrites_its_plan_key` and
 //! `a_plan_scoped_list_returns_only_that_plans_views`.

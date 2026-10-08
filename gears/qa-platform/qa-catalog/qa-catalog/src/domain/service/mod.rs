@@ -10,6 +10,8 @@
 //! - `ssh_keys` - SSH key metadata (material lives in credstore only)
 //! - `bundles` - ephemeral tar.gz bundle build/serve/GC
 //! - `sync_cache` - branch freshness TTL cache + two-tier sync locks
+//! - `branch_snapshot` - the step every branch-content read goes through:
+//!   serve the snapshot, or sync a branch the remote has and then serve it
 //!
 //! ## Security
 //!
@@ -62,6 +64,7 @@ use crate::domain::repos::{
 /// distinct resource types among them. The source side of the permission
 /// catalog's anti-drift test - review finding #1.
 pub mod authz_surface;
+mod branch_snapshot;
 pub mod bundles;
 mod custom_plans;
 mod plans;
@@ -85,7 +88,7 @@ pub use plugin_registry::{ProductPluginPresence, QaProductRegistry, RegisteredPr
 pub use products::ProductsService;
 pub use repos::ReposService;
 pub use ssh_keys::SshKeysService;
-pub use sync_cache::SyncCache;
+pub use sync_cache::{RemoteFault, SyncCache};
 
 #[cfg(test)]
 mod test_support;
@@ -226,8 +229,9 @@ pub(in crate::domain::service) fn emit(silenced: &AtomicBool, record: impl FnOnc
 /// multi-statement flows), this gear parameterizes the provider with
 /// `DomainError` directly: `transaction(...)` closures then run repository
 /// calls (which return `DomainError`) as-is, and any `Err` rolls the
-/// transaction back while preserving the domain variant (e.g.
-/// `BranchCacheConflict`) instead of flattening it to a database error.
+/// transaction back while preserving the domain variant (e.g. the `NotFound`
+/// `record_sync_success` returns from inside its transaction) instead of
+/// flattening it to a database error.
 pub type DbProvider = DBProvider<DomainError>;
 
 /// Authorization resource types and their PEP-supported properties.
@@ -325,7 +329,11 @@ where
     K: SshKeysRepository,
     B: BundlesRepository,
 {
-    pub(crate) repos: ReposService<R, K>,
+    /// An `Arc` because the plan and bundle readers hold the same instance
+    /// as their [`branch_snapshot::BranchSync`]: a read that finds a branch
+    /// without a snapshot syncs it through this service's freshness cache
+    /// and sync locks, not through a second copy of them.
+    pub(crate) repos: Arc<ReposService<R, K>>,
     pub(crate) plans: PlansService<R>,
     pub(crate) custom_plans: CustomPlansService<C>,
     pub(crate) products: ProductsService<P>,
@@ -388,21 +396,27 @@ where
     ) -> Self {
         let enforcer = PolicyEnforcer::new(deps.authz);
 
+        let repos = Arc::new(ReposService::new(
+            Arc::clone(&deps.db),
+            Arc::clone(&repos_repo),
+            Arc::clone(&ssh_keys_repo),
+            Arc::clone(&deps.credstore),
+            deps.sync_engine,
+            deps.repos_dir.clone(),
+            deps.sync_cache,
+            enforcer.clone(),
+        ));
+        // The plan and bundle readers sync a branch without a snapshot
+        // through this same instance.
+        let branch_sync: Arc<dyn branch_snapshot::BranchSync> = Arc::clone(&repos) as _;
+
         Self {
-            repos: ReposService::new(
-                Arc::clone(&deps.db),
-                Arc::clone(&repos_repo),
-                Arc::clone(&ssh_keys_repo),
-                Arc::clone(&deps.credstore),
-                deps.sync_engine,
-                deps.repos_dir.clone(),
-                deps.sync_cache,
-                enforcer.clone(),
-            ),
+            repos,
             plans: PlansService::new(
                 Arc::clone(&deps.db),
                 Arc::clone(&repos_repo),
                 deps.repos_dir.clone(),
+                Arc::clone(&branch_sync),
                 enforcer.clone(),
             ),
             custom_plans: CustomPlansService::new(
@@ -411,7 +425,7 @@ where
                 enforcer.clone(),
             ),
             // The plugin-presence port is the registry, narrowed to one
-            // method (ruling F-11). `plugin_registry` is already in scope
+            // method. `plugin_registry` is already in scope
             // here, which is why this wiring needs no change in `gear.rs`.
             products: ProductsService::new(
                 Arc::clone(&deps.db),
@@ -431,6 +445,7 @@ where
                 repos_repo,
                 deps.bundle_store,
                 deps.repos_dir,
+                branch_sync,
                 deps.bundle_ttl,
                 deps.bundle_download_signing_secret,
                 deps.bundle_download_metrics,

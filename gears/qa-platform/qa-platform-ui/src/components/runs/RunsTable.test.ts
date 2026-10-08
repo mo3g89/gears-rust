@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 //
-// Task 10 review, finding 1 (Critical): the succeeded-with-skips marker's own
+// The succeeded-with-skips marker's own
 // condition compared `run.phase` against `'Succeeded'`, but `WorkflowRun.phase`
 // is qa-runs' lowercase state set — `runFromDto` sets it to `dto.state`
-// "without re-casing" (`adapters.ts:378-383`, decision X4). So the marker was
+// "without re-casing" (`adapters.ts`). So the marker was
 // dead code: it never rendered for any real run, including the exact
-// "succeeded, 68 skipped" case Task 10 exists to make visible. This suite
+// "succeeded, 68 skipped" case the marker exists to make visible. This suite
 // renders the actual table with a lowercase-`'succeeded'` fixture and asserts
 // the marker text is present, so a regression back to Title Case fails here
 // rather than only in a manual check.

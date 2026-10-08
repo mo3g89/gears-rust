@@ -42,8 +42,8 @@
 //!    auto-rerun on (`manager/src/models.rs:1422-1429`, reached through
 //!    `get_or_default::<JiraPollerConfig>` at `settings.rs:513-517`).
 //! 3. **The `.max(1)` interval clamp lives here.** Legacy applies it where it
-//!    sleeps (`manager/src/services/jira_poller.rs:26`), and controller ruling
-//!    R71 puts it in the domain rather than in the DDL or the mapper. It is
+//!    sleeps (`manager/src/services/jira_poller.rs:26`); this gear puts it in
+//!    the domain rather than in the DDL or the mapper. It is
 //!    applied on **read** and not on write, so the stored row keeps what the
 //!    tenant saved and the settings screen does not lie about it; a zero that
 //!    reached a sleep would be a hot loop against a third party's API.
@@ -62,12 +62,11 @@
 //! [`JiraClient`](crate::domain::ports::JiraClient) port had to arrive with a
 //! call site — `domain::ports`' header states that rule.
 //! [`JiraClient::create_or_find_issue`](crate::domain::ports::JiraClient::create_or_find_issue)
-//! and
-//! [`JiraClient::get_issue`](crate::domain::ports::JiraClient::get_issue)
-//! therefore had no production caller in that commit — a weaker situation than
-//! `check_status`' and not the same as an unused port, since both were already
-//! exercised by the adapter's own tests against every legacy behaviour Task
-//! 32's Step 0 recorded.
+//! and the port's since-deleted `get_issue` therefore had no production caller
+//! in that commit — a weaker situation than `check_status`' and not the same as
+//! an unused port, since both were already exercised by the adapter's own tests
+//! against every legacy behaviour Task 32's Step 0 recorded. (`get_issue` never
+//! acquired one: finding #38's triage removed it from the port.)
 //!
 //! **Task 33 is that caller**, and it is [`JiraService::file_bugs`] — the port
 //! of legacy's `api_create_jira_ticket` (`manager/src/routes/settings.rs:581-631`),
@@ -80,19 +79,19 @@
 //! Legacy's `api_create_jira_ticket` resolves a run's plan, app version and
 //! platform by reading an Argo workflow (`state.argo.get_workflow`) and its
 //! logs (`state.argo.get_workflow_logs`) — this gear has no Argo client and
-//! never will (R84). What it has instead is its own event-sourced projection:
+//! never will. What it has instead is its own event-sourced projection:
 //! `qa_test_results`, already denormalized with exactly those columns per run.
 //! So [`JiraService`] is generic over
 //! [`ResultsRepository`](crate::domain::repos::ResultsRepository) as well as
 //! [`JiraRepository`], the same shape
-//! [`crate::domain::service::analytics::AnalyticsService<R, C>`] already uses to
-//! read two repositories from one composed operation — extending the one
+//! [`crate::domain::service::analytics::AnalyticsService<R, C>`] already uses
+//! to read two repositories from one composed operation — extending the one
 //! service in place rather than adding a second, `ResultsRepository`-only
 //! service beside it on `AppServices`. `domain::service`'s own header, "And a
-//! fifth, added by Task 32 ... then a use of `R` again for Task 33's
-//! bug-filing path", carries why.
+//! fifth, added by Task 32 ... then a use of `R` again for Task 33's bug-filing
+//! path", carries why.
 //!
-//! # R87 — the results reads compile their own scope, fix round 1
+//! # The results reads compile their own scope, fix round 1
 //!
 //! **A first revision of [`JiraService::file_bugs`] read `qa_test_results`
 //! and `qa_test_case_results` under [`JiraService::bug_scope`]'s compiled
@@ -111,7 +110,7 @@
 //! second, separately-compiled scope, over [`resources::TEST_RESULT`] /
 //! [`actions::LIST`], for exactly the two calls that need it.
 //!
-//! # R80 — three status vocabularies, and which one `file_bugs` uses
+//! # Three status vocabularies, and which one `file_bugs` uses
 //!
 //! Legacy's `jira_bugs.status` is compared three different ways across three
 //! call sites, and they disagree on one class of row. `get_open_bugs`/
@@ -129,7 +128,7 @@
 //! `infra::storage::jira_sea_repo`'s repository-level test of the same name
 //! pin it from both sides.
 //!
-//! # R86 — the probe takes an explicit tenant, fix round 1's Critical
+//! # The probe takes an explicit tenant, fix round 1's Critical
 //!
 //! **A first revision of [`JiraRepository::find_unclosed_for_test`] took no
 //! `tenant_id` and relied on the compiled scope alone** — the same defect
@@ -149,11 +148,11 @@
 //! invisible to that run's own tenant's [`JiraService::open_bugs`]. Fixed by
 //! taking `tenant_id` explicit, calling `validate_tenant_in_scope` and adding
 //! the equality predicate — `find_unclosed_for_test`'s own doc carries the
-//! rest, and `domain::service::mod`'s header now states this as ruling R86, a
-//! standing rule for every `.one()`-over-`OWNER_TENANT_ID` read in this crate,
-//! not only this one.
+//! rest, and [`JiraRepository`]'s doc states this as the explicit-`tenant_id`
+//! rule, a standing rule for every statement in this crate whose effect
+//! another tenant's row could change, not only this one.
 //!
-//! # R84 — the issue body's detail text, since this gear has no logs to send
+//! # The issue body's detail text, since this gear has no logs to send
 //!
 //! Legacy passes `&result.logs` — the captured pytest output for one test file
 //! — as `create_or_find_issue`'s `logs` argument, which becomes the JIRA
@@ -196,7 +195,7 @@ use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
 use crate::domain::analytics::PlanRef;
-use crate::domain::error::DomainError;
+use crate::domain::error::{DomainError, EgressFailure};
 use crate::domain::ports::JiraClient;
 use crate::domain::ports::jira_client::{
     IssueRef, NewIssue, StatusCategory, validate_credstore_ref,
@@ -223,10 +222,11 @@ const MIN_POLL_INTERVAL_SECONDS: u64 = 1;
 /// Legacy's own literal equality — `if result.status != "FAILED" { continue }`
 /// (`manager/src/routes/settings.rs:608-610`) — not the wider "did not pass"
 /// this gear's status fold elsewhere uses (`domain::service::ingest::classify`,
-/// which also counts `ERROR`). Ported exactly: R84's own detail-text decision
-/// reuses this same literal for the case-level fold, on the reading that a
-/// case worth quoting in a filed bug is one that failed the same way the
-/// file-level row that triggered the filing did.
+/// which also counts `ERROR`). Ported exactly: the detail-text choice (this
+/// module's header, "The issue body's detail text") reuses this same literal
+/// for the case-level fold, on the reading that a case worth quoting in a filed
+/// bug is one that failed the same way the file-level row that triggered the
+/// filing did.
 const STATUS_FAILED: &str = "FAILED";
 
 /// The unvalidated body of a JIRA settings save.
@@ -370,11 +370,10 @@ where
     /// # The reference's syntax is checked here, not discovered at request time
     ///
     /// **Fix round 1, finding 1.** The stored value is copied verbatim into the
-    /// oagw upstream's apikey auth config, where it reaches `SecretRef::new`
-    /// after a `cred://` strip — and `SecretRef` accepts `[a-zA-Z0-9_-]` only,
-    /// rejecting the slashes and colons a URL-flavoured guess like
-    /// `credstore://qa/jira/api-token` carries
-    /// (`gears/credstore/credstore-sdk/src/models.rs:42-83`). Unchecked, that
+    /// oagw upstream's apikey auth config, where it reaches `SecretRef::new` —
+    /// and `SecretRef` accepts `[a-zA-Z0-9_-]` only, rejecting the slashes and
+    /// colons a URL-flavoured guess like `credstore://qa/jira/api-token` carries
+    /// (`credstore_sdk::SecretRef`'s own doc). Unchecked, that
     /// value saves cleanly and then fails inside oagw at *request* time,
     /// uncorrelated with the `PUT` that stored it.
     /// [`validate_credstore_ref`] is the check and the `PUT` route description
@@ -498,9 +497,9 @@ where
     /// `api_get_jira_poller` (`manager/src/routes/settings.rs:510-524`) reads
     /// through `get_or_default`, so an absent row is
     /// [`JiraPollerConfig::default`] — 300 seconds, auto-rerun on. The
-    /// [`MIN_POLL_INTERVAL_SECONDS`] clamp is applied here and nowhere else; this
-    /// module's header and controller ruling R71 carry why it is neither in the
-    /// DDL nor in the mapper nor on the write.
+    /// [`MIN_POLL_INTERVAL_SECONDS`] clamp is applied here and nowhere else;
+    /// this module's header carries why it is neither in the DDL nor in the
+    /// mapper nor on the write.
     ///
     /// **This is the reader Task 35 consumes.** It must not add one of its own.
     ///
@@ -568,7 +567,9 @@ where
     /// [`Self::active_config`] is what a caller should use to decide whether to
     /// ask at all.
     /// [`DomainError::Forbidden`] when the PDP denies.
-    /// [`DomainError::Internal`] when the JIRA instance or the gateway failed.
+    /// [`DomainError::UpstreamEgress`] when the JIRA instance or the gateway failed,
+    /// classified (see `infra::jira::oagw_client`); [`DomainError::Internal`] for this
+    /// gear's own fault.
     pub async fn check_status(
         &self,
         ctx: &SecurityContext,
@@ -597,8 +598,8 @@ where
     /// `qa_jira_bugs` resource [`Self::open_bugs`] and [`Self::file_bugs`]
     /// already compile a scope over, for a write rather than a read on it.
     ///
-    /// # `ctx.subject_tenant_id()` is passed through — R86, Phase C's final
-    /// # review, Critical 1
+    /// # `ctx.subject_tenant_id()` is passed through — the explicit-`tenant_id`
+    /// # rule, Phase C's final review, Critical 1
     ///
     /// The compiled scope is not the tenant pin, and this is a *write*: under a
     /// grant over `InTenantSubtree`, an unpinned
@@ -638,24 +639,25 @@ where
     /// # Pushed into the query, not filtered in Rust — fix round 1, Important 2
     ///
     /// **A first revision of this method called
-    /// [`ResultsRepository::list_for_plan`] from
-    /// [`OffsetDateTime::UNIX_EPOCH`] and reduced with `.find_map` in Rust.**
-    /// That method's window exists precisely so a per-plan read never scans
-    /// the whole plan unbounded (its own doc, and `cpt-cf-qa-nfr-scale`'s
-    /// 5M-row target); `UNIX_EPOCH` disabled that window entirely, and
-    /// `list_for_plan` has no `LIMIT`, so **every row ever recorded for the
-    /// plan crossed the wire** on every poll pass, for every open bug — a
-    /// background job's steady-state cost, not a one-off. Rejected in favour
-    /// of [`ResultsRepository::latest_version_for_plan`], which expresses
-    /// legacy's own shape (`product_version IS NOT NULL`, newest first,
+    /// [`ResultsRepository::list_for_plan`] from [`OffsetDateTime::UNIX_EPOCH`]
+    /// and reduced with `.find_map` in Rust.** That method's window exists
+    /// precisely so a per-plan read never scans the whole plan unbounded (its
+    /// own doc, and `cpt-cf-qa-nfr-scale`'s 5M-row target); `UNIX_EPOCH`
+    /// disabled that window entirely, and `list_for_plan` has no `LIMIT`, so
+    /// **every row ever recorded for the plan crossed the wire** on every poll
+    /// pass, for every open bug — a background job's steady-state cost, not a
+    /// one-off. Rejected in favour of
+    /// [`ResultsRepository::latest_version_for_plan`], which expresses legacy's
+    /// own shape (`product_version IS NOT NULL`, newest first,
     /// `LIMIT 1`/`.one()`) in the query, so this method's own read is one row
-    /// transferred rather than the plan's whole history — see that method's
-    /// doc for why an unwindowed `.one()` is still the right shape, and for
-    /// the `tenant_id` parameter R86 requires of it.
+    /// transferred rather than the plan's whole history — see that method's doc
+    /// for why an unwindowed `.one()` is still the right shape, and for the
+    /// `tenant_id` parameter the explicit-`tenant_id` rule requires of it.
     ///
     /// Authorized under [`Self::results_scope`] — the same
     /// [`resources::TEST_RESULT`] scope [`Self::file_bugs`] compiles for the
-    /// identical table, R87's rule applied to a second caller of it.
+    /// identical table, this module's header's "The results reads compile
+    /// their own scope" applied to a second caller of it.
     ///
     /// # `repo_id` is a parameter — task 2's fix
     ///
@@ -707,7 +709,8 @@ where
 
     /// Compile the caller's scope for the `qa_test_results`/
     /// `qa_test_case_results` reads [`Self::file_bugs`] makes on the way to
-    /// filing — **fix round 1, Important 2, controller ruling R87**.
+    /// filing — **fix round 1, Important 2**; this module's header, "The
+    /// results reads compile their own scope", carries why.
     ///
     /// A separate scope from [`Self::bug_scope`], compiled over
     /// [`resources::TEST_RESULT`] / [`actions::LIST`] rather than
@@ -740,15 +743,14 @@ where
     /// [`JiraRepository::list_open_for_plan`] and
     /// `qa_insights_sdk::QaInsightsClientV1::skip_list_for` already speak.
     ///
-    /// Controller ruling R85: this is **not** the analytics drill-downs'
-    /// single `plan_id` token, which matches a path across every repository
-    /// the caller's scope admits. That is right for analytics and wrong here —
-    /// a bug that suppresses a test at launch must be the same bug this
-    /// endpoint lists, so the identity has to be exact, not "any repository
-    /// with this path".
+    /// This is **not** the analytics drill-downs' single `plan_id` token, which
+    /// matches a path across every repository the caller's scope admits. That
+    /// is right for analytics and wrong here — a bug that suppresses a test at
+    /// launch must be the same bug this endpoint lists, so the identity has to
+    /// be exact, not "any repository with this path".
     ///
-    /// # Both listings are pinned to the caller's own tenant — R86, Phase C's
-    /// # final review, Critical 1b
+    /// # Both listings are pinned to the caller's own tenant — the
+    /// # explicit-`tenant_id` rule, Phase C's final review, Critical 1b
     ///
     /// `ctx.subject_tenant_id()` is passed to both
     /// [`JiraRepository::list_open`] and
@@ -771,10 +773,9 @@ where
     /// # Errors
     ///
     /// [`DomainError::Validation`] naming `plan_path` when exactly one of
-    /// `repo_id`/`plan_path` is supplied — R85's "one without the other is a
-    /// 400". Both present narrows to that plan; both absent lists every open
-    /// bug in the tenant.
-    /// [`DomainError::Forbidden`] when the PDP denies.
+    /// `repo_id`/`plan_path` is supplied: one without the other is a 400. Both
+    /// present narrows to that plan; both absent lists every open bug in the
+    /// tenant. [`DomainError::Forbidden`] when the PDP denies.
     /// [`DomainError::Database`] on a query failure.
     pub async fn open_bugs(
         &self,
@@ -804,13 +805,16 @@ where
     /// `Some` narrows to one. Legacy's per-test loop swallows and logs a
     /// single test's failure and continues (`:624-627`); this does the same —
     /// a partial success is still `Ok`, with fewer entries than failed tests,
-    /// never a bulk error.
+    /// never a bulk error. The one exception is an outage: when no test was
+    /// filed or found and a JIRA call failed on egress, the request answers
+    /// that failure (see "What is never swallowed").
     ///
-    /// This module's header carries the two decisions specific to this
-    /// method in full: **R80** (why the local dedupe probe is
+    /// This module's header carries the two decisions specific to this method
+    /// in full: **"Three status vocabularies"** (why the local dedupe probe is
     /// [`JiraRepository::find_unclosed_for_test`] and not the open-bug lists'
-    /// predicate) and **R84** (why the issue body's detail is the failing
-    /// cases' concatenated `reason`, not an empty string).
+    /// predicate) and **"The issue body's detail text"** (why the issue body's
+    /// detail is the failing cases' concatenated `reason`, not an empty
+    /// string).
     ///
     /// # What "swallowed" covers, precisely
     ///
@@ -830,9 +834,26 @@ where
     ///   outward answer is the same empty-for-every-remaining-test result,
     ///   with one config read instead of *N* identical ones.
     /// * The port's own two calls failed — a transport or gateway error from
-    ///   [`JiraClient::create_or_find_issue`].
+    ///   [`JiraClient::create_or_find_issue`] — while at least one other test
+    ///   of the same request was filed or found, or with an error that is not
+    ///   [`DomainError::UpstreamEgress`].
     ///
     /// # What is never swallowed
+    ///
+    /// **A JIRA outage that left nothing filed.** Failed tests are tried in
+    /// `(test_name, test_file)` order, so identical requests make the same
+    /// attempts. The first [`JiraClient::create_or_find_issue`] failure that
+    /// is [`DomainError::UpstreamEgress`] of class `Unreachable`, `Timeout` or
+    /// `Authentication` **stops the pass**: the tenant has one JIRA endpoint
+    /// and one credential, so a later test cannot succeed, and trying every
+    /// test outlived the API gateway's request timeout. The tests after it are
+    /// logged once as not attempted. A `Rejected` failure (JIRA refusing one
+    /// issue's request) does not stop the pass. Then, when no test was filed
+    /// or found, the request answers the failure that stopped the pass, or
+    /// else the first `Rejected` one, which the REST layer maps to `503`
+    /// naming the `jira` channel and its class. A `200 []` here would read as
+    /// "nothing to file" while JIRA was down. When a test was filed or found
+    /// before the pass stopped, the answer is `200` with those entries.
     ///
     /// A run with **no** ingested rows at all is
     /// [`DomainError::RunNotIngested`], not an empty list — this gear has no
@@ -862,6 +883,9 @@ where
     /// [`Self::active_config`] makes before filing starts) — all three are
     /// grants this endpoint requires, not only the first.
     /// [`DomainError::Database`] on a query failure.
+    /// [`DomainError::UpstreamEgress`] (channel `jira`) when nothing was filed
+    /// or found and a JIRA call failed on egress — the failure that stopped
+    /// the pass, else the first `Rejected` one.
     pub async fn file_bugs(
         &self,
         ctx: &SecurityContext,
@@ -869,8 +893,9 @@ where
         test_name: Option<&str>,
     ) -> Result<Vec<IssueRef>, DomainError> {
         let access = self.bug_scope(ctx, actions::CREATE).await?;
-        // A second, separately-compiled scope for the two results tables —
-        // R87. `access` above authorizes the registry write; this authorizes
+        // A second, separately-compiled scope for the two results tables (this
+        // module's header, "The results reads compile their own scope").
+        // `access` above authorizes the registry write; this authorizes
         // the read of `qa_test_results`/`qa_test_case_results` this method
         // makes on the way to it, exactly like every other reader of those
         // tables in this crate.
@@ -885,11 +910,21 @@ where
             return Err(DomainError::RunNotIngested { run_id });
         }
 
-        let failed: Vec<TestResultRecord> = rows
+        let mut failed: Vec<TestResultRecord> = rows
             .into_iter()
             .filter(|row| row.status == STATUS_FAILED)
             .filter(|row| test_name.is_none_or(|name| row.test_name == name))
             .collect();
+        // `list_by_run` has no order, and the pass below stops at the first
+        // outage-class failure and otherwise answers the first `Rejected`
+        // one: without a fixed order two identical requests could make
+        // different attempts and answer different classes. `test_file` is unique
+        // within a run, so it breaks a `test_name` tie for good.
+        failed.sort_by(|a, b| {
+            a.test_name
+                .cmp(&b.test_name)
+                .then_with(|| a.test_file.cmp(&b.test_file))
+        });
         if failed.is_empty() {
             return Ok(Vec::new());
         }
@@ -906,7 +941,10 @@ where
         let config = self.active_config(ctx).await?;
 
         let mut outcomes = Vec::with_capacity(failed.len());
-        for row in &failed {
+        // The egress failure the request answers when nothing was filed or
+        // found: the one that stopped the pass, else the first `Rejected`.
+        let mut egress_failure = None;
+        for (index, row) in failed.iter().enumerate() {
             match self
                 .file_one(ctx, &access, &conn, row, config.as_ref(), &reasons)
                 .await
@@ -916,14 +954,29 @@ where
                     tracing::error!(
                         test_name = %row.test_name,
                         run_id = %run_id,
+                        failure = %err.failure_class(),
                         error = %err,
                         "failed to file a JIRA bug for a failed test; skipping \
                          (legacy manager/src/routes/settings.rs:624-627)",
                     );
+                    let stops = stops_the_pass(&err);
+                    if stops || (egress_failure.is_none() && is_egress(&err)) {
+                        egress_failure = Some(err);
+                    }
+                    if stops {
+                        log_not_attempted(run_id, &failed[index + 1..]);
+                        break;
+                    }
                 }
             }
         }
-        Ok(outcomes)
+        // Nothing filed or found, and JIRA (or the gateway) failed: the
+        // caller must see the outage, not a `200 []` that reads as "nothing
+        // to file". A partial success stays `Ok`.
+        match egress_failure {
+            Some(err) if outcomes.is_empty() => Err(err),
+            _ => Ok(outcomes),
+        }
     }
 
     /// One failing test's local-dedupe-then-file step of [`Self::file_bugs`].
@@ -936,12 +989,13 @@ where
         config: Option<&JiraConfig>,
         reasons: &HashMap<String, String>,
     ) -> Result<IssueRef, DomainError> {
-        // Step 1 of legacy's `create_or_find_issue` (`jira.rs:43-56`) — R80's
-        // predicate. `ctx.subject_tenant_id()` is explicit — fix round 1,
-        // Critical 1 (R86) — so a multi-tenant scope cannot make this probe
-        // answer with another tenant's row; it is the same tenant `upsert_bug`
-        // below writes under, so the probe and the write can never disagree
-        // about whose bug this is.
+        // Step 1 of legacy's `create_or_find_issue` (`jira.rs:43-56`) — its
+        // `!= 'Closed'` predicate. `ctx.subject_tenant_id()` is explicit — fix
+        // round 1, Critical 1 (the explicit-`tenant_id` rule) — so a
+        // multi-tenant scope cannot make this probe answer with another
+        // tenant's row; it is the same tenant `upsert_bug` below writes under,
+        // so the probe and the write can never disagree about whose bug this
+        // is.
         if let Some(existing) = self
             .jira
             .find_unclosed_for_test(conn, access, ctx.subject_tenant_id(), &row.test_name)
@@ -997,18 +1051,16 @@ where
         // `DO NOTHING` makes the first of those two calls a no-op rather than
         // a hazard.
         //
-        // **Best-effort, not propagated — fix round 1, Important 3
-        // (controller ruling R88).** Legacy is `let _ =
-        // self.track_bug(...)` on both of these call sites: local tracking
-        // failing does not undo an issue that already exists in JIRA. An
-        // earlier revision of this method let the `?` propagate, which is
+        // **Best-effort, not propagated — fix round 1, Important 3.** Legacy is
+        // `let _ = self.track_bug(...)` on both of these call sites: local
+        // tracking failing does not undo an issue that already exists in JIRA.
+        // An earlier revision of this method let the `?` propagate, which is
         // *stricter* than legacy and, on this exact error path, *worse*: the
-        // issue the port just created or found is real in JIRA, but
-        // propagating drops it from `file_bugs`' response and leaves no local
-        // row behind, so the very next call reaches the port again and
-        // duplicates it — the outcome the local probe above exists to
-        // prevent. Logged at error so the miss is visible; the caller still
-        // gets the key.
+        // issue the port just created or found is real in JIRA, but propagating
+        // drops it from `file_bugs`' response and leaves no local row behind,
+        // so the very next call reaches the port again and duplicates it — the
+        // outcome the local probe above exists to prevent. Logged at error so
+        // the miss is visible; the caller still gets the key.
         if let Err(err) = self
             .jira
             .upsert_bug(
@@ -1040,7 +1092,8 @@ where
         Ok(result)
     }
 
-    /// The failing cases' concatenated `reason`, by `test_file` — R84.
+    /// The failing cases' concatenated `reason`, by `test_file` — this
+    /// module's header, "The issue body's detail text".
     ///
     /// One read for the whole run rather than one per failing file: the run's
     /// case rows are already bounded (one run), and a per-file query would be
@@ -1068,6 +1121,44 @@ where
     }
 }
 
+/// Whether `err` is a JIRA egress failure of any class.
+const fn is_egress(err: &DomainError) -> bool {
+    matches!(err, DomainError::UpstreamEgress { .. })
+}
+
+/// Whether `err` ends a [`JiraService::file_bugs`] pass: an unreachable JIRA,
+/// a timeout or a refused credential. The tenant has one JIRA endpoint and one
+/// credential, so a later test cannot succeed where this one failed. A
+/// `Rejected` failure is JIRA refusing one issue's request, so the pass goes
+/// on.
+const fn stops_the_pass(err: &DomainError) -> bool {
+    matches!(
+        err,
+        DomainError::UpstreamEgress {
+            failure: EgressFailure::Unreachable
+                | EgressFailure::Timeout
+                | EgressFailure::Authentication,
+            ..
+        }
+    )
+}
+
+/// One line for the failed tests a stopped [`JiraService::file_bugs`] pass
+/// did not attempt.
+fn log_not_attempted(run_id: Uuid, skipped: &[TestResultRecord]) {
+    if skipped.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = skipped.iter().map(|row| row.test_name.as_str()).collect();
+    tracing::warn!(
+        run_id = %run_id,
+        not_attempted = skipped.len(),
+        tests = ?names,
+        "JIRA is unreachable, timed out or refused the credential; the remaining failed \
+         tests of this request were not attempted",
+    );
+}
+
 /// The document an unconfigured tenant reads, field for field with legacy's
 /// `Ok(None)` arm (`manager/src/routes/settings.rs:262-269`).
 fn blank_config() -> JiraConfig {
@@ -1081,7 +1172,7 @@ fn blank_config() -> JiraConfig {
     }
 }
 
-/// Pair `repo_id` and `plan_path` into a [`PlanRef`], enforcing R85's
+/// Pair `repo_id` and `plan_path` into a [`PlanRef`], enforcing the
 /// "together or neither" rule on `GET /qa/v1/jira/open-bugs`.
 ///
 /// [`crate::domain::service::saved_views::required_plan`]'s shape, without
@@ -1137,7 +1228,7 @@ fn optional_plan_ref(
 /// truncation boundary,
 /// `the_stored_summary_matches_the_one_sent_to_jira_past_the_truncation_boundary`
 /// — rather than leaving them to drift apart unnoticed.
-pub(crate) fn bug_summary(test_name: &str) -> String {
+pub fn bug_summary(test_name: &str) -> String {
     format!("[VHP] Test Failed: {test_name}")
         .chars()
         .take(JIRA_SUMMARY_MAX_CHARS)

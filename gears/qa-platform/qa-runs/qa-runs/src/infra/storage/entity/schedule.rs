@@ -32,8 +32,8 @@ pub struct Model {
     pub target_custom_plan_id: Option<Uuid>,
     /// The collect report URL, present only for a `collect` target. Carried
     /// because this table shares the run's target codec, not because a collect
-    /// schedule is a feature — `m20260818_000006_collect_target` argues both
-    /// halves.
+    /// schedule is a feature (`m20260818_000006_collect_target` (folded into `migrations::m20260813_000003_initial` by the docs squash)
+    /// made that argument; the initial migration keeps only the column).
     pub target_collect_url: Option<String>,
     /// The environment every fire targets. Ownership is verified at launch
     /// through a tenant-scoped qa-environments client and nowhere else — see
@@ -69,7 +69,7 @@ pub struct Model {
     /// (`manager/src/routes/schedules.rs::api_update_notifications`).
     ///
     /// **qa-runs owns these three columns and sends nothing.** The sending lives
-    /// in qa-insights (D9, Task 36), which reads them over the SDK when a
+    /// in qa-insights (Task 36), which reads them over the SDK when a
     /// scheduled run changes status. A schedule is a qa-runs aggregate, so a
     /// notification setting on it is a field of that aggregate, not a separate
     /// entity in another gear.

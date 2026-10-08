@@ -11,16 +11,15 @@
 //! `retained`.
 //!
 //! **What used to follow does not hold any more, and is retracted rather than
-//! restated.** This section used to conclude that a pending buffer is
-//! therefore safe left unbounded, "consistent with the no-cap decision
-//! (design §8) and bounded in practice by the flush period." That was true
-//! for a log read once. It stopped being true the moment a flapping API
-//! server made a watcher re-attach re-read a pod's *whole* log every 5 s
-//! while `append_log` concatenated each re-read onto the row — Finding #50 —
-//! because "bounded by the flush period" assumes one flush period's worth of
-//! *new* output, not the same output arriving again and again between
-//! flushes. With that fixed (the preceding commit; the resume position is
-//! recovered from a per-node kubelet emission instant, see
+//! restated.** This section used to conclude that a pending buffer is therefore
+//! safe left unbounded, "consistent with the no-cap decision and bounded in
+//! practice by the flush period." That was true for a log read once. It stopped
+//! being true the moment a flapping API server made a watcher re-attach re-read
+//! a pod's *whole* log every 5 s while `append_log` concatenated each re-read
+//! onto the row — Finding #50 — because "bounded by the flush period" assumes
+//! one flush period's worth of *new* output, not the same output arriving again
+//! and again between flushes. With that fixed (the preceding commit; the resume
+//! position is recovered from a per-node kubelet emission instant, see
 //! [`RunLogsRepository::log_resume_positions`](crate::domain::repos::RunLogsRepository::log_resume_positions)),
 //! what is left between two flushes really is one flush period's worth of a
 //! run's own output — and that can still be enormous for a genuinely chatty
@@ -784,7 +783,7 @@ mod tests {
     /// map while the first flush's failing write is still in flight, so
     /// `restore` has to merge a `taken` (pre-failure) with a `newer`
     /// (arrived-during-failure) rather than an empty map. Break-tested by
-    /// swapping `restore`'s two `push_str` operands (task-3-report.md).
+    /// swapping `restore`'s two `push_str` operands.
     #[tokio::test]
     async fn a_flush_that_fails_while_a_new_line_arrives_preserves_arrival_order() {
         let fx = fixture().await;
@@ -1023,7 +1022,7 @@ mod tests {
     /// **A single run's pending buffer is bounded.**
     ///
     /// `record` appended without limit between flushes. The module header
-    /// used to defend that as design §8's no-cap decision, "bounded in
+    /// used to defend that as the no-cap decision, "bounded in
     /// practice by the flush period" -- true for a log read once, and it was
     /// the second half of #50's growth while a re-attach re-appended the
     /// whole log every 5 s. That is fixed (the preceding commit); this bounds

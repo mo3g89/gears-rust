@@ -150,7 +150,7 @@ export function SchedulesPage() {
           <h1 className="text-xl font-semibold">Schedules</h1>
           <p className="text-muted-foreground">
             Manage automated test execution schedules — scoped to the selected
-            product. A schedule that can't be attributed to one product isn't
+            product, filtered in your browser. A schedule that can't be attributed to one product isn't
             listed here: its repository or custom plan has been deleted, or it
             runs a custom plan whose tests span two products or resolve to none.
           </p>

@@ -4,7 +4,7 @@
 //!
 //! This module is where ALL `SeaORM`-specific code lives:
 //! - `migrations/` — the database schema, append-only.
-//! - `entity/` — `SeaORM` entity definitions (Task 11).
+//! - `entity/` — `SeaORM` entity definitions.
 //! - `mapper.rs` — conversions between `SeaORM` models and `qa-insights-sdk`
 //!   contract types, plus the two derived values a repository must not leave to
 //!   a caller (`plan_key` and the column-width truncation).
@@ -47,6 +47,9 @@ pub mod migrations;
 pub mod notify_sea_repo;
 pub mod odata;
 pub mod results_sea_repo;
+#[cfg(all(test, feature = "integration"))]
+#[path = "results_race_pg_tests.rs"]
+mod results_race_pg_tests;
 pub mod saved_views_sea_repo;
 pub mod watermark_sea_repo;
 
@@ -55,10 +58,11 @@ pub mod watermark_sea_repo;
 /// **Pulled forward from Tasks 13-15 by Task 10**, and for a narrower reason
 /// than those tasks will have. They need it for ingest races; this needs it
 /// because `POSTGRES_UP` — the only dialect this gear actually ships — had
-/// *zero* automated verification. The two parity tests prove the three blobs
-/// agree with one another; nothing proved that any of them runs, and Postgres
-/// is the one where that matters. A syntax error or a rejected default in
-/// `POSTGRES_UP` would have reached a deployment with the whole suite green.
+/// *zero* automated verification. The two parity tests prove `POSTGRES_UP`
+/// and `SQLITE_UP` agree with one another; nothing proved that either runs,
+/// and Postgres is the one where that matters. A syntax error or a rejected
+/// default in `POSTGRES_UP` would have reached a deployment with the whole
+/// suite green.
 ///
 /// Gated on the `integration` feature so a default `cargo test` needs no Docker
 /// daemon:
@@ -71,7 +75,7 @@ pub mod watermark_sea_repo;
 /// and all. Tasks 13-15 extend this module rather than rebuilding it.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-pub(crate) mod test_db {
+pub mod test_db {
     use time::OffsetDateTime;
     use toolkit_db::secure::{AccessScope, Db};
     use uuid::Uuid;
@@ -117,6 +121,58 @@ pub(crate) mod test_db {
             .await
             .expect("failed to run qa-insights migrations");
         db
+    }
+
+    /// [`inmem_db`] stopped two migrations short — the schema and data as a
+    /// deployment held them **before** the notification backfill
+    /// (`m20260929_000003_seed_run_completed_notification_claims` and
+    /// `m20260929_000004_run_completed_notification_cutoff`).
+    ///
+    /// The point is to be able to write rows, and register finished runs, the
+    /// way a running deployment would have, and only then upgrade, through
+    /// [`apply_pending_migrations`]. A backfill tested against a
+    /// fully-migrated *empty* database proves nothing: it runs over no history,
+    /// and a backfill that did nothing at all would pass.
+    pub async fn inmem_db_before_the_notification_backfill() -> Db {
+        use toolkit_db::migration_runner::run_migrations_for_testing;
+        use toolkit_db::{ConnectOpts, connect_db};
+
+        let db = connect_db(
+            "sqlite::memory:",
+            ConnectOpts {
+                max_conns: Some(1),
+                min_conns: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("failed to connect to in-memory sqlite database");
+
+        run_migrations_for_testing(
+            &db,
+            super::migrations::migrations_before_the_notification_backfill(),
+        )
+        .await
+        .expect("failed to run qa-insights migrations up to the notification backfill");
+        db
+    }
+
+    /// Apply whatever of the real chain `db` has not had yet — the upgrade
+    /// itself, for a database built by
+    /// [`inmem_db_before_the_notification_backfill`].
+    ///
+    /// The runner records applied migrations per gear, so handing it the full
+    /// list after a partial one applies exactly the difference. This is the
+    /// real `Migrator` list, not a hand-picked pair: a migration left out of
+    /// it would leave this call a no-op and the test that follows red, which
+    /// is the right failure.
+    pub async fn apply_pending_migrations(db: &Db) {
+        use sea_orm_migration::MigratorTrait;
+        use toolkit_db::migration_runner::run_migrations_for_testing;
+
+        run_migrations_for_testing(db, super::migrations::Migrator::migrations())
+            .await
+            .expect("failed to apply the pending qa-insights migrations");
     }
 
     /// The scope a real PEP compiles for a tenant-isolated subject:

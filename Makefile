@@ -818,7 +818,7 @@ OPENAPI_BUILD_FEATURE_ARGS := $(if $(GEAR),$(GEAR_OPENAPI_FEATURE_ARGS),$(OPENAP
 
 # -------- Tests --------
 
-.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-types-registry-db test-cluster-pg test-rg-pg test-pricing-pg test-coord-pg test-fixtures-narrow test-fips test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git test-qa-platform-features
+.PHONY: test test-no-macros test-macros test-sqlite test-pg test-mysql test-db test-users-info-pg test-usage-collector-pg test-types-registry-db test-cluster-pg test-rg-pg test-pricing-pg test-coord-pg test-fixtures-narrow test-fips test-qa-runs-pg test-qa-insights-pg test-qa-catalog-pg test-qa-environments-pg test-qa-catalog-git test-qa-platform-features
 
 # Run all tests, or a single gear when GEAR=<gear> is set.
 # When GEAR= is set, cargo gears ls packages finds matching crates + their
@@ -1006,6 +1006,24 @@ test-qa-catalog-git: install-tools
 	@command -v git >/dev/null || (echo "git is required for test-qa-catalog-git" && exit 1)
 	cargo nextest run -p qa-catalog --features integration --tests
 
+## Run qa-catalog's real-Postgres tier (Docker required; one container per test,
+## see `test_support::pg_db`). The rest of the gear's DB tier is in-memory SQLite,
+## which admits one writer at a time, so two branch-cache writes of one repository
+## cannot overlap there -- `infra::storage::branch_cache_pg_tests` is the only test
+## that can falsify the idempotent `replace_branches` (DESIGN §3.3). `--retries 1`
+## for the reason `test-qa-runs-pg` gives.
+test-qa-catalog-pg: install-tools
+	cargo nextest run -p qa-catalog --features postgres --lib --retries 1
+
+## Run qa-environments' real-Postgres tier (Docker required; one container per
+## test, see `test_support::pg_db`). The rest of the gear's DB tier is in-memory
+## SQLite with one connection, which admits one writer at a time, so two upserts
+## of one variable cannot overlap there -- `infra::storage::variables_pg_tests`
+## is the only test that can falsify them (DESIGN §3.2). `--retries 1` for the
+## reason `test-qa-runs-pg` gives.
+test-qa-environments-pg: install-tools
+	cargo nextest run -p qa-environments --features postgres --lib --retries 1
+
 ## Run the unit tier of the two feature-gated adapters the shipped image
 ## enables (`deploy/cargo-features.argo`: runner-secret, qa-runs-argo).
 ## `make test-no-macros` is `cargo nextest run --workspace` with per-crate
@@ -1048,12 +1066,13 @@ test-qa-platform-features: install-tools
 
 ## Run the qa-platform Helm chart guards. No cluster needed -- these are
 ## `helm template` plus file reads -- so the `lint` job holds them.
-## Includes `test_no_system_gear_changes.py`, the guard FOOTPRINT names for the
-## reverted system-gear changes, `test_nginx_template.sh`, which is what
+## Includes `test_no_system_gear_changes.py`, the guard that keeps the
+## reverted changes to `gears/system/authz-resolver` and
+## `gears/system/event-broker` out, `test_nginx_template.sh`, which is what
 ## proves the SSE access-log redaction, `test_collect_exit_code.sh`
-## (WS2 Task 3), which proves the runner's collect cycle fails closed on a
+##, which proves the runner's collect cycle fails closed on a
 ## partial collect (some files refused or uncollectable), not only a total
-## one, and `check_no_password_in_argv.sh` (WS3 Task 6), which proves the
+## one, and `check_no_password_in_argv.sh`, which proves the
 ## Postgres password never appears in `sed`'s argv during entrypoint.sh's
 ## config render -- entrypoint.sh has no test harness of its own, so both of
 ## these extract the real decision/render out of the real file by line
@@ -1071,8 +1090,9 @@ test-qa-platform-features: install-tools
 ## against the other. Drift here is not a build failure; it is a pod stuck
 ## Pending with FailedMount on a stand.
 ##
-## Only test_no_system_gear_changes.py is pytest-shaped (it defines a
-## `test_*` function). Every other Python guard here is named `check_*.py`
+## Only `test_no_system_gear_changes.py` and `test_fetch_bundle_extraction.py`
+## are pytest-shaped (each defines `test_*` functions). Every other Python
+## guard here is named `check_*.py`
 ## (WS3 Task 5 -- these used to be `test_*.py` despite being `main()`
 ## scripts, which made `python3 -m pytest tests/` collect zero items from
 ## them and report a truthful-looking "1 passed" for a nine-file suite;
@@ -1107,14 +1127,30 @@ test-qa-platform-features: install-tools
 ## it never ships as its committed dev literal. The credential and the
 ## signature are a replacement, not a pair: a partial revert would restore
 ## the first while the second kept working, every test kept passing, and
-## nothing else in the tree noticed) are standalone
+## nothing else in the tree noticed) and `check_signing_secret_placement.py`
+## (the PLACEMENT of those same two signing secrets -- asserts that neither
+## HMAC root renders into any ConfigMap, that the object carrying the gears
+## config is a Secret whose body still contains BOTH roots, and that every
+## pod mounting it does so from a `secret:` volume. A different assertion
+## from check_bundle_token's: that one catches a transform that stopped
+## firing, and it passed throughout the entire life of this defect, because
+## the VALUE was right and only the OBJECT was wrong),
+## `check_config_rollout.py` (a config change rolls the gears Deployment and an
+## identical upgrade does not -- asserts every config source the gears pod
+## consumes is hashed into a `checksum/*` pod annotation) and
+## `check_design_config_keys.py` (DESIGN.md section 3.13 documents only keys
+## the gears' and the product plugins' config structs really have -- resolved
+## from each one's root struct through its nested structs, since every config struct is
+## `deny_unknown_fields` and a key written from a wrong table is a hard
+## startup failure) are standalone
 ## scripts -- a `main()` run via `if __name__ == "__main__"` -- so
 ## `python3 -m pytest tests/` collects zero items from them and would
-## silently skip every Python guard but `test_no_system_gear_changes.py`.
+## silently skip every Python guard but the two pytest-shaped ones.
 ## Each is therefore invoked directly, one recipe line per guard, so every
 ## guard in `deploy/helm/tests/` actually runs; a non-zero exit from any of
 ## them fails this target. `test_nginx_template.sh`,
-## `test_collect_exit_code.sh`, `check_no_password_in_argv.sh` and
+## `test_collect_exit_code.sh`, `check_no_password_in_argv.sh`,
+## `check_deploy_secrets_not_in_argv.sh`, `test_runner_pytest_args.sh` and
 ## `check_secret_name_parity.sh` are bash, invoked the same direct way.
 ##
 ## THE GUARD COUNT IS DELIBERATELY NOT WRITTEN HERE ANY MORE. It was, and it
@@ -1132,20 +1168,37 @@ helm-tests:
 	python3 gears/qa-platform/deploy/helm/tests/check_metrics_config.py
 	python3 gears/qa-platform/deploy/helm/tests/check_no_environment_hardcode.py
 	python3 gears/qa-platform/deploy/helm/tests/check_pins.py
+	python3 gears/qa-platform/deploy/helm/tests/check_image_pins.py
+	python3 gears/qa-platform/deploy/helm/tests/check_log_level_redaction.py
 	python3 gears/qa-platform/deploy/helm/tests/check_runner_service_account.py
+	python3 gears/qa-platform/deploy/helm/tests/check_secret_writer_rbac.py
 	python3 gears/qa-platform/deploy/helm/tests/check_runner_networkpolicy.py
 	python3 gears/qa-platform/deploy/helm/tests/check_release_isolation.py
 	python3 gears/qa-platform/deploy/helm/tests/check_replica_guard.py
 	python3 gears/qa-platform/deploy/helm/tests/check_realm_secrecy.py
+	python3 gears/qa-platform/deploy/helm/tests/check_postgres_password.py
+	python3 gears/qa-platform/deploy/helm/tests/check_ci_render_values.py
 	python3 gears/qa-platform/deploy/helm/tests/check_hook_weights.py
 	python3 gears/qa-platform/deploy/helm/tests/check_tls_secret_name.py
 	python3 gears/qa-platform/deploy/helm/tests/check_smtp_egress.py
 	python3 gears/qa-platform/deploy/helm/tests/check_bundle_token.py
 	python3 gears/qa-platform/deploy/helm/tests/check_config_rollout.py
+	python3 gears/qa-platform/deploy/helm/tests/check_design_config_keys.py
+	python3 gears/qa-platform/deploy/helm/tests/check_signing_secret_placement.py
 	bash gears/qa-platform/deploy/helm/tests/test_nginx_template.sh
 	bash gears/qa-platform/deploy/helm/tests/test_collect_exit_code.sh
 	bash gears/qa-platform/deploy/helm/tests/check_no_password_in_argv.sh
+	bash gears/qa-platform/deploy/helm/tests/check_deploy_secrets_not_in_argv.sh
+	bash gears/qa-platform/deploy/helm/tests/test_runner_pytest_args.sh
 	bash gears/qa-platform/deploy/helm/tests/check_secret_name_parity.sh
+
+## Re-resolve every pinned base-image digest and re-fetch every published
+## binary checksum the qa-platform Dockerfiles carry (finding #95). Needs
+## network and docker, so it is not in `helm-tests` -- run it when bumping a pin;
+## the offline half of the same guard is in `helm-tests`.
+.PHONY: qa-pins-online
+qa-pins-online:
+	python3 gears/qa-platform/deploy/helm/tests/check_image_pins.py --online
 
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
 ## Covers:
@@ -1602,7 +1655,7 @@ ci_docs: lychee gts-docs
 	$(call print_target_banner)
 
 # Run CI pipeline locally, requires docker
-ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg test-types-registry-db test-qa-runs-pg test-qa-insights-pg test-qa-catalog-git test-qa-platform-features helm-tests lychee gts-docs dylint
+ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg test-usage-collector-pg test-types-registry-db test-qa-runs-pg test-qa-insights-pg test-qa-catalog-pg test-qa-environments-pg test-qa-catalog-git test-qa-platform-features helm-tests lychee gts-docs dylint
 	$(call print_target_banner)
 
 ## Build the cf-gears-example-server release binary, or a single gear when GEAR=<gear> is set

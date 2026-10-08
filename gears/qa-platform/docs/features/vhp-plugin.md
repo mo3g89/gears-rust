@@ -36,6 +36,22 @@ Version, build and base URL land in the dedicated columns; the rest of the topol
 * `service_account: None` — the runner authenticates to the cluster with the mounted kubeconfig,
   not a pod identity, so `RunAccess` carries the field but this plugin never populates it.
 
+### Run variables and which of them a run parameter cannot override
+
+The plugin's run variables are `E2E_VHP_BASE_URL` (the observed base URL),
+`VPADM_BASE_DOMAIN` (that URL's bare host), `E2E_K8S_NAMESPACE` (the namespace the install was
+observed in) and `KUBECONFIG` (the path the kubeconfig is mounted at, `/.kube/kubeconfig`). These
+spellings are frozen: existing test repositories read them by name.
+
+`env_contract` reserves two of them, `E2E_K8S_NAMESPACE` and `KUBECONFIG`. Both are already in
+the platform's reserved floor (PRD §5.4), so the plugin's own list adds no name to the union
+today; it states them so that the refusal is the plugin's declared contract rather than a
+coincidence of the floor: a run parameter of either name is refused, because each is a fact
+about the target, not a knob. `E2E_VHP_BASE_URL` and `VPADM_BASE_DOMAIN` are deliberately **not**
+reserved, at parity with the source system (which let a run parameter override the variable the
+plugin supplies), so a run parameter of either name overrides what the plugin
+supplies. Closing that is a product decision, not something to change from this plugin's side.
+
 `qa-connector-k8s`'s secret writer is what materialises the referenced secret into the cluster the
 runner executes in.
 

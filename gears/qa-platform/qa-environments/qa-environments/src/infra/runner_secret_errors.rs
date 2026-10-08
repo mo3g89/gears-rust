@@ -18,7 +18,7 @@
 //! The text these produce is written into `version_detect_error`, which is
 //! published on `EnvironmentDto` and rendered on the environment page, so it
 //! must never carry anything credential-derived — the rule the 2026-08-28 leak
-//! established (**D-CH-5**).
+//! established: **a failed cluster read classifies its error, never echoes it.**
 
 use kube::config::KubeconfigError;
 

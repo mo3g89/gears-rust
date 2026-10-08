@@ -121,9 +121,29 @@ into the historical model, correlates failures with JIRA, and sends notification
 * Live log streaming and durable log archiving.
 * Typed result ingestion at file and case granularity.
 * Analytics: dashboard, overview, per-build and per-test breakdowns, export, saved views.
-* JIRA correlation and polling; Slack and email notifications.
-* A browser UI covering all of the above.
-* A Helm chart deploying the subsystem with Postgres, Keycloak and Argo wiring.
+* JIRA correlation and polling; Slack and email notifications. **What notifies, exactly**: a run
+  that finished after this deployment's notification cutoff, whose outcome the tenant's
+  `notify_on_failure`/`notify_on_success` policy admits, over each channel the tenant has switched
+  on — and, for Slack only, whose schedule also has Slack notifications on. A run no schedule
+  launched notifies on the tenant's settings like any other. The stored
+  `notify_on_schedule_completion` flag is round-tripped by the settings API and read by nothing.
+
+  **Until 2026-09-29 nothing was notified at all**: `notify_run_completed` had no production caller
+  until the reconcile sweep was made to call it that day, and Slack could not deliver until
+  2026-09-30 (ADR-0011's 2026-09-30 amendment). The routing the sweep first shipped with was three
+  narrower rules, all faithful ports of the source system: an ad-hoc run notified on no channel, one
+  schedule flag silenced email as well as Slack, and the two outcome flags were inert so a pass and
+  a failure notified alike. The owner ruled all three reversed the same day, accepting the
+  divergence from the source system and the extra mail.
+
+  The outcome policy's default is failures only, which would have *silenced* the passing runs of a
+  tenant on the intermediate build (between the sweep first calling the notifier and the outcome
+  gates landing the same day, when every scheduled run notified whatever its outcome) — a reduction,
+  where the ruling was to widen — so a migration opts existing tenants in and leaves the default
+  alone for new ones (DESIGN §3.5). A deployment upgrading from before 2026-09-29 was announcing
+  nothing, so for it the opt-in decides what it starts receiving. ADR-0011 and
+  `domain::notify::routing`'s header carry the rest of the reasoning. * A browser UI covering all of
+  the above. * A Helm chart deploying the subsystem with Postgres, Keycloak and Argo wiring.
 
 ### 4.2 Out of Scope
 
@@ -134,6 +154,10 @@ into the historical model, correlates failures with JIRA, and sends notification
 * Multi-team tenancy beyond a single designated tenant per deployment (see
   `cpt-cf-qa-constraint-single-tenant-deployment`).
 * Runtime installation of plugins. A new product requires a rebuild.
+* A one-shot import of an existing VHP Test Runner PostgreSQL database (products, repositories, custom
+  plans, environment metadata, run and test results, JIRA bugs, saved views). An earlier draft required
+  one; it was dropped on 2026-10-07. The subsystem starts with an empty history, and nothing in it
+  depends on imported rows.
 
 ## 5. Functional Requirements
 
@@ -163,7 +187,9 @@ folder, and the plugin instance that governs it.
 
 The system MUST register test repositories per product with a URL, default branch and content root,
 optionally authenticated by a credstore-held credential; MUST clone and fetch them on demand; and
-MUST cache their branch list. A sync failure MUST be visible on the repository rather than only in
+MUST cache their branch list. A read of a branch that has not been synced yet MUST sync it when the
+remote has the branch, and MUST answer not-found when it does not, so launching on a non-default
+branch needs no manual sync. A sync failure MUST be visible on the repository rather than only in
 logs.
 
 - **Actors**: `cpt-cf-qa-actor-admin`
@@ -304,6 +330,10 @@ re-validate them when a run is re-run. Validation covers the permitted character
 list, rejection of duplicates, and caps on the number of parameters and on the length of a name and
 of a value. Parameters are stored in plain text and MUST NOT be used for tokens or passwords.
 
+**The reserved floor.** A run parameter may not be named `APP_BUILD`, `APP_VERSION`, `E2E_K8S_NAMESPACE`, `KUBECONFIG`, `PRODUCT_KEY`, `QA_RUNNER_PYTEST_ARGS`, `RP_API_KEY`, `RP_PROJECT`, `SKIP_TESTS_WITH_BUGS`, `TEST_BUNDLE_URL`, `TEST_FILES` or `TEST_VERSION`, on any product. Each names something the platform itself sets in the runner's environment, and `QA_RUNNER_PYTEST_ARGS` would let a parameter pass pytest flags that deselect failing tests. A product plugin may reserve more names through its run-variable contract; it can add to this floor and never remove from it.
+
+Pipeline and environment variables are refused under the same names (qa-environments' `RESERVED_VARIABLE_NAMES`), because they reach the same runner environment.
+
 - **Actors**: `cpt-cf-qa-actor-engineer`, `cpt-cf-qa-actor-ci`
 
 - [ ] `p1` - **ID**: `cpt-cf-qa-fr-runs-env-assembly`
@@ -400,9 +430,16 @@ credentials MUST come from credstore and egress MUST go through the platform gat
 
 - [ ] `p1` - **ID**: `cpt-cf-qa-fr-insights-notifications`
 
-The system MUST notify on run outcomes over Slack and email, per tenant, with per-event toggles, a
-template preview, a test send, and an audit record of every attempt. A run MUST NOT be notified
-twice for the same event.
+The system MUST notify on run outcomes over Slack and email, per tenant, with a template preview, a
+test send, and an audit record of every attempt. A run MUST NOT be notified twice for the same
+event, except that a send whose outcome is unknown (it timed out) MAY be repeated rather than lost
+(DESIGN §3.5, "Egress"). A tenant can switch each channel and each outcome (`notify_on_failure`, `notify_on_success`)
+on or off.
+
+**Not implemented: per-event toggles.** Exactly one event is produced, a run completing, so there
+is nothing to toggle between. The two stored flags that were meant to be per-event,
+`run_queue_queued_slack_enabled` and `notify_on_schedule_completion`, are round-tripped by the
+settings API and read by nothing (DESIGN §3.5, "What actually notifies").
 
 - **Actors**: `cpt-cf-qa-actor-admin`
 
@@ -465,6 +502,16 @@ All endpoints live under `/qa/v1`, are described by the generated OpenAPI docume
 problem-detail errors. Collection endpoints support OData query. The surface is enumerated per gear
 in [DESIGN.md](./DESIGN.md) §3.2–§3.5.
 
+**Unknown query parameters are silently ignored.** No `*Query` struct in any of the four gears carries
+`deny_unknown_fields`, and the queue read in particular tolerates OData `$`-parameters, so a
+misspelled or retired parameter name is dropped rather than answered with a 400. That is the rule a
+client has to code against, and it is the defect that bit when `platform_id` was renamed
+`environment_id`: a caller still sending `GET /qa/v1/queue?platform_id=…` would have received the
+whole deployment's queue instead of one environment's. The rename is therefore guarded by name — the
+launch body, the schedule body and the queue read answer 400 naming `platform_id`
+(`DESIGN.md` §3.8, "`platform_id` on the wire is refused, not accepted") — and any future rename of
+a query parameter needs the same explicit guard, because nothing else will catch it.
+
 ### 7.2 SDK crates
 
 `qa-environments-sdk`, `qa-catalog-sdk`, `qa-runs-sdk` and `qa-insights-sdk` carry each gear's
@@ -482,10 +529,14 @@ interface. See [ADR-0006](./ADR/0006-cpt-cf-qa-adr-product-plugins.md) and
 
 - [ ] `p1` - **ID**: `cpt-cf-qa-contract-egress`
 
-All outbound HTTP MUST go through the platform's Outbound API Gateway, which injects credentials and
-controls egress. The contract permits **exactly one** direct-HTTP exception, and it belongs to
+All outbound HTTP MUST go through the platform's Outbound API Gateway, which controls egress and, for
+header-shaped credentials, injects them. The contract permits **exactly one** direct-HTTP exception, and it belongs to
 qa-catalog's git transport ([ADR-0005](./ADR/0005-cpt-cf-qa-adr-git-egress.md)). JIRA and Slack go
 through the gateway; a `reqwest` dependency in qa-insights would be a violation of this contract.
+Slack's credential is the one HTTP credential the gateway cannot inject — an incoming webhook's
+secret is its URL path — so qa-insights resolves the webhook URL from credstore itself, accepts
+only `https://hooks.slack.com/services/…`, and still sends it through the gateway
+([ADR-0011](./ADR/0011-cpt-cf-qa-adr-smtp-egress.md), amendment of 2026-09-30).
 
 **SMTP does not, and is the contract's one non-HTTP exception**
 ([ADR-0011](./ADR/0011-cpt-cf-qa-adr-smtp-egress.md)). The gateway speaks HTTP; SMTP is a stateful,
@@ -514,7 +565,7 @@ The typed events a runner reports are the contract between a runner and the cont
 | UC-7 | Schedule a nightly run | admin | The schedule fires once per due instant |
 | UC-8 | Collect case counts | engineer | Expected case counts recorded per file, with no environment involved |
 | UC-9 | Investigate a failure | engineer | Per-case result, its history, and its correlated JIRA issue |
-| UC-10 | Be told about a failure | admin | Slack or email notification, sent once, audited |
+| UC-10 | Be told a run finished (scheduled or ad hoc) | admin | Slack or email notification per the tenant's outcome flags, sent once, audited — see §4.1 |
 | UC-11 | Install the platform | operator | One Helm install brings the stack up |
 
 ## 9. Acceptance Criteria

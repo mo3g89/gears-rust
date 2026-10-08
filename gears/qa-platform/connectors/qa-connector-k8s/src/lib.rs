@@ -13,12 +13,9 @@
 //! to keep: "`kube` and `k8s-openapi` may appear in the dependency tree only
 //! under the `argo` cargo feature of `qa-runs` and in `qa-connector-k8s`,
 //! which is linked only by the VHP plugin" — this crate is named in that
-//! sentence by design, not as an oversight. (`PRODUCT-PLUGINS-DESIGN.md`
-//! §4.1 and an "ADR-0001 2026-09-04 amendment" were cited here previously;
-//! neither ever existed — `PRODUCT-PLUGINS-DESIGN.md` is not in the
-//! repository, and before 2026-09-18 ADR-0001 had exactly one revision, its
-//! 2026-08-12 original, with no amendment section. ADR-0001's `## Amendments`
-//! section, added that day, is the real place these two facts belong now.)
+//! sentence by design, not as an oversight. ADR-0001's `## Amendments` section is the
+//! place these two facts are recorded (before 2026-09-18 ADR-0001 had exactly
+//! one revision, its 2026-08-12 original, with no amendment section).
 //! The claim this crate makes good on, stated precisely
 //! because the looser version of
 //! it was wrong and shipped: **this is the only qa-platform crate that names
@@ -45,10 +42,11 @@
 //! # Where the code came from
 //!
 //! Every module here was lifted from `qa-environments/src/infra/observer/`,
-//! which stays in place and stays active behind its `platform-observation`
-//! feature until Task 19 removes it. This is a **copy**: Phase C must not
-//! change `qa-environments`' behaviour, so both paths exist side by side
-//! until the one-way door in Phase E. Each module's header names its origin.
+//! then behind its `platform-observation` feature. It was a **copy**: Phase C
+//! must not change `qa-environments`' behaviour, so both paths existed side by
+//! side until the one-way door in Phase E. Task 19b deleted the observer and
+//! moved its runner-`Secret` writer out of that directory. Each module's
+//! header names its origin and what is left of it.
 //!
 //! What did **not** come along: the VHP install-topology rules
 //! (`core-install-metadata`, `vp-gateway-hostnames`, `platformVersion`). Those

@@ -3,17 +3,16 @@
 //!
 //! # It translates errors and nothing else
 //!
-//! Every method here is one SDK call plus error translation — a plain
-//! `map_err` for four of the five, and a `match` for
-//! [`QaRunsReader::get_schedule_notifications`] (Task 38, R105) only because
-//! `NotFound` there folds into `Ok(None)` rather than an error, per that
-//! port method's own doc. That is still deliberate translation and not a
-//! decision: the port's five methods were chosen to match qa-runs' contract
-//! exactly — same bounds, same ordering guarantee, same "a run still
-//! running is never returned" — precisely so that this file could hold no
-//! behaviour worth a bug. Anything that looks like a decision belongs on
-//! the far side of the port, in [`crate::domain::service`], where a fake can
-//! reach it.
+//! Every method here is one SDK call plus error translation — a plain `map_err`
+//! for four of the five, and a `match` for
+//! [`QaRunsReader::get_schedule_notifications`] (Task 38) only because
+//! `NotFound` there folds into `Ok(None)` rather than an error, per that port
+//! method's own doc. That is still deliberate translation and not a decision:
+//! the port's five methods were chosen to match qa-runs' contract exactly — same
+//! bounds, same ordering guarantee, same "a run still running is never returned"
+//! — precisely so that this file could hold no behaviour worth a bug. Anything
+//! that looks like a decision belongs on the far side of the port, in
+//! [`crate::domain::service`], where a fake can reach it.
 //!
 //! # One struct, two traits — not two structs
 //!
@@ -415,7 +414,7 @@ mod tests {
         assert!(matches!(on_subject(denied), DomainError::Forbidden));
     }
 
-    /// R105: a schedule that cannot be resolved is `Ok(None)`, not an error —
+    /// A schedule that cannot be resolved is `Ok(None)`, not an error —
     /// [`RunsReader::get_schedule_notifications`]'s own doc says why "deleted"
     /// and "not visible" are folded together and treated as "no schedule"
     /// rather than surfaced to `NotifyService`.

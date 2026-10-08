@@ -136,9 +136,10 @@ fn a_blank_role_claimed_attribute_projects_to_none() {
 }
 
 // Two tests were deleted here with `legacy_cluster_status`, which computed a
-// value for the `cluster_status` column `m20260903_000012` dropped. They pinned
-// that a plugin naming one of legacy's four statuses in its `detail` had that
-// word used verbatim, and that anything else fell back to the coarse
+// value for the `cluster_status` column `m20260903_000012` (folded into
+// `migrations::m20260812_000001_initial` by the docs squash) dropped. They
+// pinned that a plugin naming one of legacy's four statuses in its `detail` had
+// that word used verbatim, and that anything else fell back to the coarse
 // `HealthState` projection. There is no legacy spelling to recover any more --
 // `health_state` and `health_detail` are the only health columns, and
 // `the_four_role_claimed_attributes_are_projected` above covers what remains of

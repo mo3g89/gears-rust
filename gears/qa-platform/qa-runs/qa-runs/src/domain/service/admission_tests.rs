@@ -2072,10 +2072,14 @@ pub(in crate::domain::service) mod fakes {
             name: "staging".to_owned(),
             // **Since Task 18 every environment a run targets must name a
             // product**, because that is what resolves the plugin that
-            // says how to reach it (**D6**: there is no fallback path). An
-            // environment with `None` here fails its runs' dispatch, which
-            // `a_run_whose_environment_names_no_product_cannot_dispatch`
-            // is what covers — so this default is `Some`.
+            // says how to reach it (every product names a plugin —
+            // `qa_products.plugin_instance_id` is NOT NULL, DESIGN §3.8,
+            // "qa-catalog schema" — so there is no fallback path). Since
+            // Task 20b the field is a plain `Uuid`, so a productless
+            // environment is unrepresentable here; the test that covered its
+            // dispatch refusal
+            // (`a_run_whose_environment_names_no_product_cannot_dispatch`)
+            // went with it — see the note in `dispatch_tests.rs`.
             product_id: PRODUCT,
             description: None,
             available: true,
@@ -2090,12 +2094,12 @@ pub(in crate::domain::service) mod fakes {
             // **Keyed with the plugin double's own key.** Before Task 19 this
             // was an empty list beside `kubeconfig_credstore_ref`, and dispatch
             // derived the key from `sole_required_secret_key(schema)`. The
-            // column is gone (ruling F-2), so the key comes from the row, and
+            // column is gone, so the key comes from the row, and
             // an empty list here means "this environment stores no credential"
             // -- a real state, but not this fixture's.
             credentials: vec![qa_environments_sdk::EnvironmentCredential {
                 key: PLUGIN_SECRET_KEY.to_owned(),
-                credstore_ref: "credstore://kubeconfig".to_owned(),
+                credstore_ref: "sv-staging-kubeconfig".to_owned(),
             }],
             observed_attrs: qa_environments_sdk::ObservedAttrs::default(),
             config: serde_json::json!({}),
@@ -2388,7 +2392,7 @@ pub(in crate::domain::service) mod fakes {
     /// A product plugin shaped like a real one, product-neutrally.
     ///
     /// **Not a copy of `qa-vhp-product-plugin`.** It declares one required
-    /// secret (so `sole_required_secret_key` resolves), mounts it, and returns
+    /// secret (as every plugin in this tree does), mounts it, and returns
     /// the one variable that names the mount — the minimum a dispatch needs.
     /// Its variables are deliberately *not* VHP's: a double that reproduced
     /// VHP's four names would let a dispatch test "prove" the fixture by
@@ -2403,8 +2407,9 @@ pub(in crate::domain::service) mod fakes {
         pub(in crate::domain::service) reserved: Vec<String>,
         /// When set, `prepare_run_access` refuses with this classified detail.
         pub(in crate::domain::service) refuse: Option<&'static str>,
-        /// A second required secret, so `sole_required_secret_key` resolves to
-        /// nothing and the legacy single-reference column cannot be keyed.
+        /// A second required secret in `credential_schema`. Before Task 19 this
+        /// made the legacy single-reference column unkeyable at dispatch; since
+        /// every reference is stored beside its key, it only widens the schema.
         pub(in crate::domain::service) two_required_secrets: bool,
         /// The runner shape this double declares.
         ///
@@ -2646,7 +2651,7 @@ pub(in crate::domain::service) mod fakes {
     // -----------------------------------------------------------------------
 
     /// Serves one plan per repository, one bundle per build, and can fail the
-    /// first bundle build so decision D4's single retry is observable.
+    /// first bundle build so `build_bundle`'s single retry is observable.
     #[derive(Default)]
     pub(in crate::domain::service) struct FakeCatalog {
         pub(in crate::domain::service) test_files: Mutex<Vec<String>>,
@@ -2654,6 +2659,9 @@ pub(in crate::domain::service) mod fakes {
         pub(in crate::domain::service) metas: Mutex<Vec<TestFileMeta>>,
         pub(in crate::domain::service) fail_meta: Mutex<bool>,
         pub(in crate::domain::service) fail_bundle_times: Mutex<u32>,
+        /// When set, every `sync_repo` answers this error verbatim — a
+        /// refusal whose category and message are the point.
+        pub(in crate::domain::service) fail_sync: Mutex<Option<QaCatalogError>>,
         pub(in crate::domain::service) syncs: Mutex<Vec<(Uuid, SyncRequest)>>,
         /// `(repo_id, branch)` of every `list_plans` call — the collect
         /// dispatch's only catalog read for its file set.
@@ -2821,6 +2829,9 @@ pub(in crate::domain::service) mod fakes {
             req: SyncRequest,
         ) -> Result<TestRepository, QaCatalogError> {
             self.syncs.lock().unwrap().push((id, req));
+            if let Some(error) = self.fail_sync.lock().unwrap().clone() {
+                return Err(error);
+            }
             let stamp = now();
             Ok(TestRepository {
                 id,
@@ -3321,7 +3332,7 @@ pub(in crate::domain::service) mod fakes {
                 environments: Arc::clone(&self.environments) as Arc<dyn QaEnvironmentsClientV1>,
                 product_plugins: Arc::clone(&self.product_plugins) as Arc<dyn ProductPluginPort>,
                 executor: Arc::clone(&executor),
-                // Task 15: a terminal transition releases the run's live log channel.
+                // A terminal transition releases the run's live log channel.
                 logs: Arc::clone(&logs) as Arc<dyn crate::domain::service::LogFanout>,
                 locks,
                 limits: self.limits,
@@ -4215,8 +4226,8 @@ impl RunExecutor for YieldingListing {
 /// **The race `enforce_global_cap` was.** It read `list_active()`, compared, and
 /// returned; the run it admitted does not enter that listing until it is
 /// submitted, so two concurrent callers both read an empty cluster and both
-/// passed a cap of one — and the guide makes this the one cap force start may not
-/// override (`exclusive-runs-and-the-queue.md:117`).
+/// passed a cap of one — and the legacy guide makes this the one cap force start may not
+/// override.
 ///
 /// Platformless runs, so the outcome is decided by the cap and nothing else: no
 /// queue row, no lease, no platform lock.

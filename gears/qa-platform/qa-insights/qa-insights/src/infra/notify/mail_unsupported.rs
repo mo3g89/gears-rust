@@ -3,10 +3,11 @@
 //!
 //! # This type outlived the decision that created it
 //!
-//! It was built for D10: config, routing and dedupe shipped for email exactly
+//! It was built for the original design, which deferred the SMTP socket:
+//! config, routing and dedupe shipped for email exactly
 //! as for Slack, and the SMTP socket was deferred, so this adapter reported
 //! `Ok(SendOutcome::UnsupportedEgress)` — never an `Err`, by a property the
-//! port's own header claimed for the *port*. D10 is closed
+//! port's own header claimed for the *port*. ADR-0011 reversed that deferral
 //! ([`crate::domain::ports::mail_client`]'s header), and
 //! [`crate::infra::notify::mail_smtp::SmtpMailClient`] is the adapter that
 //! sends. **This type did not go away with it**, exactly as its own replacement

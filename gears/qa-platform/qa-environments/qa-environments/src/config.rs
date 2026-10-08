@@ -46,7 +46,7 @@ pub struct QaEnvironmentsConfig {
     pub max_variables: usize,
 
     /// How to reach the **Argo** cluster that
-    /// `KubeRunnerSecretWriter::ensure_runner_secret` (D4) writes each runner
+    /// `KubeRunnerSecretWriter::ensure_runner_secret` writes each runner
     /// `Secret` into — a different cluster from any environment's own. Only
     /// *meaningful* in a build carrying
     /// the `runner-secret` cargo feature — `crate::gear::build_runner_secret_writer`
@@ -123,7 +123,7 @@ impl Default for ArgoObserverConfig {
     }
 }
 
-/// The background observation ticker's settings (Task 8): `qa-environments.observation`.
+/// The background observation ticker's settings: `qa-environments.observation`.
 ///
 /// Mirrors legacy's `PlatformVersionPollerConfig`
 /// (`platform_version_poller.rs`): `enabled` is the *sole* on/off switch, and
@@ -151,6 +151,16 @@ pub struct ObservationConfig {
     /// [`Self::effective_poll_interval_seconds`] — never raw — so this field
     /// itself carries no guarantee about its lower bound.
     pub poll_interval_seconds: u64,
+    /// Seconds one environment's `observe` may run before the platform
+    /// abandons it and records a `Timeout`, on the ticker and on
+    /// `POST /qa/v1/environments/{id}/refresh` alike. Read only through
+    /// [`Self::effective_observe_timeout`], which floors it at one second: a
+    /// zero must not disable the bound, because an unbounded plugin call is
+    /// the defect this exists for. Default 300 s, equal to the default poll
+    /// interval and above VHI's worst legitimate path (agent start, up to
+    /// 40 s, plus four sequential commands of up to 60 s each), so no
+    /// legitimate observation is cut.
+    pub observe_timeout_seconds: u64,
 }
 
 impl Default for ObservationConfig {
@@ -158,6 +168,7 @@ impl Default for ObservationConfig {
         Self {
             enabled: true,
             poll_interval_seconds: 300,
+            observe_timeout_seconds: 300,
         }
     }
 }
@@ -183,6 +194,12 @@ impl ObservationConfig {
         }
         self.poll_interval_seconds
             .max(Self::MIN_POLL_INTERVAL_SECONDS)
+    }
+
+    /// [`Self::observe_timeout_seconds`] as a deadline, floored at one second.
+    #[must_use]
+    pub fn effective_observe_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.observe_timeout_seconds.max(1))
     }
 }
 
@@ -217,6 +234,7 @@ argo:
 observation:
   enabled: true
   poll_interval_seconds: 300
+  observe_timeout_seconds: 90
 ";
         let cfg: QaEnvironmentsConfig = serde_yaml::from_str(yaml)
             .expect("an --argo deployment's config must parse in ANY build");
@@ -227,6 +245,11 @@ observation:
         assert_eq!(cfg.argo.namespace, "argo");
         assert!(cfg.observation.enabled);
         assert_eq!(cfg.observation.poll_interval_seconds, 300);
+        assert_eq!(cfg.observation.observe_timeout_seconds, 90);
+        assert_eq!(
+            cfg.observation.effective_observe_timeout(),
+            std::time::Duration::from_secs(90)
+        );
         // The defaults still fill in what the document does not name, so
         // `deny_unknown_fields` is doing typo-catching and nothing else.
         assert_eq!(cfg.argo.secret_prefix, "qa-platform-");
@@ -251,6 +274,7 @@ argo:
             ObservationConfig {
                 enabled: true,
                 poll_interval_seconds: 0,
+                ..ObservationConfig::default()
             }
             .effective_poll_interval_seconds(),
             60
@@ -259,6 +283,7 @@ argo:
             ObservationConfig {
                 enabled: true,
                 poll_interval_seconds: 30,
+                ..ObservationConfig::default()
             }
             .effective_poll_interval_seconds(),
             60
@@ -267,9 +292,32 @@ argo:
             ObservationConfig {
                 enabled: true,
                 poll_interval_seconds: 300,
+                ..ObservationConfig::default()
             }
             .effective_poll_interval_seconds(),
             300
+        );
+    }
+
+    /// The deadline's default is the default poll interval, 300 s.
+    #[test]
+    fn the_observe_timeout_defaults_to_three_hundred_seconds() {
+        assert_eq!(
+            ObservationConfig::default().effective_observe_timeout(),
+            std::time::Duration::from_mins(5)
+        );
+    }
+
+    /// A zero must not disable the bound: it is floored at one second.
+    #[test]
+    fn a_zero_observe_timeout_is_floored_at_one_second() {
+        assert_eq!(
+            ObservationConfig {
+                observe_timeout_seconds: 0,
+                ..ObservationConfig::default()
+            }
+            .effective_observe_timeout(),
+            std::time::Duration::from_secs(1)
         );
     }
 }

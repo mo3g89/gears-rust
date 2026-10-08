@@ -148,13 +148,18 @@ use uuid::Uuid;
 /// These are `qa_product_sdk::access`'s types unchanged, not wrappers. A local
 /// mirror would be a second definition of an interface a plugin author reads
 /// from the SDK, and the two would drift the first time either side gained a
-/// field — the failure mode spec §5.3 records for `RunVarContract::names`.
+/// field — the failure mode `RunVarContract::names` once had.
 ///
 /// [`RunAccess`] is what this port's `KubeconfigMount` generalised into
-/// (spec §5.2, §7) — Task 17 replaced the field, Task 18 deleted the type: a
+/// — Task 17 replaced the field, Task 18 deleted the type: a
 /// plugin says which credentials to mount, which variables to add and which
 /// service account to assume, and no part of this gear names a product.
-pub use qa_product_sdk::access::{MountSpec, RunAccess, RunnerSpec};
+pub use qa_product_sdk::access::{RunAccess, RunnerSpec};
+// `MountSpec` is read by the Argo adapter's workflow builder and by this
+// crate's tests, and by nothing in a default (non-argo) production build, so
+// the re-export is conditional rather than carrying an allowance.
+#[cfg(any(feature = "argo", test))]
+pub use qa_product_sdk::access::MountSpec;
 
 use crate::domain::error::DomainError;
 use crate::domain::repos::LogResume;
@@ -216,12 +221,11 @@ impl ExecutionRef {
 /// Deliberately one opaque string rather than the source system's
 /// `{name, key, optional}` triple (`argo.rs:446-450`): that triple is the shape
 /// of a Kubernetes `secretKeyRef`, and ADR-0001 removes Kubernetes. The
-/// new-world spelling is credstore's, and qa-environments already models a
-/// platform's kubeconfig exactly this way — `kubeconfig_credstore_ref: String`,
-/// documented "Never the material itself"
-/// (`qa-environments-sdk/src/models.rs:14-15`). Two representations of the same
-/// reference across one subsystem boundary would need a translation nobody
-/// owns.
+/// new-world spelling is credstore's, and qa-environments models an
+/// environment's credentials exactly this way —
+/// `EnvironmentCredential::credstore_ref: String`, a reference and never the
+/// material itself. Two representations of the same reference across one
+/// subsystem boundary would need a translation nobody owns.
 ///
 /// There is intentionally no `From<String>`, no `Deref<Target = str>` and no
 /// `Display`. Each of the three would let a plain value slide into a reference
@@ -231,8 +235,9 @@ impl ExecutionRef {
 pub struct SecretRef(String);
 
 impl SecretRef {
-    /// Wrap a credstore reference — e.g. `Platform::kubeconfig_credstore_ref`,
-    /// or the `ReportPortal` API-key reference from this gear's own config.
+    /// Wrap a credstore reference — e.g. an
+    /// `EnvironmentCredential::credstore_ref`, or the `ReportPortal` API-key
+    /// reference from this gear's own config.
     #[must_use]
     pub fn new(reference: impl Into<String>) -> Self {
         Self(reference.into())
@@ -365,9 +370,9 @@ impl RunEnv {
 /// One execution node: a bundle, and the test files to run out of it.
 ///
 /// There is exactly one node per repository group, each carrying its own bundle
-/// reference; a single group yields a single node and no synthetic DAG (parity
-/// spec §3.4 step 5). The source system does the same — it groups the plan's
-/// files by repository, builds one bundle per group
+/// reference; a single group yields a single node and no synthetic DAG (launch
+/// rule 5). The source system does the same — it groups the plan's files by
+/// repository, builds one bundle per group
 /// (`manager/src/routes/custom_plans.rs:696-712`) and emits one independent
 /// node per group (`custom_plans.rs:714-764`), with a single group staying a
 /// single container (`custom_plans.rs:784-786`).
@@ -532,7 +537,7 @@ pub struct RunSpec {
     ///
     /// [`RunAccess::env`] is **not** read by the executor. Those variables
     /// reach the run through [`Self::env`], where `runvars::assemble` has
-    /// already placed them at their tier: the ladder is platform-owned (**D8**)
+    /// already placed them at their tier: the ladder is platform-owned
     /// and an executor that also read this channel would be a second, untiered
     /// path into the environment.
     pub access: RunAccess,
@@ -541,7 +546,7 @@ pub struct RunSpec {
     /// Every field is optional/empty by default, and that default means
     /// "inherit the deployment-wide `qa-runs.argo.runner_image`,
     /// `runner_command` and `image_pull_policy`" — which is what every run does
-    /// today. Per *product*, never per environment (**D11**): a per-environment
+    /// today. Per *product*, never per environment: a per-environment
     /// image would leave a run's provenance unclear.
     pub runner: RunnerSpec,
     /// Executor-side deadline. A **backstop**, not the guarantee: the source
@@ -634,7 +639,8 @@ pub struct TestObservation {
     /// of a row from which table it came out of, for free and unfalsifiably.
     ///
     /// `qa_run_test_results` is one table holding both
-    /// (`m20260818_000005_case_fidelity` (folded into `migrations::m20260813_000003_initial` by the docs squash), and decision D1 behind it), so the
+    /// (`m20260818_000005_case_fidelity`, folded into
+    /// `migrations::m20260813_000003_initial` by the docs squash), so the
     /// granularity has to be read off a *value*. The convention is:
     ///
     /// * `nodeid` empty or absent → the row describes a whole test **file**.
@@ -995,7 +1001,7 @@ mod tests {
     fn a_literal_of_the_same_name_replaces_a_secret_binding() {
         let env = RunEnv::new(
             values(&[("RP_API_KEY", "operator-supplied")]),
-            [("RP_API_KEY".to_owned(), SecretRef::new("credstore://rp"))]
+            [("RP_API_KEY".to_owned(), SecretRef::new("rp-api-key"))]
                 .into_iter()
                 .collect(),
         );
@@ -1015,13 +1021,13 @@ mod tests {
     fn a_secret_binding_stays_a_reference_in_the_assembled_environment() {
         let env = RunEnv::new(
             values(&[("TEST_FILES", "a.py,b.py")]),
-            [("RP_API_KEY".to_owned(), SecretRef::new("credstore://rp"))]
+            [("RP_API_KEY".to_owned(), SecretRef::new("rp-api-key"))]
                 .into_iter()
                 .collect(),
         );
         assert_eq!(
             env.get("RP_API_KEY"),
-            Some(&EnvSource::Secret(SecretRef::new("credstore://rp")))
+            Some(&EnvSource::Secret(SecretRef::new("rp-api-key")))
         );
         assert!(
             !env.entries()
@@ -1038,14 +1044,14 @@ mod tests {
     fn a_secret_binding_survives_when_no_literal_shares_its_name() {
         let env = RunEnv::new(
             values(&[("TEST_FILES", "")]),
-            [("RP_API_KEY".to_owned(), SecretRef::new("credstore://rp"))]
+            [("RP_API_KEY".to_owned(), SecretRef::new("rp-api-key"))]
                 .into_iter()
                 .collect(),
         );
         assert_eq!(env.entries().len(), 2);
         assert!(matches!(
             env.get("RP_API_KEY"),
-            Some(EnvSource::Secret(secret)) if secret.as_str() == "credstore://rp"
+            Some(EnvSource::Secret(secret)) if secret.as_str() == "rp-api-key"
         ));
     }
 

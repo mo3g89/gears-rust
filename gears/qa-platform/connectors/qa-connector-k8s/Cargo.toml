@@ -24,10 +24,8 @@ uuid = { workspace = true }
 # ADR-0001 forbids `kube`/`k8s-openapi` in a default build of any qa-platform
 # gear. Its Amendments section permits `qa-environments`' Secret writer behind
 # a non-default feature (`platform-observation`, renamed `runner-secret` when
-# Task 19b deleted the observer half). (`PRODUCT-PLUGINS-DESIGN.md` §4.1 and a
-# further "2026-09-04 amendment" were cited here previously; neither exists --
-# `PRODUCT-PLUGINS-DESIGN.md` is not in this repository, and ADR-0001's
-# Amendments section is the only amendment there is.)
+# Task 19b deleted the observer half). ADR-0001's Amendments section is the
+# only amendment there is.
 # The containment here is structural rather than conventional, so the feature
 # gate has nothing left to buy — a build that does not want Kubernetes simply
 # does not depend on this crate. (The `test-support` feature further down gates
@@ -69,6 +67,15 @@ hyper-util = { workspace = true, features = ["client-legacy"] }
 # `tokio-rustls`) raises a certificate/handshake failure as. Never used to
 # build a TLS config or connection of our own.
 rustls = { workspace = true }
+# `http` / `tower` / `http-body-util` are runtime dependencies because
+# `kube_client`'s response cap is a `tower::util::MapResponseLayer` over
+# `http::Response<http_body_util::Limited<_>>`, applied to every client built
+# for a tenant's cluster; `errors` downcasts to
+# `http_body_util::LengthLimitError` to name an oversize answer.
+# `test_support`'s stub `tower::Service` still uses `http` and `tower` too.
+http = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+http-body-util = { workspace = true }
 
 # ── The `test-support` feature's dependencies ─────────────────────────────────
 #
@@ -77,8 +84,6 @@ rustls = { workspace = true }
 # public API: `qa-vhp-product-plugin`'s test suite drives them, and a
 # dev-dependency is not visible outside its own package.
 #
-# * `http` / `tower` — `service_fn` and `http::Request`/`Response`, to answer
-#   `kube::Client::new` with an in-process route table instead of a socket.
 # * `tokio` — the loopback listener behind `StubApiServer`, which exists so a
 #   caller can drive `KubeClient::from_kubeconfig` itself rather than skip it.
 # * `tracing-subscriber` — the raw log buffer the leak assertions capture
@@ -88,11 +93,9 @@ rustls = { workspace = true }
 #   hand-written JSON that can drift from what the reads parse. `serde` itself
 #   is named only for the `Serialize` bound that encoding is generic over.
 #
-# `http` and `tower` are no longer dev-dependencies: the stub `tower::Service`
-# that used to live in `kube_client`'s test module now lives in `test_support`
-# and is the only thing in this crate that names either.
-http = { workspace = true, optional = true }
-tower = { workspace = true, features = ["util"], optional = true }
+# `http` and `tower` are not listed here: they are runtime dependencies (see
+# the response cap above), and `test_support`'s stub `tower::Service`
+# (`service_fn`, `http::Request`/`Response`) uses them too.
 tokio = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
@@ -105,15 +108,13 @@ serde_json = { workspace = true, optional = true }
 # tests enables this in its `[dev-dependencies]`; a production build of a
 # plugin does not compile the doubles.
 #
-# What it does *not* buy: keeping `http`/`tower`/`tokio`/`serde`/`serde_json`
+# What it does *not* buy: keeping `tokio`/`serde`/`serde_json`
 # out of the build graph. Cargo unifies features across a workspace build and
 # every one of them arrives transitively through `kube` and `cf-gears-toolkit`
 # for every gear here regardless. The feature gates *this crate's code*, not the
 # dependency tree — the same honest limit `qa-product-sdk`'s `test-util`
 # records about its own gate.
 test-support = [
-    "dep:http",
-    "dep:tower",
     "dep:tokio",
     "dep:serde",
     "dep:serde_json",

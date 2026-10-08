@@ -76,8 +76,8 @@ impl From<&EnvironmentCredential> for StoredEnvironmentCredential {
 
 /// Encode `qa_environments.credentials` — the inverse of
 /// `environment_credentials` (private, hence not linked), added by Task 18b
-/// when the column gained its first writer outside `m20260903_000011`'s
-/// backfill.
+/// when the column gained its first writer outside `m20260903_000011`'s (folded
+/// into `migrations::m20260812_000001_initial` by the docs squash) backfill.
 ///
 /// It goes through [`StoredEnvironmentCredential`] rather than serialising
 /// `EnvironmentCredential` directly, which is the whole reason the stored type
@@ -113,7 +113,7 @@ pub fn credentials_to_json(credentials: &[EnvironmentCredential]) -> serde_json:
 /// Decode `qa_environments.credentials`.
 ///
 /// An unparseable blob degrades to an empty list and is logged, following the
-/// precedent `cluster_nodes` set in the deleted `cluster_health_view` (Task 19)
+/// precedent `cluster_nodes` set in the deleted `cluster_health_view`
 /// rather than qa-catalog's
 /// erroring `custom_plan_entries_from_json`: this column is machine-written,
 /// and failing the whole mapping would take the environment list down for
@@ -122,8 +122,8 @@ pub fn credentials_to_json(credentials: &[EnvironmentCredential]) -> serde_json:
 /// # The log line carries no part of the blob, and `%error` would have
 ///
 /// `serde_json::Error`'s `Display` **quotes the offending value**: a blob of
-/// `["credstore://kc/prod"]` fails as `invalid type: string
-/// "credstore://kc/prod", expected struct StoredEnvironmentCredential`, the
+/// `["kc-prod"]` fails as `invalid type: string
+/// "kc-prod", expected struct StoredEnvironmentCredential`, the
 /// whole string, untruncated (`serde_json`'s `de.rs` maps
 /// `Value::String(s) => Unexpected::Str(s)`, and `serde` formats that as
 /// `string "{s:?}"`). This column carries credstore references, and a
@@ -302,13 +302,14 @@ mod tests {
             is_default: true,
             version_detect_error: Some("namespaces \"virtuozzo\" not found".to_owned()),
             version_detected_at: Some(OffsetDateTime::from_unix_timestamp(1_786_579_250).unwrap()),
-            // The plugin-shaped half. Every value here differs from its legacy
-            // twin above -- `observed_base_url` from `vhp_base_url`,
-            // `health_state` from `cluster_status`, `health_checked_at` from
-            // `cluster_checked_at` -- so a mapper that read the legacy column
-            // into the new field, or the other way round, cannot pass.
+            // The plugin-shaped half. Until Task 19 every value here differed
+            // from its legacy twin in this fixture (`observed_base_url` from
+            // `vhp_base_url`, `health_state` from `cluster_status`,
+            // `health_checked_at` from `cluster_checked_at`), so a mapper that
+            // read a legacy column into a new field could not pass. The twins
+            // are dropped; these are the only columns of their kind now.
             credentials: serde_json::json!([
-                {"key": "kubeconfig", "credstore_ref": "credstore://plugin-ref"}
+                {"key": "kubeconfig", "credstore_ref": "plugin-ref"}
             ]),
             observed_attrs: serde_json::json!({
                 "platformVersion": "5.0",
@@ -421,8 +422,7 @@ mod tests {
         assert_eq!(sdk.config, row.config, "config");
         assert_eq!(
             sdk.observed_base_url, row.observed_base_url,
-            "observed_base_url -- and NOT vhp_base_url, which this fixture \
-             deliberately gives a different value"
+            "observed_base_url"
         );
         assert_eq!(
             sdk.health_state,
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(sdk.health_detail, row.health_detail, "health_detail");
         assert_eq!(
             sdk.health_checked_at, row.health_checked_at,
-            "health_checked_at -- and NOT cluster_checked_at"
+            "health_checked_at"
         );
 
         // The two codec-mediated ones.
@@ -441,10 +441,9 @@ mod tests {
             sdk.credentials,
             vec![EnvironmentCredential {
                 key: "kubeconfig".to_owned(),
-                credstore_ref: "credstore://plugin-ref".to_owned(),
+                credstore_ref: "plugin-ref".to_owned(),
             }],
-            "credentials -- decoded from the JSONB, and carrying the plugin-shaped \
-             reference rather than kubeconfig_credstore_ref"
+            "credentials -- decoded from the JSONB, key and reference both"
         );
         let mut expected_attrs = ObservedAttrs::default();
         expected_attrs.set("platformVersion", "5.0");
@@ -549,7 +548,8 @@ mod tests {
     /// and what the writer emits is the shape the migration's backfill wrote.
     ///
     /// Task 18b added the writer; until then the column's only writer was
-    /// `m20260903_000011`'s SQL, and
+    /// `m20260903_000011`'s (folded into `migrations::m20260812_000001_initial`
+    /// by the docs squash) SQL, and
     /// `the_credentials_backfill_is_byte_identical_to_what_serde_writes` pinned
     /// that against `StoredEnvironmentCredential`. This pins the other
     /// direction: a row this gear writes must be readable by the same codec,
@@ -560,11 +560,11 @@ mod tests {
         let credentials = vec![
             EnvironmentCredential {
                 key: "kubeconfig".to_owned(),
-                credstore_ref: "credstore://kc/prod".to_owned(),
+                credstore_ref: "kc-prod".to_owned(),
             },
             EnvironmentCredential {
                 key: "api_token".to_owned(),
-                credstore_ref: "credstore://tokens/prod".to_owned(),
+                credstore_ref: "tokens-prod".to_owned(),
             },
         ];
 
@@ -572,8 +572,8 @@ mod tests {
         assert_eq!(
             encoded,
             serde_json::json!([
-                {"key": "kubeconfig", "credstore_ref": "credstore://kc/prod"},
-                {"key": "api_token", "credstore_ref": "credstore://tokens/prod"},
+                {"key": "kubeconfig", "credstore_ref": "kc-prod"},
+                {"key": "api_token", "credstore_ref": "tokens-prod"},
             ]),
             "the two field names are the migration's, and order is preserved"
         );
@@ -584,8 +584,8 @@ mod tests {
         );
     }
 
-    /// An empty list round-trips as `[]`, which is the value that means "fall
-    /// back to the pre-plugin column" — so it must not become `null`.
+    /// An empty list round-trips as `[]`, which is the value that means "this
+    /// environment stores no credential" — so it must not become `null`.
     #[test]
     fn no_credentials_encodes_as_an_empty_array_not_null() {
         let encoded = credentials_to_json(&[]);
@@ -601,10 +601,10 @@ mod tests {
     /// the legitimately-empty one, and the only thing that distinguishes them
     /// is the `warn`.
     ///
-    /// Both arms produce an empty `Vec<EnvironmentCredential>`, and since Task
-    /// 18b both readers treat an empty `credentials` as "fall back to the
-    /// pre-plugin column". After Task 19 drops that column an empty
-    /// `credentials` will mean "this environment has no credentials", so a
+    /// Both arms produce an empty `Vec<EnvironmentCredential>`. From Task 18b
+    /// until Task 19 both readers treated an empty `credentials` as "fall back
+    /// to the pre-plugin column"; since Task 19 dropped that column an empty
+    /// `credentials` means "this environment has no credentials", so a
     /// corrupt blob reading as empty is a silent claim that a credential does
     /// not exist. Task 19's warning listed this as a thing to *decide* rather
     /// than inherit; the decision is "keep the degrade, and make the log line
@@ -987,9 +987,9 @@ mod tests {
     /// consistently renamed a mode would round-trip fine while making every row
     /// unreadable to any other reader of the table. Nothing in the schema
     /// enforces the vocabulary: `mode` is a bare `VARCHAR(16) NOT NULL`
-    /// (`TEXT NOT NULL` on `SQLite`) with no `CHECK` constraint in any of the
-    /// three dialect blobs (`migrations/m20260812_000001_initial.rs:59`, `:106`,
-    /// `:160`), and `lease_to_state` rejects every value outside these three, so
+    /// (`TEXT NOT NULL` on `SQLite`) with no `CHECK` constraint in either of the
+    /// two dialect blobs (`POSTGRES_UP` and `SQLITE_UP` in
+    /// `migrations/m20260812_000001_initial.rs`), and `lease_to_state` rejects every value outside these three, so
     /// a fourth one written here would turn each later read of that row into a
     /// hard `Internal` error.
     #[test]

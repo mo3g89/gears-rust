@@ -19,8 +19,38 @@
 # brings along qa-platform-ui/.dockerignore, which keeps node_modules and dist
 # out of the transferred context.
 
+# BASE IMAGES ARE PINNED BY DIGEST, with the human-readable tag beside it.
+#
+# What drifts if they are not: `node:20-alpine` and `nginx:alpine` are moving
+# tags, so two builds a week apart are two different images with one name, and
+# nothing in this repository changes when the bytes do. The nginx stage is the
+# one that matters most: the SSE access-log redaction and the envsubst
+# allow-list below are measured against a specific nginx, and a floating tag
+# turns "the image behaves as tested" into "as tested on the day of the last
+# build". A tag is also mutable at the registry, so it is not an integrity
+# claim; a digest is.
+#
+# What broke: nothing yet -- this pin closes a gap the second review found
+# (#95), it does not fix an incident. The failure it forecloses is the one the
+# PDFIUM_VERSION block in the root .cargo/config.toml records, where an upstream
+# release changed output on every open branch at once with no diff in the repo.
+#
+# The tag is documentation and the digest is the pin: docker resolves
+# `name:tag@sha256:...` by the digest alone, so a tag that has since moved on
+# still builds the bytes recorded here. `check_image_pins.py --online` proves
+# tag and digest still name the same image.
+#
+# To bump (deliberately, in one commit):
+#   1. Pick the new tag (e.g. `node:20.21.0-alpine`) and read its digest:
+#        docker buildx imagetools inspect node:20.21.0-alpine
+#      Take the top-level `Digest:` (the multi-arch index), not a per-platform one.
+#   2. Replace BOTH the tag and the digest on the FROM line, never one alone.
+#   3. `make helm-tests`, then
+#        python3 gears/qa-platform/deploy/helm/tests/check_image_pins.py --online
+#   4. Rebuild the image and run the UI once (`nginx -t` runs in the entrypoint).
+#
 # Build stage
-FROM node:20-alpine AS builder
+FROM node:20.20.2-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder
 
 WORKDIR /app
 
@@ -53,7 +83,7 @@ ENV VITE_OIDC_CLIENT_ID=$VITE_OIDC_CLIENT_ID
 RUN npm run build
 
 # Production stage
-FROM nginx:alpine
+FROM nginx:1.31.6-alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2
 
 # Copy built assets from builder
 COPY --from=builder /app/dist /usr/share/nginx/html

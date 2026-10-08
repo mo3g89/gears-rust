@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use credstore_sdk::test_util::MockCredStoreClient;
+use credstore_sdk::{CredStoreClientV1, SharingMode};
 use parking_lot::Mutex;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -41,8 +42,13 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::{IMPLICIT_TLS_PORT, SmtpMailClient, TlsMode, tls_mode_for};
-use crate::domain::error::DomainError;
+use crate::domain::error::{DomainError, EgressFailure};
 use crate::domain::ports::{MailClient, MailCredentials, MailMessage, SendOutcome};
+use crate::domain::system_actor::{self, TenantBound};
+use crate::infra::notify::UNREADABLE_SECRET_HINT;
+use crate::infra::notify::test_credstores::{
+    DenyingCredStore, HangingCredStore, SharingCredStore, StoredSecret,
+};
 
 /// The tenant every send below is made as. Never
 /// [`SecurityContext::anonymous`]: credstore resolution is tenant-scoped, so an
@@ -53,6 +59,17 @@ fn ctx() -> toolkit_security::SecurityContext {
         .subject_tenant_id(Uuid::from_u128(0x1A11))
         .build()
         .expect("subject_id and subject_tenant_id are both set")
+}
+
+/// What [`MockRelay`] does when `RCPT TO` arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecipientOutcome {
+    /// `250 2.1.0 Ok`.
+    Accept,
+    /// `550 5.1.1 ... User unknown` — a permanent refusal of the message
+    /// itself, which is neither an authentication problem nor a reachability
+    /// one.
+    Refuse,
 }
 
 /// What [`MockRelay`] does when `AUTH` arrives.
@@ -70,6 +87,14 @@ enum AuthOutcome {
 enum Behaviour {
     /// A complete, well-behaved submission conversation.
     Converse(AuthOutcome),
+    /// Greet, authenticate, accept the envelope sender — and then refuse the
+    /// recipient with `550 5.1.1`.
+    ///
+    /// The fourth failure shape, and the one that is *not* about credentials,
+    /// timing or reachability: the relay was reached, it spoke, and it
+    /// declined the message on its own policy. A mailbox that does not exist
+    /// is the everyday form of it.
+    RefuseRecipient,
     /// Accept the TCP connection and then say **nothing at all**, ever.
     ///
     /// This is the failure the ten-second bound exists for and the one an SMTP
@@ -110,7 +135,18 @@ impl MockRelay {
                         // one this arm exists to produce.
                         std::future::pending::<()>().await;
                     }
-                    Behaviour::Converse(auth) => converse(stream, auth, &transcript).await,
+                    Behaviour::Converse(auth) => {
+                        converse(stream, auth, RecipientOutcome::Accept, &transcript).await;
+                    }
+                    Behaviour::RefuseRecipient => {
+                        converse(
+                            stream,
+                            AuthOutcome::Accept,
+                            RecipientOutcome::Refuse,
+                            &transcript,
+                        )
+                        .await;
+                    }
                 }
             }
         });
@@ -141,7 +177,12 @@ impl Drop for MockRelay {
 /// that *this* adapter drives a real dialogue correctly, and the smallest
 /// dependency that would serve is a mail server. Every reply below is the code
 /// a real relay sends for that step.
-async fn converse(stream: TcpStream, auth: AuthOutcome, transcript: &Arc<Mutex<Vec<String>>>) {
+async fn converse(
+    stream: TcpStream,
+    auth: AuthOutcome,
+    recipients: RecipientOutcome,
+    transcript: &Arc<Mutex<Vec<String>>>,
+) {
     let (read_half, mut write) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
@@ -177,8 +218,15 @@ async fn converse(stream: TcpStream, auth: AuthOutcome, transcript: &Arc<Mutex<V
                     "535 5.7.8 Authentication credentials invalid\r\n".to_owned()
                 }
             }
-        } else if upper.starts_with("MAIL FROM") || upper.starts_with("RCPT TO") {
+        } else if upper.starts_with("MAIL FROM") {
             "250 2.1.0 Ok\r\n".to_owned()
+        } else if upper.starts_with("RCPT TO") {
+            match recipients {
+                RecipientOutcome::Accept => "250 2.1.0 Ok\r\n".to_owned(),
+                RecipientOutcome::Refuse => {
+                    "550 5.1.1 Recipient address rejected: User unknown\r\n".to_owned()
+                }
+            }
         } else if upper.starts_with("DATA") {
             if write
                 .write_all(b"354 End data with <CR><LF>.<CR><LF>\r\n")
@@ -352,14 +400,22 @@ async fn the_relay_password_comes_from_the_credential_store() {
 // The four failures
 // ---------------------------------------------------------------------------
 
-/// A relay that rejects the credentials fails the send, and the refusal reaches
-/// the operator.
+/// A relay that rejects the credentials fails the send as an
+/// **authentication** failure against that relay, and the refusal reaches the
+/// operator.
 ///
-/// The relay's own `535 5.7.8` text is expected in the message: ADR-0008's one
+/// The relay's own `535 5.7.8` text is expected in `detail`: ADR-0008's one
 /// sanctioned exception is text a remote sent back, and without it the audit
 /// log would say only "the send failed" for a wrong password.
+///
+/// **The kind is asserted structurally**, on [`EgressFailure`], and the `5.7.8`
+/// assertion is *additional* rather than the discriminator. A test that told
+/// this apart from the other two by looking for "authentication" in the string
+/// would also pass for a `Validation` refusal from `password()`, whose message
+/// is "the SMTP credential could not be resolved" — a failure that never
+/// reaches the relay at all.
 #[tokio::test]
-async fn an_authentication_failure_fails_the_send_and_says_why() {
+async fn an_authentication_failure_is_an_upstream_authentication_failure() {
     let relay = MockRelay::start(Behaviour::Converse(AuthOutcome::Reject)).await;
 
     let error = ready_client()
@@ -367,14 +423,21 @@ async fn an_authentication_failure_fails_the_send_and_says_why() {
         .await
         .expect_err("a rejected credential cannot be a successful send");
 
-    let rendered = error.to_string();
+    let DomainError::UpstreamEgress {
+        channel,
+        endpoint,
+        failure,
+        detail,
+    } = &error
+    else {
+        panic!("an authentication rejection is an upstream failure, not {error:?}");
+    };
+    assert_eq!(*failure, EgressFailure::Authentication);
+    assert_eq!(channel, "email");
+    assert_eq!(endpoint, "127.0.0.1");
     assert!(
-        matches!(error, DomainError::Internal(_)),
-        "an authentication rejection is a transport failure, got {error:?}"
-    );
-    assert!(
-        rendered.contains("5.7.8") || rendered.to_lowercase().contains("authentication"),
-        "the relay's own refusal must survive into the message, got {rendered}"
+        detail.contains("535"),
+        "the relay's own reply code must survive into the detail, got {detail}"
     );
 
     // Nothing may be submitted after a failed AUTH.
@@ -405,8 +468,14 @@ async fn a_silent_relay_fails_within_the_timeout() {
     let elapsed = started.elapsed();
 
     assert!(
-        matches!(error, DomainError::Internal(_)),
-        "expected a transport failure, got {error:?}"
+        matches!(
+            &error,
+            DomainError::UpstreamEgress {
+                failure: EgressFailure::Timeout,
+                ..
+            }
+        ),
+        "a relay that never speaks is a timeout against that relay, not {error:?}"
     );
     // Generous, because CI schedulers are: the claim is "bounded", not
     // "bounded to the millisecond". An unbounded send against this relay never
@@ -420,6 +489,39 @@ async fn a_silent_relay_fails_within_the_timeout() {
     assert!(
         relay.transcript().is_empty(),
         "the silent relay must have said nothing"
+    );
+}
+
+/// **The password lookup is inside the bound.** No relay
+/// is started — the port is never dialled, because the lookup never ends.
+#[tokio::test]
+async fn the_bound_covers_a_credential_store_that_never_answers() {
+    let client = SmtpMailClient::plaintext_with_timeout(
+        Arc::new(HangingCredStore),
+        vec!["127.0.0.1".to_owned()],
+        Duration::from_millis(300),
+    );
+
+    let started = std::time::Instant::now();
+    let error = client
+        .send(&ctx(), &message(1, Some(credentials())))
+        .await
+        .expect_err("a hanging credential store cannot send a message");
+
+    assert!(
+        matches!(
+            &error,
+            DomainError::UpstreamEgress {
+                failure: EgressFailure::Timeout,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
     );
 }
 
@@ -444,8 +546,55 @@ async fn an_unreachable_relay_fails_the_send() {
         .await
         .expect_err("nothing is listening on that port");
     assert!(
-        matches!(error, DomainError::Internal(_)),
-        "expected a transport failure, got {error:?}"
+        matches!(
+            &error,
+            DomainError::UpstreamEgress {
+                failure: EgressFailure::Unreachable,
+                ..
+            }
+        ),
+        "a refused connection is an unreachable relay, not {error:?}"
+    );
+}
+
+/// A relay that answers and **refuses the message** is a rejection, not an
+/// authentication failure and not an unreachable host.
+///
+/// This is what keeps `classify`'s status-code arm honest: `550` carries a
+/// reply code exactly as `535` does, so a classifier that treated "the relay
+/// answered with a 5xx" as "the credentials were wrong" would send an operator
+/// to rotate a password over a mistyped recipient.
+#[tokio::test]
+async fn a_relay_that_refuses_the_recipient_is_a_rejection() {
+    let relay = MockRelay::start(Behaviour::RefuseRecipient).await;
+
+    let error = ready_client()
+        .send(&ctx(), &message(relay.port, Some(credentials())))
+        .await
+        .expect_err("a refused recipient cannot be a successful send");
+
+    let DomainError::UpstreamEgress {
+        failure, detail, ..
+    } = &error
+    else {
+        panic!("a refusal is an upstream failure, not {error:?}");
+    };
+    assert_eq!(
+        *failure,
+        EgressFailure::Rejected,
+        "the relay answered 550, which is a refusal of the message and not of the \
+         credentials: {detail}"
+    );
+    assert!(
+        detail.contains("550"),
+        "the relay's own reply code must survive into the detail, got {detail}"
+    );
+    // It really did authenticate first — otherwise this would be the
+    // authentication test wearing a different name.
+    assert!(
+        relay.transcript().iter().any(|l| l.starts_with("AUTH")),
+        "the conversation never reached AUTH: {:?}",
+        relay.transcript()
     );
 }
 
@@ -507,6 +656,122 @@ async fn an_unresolvable_credential_reference_is_a_validation_error() {
         relay.transcript().is_empty(),
         "the credential was resolved after connecting: {:?}",
         relay.transcript()
+    );
+}
+
+/// SMTP's half: the relay password is read as the system actor
+/// too, and a `private` secret is refused with the reason, before connecting.
+#[tokio::test]
+async fn a_private_smtp_secret_is_unreadable_to_the_system_actor_and_the_refusal_names_sharing() {
+    // One relay serves one connection; the `private` half never connects, so
+    // the `tenant` half below is the one that uses it.
+    let relay = MockRelay::start(Behaviour::Converse(AuthOutcome::Accept)).await;
+    let tenant = ctx().subject_tenant_id();
+    let actor = system_actor::for_settings_test_send(TenantBound::new(tenant).expect("non-nil"));
+    let store = |sharing| -> Arc<dyn CredStoreClientV1> {
+        Arc::new(SharingCredStore::new(vec![StoredSecret {
+            reference: SMTP_REF,
+            value: SMTP_PASSWORD,
+            tenant,
+            owner: ctx().subject_id(),
+            sharing,
+        }]))
+    };
+    let mail = |store| {
+        SmtpMailClient::plaintext_with_timeout(
+            store,
+            vec!["127.0.0.1".to_owned()],
+            Duration::from_secs(5),
+        )
+    };
+
+    let error = mail(store(SharingMode::Private))
+        .send(&actor, &message(relay.port, Some(credentials())))
+        .await
+        .expect_err("a private secret is invisible to the system actor");
+    match &error {
+        DomainError::Validation { field, message } => {
+            assert_eq!(field, "email_smtp_credstore_ref");
+            assert!(message.contains(UNREADABLE_SECRET_HINT), "{message}");
+        }
+        other => panic!("expected a Validation naming the reference, got {other:?}"),
+    }
+    assert!(
+        relay.transcript().is_empty(),
+        "resolved after connecting: {:?}",
+        relay.transcript()
+    );
+
+    let outcome = mail(store(SharingMode::Tenant))
+        .send(&actor, &message(relay.port, Some(credentials())))
+        .await
+        .expect("a tenant-shared secret is readable by the system actor");
+    assert_eq!(outcome, SendOutcome::Sent);
+}
+
+/// A client that reports the miss as `NotFound` (or the caller's missing read
+/// permission as `AccessDenied`, the SDK's documented answer) gets the same
+/// refusal as `Ok(None)` — the Slack adapter's rule, which this adapter did
+/// not follow: it answered a bare 500.
+#[tokio::test]
+async fn a_credential_store_not_found_error_is_the_same_refusal_as_a_miss() {
+    let relay = MockRelay::start(Behaviour::Converse(AuthOutcome::Accept)).await;
+
+    let error = client(
+        MockCredStoreClient::erroring_not_found(),
+        Duration::from_secs(5),
+    )
+    .send(&ctx(), &message(relay.port, Some(credentials())))
+    .await
+    .expect_err("NotFound is a miss");
+
+    assert!(
+        matches!(&error, DomainError::Validation { field, message }
+            if field == "email_smtp_credstore_ref" && message.contains(UNREADABLE_SECRET_HINT)),
+        "{error:?}"
+    );
+    assert!(
+        relay.transcript().is_empty(),
+        "resolved after connecting: {:?}",
+        relay.transcript()
+    );
+}
+
+/// `AccessDenied` and a non-UTF-8 value read the same as a miss: the reference
+/// is caller-supplied, and a second text would tell the caller the name exists
+/// over a store the system actor reads more widely than the caller does.
+#[tokio::test]
+async fn every_unreadable_secret_is_refused_with_one_message() {
+    let stores: Vec<Arc<dyn CredStoreClientV1>> = vec![
+        Arc::new(MockCredStoreClient::empty()),
+        Arc::new(MockCredStoreClient::erroring_not_found()),
+        Arc::new(DenyingCredStore),
+        Arc::new(MockCredStoreClient::returning_raw_value(vec![0xFF, 0xFE])),
+    ];
+    let mut messages = Vec::new();
+    for store in stores {
+        let relay = MockRelay::start(Behaviour::Converse(AuthOutcome::Accept)).await;
+        let error = SmtpMailClient::plaintext_with_timeout(
+            store,
+            vec!["127.0.0.1".to_owned()],
+            Duration::from_secs(5),
+        )
+        .send(&ctx(), &message(relay.port, Some(credentials())))
+        .await
+        .expect_err("an unreadable secret");
+        let DomainError::Validation { field, message } = error else {
+            panic!("expected Validation, got {error:?}");
+        };
+        assert_eq!(field, "email_smtp_credstore_ref");
+        assert!(message.contains(UNREADABLE_SECRET_HINT), "{message}");
+        assert!(relay.transcript().is_empty());
+        messages.push(message);
+    }
+    messages.dedup();
+    assert_eq!(
+        messages.len(),
+        1,
+        "one message for every case: {messages:?}"
     );
 }
 
@@ -595,12 +860,10 @@ async fn a_recipient_line_with_no_addresses_is_refused() {
 // The two constants
 // ---------------------------------------------------------------------------
 
-/// The bound is legacy's own ten seconds and `SlackOagwClient`'s — pinned here
-/// so the tests above may use a short one without the real value going
-/// unasserted.
+/// The bound is `SlackOagwClient`'s — the two egress bounds are one decision,
+/// so this test compares them rather than restating a number.
 #[test]
-fn the_send_timeout_is_ten_seconds() {
-    assert_eq!(SmtpMailClient::SEND_TIMEOUT, Duration::from_secs(10));
+fn the_send_timeout_matches_the_slack_bound() {
     assert_eq!(
         SmtpMailClient::SEND_TIMEOUT,
         super::super::SlackOagwClient::REQUEST_TIMEOUT,

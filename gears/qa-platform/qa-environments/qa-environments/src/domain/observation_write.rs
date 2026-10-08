@@ -72,8 +72,11 @@ impl ObservationWrite {
         &self.attrs
     }
 
-    /// The four role projections: `observed_version`, `observed_build`,
-    /// `observed_base_url`/`vhp_base_url`, `observed_namespace`.
+    /// The four role projections (`version`, `build`, `base_url`,
+    /// `namespace`). Three have a column of their own — `observed_version`,
+    /// `observed_build`, `observed_base_url`; the namespace has none since
+    /// Task 19 dropped `observed_namespace` (and `vhp_base_url` beside it),
+    /// and reaches a reader through `observed_attrs`.
     #[must_use]
     pub const fn roles(&self) -> &RoleProjection {
         &self.roles
@@ -97,9 +100,10 @@ impl ObservationWrite {
 // It recovered legacy's four-value `cluster_status` spelling from a plugin's
 // coarse `HealthState` plus its classified detail -- the one rule that made an
 // empty cluster store `Warning` rather than the `Degraded` it coarsens to.
-// `m20260903_000012` dropped that column, so nothing had called it since Task
-// 19 except its own tests, and it was the last thing keeping
-// `domain::observation` reachable (whole-branch review, I-2).
+// `m20260903_000012` (folded into `migrations::m20260812_000001_initial` by the
+// docs squash) dropped that column, so nothing had called it since Task 19
+// except its own tests, and it was the last thing keeping `domain::observation`
+// reachable (whole-branch review, I-2).
 
 #[cfg(test)]
 #[path = "observation_write_tests.rs"]

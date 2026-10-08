@@ -15,12 +15,12 @@
 //!   reported with no legality check anywhere. So there is nothing to port even
 //!   though there is a table. `cpt-cf-qa-principle-db-first-state` makes our
 //!   row authoritative, which means it needs one.
-//! * **Phase derivation** is ported from `manager/src/services/argo.rs:2154-2227`
-//!   with one deliberate divergence: legacy's rule that any skipped test
-//!   downgrades a successful run (plan decision D2, recorded in
-//!   DESIGN §3.1's run state machine) is **not** ported. The product owner overrode it on
-//!   2026-08-28 — see [`derive_terminal_state`]'s "Skips no longer fail a run"
-//!   for the reasoning and what replaces the signal.
+//! * **Phase derivation** is ported from
+//!   `manager/src/services/argo.rs:2154-2227` with one deliberate divergence:
+//!   legacy's rule that any skipped test downgrades a successful run (DESIGN
+//!   §3.1, "Run state machine") is **not** ported. The product owner overrode it
+//!   on 2026-08-28 — see [`derive_terminal_state`]'s "Skips no longer fail a
+//!   run" for the reasoning and what replaces the signal.
 //! * **Crash recovery** is ported from `manager/src/services/run_queue.rs:349-361`
 //!   and `manager/src/services/run_dispatcher.rs:417-487`, including the
 //!   boot-only / tick-only split that is easy to collapse and dangerous to.
@@ -51,6 +51,22 @@ use time::OffsetDateTime;
 /// sweep the terminal set iterate it, which makes it their own oracle.
 /// `the_terminal_set_is_exactly_these_six_states` is the independent check;
 /// that test's doc carries the full argument.
+///
+/// # Read only by the tests, and that is not dead code
+///
+/// `domain` is `pub(crate)` since finding #38's triage, so a declared set
+/// nothing outside the sweeps names is genuinely unreachable and the compiler
+/// says so. Deleting it would delete the gate rather than the redundancy: the
+/// three spellings of the terminal set (this constant, [`is_terminal`]'s
+/// `match`, and [`can_transition`]'s terminal arm) are pinned to each other
+/// only because a declared list exists to pin them against. The same allowance
+/// and the same argument sit on [`crate::domain::metrics::COUNTERS`].
+#[allow(
+    dead_code,
+    reason = "read by this module's tests and by `domain::metrics_tests`; `domain` is \
+              pub(crate), so a declared set with no production reader is unreachable \
+              and deleting it would delete the cross-check on `is_terminal`"
+)]
 pub const TERMINAL_STATES: [RunState; 6] = [
     RunState::Succeeded,
     RunState::Failed,
@@ -296,6 +312,12 @@ pub fn can_transition(from: RunState, to: RunState) -> bool {
 /// by `is_terminal_agrees_with_the_terminal_set`, but this module is otherwise
 /// precise that the terminal set has three spellings and which one is being read
 /// matters.
+///
+/// **`#[cfg(test)]` since finding #38's triage.** Its two callers are in this
+/// module's tests and nowhere else; with `domain` now `pub(crate)` the compiler
+/// reports it as dead in a non-test build, and a `cfg` says "test-only" in the
+/// type system where a dead-code allowance would only say "do not ask".
+#[cfg(test)]
 #[must_use]
 pub fn is_immutable_terminal(state: RunState) -> bool {
     is_terminal(state) && state != RunState::Succeeded
@@ -347,7 +369,7 @@ pub enum ExecutorOutcome {
 ///
 /// Legacy is explicit and considered here, not silent: "a skipped test means
 /// the run didn't fully execute, so it must never read as passing either"
-/// (`manager/src/services/argo.rs:2197`). Plan decision D2 ported that rule
+/// (`manager/src/services/argo.rs:2197`). The plan ported that rule
 /// as-is, and it held until this task, including its consequence — the
 /// open-bug skip-list (`SKIP_TESTS_WITH_BUGS`, `argo.rs:476-481`) makes the
 /// runner skip tests, so a run that skipped only known-broken tests reported
@@ -1099,7 +1121,7 @@ mod tests {
         }
     }
 
-    // ---------- phase derivation (decision D2) ----------
+    // ---------- phase derivation ----------
 
     #[test]
     fn a_clean_run_succeeds() {
@@ -1136,7 +1158,7 @@ mod tests {
     }
 
     /// **Pinned the opposite verdict until 2026-08-28.** This test used to
-    /// assert `RunState::Failed` here, quoting decision D2: "any skipped test
+    /// assert `RunState::Failed` here, quoting the plan: "any skipped test
     /// makes the run Failed (argo.rs:2186)". Legacy's own rule is explicit and
     /// was faithfully ported — `manager/src/services/argo.rs:2197`: "a skipped
     /// test means the run didn't fully execute, so it must never read as

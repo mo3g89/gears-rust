@@ -150,6 +150,69 @@ use uuid::Uuid;
 // re-declared so both raise the same `gts_id`.
 use crate::domain::error_attribution::JiraBugResourceError;
 
+/// How far an egress attempt got before it failed — the discriminator on
+/// [`DomainError::UpstreamEgress`].
+///
+/// Four arms because the adapter can genuinely tell four things apart, and
+/// because they have four different fixes: a wrong password is a credential to
+/// re-store, a timeout is a relay or a network to chase, an unreachable host is
+/// a name or a firewall, and a refusal is a message or a policy on the far
+/// side. Folding them into one string would put the operator back where a
+/// blanket 500 left them.
+///
+/// **This is what a test asserts on**, rather than a substring of the rendered
+/// message. See [`DomainError::UpstreamEgress`]'s doc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EgressFailure {
+    /// The relay was reached, spoke, and rejected the credentials it was
+    /// offered (RFC 4954 §6's `535`/`534`/`538`/`530`, or the transient `454`).
+    Authentication,
+    /// The conversation did not finish inside the adapter's send budget —
+    /// including the case an SMTP client is most exposed to, a relay that
+    /// accepts the connection and then never greets.
+    Timeout,
+    /// No conversation happened at all: the connection was refused, the name
+    /// did not resolve, TLS could not be established, or the protocol never
+    /// produced a reply to classify.
+    Unreachable,
+    /// The relay was reached, spoke, and refused the message on its own terms
+    /// — a mailbox it will not accept, a size limit, a policy block.
+    Rejected,
+}
+
+impl EgressFailure {
+    /// The phrase [`DomainError::UpstreamEgress`]'s `Display` reads with, and
+    /// the word an operator sees.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authentication => "rejected this deployment's credentials",
+            Self::Timeout => "did not answer in time",
+            Self::Unreachable => "could not be reached",
+            Self::Rejected => "refused the message",
+        }
+    }
+}
+
+/// What [`DomainError::UpstreamEgress`] calls the far side of `channel`:
+/// SMTP's is a **relay**, and every other channel's (Slack's webhook) is an
+/// **endpoint**. One function, so the `Display` and the API body cannot
+/// disagree.
+#[must_use]
+pub fn egress_noun(channel: &str) -> &'static str {
+    if channel == "email" {
+        "relay"
+    } else {
+        "endpoint"
+    }
+}
+
+impl std::fmt::Display for EgressFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Domain-specific errors using thiserror.
 #[domain_model]
 #[derive(Error, Debug)]
@@ -256,7 +319,7 @@ pub enum DomainError {
     /// A notification was routed to a channel this deployment has no adapter
     /// for.
     ///
-    /// The named case is email, which the design defers (D10): its config,
+    /// The named case is email, which the design defers: its config,
     /// routing, dedupe and logging all ship, and only the send does not. A
     /// deployment reaching this has a working configuration and a missing
     /// adapter, which is why it is its own variant and not a `Validation`.
@@ -264,6 +327,59 @@ pub enum DomainError {
     /// this file.
     #[error("egress channel '{channel}' is not supported by this deployment")]
     UnsupportedEgress { channel: String },
+
+    /// An egress relay this gear reached — or could not reach — failed the
+    /// send. **Not this service's fault, and not a 500.**
+    ///
+    /// # Why this is not [`Self::Internal`], which is where it used to land
+    ///
+    /// `infra::notify::mail_smtp` mapped all four of its failure shapes to
+    /// `Internal`: a wrong SMTP password, a relay that never greets, a host
+    /// nothing is listening on, and a relay that refused the message all
+    /// answered `500 An internal error occurred` with the relay's own words
+    /// swallowed by [`opaque_internal`]. Three of those are the operator's own
+    /// relay misbehaving and one is their own credential being wrong; none is
+    /// a fault in this gear, and an operator pressing a *test* button on the
+    /// settings page got back the one answer that tells them nothing about
+    /// which. [`Self::Internal`] keeps its meaning — a genuine internal fault
+    /// — precisely because this variant now takes the cases that were never
+    /// that.
+    ///
+    /// # Distinct from [`Self::UnsupportedEgress`]
+    ///
+    /// That one is "this deployment has no adapter for the channel at all"
+    /// (501). This one is "the adapter exists, it tried, and the far side did
+    /// not deliver". The audit log has kept those two apart since the SMTP
+    /// follow-up (`domain::service::notify`'s `OUTCOME_UNSUPPORTED_EGRESS`);
+    /// this makes the API boundary keep them apart too.
+    ///
+    /// `failure` is the discriminator, and it is an enum rather than a
+    /// substring of `detail` on purpose: a test that told the four apart by
+    /// grepping the rendered message would pass whenever some *other* check
+    /// fired with a message that happened to contain the same word.
+    ///
+    /// `endpoint` is the relay the attempt was aimed at — the tenant's own
+    /// `email_smtp_host` for `channel = "email"`, the fixed `hooks.slack.com`
+    /// for `channel = "slack"` — never credential material. `detail` is the
+    /// far side's own rendered answer, which ADR-0008
+    /// (`cpt-cf-qa-adr-credential-containment`) sanctions as its one
+    /// exception: text the remote sent back is not derived from our
+    /// credential material, and suppressing it leaves an operator debugging
+    /// blind. `lettre`'s `Error` renders the relay's refusal and never the
+    /// credentials it was given. **Slack's `detail` is narrower** — fixed
+    /// text, a gateway error's category title, or the HTTP status — because
+    /// the Slack credential is the webhook's URL path and `oagw`'s own error
+    /// text carries the full URL (`infra::notify::slack_oagw`, "Redaction").
+    ///
+    /// The noun is [`egress_noun`]'s: "relay" for SMTP, "endpoint" for
+    /// anything else — a Slack webhook is not a relay.
+    #[error("the {channel} {} {endpoint} {failure}: {detail}", egress_noun(.channel))]
+    UpstreamEgress {
+        channel: String,
+        endpoint: String,
+        failure: EgressFailure,
+        detail: String,
+    },
 
     /// A stored value this gear cannot decode, naming the row.
     ///
@@ -361,6 +477,22 @@ pub enum DomainError {
 }
 
 impl DomainError {
+    /// The log field that tells a refused credential from an outage: the
+    /// [`EgressFailure`] class of an [`Self::UpstreamEgress`] as a lower-case
+    /// word, and `internal` for every other error (this gear's own faults).
+    #[must_use]
+    pub const fn failure_class(&self) -> &'static str {
+        match self {
+            Self::UpstreamEgress { failure, .. } => match failure {
+                EgressFailure::Authentication => "authentication",
+                EgressFailure::Timeout => "timeout",
+                EgressFailure::Unreachable => "unreachable",
+                EgressFailure::Rejected => "rejected",
+            },
+            _ => "internal",
+        }
+    }
+
     /// A [`Self::Database`] from a rendered message alone, with no source to
     /// attach — for a storage failure that arrives as text rather than as a
     /// typed error (`infra::storage`'s `toolkit_odata` mapping, and test
@@ -534,6 +666,17 @@ impl From<authz_resolver_sdk::EnforcerError> for DomainError {
 // cannot be handed pre-formatted text by mistake -- qa-runs' idiom, and the
 // reason it is worth copying is that the mistake it prevents is a one-word
 // edit.
+//
+// **[`DomainError::UpstreamEgress`] is the one variant that deliberately
+// renders remote text into the body**, and it is not an exception to the rule
+// above so much as a different question. The three variants above carry text
+// from *inside* this deployment -- a driver, this gear, a persisted column.
+// That one carries what the tenant's own relay said back, which ADR-0008
+// (`cpt-cf-qa-adr-credential-containment`) names as its single sanctioned
+// exception and which the operator pressing *test* on their own settings page
+// is asking for. Its arm still keeps the relay **hostname** out of the body,
+// because that is deployment configuration rather than the far side's answer;
+// it goes to the log instead.
 
 /// `qa_test_results` and `qa_test_case_results` — the projection this gear
 /// exists to serve, and the resource the rebuild endpoint mutates.
@@ -542,19 +685,92 @@ impl From<authz_resolver_sdk::EnforcerError> for DomainError {
 /// resource type and the error resource type name the same thing, and a caller
 /// denied on `qa.test_result` should be told about `cf.qa.insights.test_result`.
 #[resource_error(gts_id!("cf.qa.insights.test_result.v1~"))]
-pub(crate) struct TestResultResourceError;
+pub struct TestResultResourceError;
 
 /// `qa_saved_views`. Declared now because [`DomainError::SavedViewNameExists`]
 /// already exists and the `match` below is exhaustive — a caller told a *test
 /// result* already exists while naming a saved view would go looking for the
 /// wrong row. Task 28 owns the endpoints.
 #[resource_error(gts_id!("cf.qa.insights.saved_view.v1~"))]
-pub(crate) struct SavedViewResourceError;
+pub struct SavedViewResourceError;
 
 /// `qa_notification_config`, `qa_notification_log` and `qa_run_notifications`.
 /// Tasks 36-39; [`as_notification_error`] is Task 38's call-site renderer.
 #[resource_error(gts_id!("cf.qa.insights.notification.v1~"))]
-pub(crate) struct NotificationResourceError;
+pub struct NotificationResourceError;
+
+/// Log the relay, its host and its answer; render the answer without the host.
+///
+/// A named function beside [`opaque_internal`] rather than an arm body, for
+/// [`opaque_internal`]'s reason and one more: this is the only arm in the
+/// mapping whose HTTP status is not its category's default, so the decision is
+/// worth being somewhere a reader can find without reading a `match`.
+///
+/// # `ServiceUnavailable` — 503, the category's own status, with no override
+///
+/// **This shipped for one commit as a 502**, carried as an
+/// `Http::status_code` transport override on this same `ServiceUnavailable`
+/// category, on the reasoning that 502 is what "a relay one hop further out
+/// did not deliver" actually means. The override is withdrawn, and the reason
+/// is that it made the error say two different things at once: the RFC-9457
+/// envelope's `type` is derived from the *category*, so it read
+/// `cf.core.err.service_unavailable` while the HTTP status line read `502`. A
+/// client that matches on `type` and a client that matches on the digit would
+/// have come away with different stories about the same failure, and neither
+/// would have been wrong to.
+///
+/// `toolkit-canonical-errors` has no `BadGateway` category to make both agree
+/// on — `ProblemCategory` stops at `ServiceUnavailable` (503) and
+/// `DeadlineExceeded` (504) — so the choice was between a truthful digit with
+/// a mismatched `type` and a slightly-off digit with a consistent one. 503 is
+/// also what the sibling gear already answers for its own upstream
+/// (qa-catalog's `DomainError::SyncFailed`, the git remote), so it is the
+/// subsystem's existing answer rather than a new one.
+///
+/// **The distinguishability finding #119 asks for does not live in the digit.**
+/// It lives in [`EgressFailure`], which names which of the four things went
+/// wrong, and in the detail below, which carries the relay's own words. Both
+/// survive the change untouched; what is gone is a number that disagreed with
+/// the document it was printed on.
+///
+/// # What reaches the body, and what only reaches the log
+///
+/// The relay's own words are surfaced, which qa-catalog's arm deliberately does
+/// not do for `gix` error chains. Two reasons it is right here and not there:
+/// the far side's text is ADR-0008's one sanctioned exception
+/// (`crate::domain::ports::mail_client`), and the caller that reaches this arm
+/// is an operator who pressed *test* on their own tenant's settings —
+/// `NotifyService::send_test`'s own doc says such an operator "deserves to be
+/// told it does not work, not a silent success." The other caller is
+/// `POST /qa/v1/jira/bugs` when nothing was filed or found (`JiraService::file_bugs`);
+/// the JIRA adapter's `detail` is fixed text or an HTTP status, never JIRA's
+/// body, so nothing beyond the class reaches that caller.
+///
+/// The **host** is logged and not rendered.
+/// `ServiceUnavailableBuilder::with_detail`'s caller contract spells out "no
+/// hostnames", and it is right: an error body travels further than a log line,
+/// and a relay hostname is deployment configuration rather than an answer the
+/// far side gave.
+fn upstream_egress(
+    channel: &str,
+    endpoint: &str,
+    failure: EgressFailure,
+    detail: &str,
+) -> CanonicalError {
+    tracing::error!(
+        %channel,
+        %endpoint,
+        failure = %failure,
+        %detail,
+        "an upstream egress call did not deliver",
+    );
+    CanonicalError::service_unavailable()
+        .with_detail(format!(
+            "The {channel} {} {failure}: {detail}",
+            egress_noun(channel)
+        ))
+        .create()
+}
 
 /// Log the real cause, answer with the canonical internal detail.
 ///
@@ -703,15 +919,24 @@ impl From<DomainError> for CanonicalError {
 
             // -- 501 --------------------------------------------------------
             //
-            // Email, which design decision D10 defers: its config, routing,
-            // dedupe and logging all ship and only the send does not. A
-            // deployment reaching this has a *working* configuration and a
-            // missing adapter, so it is not a 400 — there is nothing the caller
-            // can change about the request.
+            // Email on a deployment whose operator has not enabled SMTP egress
+            // (`smtp_allowed_hosts` empty, so `UnsupportedMailClient` is
+            // bound): its config, routing, dedupe and logging all work and only
+            // the send does not. A deployment reaching this has a *working*
+            // configuration and a missing adapter, so it is not a 400 — there
+            // is nothing the caller can change about the request.
             DomainError::UnsupportedEgress { channel } => NotificationResourceError::unimplemented(
                 format!("This deployment has no adapter for the '{channel}' channel"),
             )
             .create(),
+
+            // -- 503, an upstream that did not deliver -----------------------
+            DomainError::UpstreamEgress {
+                channel,
+                endpoint,
+                failure,
+                detail,
+            } => upstream_egress(channel, endpoint, *failure, detail),
 
             // -- 500, opaque ------------------------------------------------
             DomainError::CorruptState { .. }

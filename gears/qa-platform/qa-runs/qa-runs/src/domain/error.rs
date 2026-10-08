@@ -37,7 +37,9 @@
 //!   `UPDATE` refused), [`DomainError::Internal`] (an exhausted name retry, and
 //!   an admission outcome that is not representable), and
 //!   [`DomainError::Catalog`] / [`DomainError::Environments`] (the two cross-gear
-//!   reads).
+//!   reads). Every catalog failure, in `launch` and in `dispatch_spec`, is
+//!   classified by [`DomainError::from_catalog`], which is also the only
+//!   constructor of [`DomainError::CatalogRefused`].
 //! * The `Admitter` seam, implemented by Task 14 — [`DomainError::QueueFull`],
 //!   [`DomainError::ConcurrencyLimit`].
 //! * `domain::service::ingest` — [`DomainError::IllegalTransition`] for a
@@ -156,7 +158,7 @@ pub enum DomainError {
 
     /// A conditional state update matched no row: the run had already left
     /// `state`, so the caller's transition is no longer legal. Constructed by
-    /// the services (Tasks 13-15) from `RunsRepository::update_state`'s
+    /// the services from `RunsRepository::update_state`'s
     /// `false`; the repository itself reports only whether the guarded update
     /// matched.
     ///
@@ -227,8 +229,8 @@ pub enum DomainError {
     ConcurrencyLimit { limit: u32 },
 
     /// A custom plan spans more than one repository and the launch named no
-    /// branch, so no single repository `default_branch` applies (parity spec
-    /// §3.4 rule 3; `manager/src/routes/custom_plans.rs:671-687`).
+    /// branch, so no single repository `default_branch` applies (launch rule
+    /// 3; `manager/src/routes/custom_plans.rs:671-687`).
     ///
     /// Maps to `FailedPrecondition`, i.e. **HTTP 400** and not 409 — which is
     /// also what the source system answers (`StatusCode::BAD_REQUEST` at
@@ -240,20 +242,42 @@ pub enum DomainError {
     )]
     AmbiguousBranch { plan_id: Uuid, groups: usize },
 
-    /// qa-catalog refused or could not answer.
+    /// qa-catalog could not answer: it is unavailable, failed internally, or
+    /// answered with a category that is not the caller's to fix.
     ///
     /// A `String` rather than a re-export of `qa_catalog_sdk::QaCatalogError`,
     /// matching [`Self::Database`] and [`Self::ExecutorFailed`]: the failure is
-    /// another gear's, and mirroring its vocabulary here would be a contract
-    /// this gear cannot keep current.
+    /// another gear's, and its text is logged, never shown.
     ///
     /// **Not every catalog failure becomes one of these.** A catalog error
-    /// raised while *gathering exclusivity inputs* is swallowed — the launch
-    /// resolves parallel and continues, exactly as the source system does
-    /// (`manager/src/services/exclusivity.rs:177-179`). This variant carries the
-    /// failures that genuinely stop a launch, such as an unresolvable plan.
+    /// raised while *gathering exclusivity inputs* because an input is absent
+    /// is swallowed — the launch resolves parallel and continues, exactly as
+    /// the source system does (`manager/src/services/exclusivity.rs:177-179`).
+    /// A denial is [`Self::Forbidden`], and a refusal the caller can act on is
+    /// [`Self::CatalogRefused`]; [`Self::from_catalog`] draws both lines.
     #[error("catalog error: {0}")]
     Catalog(String),
+
+    /// qa-catalog refused the request for a reason the caller can act on: the
+    /// addressed repository, branch or plan does not exist (`NotFound`), the
+    /// repository has no synced content for the branch (`FailedPrecondition`),
+    /// or the request was malformed (`InvalidArgument`).
+    ///
+    /// Carries the catalog's own canonical error, which is the platform's wire
+    /// type rather than the catalog's domain vocabulary, and the boundary
+    /// answers with it unchanged: the caller gets the catalog's status, its
+    /// resource type and its sentence. That is safe to *answer* because the
+    /// caller is the principal the catalog answered — a user's own launch, an
+    /// operator's own force-start. It is **not** safe to *record*: the sentence
+    /// can carry the repository's sanitized `sync_error` (remote host, URL
+    /// shape), and dispatch and schedule fires read the catalog as a system
+    /// actor while `qa_runs.error` and the tick rows are read by principals
+    /// who need no `TEST_REPO/GET`. So [`Self::disclosable`] is `true` and
+    /// [`Self::recorded_text`] records a fixed sentence by category.
+    ///
+    /// Built only by [`Self::from_catalog`].
+    #[error("catalog refused the request: {}", catalog_refusal_text(.0))]
+    CatalogRefused(#[source] CanonicalError),
 
     /// qa-environments refused or could not answer. Same shape and reasoning as
     /// [`Self::Catalog`].
@@ -311,12 +335,35 @@ pub enum DomainError {
 ///
 /// Deliberately says nothing. An operator who needs the cause reads the `warn!`
 /// the redacting call site emits, which names the row.
-pub(crate) const OPAQUE_ERROR_TEXT: &str =
+pub const OPAQUE_ERROR_TEXT: &str =
     "the operation failed; see the service log for the cause";
 
+/// What a row records for a qa-catalog refusal, by category — never the
+/// catalog's own sentence. See [`DomainError::recorded_text`].
+///
+/// Each names where the detail lives: the caller who triggered the read got
+/// the catalog's sentence in its answer, and anyone with read access to the
+/// repository reads the same fact from qa-catalog itself.
+pub const CATALOG_BRANCH_NOT_SYNCED: &str = "catalog refused the request: the repository \
+     has no usable synced content for this run's branch; the repository's sync status in \
+     qa-catalog says why";
+pub const CATALOG_PLAN_YAML_INVALID: &str = "catalog refused the request: a plan.yaml this \
+     run reads is invalid; reading the plan in qa-catalog shows the parser's message";
+pub const CATALOG_PRECONDITION_FAILED: &str = "catalog refused the request: the \
+     repository's state in qa-catalog cannot serve this run";
+pub const CATALOG_TARGET_NOT_FOUND: &str = "catalog refused the request: the repository, \
+     branch, plan or file this run targets does not exist in qa-catalog";
+pub const CATALOG_REQUEST_REJECTED: &str = "catalog refused the request: qa-catalog \
+     rejected this run's request as malformed";
+
 impl DomainError {
-    /// Whether this error's `Display` text may be **persisted to a row**, or
-    /// must be replaced by [`OPAQUE_ERROR_TEXT`].
+    /// Whether this error's `Display` text may be **answered to the caller**,
+    /// or must be replaced by [`OPAQUE_ERROR_TEXT`].
+    ///
+    /// Disclosable is not the same as recorded verbatim: a row records
+    /// [`Self::recorded_text`], which for [`Self::CatalogRefused`] is a fixed
+    /// sentence by category even though the variant is disclosable in the
+    /// answer. [`Self::records_verbatim`] is the predicate for what a row holds.
     ///
     /// # Why the decision lives here and not at the call site
     ///
@@ -374,7 +421,7 @@ impl DomainError {
     /// name — a limit they hit, a field they sent, a state their run is in.
     /// Redact anything whose text originates in another system or in this gear's
     /// internals. [`Self::CorruptState`] sets the standard the whole way back at
-    /// Task 5: its `what` is a `&'static str` *"because it always names a column
+    /// Its `what` is a `&'static str` *"because it always names a column
     /// … never caller-controlled text"* — but its `value` is the offending column
     /// contents, which is exactly what must not travel.
     pub(crate) const fn disclosable(&self) -> bool {
@@ -396,7 +443,11 @@ impl DomainError {
             | Self::QueueFull { .. }
             | Self::ConcurrencyLimit { .. }
             | Self::AmbiguousBranch { .. }
-            | Self::Forbidden => true,
+            | Self::Forbidden
+            // qa-catalog's own answer to the caller's own request: disclosable
+            // in the answer. What a row records is narrower — see
+            // `recorded_text` and the variant's doc.
+            | Self::CatalogRefused(_) => true,
 
             // Text that originates outside this gear or inside its internals.
             // `CorruptState` carries a persisted column's contents; `Catalog` and
@@ -410,6 +461,37 @@ impl DomainError {
             | Self::Environments(_)
             | Self::Database { .. }
             | Self::Internal(_) => false,
+        }
+    }
+
+    /// Classify a qa-catalog failure: the one rule every catalog read in this
+    /// gear goes through, in `service::launch` and `service::dispatch_spec`
+    /// alike, so no call site holds its own copy of "which category means
+    /// what".
+    ///
+    /// * `PermissionDenied` is [`Self::Forbidden`] (403).
+    /// * `NotFound`, `FailedPrecondition` and `InvalidArgument` are
+    ///   [`Self::CatalogRefused`], answered with the catalog's own status and
+    ///   message (404, 400, 400).
+    /// * Everything else — unavailable, internal, unknown, and any category
+    ///   added later, since `CanonicalError` is `#[non_exhaustive]` — is
+    ///   [`Self::Catalog`], an opaque 500. A `ServiceUnavailable` (a remote the
+    ///   catalog could not list) stays a 500 rather than becoming this gear's
+    ///   503: the opaque answer keeps the catalog's internals out of the body,
+    ///   and either way it stays a server fault, never a 4xx.
+    ///
+    /// **Whether an absence is a failure stays the caller's question.** A
+    /// caller for which `NotFound` is not a failure — the exclusivity scan's
+    /// absent `TEST_META` file or nested `plan.yaml`, or
+    /// `LaunchService::resolve_target_exists`, which reports a dangling
+    /// reference as a field `Validation` — answers it before calling this.
+    pub(crate) fn from_catalog(error: qa_catalog_sdk::QaCatalogError) -> Self {
+        match error {
+            CanonicalError::PermissionDenied { .. } => Self::Forbidden,
+            refusal @ (CanonicalError::NotFound { .. }
+            | CanonicalError::FailedPrecondition { .. }
+            | CanonicalError::InvalidArgument { .. }) => Self::CatalogRefused(refusal),
+            other => Self::Catalog(other.to_string()),
         }
     }
 
@@ -429,16 +511,88 @@ impl DomainError {
         }
     }
 
+    /// Whether [`Self::recorded_text`] is this error's own `Display` text.
+    ///
+    /// `false` for every non-[`Self::disclosable`] variant (opaque text) and for
+    /// [`Self::CatalogRefused`] (a fixed sentence by category): the call sites
+    /// that redact log the real cause when, and only when, this is `false`.
+    pub(crate) const fn records_verbatim(&self) -> bool {
+        self.disclosable() && !matches!(self, Self::CatalogRefused(_))
+    }
+
     /// The text that may be written to a row's `error` column.
     ///
     /// The **error returned to the caller is never affected** — services return
     /// the original value; this is only what gets written down.
+    ///
+    /// A [`Self::CatalogRefused`] is disclosable *to the caller* and still not
+    /// recorded verbatim: the column's readers are not the principal qa-catalog
+    /// answered. It records [`catalog_refusal_record`]'s fixed sentence.
     pub(crate) fn recorded_text(&self) -> String {
-        if self.disclosable() {
-            self.to_string()
-        } else {
-            OPAQUE_ERROR_TEXT.to_owned()
+        match self {
+            Self::CatalogRefused(refusal) => catalog_refusal_record(refusal).to_owned(),
+            _ if self.disclosable() => self.to_string(),
+            _ => OPAQUE_ERROR_TEXT.to_owned(),
         }
+    }
+}
+
+/// The fixed sentence a row records for a catalog refusal — the category,
+/// and for a `FailedPrecondition` the violation's machine `type_`
+/// (`NOT_SYNCED`, `PLAN_YAML_INVALID`, the codes qa-catalog's
+/// `api::rest::error` raises). Never the description: that is where the
+/// repository's sanitized `sync_error` rides.
+fn catalog_refusal_record(refusal: &CanonicalError) -> &'static str {
+    match refusal {
+        CanonicalError::FailedPrecondition { ctx, .. }
+            if ctx.violations.iter().any(|v| v.type_ == "NOT_SYNCED") =>
+        {
+            CATALOG_BRANCH_NOT_SYNCED
+        }
+        CanonicalError::FailedPrecondition { ctx, .. }
+            if ctx
+                .violations
+                .iter()
+                .any(|v| v.type_ == "PLAN_YAML_INVALID") =>
+        {
+            CATALOG_PLAN_YAML_INVALID
+        }
+        CanonicalError::NotFound { .. } => CATALOG_TARGET_NOT_FOUND,
+        CanonicalError::InvalidArgument { .. } => CATALOG_REQUEST_REJECTED,
+        // `FailedPrecondition` with another code (`CREDENTIAL_REJECTED`,
+        // `SYNC_BUDGET_EXCEEDED`, ...), and any category `from_catalog` might
+        // admit later (`CanonicalError` is `#[non_exhaustive]`).
+        _ => CATALOG_PRECONDITION_FAILED,
+    }
+}
+
+/// The sentence a catalog refusal carries, for [`DomainError::CatalogRefused`]'s
+/// `Display` — the text a log line and the caller's answer read. A row records
+/// [`catalog_refusal_record`]'s fixed sentence instead.
+///
+/// Not `CanonicalError`'s own `Display`: for a `FailedPrecondition` or a
+/// field-violation `InvalidArgument` its `detail` is the category's fixed
+/// title ("Operation precondition not met", "Request validation failed"), and
+/// the catalog's sentence lives in the violations. Rendering `detail` alone is
+/// how "has no synced content for branch …" used to reach the log as the
+/// title only.
+fn catalog_refusal_text(refusal: &CanonicalError) -> String {
+    match refusal {
+        CanonicalError::FailedPrecondition { ctx, .. } if !ctx.violations.is_empty() => ctx
+            .violations
+            .iter()
+            .map(|violation| violation.description.as_str())
+            .collect::<Vec<_>>()
+            .join("; "),
+        CanonicalError::InvalidArgument {
+            ctx: toolkit_canonical_errors::InvalidArgument::FieldViolations { field_violations },
+            ..
+        } if !field_violations.is_empty() => field_violations
+            .iter()
+            .map(|violation| format!("{}: {}", violation.field, violation.description))
+            .collect::<Vec<_>>()
+            .join("; "),
+        other => other.detail().to_owned(),
     }
 }
 
@@ -608,7 +762,7 @@ impl From<authz_resolver_sdk::EnforcerError> for DomainError {
 /// implemented the five schedule methods, so that module raises no error of its
 /// own and no longer names this type at all.
 #[resource_error(gts_id!("cf.qa.runs.run.v1~"))]
-pub(crate) struct RunResourceError;
+pub struct RunResourceError;
 
 /// A 500 whose body says nothing, with the real cause logged.
 ///
@@ -853,6 +1007,14 @@ impl From<DomainError> for CanonicalError {
                 .with_reason("ACCESS_DENIED")
                 .create(),
 
+            // -- 404 / 400, qa-catalog's own refusal ---------------------------
+            // Answered with the catalog's canonical error unchanged: its status,
+            // its resource type (the repository, branch or plan the refusal is
+            // about, which a run's resource type would misname) and its
+            // sentence. `DomainError::from_catalog` admits only `NotFound`,
+            // `FailedPrecondition` and `InvalidArgument` here.
+            DomainError::CatalogRefused(refusal) => refusal.clone(),
+
             // -- 500, opaque ------------------------------------------------
             // Exactly the variants `DomainError::disclosable` classifies as
             // unsafe to echo, in the order that method lists them, so the two
@@ -861,10 +1023,13 @@ impl From<DomainError> for CanonicalError {
             // workspace and every body here is the same call.
             //
             // `Catalog` and `Environments` are the two cross-gear reads, and
-            // neither is `unavailable`/503: a failure here is as often "the plan
-            // does not resolve" as "the gear is down", this layer cannot tell
-            // which, and answering 503 to the first would invite a client to
-            // retry something that will never succeed.
+            // neither is `unavailable`/503. For `Environments` a failure here is
+            // as often "the platform does not resolve" as "the gear is down",
+            // this layer cannot tell which, and answering 503 to the first would
+            // invite a client to retry something that will never succeed. For
+            // `Catalog` the caller-fixable refusals have already been split off
+            // into `CatalogRefused`; what is left is the catalog's own fault or
+            // outage, which stays opaque so its text never reaches a body.
             DomainError::Database { .. }
             | DomainError::Internal(_)
             | DomainError::ExecutorFailed(_)
@@ -891,6 +1056,14 @@ mod canonical_mapping_tests {
     use super::{CanonicalError, DomainError};
     use crate::domain::error::OPAQUE_ERROR_TEXT;
     use toolkit_canonical_errors::Problem;
+
+    /// qa-catalog's repository resource type, for the [`DomainError::CatalogRefused`]
+    /// sample: a refusal the catalog raises carries the catalog's type, not a
+    /// run's.
+    #[toolkit_canonical_errors::resource_error(toolkit_canonical_errors::gts_id!(
+        "cf.qa.catalog.test_repo.v1~"
+    ))]
+    struct CatalogTestRepoError;
 
     /// What the client actually receives, as JSON.
     ///
@@ -978,6 +1151,7 @@ mod canonical_mapping_tests {
             DomainError::ConcurrencyLimit { .. } => "ConcurrencyLimit",
             DomainError::AmbiguousBranch { .. } => "AmbiguousBranch",
             DomainError::Catalog(_) => "Catalog",
+            DomainError::CatalogRefused(_) => "CatalogRefused",
             DomainError::Environments(_) => "Environments",
             DomainError::Forbidden => "Forbidden",
             DomainError::Database { .. } => "Database",
@@ -1081,6 +1255,18 @@ mod canonical_mapping_tests {
                 Some(id.to_string()),
             ),
             (DomainError::Catalog(SENTINEL.to_owned()), None),
+            (
+                DomainError::CatalogRefused(
+                    CatalogTestRepoError::failed_precondition()
+                        .with_precondition_violation(
+                            "sync_state",
+                            "Repository has no synced content for branch '26.8'",
+                            "NOT_SYNCED",
+                        )
+                        .create(),
+                ),
+                Some("has no synced content for branch '26.8'".to_owned()),
+            ),
             (DomainError::Environments(SENTINEL.to_owned()), None),
             (DomainError::Forbidden, None),
             (DomainError::database(SENTINEL), None),
@@ -1214,7 +1400,7 @@ mod canonical_mapping_tests {
     /// Paired with the exhaustive `variant_tag` match: a new variant fails to
     /// compile there, and fails this count here, so the two together make the
     /// sample list complete in both directions.
-    const DOMAIN_ERROR_VARIANTS: usize = 21;
+    const DOMAIN_ERROR_VARIANTS: usize = 22;
 
     #[test]
     fn run_not_found_is_404() {
@@ -1457,6 +1643,184 @@ mod tests {
             // The error itself is untouched — only what gets written down is
             // redacted, and services still return the real cause upward.
             assert!(error.to_string().contains(raw), "{error:?}");
+        }
+    }
+
+    #[toolkit_canonical_errors::resource_error(toolkit_canonical_errors::gts_id!(
+        "cf.qa.catalog.test_repo.v1~"
+    ))]
+    struct CatalogTestRepoError;
+
+    /// [`DomainError::from_catalog`]'s three outcomes, by category: a denial is
+    /// `Forbidden`, a caller-fixable refusal keeps the catalog's error and its
+    /// sentence, and a run records only the refusal's category, and anything else
+    /// is the opaque `Catalog`.
+    #[test]
+    fn a_catalog_failure_is_classified_by_its_category() {
+        let unsynced = DomainError::from_catalog(
+            CatalogTestRepoError::failed_precondition()
+                .with_precondition_violation(
+                    "sync_state",
+                    "Repository r has no synced content for branch '26.8'",
+                    "NOT_SYNCED",
+                )
+                .create(),
+        );
+        assert!(
+            matches!(unsynced, DomainError::CatalogRefused(_)),
+            "{unsynced:?}"
+        );
+        assert_eq!(unsynced.recorded_text(), CATALOG_BRANCH_NOT_SYNCED);
+        assert!(
+            unsynced
+                .to_string()
+                .contains("has no synced content for branch '26.8'"),
+            "the error itself keeps the catalog's sentence: {unsynced}"
+        );
+
+        let absent = DomainError::from_catalog(
+            CatalogTestRepoError::not_found("Branch '26.8' does not exist in repository r")
+                .with_resource("r")
+                .create(),
+        );
+        assert!(
+            matches!(absent, DomainError::CatalogRefused(_)),
+            "{absent:?}"
+        );
+        assert!(
+            absent.to_string().contains("Branch '26.8' does not exist"),
+            "{absent}"
+        );
+
+        let malformed = DomainError::from_catalog(
+            CatalogTestRepoError::invalid_argument()
+                .with_field_violation("branch", "must not be empty", "VALIDATION")
+                .create(),
+        );
+        assert!(
+            matches!(malformed, DomainError::CatalogRefused(_)),
+            "{malformed:?}"
+        );
+
+        let denied = DomainError::from_catalog(
+            CatalogTestRepoError::permission_denied()
+                .with_reason("ACCESS_DENIED")
+                .create(),
+        );
+        assert!(matches!(denied, DomainError::Forbidden), "{denied:?}");
+
+        for fault in [
+            CanonicalError::service_unavailable()
+                .with_detail("Repository synchronization failed")
+                .create(),
+            CanonicalError::internal("An internal database error occurred").create(),
+        ] {
+            let classified = DomainError::from_catalog(fault);
+            assert!(
+                matches!(classified, DomainError::Catalog(_)),
+                "{classified:?}"
+            );
+            assert_eq!(classified.recorded_text(), OPAQUE_ERROR_TEXT);
+        }
+    }
+
+    /// A catalog refusal is *answered* with the catalog's sentence and
+    /// *recorded* by its category only. The sentence can carry the repository's
+    /// sanitized `sync_error` (remote host, URL shape), and `qa_runs.error` /
+    /// the tick rows are read by principals who never had `TEST_REPO/GET` —
+    /// whichever actor read the catalog. `LEAK` stands for that remote.
+    #[test]
+    fn a_catalog_refusal_is_recorded_by_its_category_and_never_by_its_sentence() {
+        const LEAK: &str = "git.internal.example";
+        let cases = [
+            (
+                CatalogTestRepoError::failed_precondition()
+                    .with_precondition_violation(
+                        "sync_state",
+                        format!(
+                            "Repository r has no synced content for branch '26.8': the \
+                             repository's last sync failed: remote rejected \
+                             https://***@{LEAK}/repo.git"
+                        ),
+                        "NOT_SYNCED",
+                    )
+                    .create(),
+                CATALOG_BRANCH_NOT_SYNCED,
+            ),
+            (
+                CatalogTestRepoError::failed_precondition()
+                    .with_precondition_violation(
+                        "plan_yaml",
+                        format!("unknown key `{LEAK}` at line 3"),
+                        "PLAN_YAML_INVALID",
+                    )
+                    .create(),
+                CATALOG_PLAN_YAML_INVALID,
+            ),
+            (
+                CatalogTestRepoError::failed_precondition()
+                    .with_precondition_violation("other", format!("about {LEAK}"), "SOMETHING_NEW")
+                    .create(),
+                CATALOG_PRECONDITION_FAILED,
+            ),
+            // The codes qa-catalog's REST error mapping can also raise as a
+            // `FailedPrecondition`: no dedicated sentence, the generic one.
+            (
+                CatalogTestRepoError::failed_precondition()
+                    .with_precondition_violation(
+                        "credential_ref",
+                        format!("rejected by {LEAK}"),
+                        "CREDENTIAL_REJECTED",
+                    )
+                    .create(),
+                CATALOG_PRECONDITION_FAILED,
+            ),
+            (
+                CatalogTestRepoError::failed_precondition()
+                    .with_precondition_violation(
+                        "repository_size",
+                        format!("{LEAK} exceeds limits"),
+                        "SYNC_BUDGET_EXCEEDED",
+                    )
+                    .create(),
+                CATALOG_PRECONDITION_FAILED,
+            ),
+            (
+                CatalogTestRepoError::not_found(format!(
+                    "Branch '{LEAK}' does not exist in repository r"
+                ))
+                .with_resource("r")
+                .create(),
+                CATALOG_TARGET_NOT_FOUND,
+            ),
+            (
+                CatalogTestRepoError::invalid_argument()
+                    .with_field_violation("branch", format!("must not name {LEAK}"), "VALIDATION")
+                    .create(),
+                CATALOG_REQUEST_REJECTED,
+            ),
+        ];
+        for (refusal, expected) in cases {
+            let error = DomainError::from_catalog(refusal);
+            assert!(matches!(error, DomainError::CatalogRefused(_)), "{error:?}");
+            assert!(
+                error.disclosable(),
+                "still answered to the caller: {error:?}"
+            );
+            assert!(!error.records_verbatim(), "{error:?}");
+            let recorded = error.recorded_text();
+            assert_eq!(recorded, expected, "{error:?}");
+            assert!(!recorded.contains(LEAK), "{error:?} recorded {recorded}");
+            // The caller who asked still gets the catalog's own words: the
+            // log line and the answered body both carry them.
+            assert!(error.to_string().contains(LEAK), "{error}");
+            let canonical: CanonicalError = error.into();
+            let body = serde_json::to_string(
+                &toolkit_canonical_errors::Problem::from_error(&canonical)
+                    .expect("a problem must serialize"),
+            )
+            .expect("a problem must serialize");
+            assert!(body.contains(LEAK), "the answer must stay verbatim: {body}");
         }
     }
 

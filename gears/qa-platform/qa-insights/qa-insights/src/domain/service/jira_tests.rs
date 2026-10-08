@@ -48,10 +48,8 @@ use uuid::Uuid;
 
 use super::{JiraConfigInput, JiraService};
 use crate::domain::analytics::PlanRef;
-use crate::domain::error::DomainError;
-use crate::domain::ports::jira_client::{
-    IssueRef, JiraClient, JiraIssue, NewIssue, StatusCategory,
-};
+use crate::domain::error::{DomainError, EgressFailure};
+use crate::domain::ports::jira_client::{IssueRef, JiraClient, NewIssue, StatusCategory};
 use crate::domain::repos::{JiraRepository, NewTestCaseResult, NewTestResult, ResultsRepository};
 use crate::domain::service::resources;
 use crate::domain::service::test_support::{
@@ -67,7 +65,7 @@ const TENANT: Uuid = Uuid::from_u128(0x0A);
 
 /// The credential-store reference a tenant stores. **Not** a token: the whole
 /// point of the column is that the material lives in credstore.
-const TOKEN_REF: &str = "cred://qa-jira-api-token";
+const TOKEN_REF: &str = "qa-jira-api-token";
 
 /// A [`JiraClient`] double that answers one scripted category, records the
 /// keys it was asked about, and — since Task 33 — actually files or finds
@@ -142,15 +140,6 @@ impl JiraClient for FakeJira {
         self.asked.lock().unwrap().push(jira_key.to_owned());
         Ok(self.category.clone())
     }
-
-    async fn get_issue(
-        &self,
-        _: &SecurityContext,
-        _: &JiraConfig,
-        _: &str,
-    ) -> Result<JiraIssue, DomainError> {
-        unimplemented!("nothing in this task calls it")
-    }
 }
 
 /// A PDP double that grants and compiles a scope over **two** tenants —
@@ -194,11 +183,12 @@ impl authz_resolver_sdk::AuthZResolverApi for TwoTenantAuthZ {
 /// A PDP double that grants every `qa.jira_bug` and `qa.jira_config` request
 /// and denies everything else — in particular `qa.test_result`.
 ///
-/// The fixture for controller ruling R87: if [`JiraService::file_bugs`] read
+/// The fixture for the results reads' own scope (`jira.rs`'s header, "The results
+/// reads compile their own scope"): if [`JiraService::file_bugs`] read
 /// `qa_test_results`/`qa_test_case_results` under the bug scope rather than
-/// compiling its own `qa.test_result` scope
-/// ([`JiraService::results_scope`]), this double would never be asked about
-/// `qa.test_result` at all and the whole call would wrongly succeed.
+/// compiling its own `qa.test_result` scope ([`JiraService::results_scope`]),
+/// this double would never be asked about `qa.test_result` at all and the whole
+/// call would wrongly succeed.
 struct GrantsJiraButNotResultsAuthZ;
 
 #[async_trait]
@@ -224,7 +214,7 @@ impl authz_resolver_sdk::AuthZResolverApi for GrantsJiraButNotResultsAuthZ {
 /// A [`JiraRepository`] that delegates everything to [`OrmJiraRepository`]
 /// except [`Self::upsert_bug`], which always fails.
 ///
-/// The fixture for controller ruling R88: a filed-or-found issue must not be
+/// The fixture for best-effort local tracking: a filed-or-found issue must not be
 /// discarded from [`JiraService::file_bugs`]' response just because the local
 /// registration write failed after the fact — legacy's own `let _ =
 /// self.track_bug(...)` treats that write as best-effort, and this double is
@@ -410,7 +400,7 @@ async fn fixture_with_jira_config() -> Fixture {
 // The brief's two
 // ---------------------------------------------------------------------------
 
-/// The token is a credstore reference here, never the material (Task 10). A
+/// The token is a credstore reference here, never the material. A
 /// `GET` that returned a bearer token would be a credential-disclosure bug, and
 /// legacy's masking — `"********"` substituted on read at
 /// `manager/src/routes/settings.rs:254-259`, confirmed in this task's Step 0 —
@@ -531,7 +521,7 @@ async fn saving_a_jira_config_round_trips_every_field_and_replaces_the_previous_
         url: "https://other.example.com".to_owned(),
         project_key: "OTHER".to_owned(),
         email: "someone@example.com".to_owned(),
-        api_token_credstore_ref: "cred://qa-jira-rotated".to_owned(),
+        api_token_credstore_ref: "qa-jira-rotated".to_owned(),
         issue_type: Some("Task".to_owned()),
         enabled: false,
     };
@@ -632,10 +622,10 @@ async fn a_save_with_no_credential_reference_and_no_stored_row_stores_empty() {
 /// the `PUT`, naming its own field.**
 ///
 /// Fix round 1, finding 1. The stored value is copied verbatim into the oagw
-/// upstream's apikey auth config and reaches `SecretRef::new` after a `cred://`
-/// strip; `SecretRef` accepts `[a-zA-Z0-9_-]` only, up to 255 bytes, and
-/// prohibits colons outright "to prevent `ExternalID` collisions in backend
-/// storage" (`gears/credstore/credstore-sdk/src/models.rs:42-83`). Unchecked, a
+/// upstream's apikey auth config and reaches `SecretRef::new`; `SecretRef`
+/// accepts `[a-zA-Z0-9_-]` only, up to 255 bytes, and prohibits colons
+/// outright "to prevent `ExternalID` collisions in backend storage"
+/// (`credstore_sdk::SecretRef`'s own doc). Unchecked, a
 /// bad reference saves cleanly and fails inside oagw at *request* time, with
 /// nothing tying the failure back to the save.
 ///
@@ -644,8 +634,9 @@ async fn a_save_with_no_credential_reference_and_no_stored_row_stores_empty() {
 /// The first case is `credstore://qa/jira/api-token` — **the exact value every
 /// fixture in this task's first round used**, which is how the contract got
 /// missed. The legal pair at the end is the other half: a rule that rejected
-/// everything would pass the negative cases and break the feature, so both legal
-/// spellings are asserted to survive.
+/// everything would pass the negative cases and break the feature, so two legal
+/// names are asserted to survive, and the `cred://` spelling this gear used to
+/// accept is asserted refused.
 #[tokio::test]
 async fn an_unresolvable_credential_reference_is_refused_naming_its_own_field() {
     let f = fixture_without_jira_config().await;
@@ -656,6 +647,7 @@ async fn an_unresolvable_credential_reference_is_refused_naming_its_own_field() 
         "qa:jira:token",
         "has spaces",
         "cred://",
+        "cred://qa-jira-api-token",
     ] {
         let err = f
             .service
@@ -676,7 +668,7 @@ async fn an_unresolvable_credential_reference_is_refused_naming_its_own_field() 
         }
     }
 
-    for good in ["cred://qa-jira-api-token", "qa_jira_api_token"] {
+    for good in ["qa-jira-api-token", "qa_jira_api_token"] {
         f.service
             .save_jira_config(
                 &f.ctx,
@@ -771,7 +763,7 @@ async fn a_multi_tenant_scope_does_not_carry_another_tenants_credential_referenc
                 url: "https://other.example.com".to_owned(),
                 project_key: "OTHER".to_owned(),
                 email: "other@example.com".to_owned(),
-                api_token_credstore_ref: "cred://other-tenants-secret".to_owned(),
+                api_token_credstore_ref: "other-tenants-secret".to_owned(),
                 issue_type: None,
                 enabled: true,
             },
@@ -816,7 +808,7 @@ async fn a_multi_tenant_scope_does_not_carry_another_tenants_credential_referenc
             .await
             .unwrap()
             .map(|c| c.api_token_credstore_ref),
-        Some("cred://other-tenants-secret".to_owned()),
+        Some("other-tenants-secret".to_owned()),
     );
 }
 
@@ -1001,7 +993,7 @@ async fn another_tenants_jira_settings_are_invisible() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 33: the bug registry — `open_bugs` and `file_bugs`
+// The bug registry — `open_bugs` and `file_bugs`
 // ---------------------------------------------------------------------------
 
 /// The plan every `file_bugs` fixture files against, unless a test needs a
@@ -1040,8 +1032,8 @@ fn failed_result(
     }
 }
 
-/// One case row, minimal — the fields R84's concatenation and its `FAILED`
-/// filter actually read.
+/// One case row, minimal — the fields the detail-text concatenation and its
+/// `FAILED` filter actually read.
 fn case(test_file: &str, nodeid: &str, status: &str, reason: Option<&str>) -> NewTestCaseResult {
     NewTestCaseResult {
         test_file: test_file.to_owned(),
@@ -1120,7 +1112,8 @@ async fn filing_a_failed_test_creates_an_issue_and_registers_it_locally() {
     assert_eq!(registered.plan_path, PLAN_PATH);
 }
 
-/// **R84, pinned.** The issue body concatenates every `FAILED` case's
+/// **The detail text, pinned** (`jira.rs`'s header, "The issue body's detail
+/// text"). The issue body concatenates every `FAILED` case's
 /// `reason` for the failing file, and a `PASSED` case's `reason` — however
 /// populated — must never leak in.
 ///
@@ -1130,7 +1123,7 @@ async fn filing_a_failed_test_creates_an_issue_and_registers_it_locally() {
 /// `PASSED` whose reason reads "must never appear". A concatenation that
 /// filtered on nothing, or that fell back to sending every case regardless of
 /// status, goes red on the third assertion; an implementation that sent an
-/// empty detail regardless (the R84 alternative this task rejected) goes red
+/// empty detail regardless (the alternative this task rejected) goes red
 /// on the first two.
 #[tokio::test]
 async fn the_issue_body_concatenates_every_failed_cases_reason_and_excludes_passed_ones() {
@@ -1228,8 +1221,8 @@ async fn filing_an_already_registered_test_finds_it_locally_and_calls_the_port_n
     );
 }
 
-/// **Controller ruling R86, fix round 1, Critical 1.** A multi-tenant scope
-/// must not make the local re-file probe hand back another tenant's bug.
+/// **The explicit-`tenant_id` rule, fix round 1, Critical 1.** A multi-tenant
+/// scope must not make the local re-file probe hand back another tenant's bug.
 ///
 /// Uses [`TwoTenantAuthZ`], not [`crate::domain::service::test_support::TenantScopedAuthZ`]
 /// — the same distinction
@@ -1373,8 +1366,8 @@ async fn a_port_side_dedupe_hit_is_still_registered_locally() {
     assert_eq!(registered.test_name, "AuthN Login");
 }
 
-/// **Controller ruling R88, fix round 1, Important 3.** A local registration
-/// failure must not discard a filed-or-found issue from the response.
+/// **Fix round 1, Important 3.** A local registration failure must not discard a
+/// filed-or-found issue from the response.
 ///
 /// Legacy is `let _ = self.track_bug(...)` on both of `create_or_find_issue`'s
 /// dedupe/create paths (`jira.rs:92-101`, `:177-187`): local tracking is
@@ -1461,12 +1454,12 @@ async fn upsert_bug_failure_does_not_discard_a_filed_issue() {
     );
 }
 
-/// **Controller ruling R80, pinned end to end.** The repository-level tests
-/// of similar names (`infra::storage::jira_sea_repo`) pin the predicate
-/// directly; this pins that `file_bugs` actually reaches it through the whole
-/// filing flow — a bug the poller has resolved still deduplicates a re-file
-/// locally, reusing the stale, already-resolved key, even though the same bug
-/// has already left [`JiraService::open_bugs`]'s answer.
+/// **Legacy's `!= 'Closed'` re-file probe, pinned end to end.** The
+/// repository-level tests of similar names (`infra::storage::jira_sea_repo`) pin
+/// the predicate directly; this pins that `file_bugs` actually reaches it through
+/// the whole filing flow — a bug the poller has resolved still deduplicates a
+/// re-file locally, reusing the stale, already-resolved key, even though the same
+/// bug has already left [`JiraService::open_bugs`]'s answer.
 #[tokio::test]
 async fn a_resolved_bug_still_blocks_the_local_refile_probe() {
     let f = fixture_with_jira_config().await;
@@ -1675,6 +1668,290 @@ async fn filing_a_test_with_no_plan_identity_is_swallowed() {
     assert!(f.jira.filed().is_empty());
 }
 
+/// A JIRA egress failure the port reported for one test of a `file_bugs`
+/// request.
+fn jira_egress(failure: EgressFailure) -> DomainError {
+    DomainError::UpstreamEgress {
+        channel: "jira".to_owned(),
+        endpoint: "jira.corp.example".to_owned(),
+        failure,
+        detail: "scripted".to_owned(),
+    }
+}
+
+/// Seed one run whose `test_names` all failed against [`plan_repo`].
+async fn seed_failed_run(f: &Fixture, run_id: Uuid, test_names: &[&str]) {
+    let conn = f.db.conn().unwrap();
+    let rows = test_names
+        .iter()
+        .map(|name| failed_result(&format!("tests/{name}.py"), name, plan_repo(), PLAN_PATH))
+        .collect();
+    OrmResultsRepository
+        .upsert_run_results(&conn, &scope(TENANT), TENANT, run_id, rows, vec![])
+        .await
+        .unwrap();
+}
+
+/// When no test of the request was filed or found and every JIRA call failed
+/// on egress with `Rejected` (which does not stop the pass), the request
+/// answers the first failure, which the REST layer maps to 503 naming the
+/// `jira` channel and its class. The details differ so the test can tell
+/// "the first" from "the last".
+#[tokio::test]
+async fn every_test_rejected_answers_the_first_rejection() {
+    let f = fixture_with_jira_config().await;
+    let run_id = Uuid::from_u128(0x90A);
+    seed_failed_run(&f, run_id, &["A", "B"]).await;
+    for detail in ["first", "second"] {
+        f.jira.script_next(Err(DomainError::UpstreamEgress {
+            channel: "jira".to_owned(),
+            endpoint: "jira.corp.example".to_owned(),
+            failure: EgressFailure::Rejected,
+            detail: detail.to_owned(),
+        }));
+    }
+
+    let err = f
+        .service
+        .file_bugs(&f.ctx, run_id, None)
+        .await
+        .expect_err("nothing was filed and JIRA refused every request: this is not a 200");
+
+    assert!(
+        matches!(
+            &err,
+            DomainError::UpstreamEgress { channel, failure: EgressFailure::Rejected, detail, .. }
+                if channel == "jira" && detail == "first"
+        ),
+        "{err:?}",
+    );
+    assert_eq!(
+        f.jira.filed().len(),
+        2,
+        "a rejection does not stop the pass"
+    );
+}
+
+/// "The first egress failure" is the first in `(test_name, test_file)` order,
+/// not the store's: rows seeded in reverse are still tried in name order, so
+/// identical requests answer the same class.
+#[tokio::test]
+async fn failed_tests_are_tried_in_test_name_order_whatever_the_store_returns() {
+    let f = fixture_with_jira_config().await;
+    let run_id = Uuid::from_u128(0x90E);
+    seed_failed_run(&f, run_id, &["C", "B", "A"]).await;
+    for _ in 0..3 {
+        f.jira
+            .script_next(Err(jira_egress(EgressFailure::Rejected)));
+    }
+
+    let err = f.service.file_bugs(&f.ctx, run_id, None).await.unwrap_err();
+
+    let tried: Vec<String> = f.jira.filed().into_iter().map(|i| i.test_name).collect();
+    assert_eq!(tried, ["A", "B", "C"]);
+    assert_eq!(err.failure_class(), "rejected", "{err:?}");
+}
+
+/// Nine failed tests and an unreachable JIRA: the pass stops after the first
+/// attempt (the tenant has one endpoint and one credential, so later attempts
+/// cannot succeed) and answers that failure. Trying all nine took longer than
+/// the API gateway's request timeout, so the caller saw a 504 instead.
+#[tokio::test]
+async fn an_unreachable_jira_stops_the_pass_after_one_attempt() {
+    let f = fixture_with_jira_config().await;
+    let run_id = Uuid::from_u128(0x90F);
+    let names = ["A", "B", "C", "D", "E", "F", "G", "H", "I"];
+    seed_failed_run(&f, run_id, &names).await;
+    for _ in names {
+        f.jira
+            .script_next(Err(jira_egress(EgressFailure::Unreachable)));
+    }
+
+    let err = f.service.file_bugs(&f.ctx, run_id, None).await.unwrap_err();
+
+    assert_eq!(err.failure_class(), "unreachable", "{err:?}");
+    let tried: Vec<String> = f.jira.filed().into_iter().map(|i| i.test_name).collect();
+    assert_eq!(tried, ["A"], "exactly one attempt");
+}
+
+/// A timeout and a refused credential stop the pass the same way.
+#[tokio::test]
+async fn a_timeout_or_a_refused_credential_stops_the_pass_too() {
+    for (n, failure) in [EgressFailure::Timeout, EgressFailure::Authentication]
+        .into_iter()
+        .enumerate()
+    {
+        let f = fixture_with_jira_config().await;
+        let run_id = Uuid::from_u128(0x910 + n as u128);
+        seed_failed_run(&f, run_id, &["A", "B", "C"]).await;
+        for _ in 0..3 {
+            f.jira.script_next(Err(jira_egress(failure)));
+        }
+
+        let err = f.service.file_bugs(&f.ctx, run_id, None).await.unwrap_err();
+
+        assert!(
+            matches!(&err, DomainError::UpstreamEgress { failure: got, .. } if *got == failure),
+            "{err:?}"
+        );
+        assert_eq!(f.jira.filed().len(), 1, "{failure:?} must stop the pass");
+    }
+}
+
+/// A `Rejected` failure is about one issue (JIRA's 4xx for that request), so
+/// it does not stop the pass: the next test is tried and its success is a 200.
+#[tokio::test]
+async fn a_rejected_issue_does_not_stop_the_pass() {
+    let f = fixture_with_jira_config().await;
+    let run_id = Uuid::from_u128(0x912);
+    seed_failed_run(&f, run_id, &["A", "B"]).await;
+    f.jira
+        .script_next(Err(jira_egress(EgressFailure::Rejected)));
+    f.jira.script_next(Ok(IssueRef {
+        jira_key: "VHP-8".to_owned(),
+        created: true,
+    }));
+
+    let filed = f.service.file_bugs(&f.ctx, run_id, None).await.unwrap();
+
+    assert_eq!(
+        filed,
+        vec![IssueRef {
+            jira_key: "VHP-8".to_owned(),
+            created: true,
+        }],
+    );
+    assert_eq!(f.jira.filed().len(), 2, "both tests are tried");
+}
+
+/// An earlier success, then an outage: 200 with the success, and the tests
+/// after the outage are not attempted.
+#[tokio::test]
+async fn an_outage_after_a_success_answers_the_success_and_attempts_nothing_more() {
+    let f = fixture_with_jira_config().await;
+    let run_id = Uuid::from_u128(0x913);
+    seed_failed_run(&f, run_id, &["A", "B", "C", "D"]).await;
+    f.jira.script_next(Ok(IssueRef {
+        jira_key: "VHP-9".to_owned(),
+        created: true,
+    }));
+    f.jira
+        .script_next(Err(jira_egress(EgressFailure::Unreachable)));
+    f.jira
+        .script_next(Err(jira_egress(EgressFailure::Unreachable)));
+
+    let filed = f.service.file_bugs(&f.ctx, run_id, None).await.unwrap();
+
+    assert_eq!(
+        filed,
+        vec![IssueRef {
+            jira_key: "VHP-9".to_owned(),
+            created: true,
+        }],
+    );
+    let tried: Vec<String> = f.jira.filed().into_iter().map(|i| i.test_name).collect();
+    assert_eq!(tried, ["A", "B"], "C and D are not attempted");
+}
+
+/// A `Rejected` issue then an outage, nothing filed: the answer is the
+/// failure that stopped the pass (the outage), not the earlier per-issue
+/// refusal.
+#[tokio::test]
+async fn the_outage_that_stopped_the_pass_is_the_answer_over_an_earlier_rejection() {
+    let f = fixture_with_jira_config().await;
+    let run_id = Uuid::from_u128(0x914);
+    seed_failed_run(&f, run_id, &["A", "B", "C"]).await;
+    f.jira
+        .script_next(Err(jira_egress(EgressFailure::Rejected)));
+    f.jira
+        .script_next(Err(jira_egress(EgressFailure::Unreachable)));
+    f.jira
+        .script_next(Err(jira_egress(EgressFailure::Unreachable)));
+
+    let err = f.service.file_bugs(&f.ctx, run_id, None).await.unwrap_err();
+
+    assert_eq!(err.failure_class(), "unreachable", "{err:?}");
+    assert_eq!(f.jira.filed().len(), 2);
+}
+
+/// One test filed, then one failing on egress: a partial success stays `Ok`
+/// with the filed issue, and the egress failure is only logged.
+#[tokio::test]
+async fn a_partial_success_keeps_the_filed_issues_beside_an_egress_failure() {
+    let f = fixture_with_jira_config().await;
+    let run_id = Uuid::from_u128(0x90B);
+    seed_failed_run(&f, run_id, &["A", "B"]).await;
+    f.jira.script_next(Ok(IssueRef {
+        jira_key: "VHP-7".to_owned(),
+        created: true,
+    }));
+    f.jira
+        .script_next(Err(jira_egress(EgressFailure::Authentication)));
+
+    let filed = f.service.file_bugs(&f.ctx, run_id, None).await.unwrap();
+
+    assert_eq!(
+        filed,
+        vec![IssueRef {
+            jira_key: "VHP-7".to_owned(),
+            created: true,
+        }],
+    );
+}
+
+/// A test with nothing to file (no plan identity) beside an egress failure
+/// still answers the egress failure: no issue was filed or found.
+#[tokio::test]
+async fn a_non_egress_skip_beside_an_egress_failure_answers_the_egress_failure() {
+    let f = fixture_with_jira_config().await;
+    let conn = f.db.conn().unwrap();
+    let run_id = Uuid::from_u128(0x90C);
+    OrmResultsRepository
+        .upsert_run_results(
+            &conn,
+            &scope(TENANT),
+            TENANT,
+            run_id,
+            vec![
+                NewTestResult {
+                    repo_id: None,
+                    plan_path: None,
+                    ..failed_result("tests/a.py", "A", plan_repo(), PLAN_PATH)
+                },
+                failed_result("tests/b.py", "B", plan_repo(), PLAN_PATH),
+            ],
+            vec![],
+        )
+        .await
+        .unwrap();
+    f.jira
+        .script_next(Err(jira_egress(EgressFailure::Rejected)));
+
+    let err = f
+        .service
+        .file_bugs(&f.ctx, run_id, None)
+        .await
+        .expect_err("nothing was filed and JIRA refused the request");
+
+    assert_eq!(err.failure_class(), "rejected", "{err:?}");
+}
+
+/// A non-egress port failure alone keeps today's answer: `200 []`, logged.
+#[tokio::test]
+async fn a_non_egress_port_failure_alone_is_still_an_empty_list() {
+    let f = fixture_with_jira_config().await;
+    let run_id = Uuid::from_u128(0x90D);
+    seed_failed_run(&f, run_id, &["A"]).await;
+    f.jira.script_next(Err(DomainError::Validation {
+        field: "x".to_owned(),
+        message: "scripted".to_owned(),
+    }));
+
+    let filed = f.service.file_bugs(&f.ctx, run_id, None).await.unwrap();
+
+    assert!(filed.is_empty(), "{filed:?}");
+}
+
 /// `open_bugs(None, None)` is legacy's `get_all_open_bugs` fallback.
 #[tokio::test]
 async fn open_bugs_with_no_plan_named_lists_every_open_bug() {
@@ -1711,7 +1988,7 @@ async fn open_bugs_with_no_plan_named_lists_every_open_bug() {
 /// [`JiraRepository::list_open_for_plan`] and
 /// `qa_insights_sdk::QaInsightsClientV1::skip_list_for` already speak, and
 /// **not** the analytics drill-downs' single `plan_id` matched across every
-/// repository (controller ruling R85).
+/// repository.
 #[tokio::test]
 async fn open_bugs_narrows_to_the_named_plan() {
     let f = fixture_without_jira_config().await;
@@ -1754,7 +2031,7 @@ async fn open_bugs_narrows_to_the_named_plan() {
     );
 }
 
-/// **Controller ruling R85: one without the other is a 400, on both sides.**
+/// **One without the other is a 400, on both sides.**
 #[tokio::test]
 async fn open_bugs_refuses_exactly_one_of_the_pair() {
     let f = fixture_without_jira_config().await;
@@ -1798,17 +2075,17 @@ async fn a_denied_caller_can_neither_list_nor_file_bugs() {
     ));
 }
 
-/// **Controller ruling R87, fix round 1, Important 2.** `file_bugs` reads
+/// **Fix round 1, Important 2.** `file_bugs` reads
 /// `qa_test_results`/`qa_test_case_results` under a scope compiled over
-/// `qa.test_result`, separately from the `qa.jira_bug` scope that authorizes
-/// the registry write — a grant of the latter alone must not be enough.
+/// `qa.test_result`, separately from the `qa.jira_bug` scope that authorizes the
+/// registry write — a grant of the latter alone must not be enough.
 ///
 /// # What makes this test able to fail
 ///
 /// [`GrantsJiraButNotResultsAuthZ`] grants every `qa.jira*` request and
 /// denies everything else. If a revision of `file_bugs` reused the bug
 /// scope's compiled `AccessScope` for the results read (a first draft of this
-/// method did — R87), this double would never see a `qa.test_result` request
+/// method did), this double would never see a `qa.test_result` request
 /// at all, and the call would read the run's rows and succeed instead of
 /// being refused.
 #[tokio::test]
@@ -1842,11 +2119,12 @@ async fn filing_needs_a_qa_test_result_grant_separately_from_qa_jira_bug() {
 }
 
 /// Every resource `file_bugs` actually reads is asked about, by name — the
-/// positive half of R87: `qa.jira_bug` for the registry, `qa.test_result` for
-/// the two results tables, and `qa.jira_config` for the usable-config read.
-/// `results.rs`'s `both_collections_authorize_under_test_result_list` is the
-/// precedent this follows for the same reason its own doc gives: nothing else
-/// in this crate observes the request a scope call actually sends.
+/// positive half of the results reads' own scope: `qa.jira_bug` for the registry,
+/// `qa.test_result` for the two results tables, and `qa.jira_config` for the
+/// usable-config read. `results.rs`'s
+/// `both_collections_authorize_under_test_result_list` is the precedent this
+/// follows for the same reason its own doc gives: nothing else in this crate
+/// observes the request a scope call actually sends.
 #[tokio::test]
 async fn file_bugs_asks_the_pdp_about_every_resource_it_reads() {
     let authz = Arc::new(RecordingAuthZ::default());

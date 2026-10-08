@@ -354,12 +354,6 @@ impl ClaimRowElector {
         }
     }
 
-    /// This replica's holder id, as it appears in the `holder` column.
-    #[must_use]
-    pub fn holder(&self) -> Uuid {
-        self.holder
-    }
-
     /// Take `role`'s claim if it is free, expired, or already ours.
     ///
     /// `Ok(false)` is the ordinary answer for a replica that is not the

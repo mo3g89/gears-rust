@@ -31,7 +31,8 @@
 //!   route are the same alias rather than two. An instance's **context path** is
 //!   not part of the alias — [`Endpoint`] has no path field — and rides on the
 //!   route and the request URI instead; [`JiraEgress`] carries that argument.
-//! * [`OagwJiraClient::ensure_upstream`] calls `create_upstream` and, on
+//! * [`OagwJiraClient::ensure_upstream`] — under the request bound, see
+//!   `provisioned_egress` — calls `create_upstream` and, on
 //!   `CanonicalError::AlreadyExists`, resolves the existing upstream by alias and
 //!   ensures its route — the in-repo idiom, from
 //!   `gears/mini-chat/mini-chat/src/infra/oagw_provisioning.rs:282-286` and its
@@ -40,12 +41,12 @@
 //!   and **only once the route is ensured too**, so the steady state costs no
 //!   gateway calls beyond the JIRA request itself.
 //!
-//! **The lookup on the conflict path is controller ruling R81, and fix round 1's
-//! finding 2 is why it exists.** R76 originally excluded `list_upstreams` to keep
-//! this adapter small. Without it, a transient `create_route` failure was
-//! permanent: the upstream had been created, so every later attempt — in this
-//! process *and after a restart* — took the `AlreadyExists` arm, which registered
-//! no route, and a route is mandatory for proxying
+//! **The lookup on the conflict path is fix round 1's, and its finding 2 is why
+//! it exists.** The first draft excluded `list_upstreams` to keep this adapter
+//! small. Without it, a transient `create_route` failure was permanent: the
+//! upstream had been created, so every later attempt — in this process *and
+//! after a restart* — took the `AlreadyExists` arm, which registered no route,
+//! and a route is mandatory for proxying
 //! (`gears/system/oagw/oagw/src/domain/services/management/mod.rs:443-451`). The
 //! tenant's JIRA integration stayed dead until somebody deleted the upstream by
 //! hand.
@@ -58,14 +59,21 @@
 //! failure here fails the one call that provoked it — and, since fix round 1,
 //! leaves the cache untouched so the next call tries again.
 //!
+//! # Failures on the far side are classified
+//!
+//! A failure on the far side is `UpstreamEgress` with `channel = "jira"`,
+//! classified as Slack's is: the gateway's own answer is `Unreachable`, JIRA's
+//! `401`/`403` are `Authentication` (the secret behind
+//! `api_token_credstore_ref` was refused), a deadline is `Timeout`, and any other
+//! non-2xx is `Rejected`. `Internal` is left for this gear's own faults.
+//!
 //! # The credential: what oagw actually permits, and the constraint it forces
 //!
-//! The brief and controller ruling R76 both say the JIRA credential is supplied
-//! by this adapter from credstore. **It cannot be supplied as a request header,
-//! and that was established by reading oagw rather than by preference.**
-//! `apply_passthrough` strips `authorization` from every proxied request
-//! unconditionally — it is in `STRIPPED_HEADERS` and the strip runs even under
-//! `PassthroughMode::All`
+//! The brief says the JIRA credential is supplied by this adapter from
+//! credstore. **It cannot be supplied as a request header, and that was
+//! established by reading oagw rather than by preference.** `apply_passthrough`
+//! strips `authorization` from every proxied request unconditionally — it is in
+//! `STRIPPED_HEADERS` and the strip runs even under `PassthroughMode::All`
 //! (`gears/system/oagw/oagw/src/infra/proxy/headers.rs:13-18`, applied at
 //! `:50-53`). Only two things downstream of that strip can put the header back:
 //! the upstream's auth plugin (step 5 of the proxy pipeline,
@@ -98,9 +106,8 @@
 //! design puts only a reference.
 //!
 //! The reference's **name** has a contract too, and unlike the contents one it
-//! *is* enforced: the value reaches `SecretRef::new` after a `cred://` strip and
-//! that accepts `[a-zA-Z0-9_-]` only
-//! (`gears/credstore/credstore-sdk/src/models.rs:42-83`).
+//! *is* enforced: the value must be what `SecretRef::new` accepts,
+//! `[a-zA-Z0-9_-]` only (`credstore_sdk::SecretRef`'s own doc).
 //! [`validate_credstore_ref`] refuses anything else, here and at the `PUT` — fix
 //! round 1, finding 1, which found the syntax undocumented and violated by every
 //! example in the change that introduced it.
@@ -117,8 +124,8 @@
 //! host, the alias does not change, `create_upstream` answers `AlreadyExists`,
 //! and the upstream keeps its original `secret_ref` — so the new reference has
 //! no effect until the oagw upstream is deleted and recreated. This is a
-//! deliberate consequence of R76's "no reconcile machinery" instruction rather
-//! than an oversight.
+//! deliberate consequence of this adapter carrying no reconcile machinery,
+//! rather than an oversight.
 //!
 //! **Fix round 1 narrowed it without closing it.** The `AlreadyExists` arm now
 //! resolves the upstream by alias, so its id *is* in hand — which is the piece an
@@ -134,7 +141,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use oagw_sdk::api::ServiceGatewayClientV1;
+use oagw_sdk::api::{ErrorSource, ServiceGatewayClientV1};
 use oagw_sdk::{
     APIKEY_AUTH_PLUGIN_ID, AuthConfig, Body, CreateRouteRequest, CreateUpstreamRequest, Endpoint,
     HTTP_PROTOCOL_ID, HttpMatch, HttpMethod, ListQuery, MatchRules, PathSuffixMode, Scheme, Server,
@@ -146,7 +153,7 @@ use toolkit_security::SecurityContext;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::domain::error::DomainError;
+use crate::domain::error::{DomainError, EgressFailure};
 use crate::domain::ports::jira_client::{
     IssueRef, JiraClient, JiraIssue, NewIssue, StatusCategory, validate_credstore_ref,
 };
@@ -160,6 +167,100 @@ use crate::domain::ports::jira_client::{
 /// at that prefix with [`PathSuffixMode::Append`] covers `/search`, `/issue` and
 /// `/issue/{key}` — the three suffixes below — rather than needing three routes.
 const API_PREFIX: &str = "/rest/api/3";
+
+/// The channel every [`DomainError::UpstreamEgress`] from this adapter names.
+const CHANNEL: &str = "jira";
+
+/// One [`DomainError::UpstreamEgress`] aimed at `host`. `detail` is fixed text
+/// or an HTTP status, never JIRA's body: a JIRA error document can carry
+/// instance detail (see `fetch_issue`).
+fn egress_error(host: &str, failure: EgressFailure, detail: String) -> DomainError {
+    DomainError::UpstreamEgress {
+        channel: CHANNEL.to_owned(),
+        endpoint: host.to_owned(),
+        failure,
+        detail,
+    }
+}
+
+/// What a non-2xx from `send` means, by Slack's adapter's rule: the gateway
+/// answering for an unreachable JIRA is `Unreachable`; 401/403 are JIRA
+/// refusing the secret behind `api_token_credstore_ref` (`Authentication`);
+/// anything else is JIRA refusing this request (`Rejected`).
+fn refusal(host: &str, answer: &JiraAnswer, what: &str) -> DomainError {
+    let status = answer.status.as_u16();
+    if answer.from_gateway {
+        return egress_error(
+            host,
+            EgressFailure::Unreachable,
+            format!("{what}: the gateway could not reach JIRA (HTTP {status})"),
+        );
+    }
+    let failure = match status {
+        401 | 403 => EgressFailure::Authentication,
+        _ => EgressFailure::Rejected,
+    };
+    egress_error(
+        host,
+        failure,
+        format!("{what}: the instance answered HTTP {status}"),
+    )
+}
+
+/// A dedupe search whose call failed: an outage is returned, anything else is
+/// logged and falls through to the create (legacy's fall-through).
+fn search_failed(e: DomainError) -> Result<Option<String>, DomainError> {
+    if is_outage(&e) {
+        return Err(e);
+    }
+    warn!(
+        failure = %e.failure_class(),
+        error = %e,
+        "the JIRA dedupe search failed; filing a new issue rather than dropping the report \
+         (legacy's own fall-through)",
+    );
+    Ok(None)
+}
+
+/// A dedupe search answered with a non-2xx: an outage (the gateway answering
+/// for JIRA, or JIRA refusing the credential) is returned, any other refusal
+/// is logged and falls through to the create.
+fn search_refused(host: &str, answer: &JiraAnswer) -> Result<Option<String>, DomainError> {
+    let refused = refusal(host, answer, "the JIRA dedupe search");
+    if is_outage(&refused) {
+        return Err(refused);
+    }
+    warn!(
+        status = %answer.status,
+        failure = %refused.failure_class(),
+        "the JIRA dedupe search was refused; filing a new issue rather than dropping the report",
+    );
+    Ok(None)
+}
+
+/// Whether `err` means this tenant's JIRA cannot be used right now: the gateway
+/// could not reach it, a call timed out, or JIRA refused the credential. Any
+/// later call to the same endpoint with the same credential would fail the
+/// same way. `Rejected` (JIRA refusing one request) is not an outage.
+const fn is_outage(err: &DomainError) -> bool {
+    matches!(
+        err,
+        DomainError::UpstreamEgress {
+            failure: EgressFailure::Unreachable
+                | EgressFailure::Timeout
+                | EgressFailure::Authentication,
+            ..
+        }
+    )
+}
+
+/// One JIRA exchange: the status, whether the gateway generated the response
+/// itself, and the capped body.
+struct JiraAnswer {
+    status: http::StatusCode,
+    from_gateway: bool,
+    body: Vec<u8>,
+}
 
 /// The label legacy puts on every issue it files (`jira.rs:71`, `:151`) and
 /// searches by (`:71`).
@@ -263,6 +364,38 @@ impl JiraEgress {
     }
 }
 
+/// The most bytes of one JIRA response body [`OagwJiraClient::send`] will
+/// buffer.
+///
+/// Every call this adapter makes returns a single JSON document about at most
+/// one issue: the dedupe search asks for `maxResults=1`, the create answers
+/// `{id, key, self}`, and the issue read is one issue. An issue with hundreds of
+/// comments is still well under a megabyte, so 2 MiB leaves generous headroom
+/// while stopping a runaway or hostile upstream from being buffered whole.
+/// `Body::into_bytes` cannot enforce this — it reads a stream to the end before
+/// returning — so [`read_capped`] walks the stream itself.
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Buffer `body`, failing as soon as it is known to exceed
+/// [`MAX_RESPONSE_BYTES`] rather than after reading all of it.
+async fn read_capped(body: Body) -> Result<Vec<u8>, DomainError> {
+    use futures_util::StreamExt;
+
+    let mut stream = body.into_stream();
+    let mut buffer = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|e| DomainError::Internal(format!("could not read the JIRA response: {e}")))?;
+        if buffer.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(DomainError::Internal(format!(
+                "the JIRA response body exceeded {MAX_RESPONSE_BYTES} bytes"
+            )));
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+    Ok(buffer)
+}
+
 impl OagwJiraClient {
     /// The fixed bound [`Self::send`] applies to one proxied request.
     ///
@@ -283,6 +416,9 @@ impl OagwJiraClient {
     /// losing just the one lookup. The same "bound the one call rather than
     /// the whole loop" reasoning Slack's own module header records, applied
     /// here.
+    ///
+    /// Provisioning gets the same bound, separately — see
+    /// [`Self::provisioned_egress`].
     pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
     #[must_use]
@@ -309,6 +445,39 @@ impl OagwJiraClient {
         }
     }
 
+    /// [`Self::ensure_upstream`] under the same bound [`Self::send`] applies.
+    ///
+    /// Provisioning is up to three gateway calls (`create_upstream`, the
+    /// `list_upstreams` pages, `create_route`) and used to run *before* the
+    /// request's timeout began, so a gateway hanging there stalled the
+    /// leader-claimed poller tick with nothing to stop it — Slack's adapter
+    /// already provisions inside its bound. A separate bound rather than one
+    /// around provisioning *and* the request, because `create_or_find_issue`
+    /// makes two requests after it and each keeps its own.
+    async fn provisioned_egress(
+        &self,
+        ctx: &SecurityContext,
+        config: &JiraConfig,
+    ) -> Result<JiraEgress, DomainError> {
+        tokio::time::timeout(self.timeout, self.ensure_upstream(ctx, config))
+            .await
+            .map_err(|_| {
+                // Pure, and a bad URL fails inside `ensure_upstream` with its
+                // own `Validation` before this bound can matter.
+                let host = egress_for(&config.url)
+                    .map(|e| e.endpoint.host)
+                    .unwrap_or_default();
+                egress_error(
+                    &host,
+                    EgressFailure::Timeout,
+                    format!(
+                        "provisioning the JIRA egress did not complete within {:?}",
+                        self.timeout
+                    ),
+                )
+            })?
+    }
+
     /// Ensure the tenant has an oagw upstream *and* a route for this config's
     /// JIRA instance, and return how to address it.
     ///
@@ -322,8 +491,8 @@ impl OagwJiraClient {
     /// no egress.
     /// [`DomainError::Validation`] naming `url` or `api_token_credstore_ref` for
     /// a stored value oagw could not use.
-    /// [`DomainError::Internal`] when the gateway refused the upstream or the
-    /// route.
+    /// [`DomainError::UpstreamEgress`] (`Unreachable`) when the gateway refused
+    /// the upstream or the route.
     async fn ensure_upstream(
         &self,
         ctx: &SecurityContext,
@@ -368,22 +537,26 @@ impl OagwJiraClient {
             Err(CanonicalError::AlreadyExists { resource_name, .. }) => {
                 // Another replica, or an earlier run of this process, already
                 // provisioned the upstream. **The route still has to be
-                // ensured** — controller ruling R81, fix round 1 finding 2:
-                // without this lookup a restart after a failed route
-                // registration left the tenant's egress permanently dead,
-                // because the upstream existed and nothing ever registered a
-                // route against it. `mini-chat`'s `reuse_existing_upstream`
-                // (`oagw_provisioning.rs:315-336`) is the precedent for
-                // recovering the upstream behind the conflict.
+                // ensured** — fix round 1 finding 2: without this lookup a
+                // restart after a failed route registration left the tenant's
+                // egress permanently dead, because the upstream existed and
+                // nothing ever registered a route against it. `mini-chat`'s
+                // `reuse_existing_upstream` (`oagw_provisioning.rs:315-336`) is
+                // the precedent for recovering the upstream behind the conflict.
                 let taken = resource_name.as_deref().unwrap_or(&egress.alias);
                 if self.reuse_existing_upstream(ctx, taken, &egress).await? {
                     self.mark_provisioned(key);
                 }
             }
             Err(e) => {
-                return Err(DomainError::Internal(format!(
-                    "could not provision an oagw upstream for the tenant's JIRA instance: {e}"
-                )));
+                return Err(egress_error(
+                    &egress.endpoint.host,
+                    EgressFailure::Unreachable,
+                    format!(
+                        "could not provision an oagw upstream for the tenant's JIRA instance ({})",
+                        e.title()
+                    ),
+                ));
             }
         }
 
@@ -404,7 +577,7 @@ impl OagwJiraClient {
     ///
     /// # Errors
     ///
-    /// [`DomainError::Internal`] when the route could not be registered — see
+    /// [`DomainError::UpstreamEgress`] when the route could not be registered — see
     /// [`Self::ensure_route`].
     async fn reuse_existing_upstream(
         &self,
@@ -445,7 +618,7 @@ impl OagwJiraClient {
     ///
     /// # Errors
     ///
-    /// [`DomainError::Internal`] when the gateway refused the route for any
+    /// [`DomainError::UpstreamEgress`] (`Unreachable`) when the gateway refused the route for any
     /// reason other than its already existing.
     async fn ensure_route(
         &self,
@@ -495,9 +668,14 @@ impl OagwJiraClient {
                 debug!(%upstream_id, %route_path, "the JIRA route is already registered");
                 Ok(())
             }
-            Err(e) => Err(DomainError::Internal(format!(
-                "could not register the JIRA route on the oagw upstream: {e}"
-            ))),
+            Err(e) => Err(egress_error(
+                &egress.endpoint.host,
+                EgressFailure::Unreachable,
+                format!(
+                    "could not register the JIRA route on the oagw upstream ({})",
+                    e.title()
+                ),
+            )),
         }
     }
 
@@ -511,7 +689,7 @@ impl OagwJiraClient {
     /// than failing a JIRA call over a diagnostic lookup.
     ///
     /// Reached only on the `AlreadyExists` path, so the steady state still costs
-    /// no `list_upstreams` call at all. Controller ruling R81 lifted R76's
+    /// no `list_upstreams` call at all. Fix round 1 lifted the first draft's
     /// exclusion of this lookup for exactly this purpose.
     async fn find_upstream_by_alias(
         &self,
@@ -552,7 +730,8 @@ impl OagwJiraClient {
             .insert(key);
     }
 
-    /// One proxied request, returning `(status, body_bytes)`.
+    /// One proxied request, returning the status, whether the gateway generated
+    /// the response itself, and the body.
     ///
     /// The status is handed back rather than turned into an error here because
     /// the three callers disagree about what a non-2xx means: the dedupe search
@@ -562,10 +741,11 @@ impl OagwJiraClient {
     async fn send(
         &self,
         ctx: &SecurityContext,
+        host: &str,
         method: http::Method,
         uri: String,
         body: Body,
-    ) -> Result<(http::StatusCode, Vec<u8>), DomainError> {
+    ) -> Result<JiraAnswer, DomainError> {
         let mut builder = http::Request::builder().method(method).uri(&uri);
         if !body.is_empty() {
             // `Content-Type` is the one header oagw forwards regardless of
@@ -577,80 +757,106 @@ impl OagwJiraClient {
             .body(body)
             .map_err(|e| DomainError::Internal(format!("could not build the JIRA request: {e}")))?;
 
-        // This task's timeout bound — see `Self::REQUEST_TIMEOUT`'s own doc
-        // for why this call had none until now. Slack's adapter wraps its
-        // one proxy call the same way, for the same reason.
-        let response = tokio::time::timeout(
-            self.timeout,
-            self.gateway.proxy_request(ctx.clone(), request),
-        )
-        .await
-        .map_err(|_| {
-            DomainError::Internal(format!(
-                "the JIRA request did not complete within {:?}",
-                self.timeout
-            ))
-        })?
-        .map_err(|e| DomainError::Internal(format!("the JIRA request failed: {e}")))?;
-
-        let status = response.status();
-        let bytes =
-            response.into_body().into_bytes().await.map_err(|e| {
-                DomainError::Internal(format!("could not read the JIRA response: {e}"))
-            })?;
-        Ok((status, bytes.to_vec()))
+        // One deadline covers the proxy call AND the body read. Bounding only
+        // `proxy_request` left the read below it unbounded: the gateway hands
+        // back a response as soon as the headers are in, so a JIRA instance that
+        // then trickles (or never finishes) the body stalled the leader-claimed
+        // poller tick with nothing to stop it. See `Self::REQUEST_TIMEOUT`'s own
+        // doc for why this adapter's calls are bounded at all; Slack's adapter
+        // wraps its one proxy call the same way.
+        let exchange = async {
+            let response = self
+                .gateway
+                .proxy_request(ctx.clone(), request)
+                .await
+                .map_err(|e| match e {
+                    CanonicalError::DeadlineExceeded { .. } => egress_error(
+                        host,
+                        EgressFailure::Timeout,
+                        "the gateway's request to JIRA timed out".to_owned(),
+                    ),
+                    // The title, not `{e}`: a gateway error's text can carry
+                    // detail that must not reach an operator-facing string.
+                    other => egress_error(
+                        host,
+                        EgressFailure::Unreachable,
+                        format!(
+                            "the gateway could not deliver the request ({})",
+                            other.title()
+                        ),
+                    ),
+                })?;
+            let status = response.status();
+            let from_gateway =
+                response.extensions().get::<ErrorSource>() == Some(&ErrorSource::Gateway);
+            let body = read_capped(response.into_body()).await?;
+            Ok::<_, DomainError>(JiraAnswer {
+                status,
+                from_gateway,
+                body,
+            })
+        };
+        tokio::time::timeout(self.timeout, exchange)
+            .await
+            .map_err(|_| {
+                egress_error(
+                    host,
+                    EgressFailure::Timeout,
+                    format!("no answer within {:?}", self.timeout),
+                )
+            })?
     }
 
     /// The JQL dedupe probe, returning the key of an already-open issue for this
     /// test.
     ///
-    /// **Every failure is `None`, not an error**, and that is legacy's behaviour
-    /// rather than a simplification: the whole search block sits inside
-    /// `if search_resp.status().is_success()` (`jira.rs:86-108`) and a transport
-    /// failure is `?`-propagated only because legacy's caller has nowhere else to
-    /// put it — the fall-through then files a duplicate issue. Duplicating an
-    /// issue is recoverable; dropping a bug report because a search was slow is
-    /// not.
+    /// **A failure that is not an outage is `Ok(None)`, not an error**, and
+    /// that is legacy's behaviour rather than a simplification: the whole
+    /// search block sits inside `if search_resp.status().is_success()`
+    /// (`jira.rs:86-108`), and the fall-through then files a duplicate issue.
+    /// Duplicating an issue is recoverable; dropping a bug report because JIRA
+    /// answered one search badly is not. That covers JIRA's own non-2xx other
+    /// than `401`/`403`, and a body that is not JSON.
+    ///
+    /// **An outage is `Err`**: an `Unreachable`, `Timeout` or `Authentication`
+    /// failure ([`is_outage`]). The create goes to the same endpoint through
+    /// the same gateway with the same credential, so it would fail the same way,
+    /// and attempting it doubled one attempt's cost (provisioning, search and
+    /// create, each under its own bound, came to about the API gateway's 30 s
+    /// request timeout).
     async fn search_for_open_issue(
         &self,
         ctx: &SecurityContext,
         egress: &JiraEgress,
         project_key: &str,
         test_name: &str,
-    ) -> Option<String> {
-        let query = serde_urlencoded::to_string([
+    ) -> Result<Option<String>, DomainError> {
+        let Ok(query) = serde_urlencoded::to_string([
             ("jql", jql_for(project_key, test_name)),
             ("maxResults", "1".to_owned()),
-        ])
-        .ok()?;
+        ]) else {
+            return Ok(None);
+        };
 
-        let (status, body) = self
+        let answer = self
             .send(
                 ctx,
+                &egress.endpoint.host,
                 http::Method::GET,
                 format!("{}/search?{query}", egress.uri_prefix()),
                 Body::Empty,
             )
-            .await
-            .inspect_err(|e| {
-                warn!(
-                    error = %e,
-                    "the JIRA dedupe search failed; filing a new issue rather than dropping the \
-                     report (legacy's own fall-through)",
-                );
-            })
-            .ok()?;
+            .await;
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(e) => return search_failed(e),
+        };
 
-        if !status.is_success() {
-            warn!(
-                %status,
-                "the JIRA dedupe search was refused; filing a new issue rather than dropping the \
-                 report",
-            );
-            return None;
+        if !answer.status.is_success() {
+            return search_refused(&egress.endpoint.host, &answer);
         }
 
-        let document: serde_json::Value = match serde_json::from_slice(&body) {
+        let document: serde_json::Value = match serde_json::from_slice(&answer.body) {
             Ok(document) => document,
             Err(error) => {
                 // Same treatment as the HTTP-error arms above. A 200 whose body
@@ -659,44 +865,49 @@ impl OagwJiraClient {
                 // is still open, with nothing in the log to explain the
                 // duplicate. Review finding #28.
                 warn!(%error, "JIRA answered 200 with a body that could not be parsed as JSON");
-                return None;
+                return Ok(None);
             }
         };
-        document
+        Ok(document
             .pointer("/issues/0/key")
             .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
+            .map(str::to_owned))
     }
 
-    /// `GET /rest/api/3/issue/{key}` — the call both [`JiraClient::check_status`]
-    /// and [`JiraClient::get_issue`] are projections of (`jira.rs:261-287`).
+    /// `GET /rest/api/3/issue/{key}` — the call [`JiraClient::check_status`] is
+    /// a projection of (`jira.rs:261-287`). The port's `get_issue`, which
+    /// returned this whole issue, was deleted unused in finding #38's triage;
+    /// this module's own tests are what still read the summary and the key.
     async fn fetch_issue(
         &self,
         ctx: &SecurityContext,
         config: &JiraConfig,
         jira_key: &str,
     ) -> Result<JiraIssue, DomainError> {
-        let egress = self.ensure_upstream(ctx, config).await?;
-        let (status, body) = self
+        let egress = self.provisioned_egress(ctx, config).await?;
+        let answer = self
             .send(
                 ctx,
+                &egress.endpoint.host,
                 http::Method::GET,
                 format!("{}/issue/{jira_key}", egress.uri_prefix()),
                 Body::Empty,
             )
             .await?;
 
-        if !status.is_success() {
+        if !answer.status.is_success() {
             // Legacy's message shape (`jira.rs:275`), which deliberately does
             // not quote the response body: a JIRA error document can contain
             // instance detail, and this string reaches an operator through
-            // `DomainError::Internal`.
-            return Err(DomainError::Internal(format!(
-                "failed to get JIRA issue {jira_key}: the instance answered {status}"
-            )));
+            // the error.
+            return Err(refusal(
+                &egress.endpoint.host,
+                &answer,
+                &format!("failed to get JIRA issue {jira_key}"),
+            ));
         }
 
-        let document: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+        let document: serde_json::Value = serde_json::from_slice(&answer.body).map_err(|e| {
             DomainError::Internal(format!("the JIRA issue response is not JSON: {e}"))
         })?;
 
@@ -723,13 +934,13 @@ impl JiraClient for OagwJiraClient {
         config: &JiraConfig,
         issue: NewIssue,
     ) -> Result<IssueRef, DomainError> {
-        let egress = self.ensure_upstream(ctx, config).await?;
+        let egress = self.provisioned_egress(ctx, config).await?;
         let summary = summary_for(&issue.test_name);
 
         // Step 1: the JQL dedupe probe (`jira.rs:70-108`).
         if let Some(existing) = self
             .search_for_open_issue(ctx, &egress, &config.project_key, &issue.test_name)
-            .await
+            .await?
         {
             return Ok(IssueRef {
                 jira_key: existing,
@@ -748,22 +959,25 @@ impl JiraClient for OagwJiraClient {
                 "labels": [FAILURE_LABEL],
             }
         });
-        let (status, body) = self
+        let answer = self
             .send(
                 ctx,
+                &egress.endpoint.host,
                 http::Method::POST,
                 format!("{}/issue", egress.uri_prefix()),
                 Body::from(payload.to_string()),
             )
             .await?;
 
-        if !status.is_success() {
-            return Err(DomainError::Internal(format!(
-                "JIRA refused to create the issue: the instance answered {status}"
-            )));
+        if !answer.status.is_success() {
+            return Err(refusal(
+                &egress.endpoint.host,
+                &answer,
+                "creating the issue",
+            ));
         }
 
-        let document: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+        let document: serde_json::Value = serde_json::from_slice(&answer.body).map_err(|e| {
             DomainError::Internal(format!("the JIRA create response is not JSON: {e}"))
         })?;
         let jira_key = document
@@ -795,15 +1009,6 @@ impl JiraClient for OagwJiraClient {
             .fetch_issue(ctx, config, jira_key)
             .await?
             .status_category)
-    }
-
-    async fn get_issue(
-        &self,
-        ctx: &SecurityContext,
-        config: &JiraConfig,
-        jira_key: &str,
-    ) -> Result<JiraIssue, DomainError> {
-        self.fetch_issue(ctx, config, jira_key).await
     }
 }
 
@@ -867,7 +1072,7 @@ fn upstream_request(config: &JiraConfig, egress: &JiraEgress) -> CreateUpstreamR
 /// [`JIRA_SUMMARY_MAX_CHARS`] from `qa_insights_sdk`, the one crate both
 /// layers already legitimately depend on — so there is exactly one `255`,
 /// not two bare copies for the pinning test to reconcile after the fact.
-pub(crate) fn summary_for(test_name: &str) -> String {
+pub fn summary_for(test_name: &str) -> String {
     format!("[VHP] Test Failed: {test_name}")
         .chars()
         .take(JIRA_SUMMARY_MAX_CHARS)

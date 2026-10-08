@@ -10,7 +10,7 @@
 //! * [`runs_reader`] — the qa-runs reads (Task 13, extended by Task 15).
 //! * [`catalog_reader`] — the analytics universe, read from qa-catalog (Task 20;
 //!   its adapter, Task 25a).
-//! * [`clock`] — today, as the analytics windows anchor on it (Task 22).
+//! * [`clock`] — today, as the analytics windows anchor on it.
 //! * [`environment_reader`] — an environment's display name for the
 //!   `environment_id` a row carries, read from qa-environments (Task 25a, with
 //!   its adapter; first called by Task 25b).
@@ -33,13 +33,13 @@
 //! * [`slack_client`] and [`mail_client`] — the two egress ports Task 38's
 //!   notification service sends through. **This paragraph used to forecast
 //!   both for Task 39**, which was the plan's original file assignment; the
-//!   controller's R102 moved the trait definitions (and [`SendOutcome`])
-//!   here, to the task that has a caller for them
-//!   ([`crate::domain::service::notify::NotifyService`]), and left Task 39
-//!   the two adapters — the oagw-backed Slack client and the inert mail
-//!   client D10 calls for. Same correction [`catalog_reader`]'s own header
+//!   trait definitions (and [`SendOutcome`]) moved here, to the task that has
+//!   a caller for them ([`crate::domain::service::notify::NotifyService`]),
+//!   and left Task 39 the two adapters — the oagw-backed Slack client and an
+//!   inert mail client, because the original design deferred the SMTP socket
+//!   (ADR-0011 reversed that). Same correction [`catalog_reader`]'s own header
 //!   already recorded once for a different port: a plan's task-number
-//!   forecast is not binding once a controller ruling moves the work.
+//!   forecast is not binding once the work moves.
 //!
 //! # [`catalog_reader`] was the first port here whose *first call site* was not
 //! # in its own commit
@@ -61,7 +61,7 @@
 //! ships in the same commit ([`crate::infra::clock::SystemClock`]) and its
 //! contract is one method returning a date, so what is deferred is only the
 //! service that reads it (Task 25's analytics service) and the wiring that
-//! builds it (Task 40). The folds Task 22 shipped take the [`Date`](time::Date)
+//! builds it. The folds Task 22 shipped take the [`Date`](time::Date)
 //! the port returns rather than the port itself — that module's header carries
 //! the argument, and it is the shape `domain::service::dashboard` already uses.
 //!
@@ -101,13 +101,15 @@ pub mod slack_client;
 pub use catalog_reader::CatalogReader;
 pub use clock::Clock;
 pub use environment_reader::EnvironmentReader;
-pub use jira_client::{
-    CREDSTORE_REF_SCHEME, IssueRef, JiraClient, JiraIssue, NewIssue, StatusCategory,
-    validate_credstore_ref,
-};
+// Only the port trait and the credential-reference validator are named
+// through this facade; `IssueRef`, `JiraIssue`, `NewIssue` and `StatusCategory`
+// are named at `jira_client::` by the modules that use them, and re-exporting
+// them here was four unused imports once finding #38's triage made `domain`
+// crate-internal.
+pub use jira_client::{JiraClient, validate_credstore_ref};
 pub use mail_client::{MailClient, MailCredentials, MailMessage};
 pub use runs_launcher::RunsLauncher;
-pub use runs_reader::RunsReader;
+pub use runs_reader::{MAX_FINISHED_RUNS_PAGE, RunsReader};
 pub use slack_client::{SlackBlock, SlackClient, SlackMessage};
 
 /// What one egress attempt settled on — shared by [`SlackClient::send`] and
@@ -115,7 +117,7 @@ pub use slack_client::{SlackBlock, SlackClient, SlackMessage};
 /// callers ([`crate::domain::service::notify::NotifyService`]) fold both
 /// results into the same audit-log write.
 ///
-/// # This is the R102 seam
+/// # The send-outcome seam
 ///
 /// Mapping this enum to the audit log's `outcome` string is
 /// [`crate::domain::service::notify`]'s job
@@ -126,9 +128,10 @@ pub use slack_client::{SlackBlock, SlackClient, SlackMessage};
 /// # One variant, and that is a residue rather than a design
 ///
 /// There were two. `UnsupportedEgress` was a **value** rather than an error, so
-/// that an adapter with nothing to send through (D10's inert mail client) could
-/// report it and have the caller log it. The SMTP follow-up removed the reason:
-/// mail now sends, and the remaining no-adapter case fails with
+/// that an adapter with nothing to send through (the inert mail client of the
+/// original design, which deferred the SMTP socket) could report it and have
+/// the caller log it. The SMTP follow-up removed the reason: mail now sends,
+/// and the remaining no-adapter case fails with
 /// [`DomainError::UnsupportedEgress`](crate::domain::error::DomainError::UnsupportedEgress)
 /// instead — `mail_client`'s own header carries why a value was the wrong shape
 /// for "an operator was told the test succeeded and received nothing".

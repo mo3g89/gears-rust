@@ -16,7 +16,7 @@ export default defineConfig({
       // Two retargets, both of which `npm run dev` was broken without.
       //
       // The prefix: the client's API_BASE_URL is `/qa/v1` (src/api/client.ts),
-      // not `/api`, since Task 9 -- so this rule matched nothing and every dev
+      // not `/api` -- so this rule matched nothing and every dev
       // request fell through to the dev server itself, which answered
       // index.html.
       //

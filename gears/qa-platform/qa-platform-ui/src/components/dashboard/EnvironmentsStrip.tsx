@@ -5,28 +5,26 @@ import { ServerCog } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { healthDotClass, healthLabel } from '@/lib/environment-observation';
 
-// `useEnvironments` scopes to the selected product (and to environments with no product), so
-// an empty list here is "none for this product", not "none at all" — and it is also
-// what shows for the moment before a product is selected. One string, not two: it used
-// to be typed out separately in the description and the body and could drift.
+// `useEnvironments` scopes to the selected product (every environment names one:
+// qa-environments requires `product_id`), so an empty list here is "none for this product",
+// not "none at all" — and it is also what shows for the moment before a product is
+// selected. One string, not two: it used to be typed out separately in the description and
+// the body and could drift.
 const EMPTY_MESSAGE = 'No environments configured for the selected product.';
 
 /**
  * The dashboard's environment strip.
  *
  * It was a labelled-unavailable card while nothing in this deployment observed the
- * cluster behind an environment, then a reachability-only chip once `record_observation`
- * started writing detected version/build/namespace/base URL and whether the last attempt
- * reached the cluster at all. qa-environments now observes cluster health itself (Task 5),
- * so the dot is `healthDotClass`: cluster status (Healthy/Degraded/Unhealthy/Warning/
- * Unreachable) when a cycle has reached the environment, falling back to the reachability dot
- * for the environment a cycle has not reached yet — see that function's own doc for why the
- * fallback matters (D-CH-6).
+ * cluster behind an environment, then a reachability-only chip, then a five-status cluster
+ * chip fed by the `cluster_*` columns — which the gear has since dropped. The dot is now
+ * `healthDotClass`: the product plugin's `health_state` verdict (`ok`/`degraded`/`down`), and
+ * the reachability dot for `unknown` — the value an environment nothing has observed carries
+ * — so a never-reached environment shows reachability, never a manufactured status.
  *
- * The count line partitions every environment into one of five buckets: the four cluster
- * statuses plus "not yet checked" for `cluster === null`, mirroring legacy's own summary
- * (`manager/src/services/platforms.rs:140-200`) now that there is a real per-node source
- * to draw it from again.
+ * The count line partitions every environment into one of four buckets over `health_state`:
+ * healthy, degraded, down, and "not yet checked" for `unknown` (or any value this UI does not
+ * recognise). See the comment on `healthCounts` below for why there is no fifth.
  *
  * There is no `platforms_summary` on the dashboard response to read this from — the gear
  * serves no such field — so the card asks `/qa/v1/environments` itself. That query is already
@@ -36,13 +34,12 @@ export function EnvironmentsStrip() {
   const { data: environments, isLoading, error } = useEnvironments();
   const rows = environments || [];
 
-  // **Four buckets, not five, since Task 19.** The plugin contract carries a
+  // **Four buckets, not five.** The plugin contract carries a
   // health verdict with four values, and `unknown` is one of them -- an
   // environment nothing has observed and one whose read failed are both
   // `unknown`, because the plugin cannot distinguish them either. The old
   // `Unreachable` bucket was a fifth *status*; there is no such status now, and
-  // inventing one from `version_detect_error` would be the fabrication I-5 was
-  // raised about.
+  // inventing one from `version_detect_error` would be a fabricated status.
   const healthCounts = rows.reduce(
     (acc, environment) => {
       if (environment.health_state === 'ok') acc.healthy += 1;
@@ -69,7 +66,10 @@ export function EnvironmentsStrip() {
             : `${healthCounts.healthy} healthy · ${healthCounts.degraded} degraded · ${healthCounts.down} down · ${healthCounts.notChecked} not yet checked`}
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-2">
+        <p className="text-xs text-muted-foreground">
+          Filtered in your browser to the selected product.
+        </p>
         {isLoading ? (
           <p className="py-2 text-sm text-muted-foreground">Loading environments…</p>
         ) : error ? (

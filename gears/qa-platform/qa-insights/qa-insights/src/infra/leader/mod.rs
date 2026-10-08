@@ -46,9 +46,10 @@
 //! Two replicas sweeping the same tenant concurrently produce a correct
 //! projection: the backfill is `ResultsRepository::upsert_run_results`, which is
 //! delete-then-insert per run, and `WatermarkRepository::advance` never moves a
-//! mark backwards. The worst outcome is duplicated work and, on a genuine
-//! interleave, one run projected twice — the second write replacing the first
-//! with identical rows.
+//! mark backwards. The worst outcome is duplicated work. On a genuine
+//! interleave, two writers of one run serialize on that run's
+//! `qa_run_projection_locks` row, and the second write replaces the first.
+//! Before that row existed, both batches survived.
 //!
 //! What election saves is that duplicated work: N replicas each making N times
 //! the cross-gear reads of a sweep whose whole purpose is to be cheap. It is

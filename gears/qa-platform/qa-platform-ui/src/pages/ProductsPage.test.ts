@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 //
-// Task 23: the product-plugin selector. `CreateProductForm` gained a required
+// The product-plugin selector. `CreateProductForm` gained a required
 // `plugin_instance_id`, and until this page could send one every product
 // create from the UI was a guaranteed 400 -- the gear's `qa_products` column
-// is `NOT NULL` since Task 20a. This suite exercises the real dialog against
+// is `NOT NULL`. This suite exercises the real dialog against
 // a mocked API client so a regression that stops sending the field (or lets
 // create through without one) fails here, not just at the API.
 //
@@ -25,7 +25,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const FIXTURES = vi.hoisted(() => {
   const pluginId = 'gts.a~acme.v1';
   // A second, distinct plugin so the edit tests can tell "the product's own
-  // plugin" from "any plugin the catalogue happens to list first" (I-4): a
+  // plugin" from "any plugin the catalogue happens to list first": a
   // fixture with only one registered plugin can't distinguish "picked
   // correctly" from "picked arbitrarily", so a bug that pre-fills from the
   // catalogue instead of from the product would pass unnoticed.
@@ -143,11 +143,11 @@ describe('ProductsPage — create requires a plugin', () => {
     expect((body as Record<string, unknown>).plugin_instance_id).toBe(FIXTURES.pluginId);
   });
 
-  // The three degraded states m-2 added. Each existed because loading, a failed
+  // The three degraded states. Each exists because loading, a failed
   // catalogue read and "registered but empty" otherwise look identical to the
   // operator -- an unpickable dropdown plus "Please fill in all required
-  // fields", pointing at a field there is nothing to be done about. The
-  // re-review measured that the whole block was untested: gutting it to a
+  // fields", pointing at a field there is nothing to be done about. A
+  // measurement showed the whole block was untested: gutting it to a
   // no-op compiled clean and left all 219 tests green.
   it('says the catalogue is empty rather than leaving an unexplained dead field', async () => {
     const client = vi.mocked(apiGet);
@@ -205,7 +205,7 @@ describe('ProductsPage — edit preserves the existing binding', () => {
   // Both tests below open the edit dialog on `FIXTURES.existingProduct`, bound
   // to the *second* plugin, against a catalogue that also lists a different
   // first one -- so any assertion that would also pass for "the first plugin"
-  // is a false pass (I-4). `withEditDialog` swaps `/products` to return the
+  // is a false pass. `withEditDialog` swaps `/products` to return the
   // one existing product (by path, not `mockImplementationOnce`, which
   // replaces only the very next `apiGet` call whichever one it is -- the trap
   // EnvironmentsTable.test.ts documents) and restores the default afterwards.
@@ -247,13 +247,13 @@ describe('ProductsPage — edit preserves the existing binding', () => {
       await waitFor(() => expect(apiPut).toHaveBeenCalled());
       const [path, body] = vi.mocked(apiPut).mock.calls[0];
       expect(path).toBe(`/products/${FIXTURES.productId}`);
-      // Ruling G-2: qa-catalog re-validates *any* `Some(id)` it receives
+      // qa-catalog re-validates *any* `Some(id)` it receives
       // against the live per-process plugin registry -- it does not compare
       // it to what's stored -- so resending the product's own current
       // binding on an edit that never touched it is a rebind request, not a
       // no-op, and 400s for a product whose stored plugin this deployment
       // doesn't register. An edit that doesn't change the selection must
-      // therefore omit the key entirely (D-18's "`None` means leave the
+      // therefore omit the key entirely (the gear's "`None` means leave the
       // binding alone"), not resend the same value.
       expect((body as Record<string, unknown>).plugin_instance_id).toBeUndefined();
     });
@@ -271,7 +271,7 @@ describe('ProductsPage — edit preserves the existing binding', () => {
 
       await waitFor(() => expect(apiPut).toHaveBeenCalled());
       const [, body] = vi.mocked(apiPut).mock.calls[0];
-      // The other half of G-2: a selection that genuinely differs from the
+      // The other half of that rule: a selection that genuinely differs from the
       // stored binding is a deliberate rebind and must be sent, not omitted.
       expect((body as Record<string, unknown>).plugin_instance_id).toBe(FIXTURES.pluginId);
     });

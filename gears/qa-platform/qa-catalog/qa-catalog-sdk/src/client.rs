@@ -49,10 +49,10 @@ pub trait QaCatalogClientV1: Send + Sync {
     /// invalidate anything already materialized.
     ///
     /// Changing `url` or `content_root` invalidates the existing working
-    /// copy, so the synced state is cleared and content reads reject with
-    /// `failed_precondition` (repository not synced) until the next
-    /// [`sync_repo`](Self::sync_repo) — content is never served from the old
-    /// URL.
+    /// copy: the synced state is cleared, and the next content read of a
+    /// branch syncs it from the new location first (see
+    /// [`list_plans`](Self::list_plans)) — content is never served from the
+    /// old URL.
     async fn update_repo(
         &self,
         ctx: &SecurityContext,
@@ -68,7 +68,11 @@ pub trait QaCatalogClientV1: Send + Sync {
     /// (`None` = the repository's `default_branch`). An empty or
     /// whitespace-only `Some` is treated as `None`. `req.force` skips (and
     /// evicts) the in-memory freshness TTL entry. qa-runs' launch path always
-    /// passes an explicit branch with `force: true` (parity spec §3.4 step 4).
+    /// passes an explicit branch with `force: true` (qa-runs' launch rule 4,
+    /// listed in `qa_runs::domain::service::launch`'s module doc).
+    /// Without `force`, a branch synced within the TTL is not fetched again —
+    /// unless the repository's recorded sync error is set, which a successful
+    /// sync clears.
     async fn sync_repo(
         &self,
         ctx: &SecurityContext,
@@ -85,6 +89,29 @@ pub trait QaCatalogClientV1: Send + Sync {
 
     // ==================== Plans (discovered) + metadata ====================
 
+    /// Plans discovered on `branch`'s snapshot.
+    ///
+    /// This, [`get_plan`](Self::get_plan), [`get_test_meta`](Self::get_test_meta)
+    /// and [`create_bundle`](Self::create_bundle) read branch content the
+    /// same way: a branch with no snapshot yet is synced on that first read
+    /// (not forced, so a branch synced within the freshness TTL is not
+    /// fetched again unless the repository's recorded sync error is set) when
+    /// the remote has it. So is a branch that has a
+    /// snapshot while the repository's recorded sync error is set, since
+    /// that error refuses every branch. That sync runs under `ctx` and needs
+    /// the sync permission on the repository; without it the read is refused
+    /// (`permission_denied`). Only a read of a branch with a snapshot on a
+    /// repository with no recorded sync error needs no sync permission. A
+    /// branch the remote does not have is
+    /// `not_found` and is never synced; a branch whose sync failed is
+    /// `failed_precondition`, with the repository's recorded sync error (which
+    /// may come from another branch's sync) in the message. A credential the
+    /// catalog cannot resolve, or the remote refuses, is recorded as that sync
+    /// error and answered the same way. A remote that cannot be listed is
+    /// `unavailable`. Either failure backs the repository off briefly: reads
+    /// that would sync it give the same answer without contacting the remote,
+    /// until the window ends, a listing or sync of it succeeds, a sync is
+    /// forced, or its `url` or credential changes.
     async fn list_plans(
         &self,
         ctx: &SecurityContext,

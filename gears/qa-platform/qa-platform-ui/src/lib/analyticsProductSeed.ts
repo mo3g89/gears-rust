@@ -16,9 +16,9 @@ export function initialAnalyticsProductId(
 
 /**
  * The Analytics page's product selection: seeded from the URL or the switcher,
- * and — spec D3 — **kept in sync with the switcher** while the URL names none.
+ * and **kept in sync with the switcher** while the URL names none.
  *
- * Seeding alone was not the property D3 states, and it is not the one the human
+ * Seeding alone was not the property required, and it is not the one the human
  * partner chose. `useState`'s initializer runs once, and `ProductSwitcher`
  * mutates a module store without navigating or remounting, so switching product
  * while already on `/analytics` left the report on the previous product — the

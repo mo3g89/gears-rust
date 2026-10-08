@@ -345,7 +345,7 @@ async fn update_product_replaces_fields_under_an_update_scope() {
         "an absent binding must LEAVE the stored one: the shipped UI cannot \
          send this field, so full replace turned every description edit into a \
          silent unbind -- and unbinding is not a state this platform wants at \
-         all (D6, and Task 20 makes the column NOT NULL)"
+         all (every product names a plugin, and Task 20 makes the column NOT NULL)"
     );
 }
 
@@ -511,7 +511,7 @@ const BOUND: &str =
 /// the update half of the asymmetry against a real database.
 ///
 /// A create naming a plugin this deployment does not register is refused **at
-/// the API, not at first use** (Task 20 Step 3, ruling F-10).
+/// the API, not at first use** (Task 20 Step 3).
 ///
 /// Accepting it would produce a product whose every environment is silently
 /// unobservable and undispatchable until somebody noticed.
@@ -646,7 +646,7 @@ async fn a_rebind_must_resolve_but_an_absent_field_is_not_a_rebind() {
     assert_eq!(
         presence.asked().len(),
         before,
-        "`None` means leave the binding alone (ruling D-18), so there is nothing \
+        "`None` means leave the binding alone, so there is nothing \
          to check -- consulting presence here would refuse every ordinary edit \
          made by the shipped UI, which cannot send the field"
     );

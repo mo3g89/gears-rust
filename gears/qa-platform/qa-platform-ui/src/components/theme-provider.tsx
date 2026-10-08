@@ -12,7 +12,7 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
 const STORAGE_KEY = 'qa-theme';
-/** The pre-Task-22 name. Read through once so nobody's theme resets. */
+/** The earlier `vhp-` name. Read through once so nobody's theme resets. */
 const LEGACY_STORAGE_KEY = 'vhp-theme';
 
 function getSystemTheme(): 'light' | 'dark' {

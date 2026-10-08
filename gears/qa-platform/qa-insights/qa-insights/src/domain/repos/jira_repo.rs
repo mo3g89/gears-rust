@@ -40,8 +40,8 @@ use crate::domain::error::DomainError;
 /// [`Self::get_poller_config`] is that reader, and it exists in this commit
 /// specifically so the poller consumes it rather than growing a parallel one.
 ///
-/// # Controller ruling R86 — every statement whose effect another tenant's row
-/// # could change takes an explicit `tenant_id`
+/// # Every statement whose effect another tenant's row could change takes an
+/// # explicit `tenant_id`
 ///
 /// A standing rule for this crate, not only this trait, added after the
 /// identical defect was found and fixed three times running: `get_config`
@@ -62,11 +62,11 @@ use crate::domain::error::DomainError;
 ///
 /// ## The rule was written as "`.one()`", and that spelling had a hole
 ///
-/// **Phase C's final review found two more instances of R86 in this file and
-/// neither of them was a `.one()`.** The rule's *reason* — a compiled scope is
-/// not a tenant pin, and `refuse_scope_beyond_tenant` deliberately exempts the
-/// very scope shapes that span tenants — has nothing to do with how many rows a
-/// statement touches:
+/// **Phase C's final review found two more breaches of this rule in this file
+/// and neither of them was a `.one()`.** The rule's *reason* — a compiled scope
+/// is not a tenant pin, and `refuse_scope_beyond_tenant` deliberately exempts
+/// the very scope shapes that span tenants — has nothing to do with how many
+/// rows a statement touches:
 ///
 /// * [`Self::resolve_bug`] was an unpinned `update_many`. A `jira_key` collides
 ///   across tenants by design (see [`Self::find_by_key`]), so one tenant's
@@ -98,8 +98,8 @@ pub trait JiraRepository: Send + Sync {
     /// `status` is free JIRA workflow text and an instance may report something
     /// else entirely. Legacy keys on `status`, so this does too.
     ///
-    /// # `tenant_id` is a parameter even though this returns a `Vec` — R86,
-    /// # Phase C's final review, Critical 1b
+    /// # `tenant_id` is a parameter even though this returns a `Vec` — the
+    /// # explicit-`tenant_id` rule, Phase C's final review, Critical 1b
     ///
     /// "In the tenant" is this method's *first sentence*, and until that review
     /// the statement did not say so: the `.all()` carried no `tenant_id`
@@ -145,7 +145,8 @@ pub trait JiraRepository: Send + Sync {
     /// a test repository can tell the difference. The rendering belongs to the
     /// caller; see `qa_insights_sdk::SkipListEntry`.
     ///
-    /// # `tenant_id` is a parameter — R86, Phase C's final review, Critical 1b
+    /// # `tenant_id` is a parameter — the explicit-`tenant_id` rule, Phase C's
+    /// # final review, Critical 1b
     ///
     /// [`Self::list_open`]'s reason, with a second consumer that makes it
     /// sharper: this is the read behind
@@ -197,8 +198,7 @@ pub trait JiraRepository: Send + Sync {
     /// which is why this method's own contract makes no promise about *which*
     /// row it returns when more than one matches.
     ///
-    /// # Why `!= 'Closed'` and not `list_open`'s `= 'Open'` — controller ruling
-    /// # R80, decided by Task 33
+    /// # Why `!= 'Closed'` and not `list_open`'s `= 'Open'`, decided by Task 33
     ///
     /// The two predicates disagree on exactly one class of row: a bug the
     /// poller has resolved (`status = 'Resolved'`, `'Resolved' != 'Closed'`
@@ -218,20 +218,20 @@ pub trait JiraRepository: Send + Sync {
     /// process has not finished with would be the wrong failure mode to
     /// introduce while porting a dedupe rule.
     ///
-    /// **The user-visible consequence, stated because it is real and not
-    /// merely theoretical**: once the poller resolves a bug, `GET
+    /// **The user-visible consequence, stated because it is real and not merely
+    /// theoretical**: once the poller resolves a bug, `GET
     /// /qa/v1/jira/open-bugs` and the runner's skip list (`status = 'Open'`)
     /// both stop showing it — the test is no longer suppressed and will run
-    /// again. If it fails again before the ticket is actually closed in
-    /// JIRA, `POST /qa/v1/jira/bugs` will answer `created: false` with the
-    /// **same, already-resolved** `jira_key` rather than filing a fresh
-    /// issue, because this probe still matches the `'Resolved'` row. That is
-    /// legacy's own behaviour inherited unchanged, not a divergence
-    /// introduced here — a divergence would have been switching this probe to
-    /// `list_open`'s predicate, which this ruling declines to do.
+    /// again. If it fails again before the ticket is actually closed in JIRA,
+    /// `POST /qa/v1/jira/bugs` will answer `created: false` with the **same,
+    /// already-resolved** `jira_key` rather than filing a fresh issue, because
+    /// this probe still matches the `'Resolved'` row. That is legacy's own
+    /// behaviour inherited unchanged, not a divergence introduced here — a
+    /// divergence would have been switching this probe to `list_open`'s
+    /// predicate, which this method declines to do.
     ///
     /// # `tenant_id` is a parameter, and it is not redundant with `scope` —
-    /// # controller ruling R86, fix round 1, Critical 1
+    /// # the explicit-`tenant_id` rule, fix round 1, Critical 1
     ///
     /// The identical shape [`Self::get_config`]'s own doc states: a scope over
     /// `OWNER_TENANT_ID` may legitimately span several tenants
@@ -272,13 +272,15 @@ pub trait JiraRepository: Send + Sync {
     /// stamps every bug in one pass with one instant. `false` when no open bug
     /// with that key was visible to the caller.
     ///
-    /// # `tenant_id` is a parameter, and this is the R86 instance that showed
-    /// # the rule's wording was too narrow — Phase C's final review, Critical 1
+    /// # `tenant_id` is a parameter, and this is the instance that showed the
+    /// # explicit-`tenant_id` rule's wording was too narrow — Phase C's final
+    /// # review, Critical 1
     ///
     /// This is an `update_many`, not a `.one()`, which is exactly why five fix
-    /// rounds of an R86 sweep phrased around `.one()` walked past it. Legacy's
-    /// statement is `WHERE jira_key = $1` and nothing else (`jira.rs:245`) —
-    /// correct for a single-tenant service and a cross-tenant write here.
+    /// rounds of a sweep for that rule phrased around `.one()` walked past it.
+    /// Legacy's statement is `WHERE jira_key = $1` and nothing else
+    /// (`jira.rs:245`) — correct for a single-tenant service and a cross-tenant
+    /// write here.
     ///
     /// The premise is [`Self::find_by_key`]'s, verbatim: two tenants filing
     /// against the same or different JIRA instances can each produce
@@ -309,7 +311,7 @@ pub trait JiraRepository: Send + Sync {
     /// Look up a bug by its JIRA key within the tenant.
     ///
     /// # `tenant_id` is a parameter, and it is not redundant with `scope` —
-    /// # controller ruling R89, fix round 2
+    /// # the explicit-`tenant_id` rule, fix round 2
     ///
     /// [`Self::find_unclosed_for_test`]'s reason, restated because this is the
     /// second time this exact defect was found in this file: a scope over
@@ -369,12 +371,12 @@ pub trait JiraRepository: Send + Sync {
     /// tenant's row — and `save_jira_config`'s read-then-write would then carry
     /// another tenant's credential reference onto this tenant's config.
     ///
-    /// [`NotifyRepository::get_config`](super::NotifyRepository::get_config) had
-    /// the same shape and no such parameter through Task 37 — deliberately not
-    /// fixed here (controller ruling R83): it was Task 38's file. **Task 38
-    /// closed it**, with the identical `tenant_id` parameter and equality
-    /// predicate; that method's own doc carries the argument rather than
-    /// repeating it here a second time.
+    /// [`NotifyRepository::get_config`](super::NotifyRepository::get_config)
+    /// had the same shape and no such parameter through Task 37 — deliberately
+    /// not fixed here: it was Task 38's file. **Task 38 closed it**, with the
+    /// identical `tenant_id` parameter and equality predicate; that method's
+    /// own doc carries the argument rather than repeating it here a second
+    /// time.
     ///
     /// The tenant is validated against the scope first, so this cannot be used to
     /// read a tenant the caller has no grant for.

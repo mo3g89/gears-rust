@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { readMigrated } from '@/lib/storageKeys';
 
 const STORAGE_KEY = 'qa.selectedProduct';
-/** The pre-Task-22 name. Read through once so nobody's selection resets. */
+/** The earlier `vhp.` name. Read through once so nobody's selection resets. */
 const LEGACY_STORAGE_KEY = 'vhp.selectedProduct';
 
 let current = readInitial();

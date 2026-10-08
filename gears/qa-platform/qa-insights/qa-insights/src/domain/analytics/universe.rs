@@ -270,14 +270,13 @@ pub struct LatestInfo {
     /// "executed and reported no build", and never one padded label from another.
     ///
     /// **This doc said the substitution "is not applied here either" and the code
-    /// matched it, and both were wrong** — controller ruling R15. The value
-    /// reaches the wire as
+    /// matched it, and both were wrong**. The value reaches the wire as
     /// [`AnalyticsListItem::last_build`](super::aggregates::AnalyticsListItem::last_build)
     /// (`aggregates.rs`' `build_lists`, legacy `:1422`), so the port rendered
-    /// `null` where legacy renders `"unknown"` and `"  9.1  "` where legacy
-    /// renders `"9.1"`. Ruling R13 assigned the fallback to Task 24 and legacy
-    /// applies it universally at row construction; collapsing at one of the two
-    /// consumers did not discharge that.
+    /// `null` where legacy renders `"unknown"` and `" 9.1 "` where legacy renders
+    /// `"9.1"`. The fallback was assigned to Task 24 and legacy applies it
+    /// universally at row construction; collapsing at one of the two consumers
+    /// did not discharge that.
     pub build: Option<String>,
     /// The newest row's effective instant — `run_finished_at ?? run_created_at`,
     /// already coalesced by the repository into
@@ -693,13 +692,14 @@ pub fn build_latest_map(
 ///
 /// # Not windowed
 ///
-/// `qa_test_case_collect` is a snapshot table — one row per `(repo_id,
-/// branch, test_file)`, replaced on every recollect rather than accumulated
-/// (`CollectRepository::upsert_count`'s doc) — so there is no time dimension
-/// here for ruling R21's read window to bound, unlike
+/// `qa_test_case_collect` is a snapshot table — one row per
+/// `(repo_id, branch, test_file)`, replaced on every recollect rather than
+/// accumulated (`CollectRepository::upsert_count`'s doc) — so there is no time
+/// dimension here for the universe read's window (`AnalyticsService`'s
+/// `universe_window_start`) to bound, unlike
 /// [`ResultsRepository::list_for_universe`](crate::domain::repos::ResultsRepository::list_for_universe).
-/// `domain::service::analytics::AnalyticsService`'s collect read states the
-/// same thing at the call site that supplies `collect_counts`.
+/// `domain::service::analytics::AnalyticsService`'s collect read states the same
+/// thing at the call site that supplies `collect_counts`.
 #[must_use]
 pub fn expected_cases(universe: &[UniverseTest], collect_counts: &[CollectCount]) -> usize {
     let exact: HashMap<(Uuid, &str), u32> = collect_counts

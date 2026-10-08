@@ -61,12 +61,12 @@ const STATUS_RESOLVED: &str = "Resolved";
 ///
 /// **This gear never writes this value** — [`STATUS_OPEN`] and
 /// [`STATUS_RESOLVED`] are the only two spellings this gear's own writers
-/// produce, so a row can only reach `'Closed'` if a caller wrote it directly or
-/// a future task (a manual-close endpoint, say) starts to. The literal exists
+/// produce, so a row can only reach `'Closed'` if a caller wrote it directly or a
+/// future task (a manual-close endpoint, say) starts to. The literal exists
 /// anyway because the *predicate* is legacy's own (`jira.rs:44`,
-/// `status != 'Closed'`), ported verbatim per controller ruling R80 — see
-/// `JiraRepository::find_unclosed_for_test`'s doc for the divergence this
-/// choice declines to make.
+/// `status != 'Closed'`), ported verbatim — see
+/// `JiraRepository::find_unclosed_for_test`'s doc for the divergence this choice
+/// declines to make.
 const STATUS_CLOSED: &str = "Closed";
 
 /// ORM-based implementation of the `JiraRepository` trait.
@@ -107,9 +107,9 @@ impl JiraRepository for OrmJiraRepository {
     /// leading column is the `tenant_id` this read now names.
     ///
     /// **The `tenant_id` predicate — Phase C's final review, Critical 1b.** An
-    /// `.all()` rather than a `.one()`, so no row-picking ambiguity, and R86 as
-    /// written did not reach it; the trait's own doc carries why it applies
-    /// anyway and what the poller did with the extra rows.
+    /// `.all()` rather than a `.one()`, so no row-picking ambiguity, and the
+    /// explicit-`tenant_id` rule as written did not reach it; the trait's own doc
+    /// carries why it applies anyway and what the poller did with the extra rows.
     async fn list_open<C: DBRunner>(
         &self,
         runner: &C,
@@ -239,14 +239,14 @@ impl JiraRepository for OrmJiraRepository {
         // transaction" rather than an `expect`, because a repository must not
         // panic on a concurrent delete.
         //
-        // `tenant_id` is passed through explicitly — fix round 2, controller
-        // ruling R89. Without it, a scope spanning several tenants could make
-        // this re-read return a *different* tenant's row for the identical
-        // key: the whole reason `idx_qa_jira_bugs_tenant_key` is
-        // `(tenant_id, jira_key)` rather than a global unique index is that
-        // two tenants filing the same key is expected (see this method's own
-        // doc, a few lines up), and `find_by_key`'s own doc names this call
-        // site as its most consequential caller.
+        // `tenant_id` is passed through explicitly — fix round 2, the
+        // explicit-`tenant_id` rule. Without it, a scope spanning several tenants
+        // could make this re-read return a *different* tenant's row for the
+        // identical key: the whole reason `idx_qa_jira_bugs_tenant_key` is
+        // `(tenant_id, jira_key)` rather than a global unique index is that two
+        // tenants filing the same key is expected (see this method's own doc, a
+        // few lines up), and `find_by_key`'s own doc names this call site as its
+        // most consequential caller.
         self.find_by_key(runner, scope, tenant_id, &key)
             .await?
             .ok_or(DomainError::BugNotFound { key })
@@ -307,13 +307,13 @@ impl JiraRepository for OrmJiraRepository {
     /// does not say which.
     ///
     /// **The `tenant_id` predicate — Phase C's final review, Critical 1.** The
-    /// one R86 instance that is a *write*: this statement sat between two
-    /// methods that each spend a paragraph on scopes spanning tenants and
-    /// carried neither the parameter nor the predicate, so one tenant's poller
-    /// pass resolved every in-scope tenant's row for a colliding `jira_key`.
-    /// [`JiraRepository::resolve_bug`]'s own doc carries the full failure
-    /// chain; `resolve_bug_only_touches_the_callers_own_tenants_row` is the
-    /// guard.
+    /// one instance of the explicit-`tenant_id` rule that is a *write*: this
+    /// statement sat between two methods that each spend a paragraph on scopes
+    /// spanning tenants and carried neither the parameter nor the predicate, so
+    /// one tenant's poller pass resolved every in-scope tenant's row for a
+    /// colliding `jira_key`. [`JiraRepository::resolve_bug`]'s own doc carries
+    /// the full failure chain;
+    /// `resolve_bug_only_touches_the_callers_own_tenants_row` is the guard.
     async fn resolve_bug<C: DBRunner>(
         &self,
         runner: &C,
@@ -345,12 +345,12 @@ impl JiraRepository for OrmJiraRepository {
     /// No `status` predicate: a caller looking a key up wants the row whatever
     /// state it is in.
     ///
-    /// **The `tenant_id` predicate — fix round 2, controller ruling R89.**
-    /// [`Self::find_unclosed_for_test`]'s exact reasoning: this `.one()`
+    /// **The `tenant_id` predicate — fix round 2, the explicit-`tenant_id`
+    /// rule.** [`Self::find_unclosed_for_test`]'s exact reasoning: this `.one()`
     /// carries no `ORDER BY`, and `jira_key` is not scoped to this gear's own
     /// tenants — two tenants can and, per [`Self::upsert_bug`]'s own doc, are
-    /// *expected* to produce the same key. [`Self::upsert_bug`]'s re-read is
-    /// this method's most consequential caller and is on the production path
+    /// *expected* to produce the same key. [`Self::upsert_bug`]'s re-read is this
+    /// method's most consequential caller and is on the production path
     /// `POST /qa/v1/jira/bugs` reaches on every call, so an unpinned read here
     /// could hand one tenant's newly-filed issue back with another tenant's
     /// `id`/`summary`/`status`.
@@ -707,12 +707,13 @@ mod tests {
         );
     }
 
-    /// **Controller ruling R80, pinned.** `find_unclosed_for_test`'s predicate
-    /// is `status != 'Closed'`, not `list_open`'s `status = 'Open'` — the two
-    /// disagree on exactly a resolved-but-not-closed bug, and this is the test
-    /// that goes red if a future edit "simplifies" the probe onto `list_open`'s
-    /// predicate instead. See `JiraRepository::find_unclosed_for_test`'s doc for
-    /// the full argument and the user-visible consequence.
+    /// **Legacy's `!= 'Closed'` re-file probe, pinned.**
+    /// `find_unclosed_for_test`'s predicate is `status != 'Closed'`, not
+    /// `list_open`'s `status = 'Open'` — the two disagree on exactly a
+    /// resolved-but-not-closed bug, and this is the test that goes red if a
+    /// future edit "simplifies" the probe onto `list_open`'s predicate instead.
+    /// See `JiraRepository::find_unclosed_for_test`'s doc for the full argument
+    /// and the user-visible consequence.
     #[tokio::test]
     async fn a_resolved_bug_still_blocks_the_local_refile_probe() {
         let db = inmem_db().await;
@@ -750,7 +751,7 @@ mod tests {
         assert_eq!(found.status, "Resolved");
     }
 
-    /// The other half of R80's predicate: a bug actually marked `'Closed'` is
+    /// The other half of that predicate: a bug actually marked `'Closed'` is
     /// excluded. Nothing this gear writes produces that value today
     /// (`STATUS_CLOSED`'s own doc), so the row is inserted directly, the same
     /// way `the_bug_conflict_target_names_the_tenant_scoped_index` bypasses the
@@ -898,12 +899,12 @@ mod tests {
         );
     }
 
-    /// **Controller ruling R89, fix round 2.** Under a scope spanning both
-    /// tenants, `find_by_key` must return the *caller's* row for a shared key,
-    /// not whichever of the two identically-keyed rows the engine happens to
+    /// **The explicit-`tenant_id` rule, fix round 2.** Under a scope spanning
+    /// both tenants, `find_by_key` must return the *caller's* row for a shared
+    /// key, not whichever of the two identically-keyed rows the engine happens to
     /// return first — this is `upsert_bug`'s own last statement
-    /// (`OrmJiraRepository::upsert_bug`'s doc names it as its most
-    /// consequential caller), pinned directly rather than through it.
+    /// (`OrmJiraRepository::upsert_bug`'s doc names it as its most consequential
+    /// caller), pinned directly rather than through it.
     ///
     /// **Pinned on `find_by_key` directly, not through `upsert_bug`, per the
     /// finding's own instruction — and the ordering below is measured, not
@@ -961,10 +962,10 @@ mod tests {
         );
     }
 
-    /// **Controller ruling R86, Phase C's final review, Critical 1 — and the
-    /// first R86 guard in this file over a *write*.** Under a scope spanning
-    /// both tenants, `resolve_bug` must resolve only the caller's own row for a
-    /// shared `jira_key`, never every in-scope tenant's.
+    /// **The explicit-`tenant_id` rule, Phase C's final review, Critical 1 — and
+    /// the first guard of it in this file over a *write*.** Under a scope
+    /// spanning both tenants, `resolve_bug` must resolve only the caller's own
+    /// row for a shared `jira_key`, never every in-scope tenant's.
     ///
     /// # Why this one needs no ordinal or timestamp engineering
     ///
@@ -982,7 +983,7 @@ mod tests {
     /// `update_many`. With the `tenant_id` predicate removed it writes **both**
     /// rows rather than picking one, so the assertion on `theirs` below turns
     /// red for every choice of tenant ids and every insertion order. There is no
-    /// ordering for a bulk write to be lucky about — which is also why an R86
+    /// ordering for a bulk write to be lucky about — which is also why a
     /// sweep phrased around `.one()` never looked at it.
     #[tokio::test]
     async fn resolve_bug_only_touches_the_callers_own_tenants_row() {
@@ -1036,9 +1037,9 @@ mod tests {
         );
     }
 
-    /// **Controller ruling R86, Phase C's final review, Critical 1b.** Under a
-    /// scope spanning both tenants, the two open-bug listings must answer with
-    /// the caller's own rows only.
+    /// **The explicit-`tenant_id` rule, Phase C's final review, Critical 1b.**
+    /// Under a scope spanning both tenants, the two open-bug listings must answer
+    /// with the caller's own rows only.
     ///
     /// `.all()` reads, so there is no row-picking to engineer here either: with
     /// either `tenant_id` predicate removed the foreign row simply appears in

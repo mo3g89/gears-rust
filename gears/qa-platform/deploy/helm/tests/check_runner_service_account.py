@@ -40,8 +40,8 @@ Four properties, each a way this could quietly regress:
   2. That ServiceAccount does NOT set `automountServiceAccountToken: false`
      on the object itself -- `wait` needs the token to authenticate at all.
      (The pod-level flag in `argo/workflow.rs` is a SEPARATE, still-open
-     defect this guard cannot see from the chart -- it is tracked in the
-     fix-round section of task-3-report.md, not re-litigated here.)
+     defect this guard cannot see from the chart -- it is not
+     re-litigated here.)
   3. A Role granting exactly `create` and `patch` on
      `workflowtaskresults.argoproj.io`, in `argo.namespace` -- read off a
      live cluster's own argo-workflows-installed executor Role for the
@@ -82,12 +82,18 @@ def render(*extra):
     out = subprocess.run(
         ["helm", "template", "qa-platform", str(CHART),
          "--namespace", "qa-platform", "--set", f"publicOrigin={ORIGIN}",
-         # keycloak.adminPassword has no default (WS3 Task 3) -- any value
+         # keycloak.adminPassword has no default -- any value
          # that is not the literal "admin" satisfies the render.
          "--set", "keycloak.adminPassword=guard-fixture-not-a-real-password",
+         # argo.workflowClientSecret is `required` too (2026-09-29): it is the
+         # qa-platform-workflow client's confidential secret and the chart
+         # refuses the committed dev literal outside devMode. Any other value
+         # renders; check_realm_secrecy.py owns both of those assertions.
+         "--set", "argo.workflowClientSecret=guard-fixture-not-a-real-workflow-secret",  # nosec: test fixture only
+         "--set", "postgres.password=guard-fixture-not-a-real-db-password",  # nosec: test fixture only
          # Both signing secrets have no default either (2026-09-21): the
          # per-render `randAlphaNum` fallback became a pod roll on every
-         # upgrade once the gears Deployment started hashing the ConfigMap.
+         # upgrade once the gears Deployment started hashing that object.
          "--set", "bundleDownloadSigningSecret=guard-fixture-not-a-real-bundle-key",
          "--set", "collectReportSigningSecret=guard-fixture-not-a-real-collect-key",
          *extra],

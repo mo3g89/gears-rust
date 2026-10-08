@@ -32,8 +32,8 @@
 # byte-identical to what it was before this existed and qa-runs stays on the
 # mock executor.
 #
-# WHY A FRAGMENT FILE AND NOT A DOZEN ENVIRONMENT VARIABLES. The block has ten
-# fields including a nested `bundle_auth` mapping; rendering that from
+# WHY A FRAGMENT FILE AND NOT A DOZEN ENVIRONMENT VARIABLES. The block has more than a dozen
+# fields including a nested `runner_resources` mapping; rendering that from
 # `QA_RUNS_ARGO_*` variables would put a YAML schema in a shell script and make
 # every added knob a change to this file. A fragment is reviewable as the thing
 # it becomes, and this script's whole job with it is to check the ONE property a
@@ -262,7 +262,7 @@ QA_ENVIRONMENTS_ARGO_CONFIG="${QA_ENVIRONMENTS_ARGO_CONFIG:-}"
 # with nothing in any log naming the missing config, so the message below says
 # exactly that.
 if [[ -n "$QA_RUNS_ARGO_CONFIG" && -z "$QA_ENVIRONMENTS_ARGO_CONFIG" ]]; then
-    echo "entrypoint: QA_RUNS_ARGO_CONFIG is set but QA_ENVIRONMENTS_ARGO_CONFIG is not. An Argo deployment needs BOTH -- qa-runs submits the Workflow, and qa-environments writes the runner credential Secrets that Workflow's pod mounts (decision D4). With only the first, every run hangs on FailedMount and nothing says why. Under the Helm chart both come from gears-argo-configmaps.yaml, which always renders the pair -- if only one is present the ConfigMap or its volumeMounts have been edited apart. Refusing to start." >&2
+    echo "entrypoint: QA_RUNS_ARGO_CONFIG is set but QA_ENVIRONMENTS_ARGO_CONFIG is not. An Argo deployment needs BOTH -- qa-runs submits the Workflow, and qa-environments writes the runner credential Secrets that Workflow's pod mounts. With only the first, every run hangs on FailedMount and nothing says why. Under the Helm chart both come from gears-argo-configmaps.yaml, which always renders the pair -- if only one is present the ConfigMap or its volumeMounts have been edited apart. Refusing to start." >&2
     exit 1
 fi
 
@@ -291,7 +291,7 @@ fi
 
 # WHETHER kubeconfig_path IS REQUIRED DEPENDS ON WHERE THIS CONTAINER RUNS,
 # and this is the one fact that decides it. qa-environments' D4 Secret writer
-# (`argo_client` in qa-environments/src/infra/observer/secret_writer.rs) treats an
+# (`argo_client` in qa-environments/src/infra/runner_secret_writer.rs) treats an
 # absent/empty kubeconfig_path as "use Config::infer()", which tries
 # in-cluster ServiceAccount credentials, then $KUBECONFIG, then
 # ~/.kube/config, in that order. Inside a plain Docker container NONE of those
@@ -301,16 +301,17 @@ fi
 #
 # Inside a Kubernetes POD, the FIRST of those three is real: the kubelet
 # projects a ServiceAccount token at IN_CLUSTER_TOKEN_FILE in every pod
-# (whether or not anything reads it), and gears-serviceaccount.yaml's
-# `qa-platform-gears` account plus rbac-argo.yaml's RoleBinding are what make
-# that token resolve to something with real RBAC in the `argo` namespace. So
-# a chart-rendered fragment that deliberately omits kubeconfig_path -- to let
-# Config::infer() pick up that very token, which is the whole point of
-# running in-cluster rather than against a rewritten copy of the node's own
-# kubeconfig -- is not the failure this check exists to catch. DO NOT DELETE
-# THIS BRANCH TO "SIMPLIFY" THE GUARD BACK TO ALWAYS REQUIRING
-# kubeconfig_path: that would make the Helm chart's own fragments
-# (gears-argo-configmaps.yaml) refuse to boot by design.
+# (whether or not anything reads it), so a fragment that omits
+# kubeconfig_path to let Config::infer() pick up that very token is not the
+# failure this check exists to catch. The Helm chart's own fragment no longer
+# relies on this (finding #94): it sets kubeconfig_path to a kubeconfig for
+# the dedicated `qa-platform-secret-writer` account
+# (gears-argo-configmaps.yaml), because the pod's own `qa-platform-gears`
+# account no longer holds `secrets` create/patch in the `argo` namespace --
+# an inferred client would authenticate but be Forbidden. The branch stays
+# for any in-cluster deployment that grants the pod's own account instead,
+# and because it costs the chart nothing: a fragment that DOES carry
+# kubeconfig_path passes either way.
 #
 # NOT OVERRIDABLE, deliberately, unlike GEARS_CONFIG_FILE/PUBLIC_HOST
 # elsewhere in this script. The kubelet's projected-token path is fixed by

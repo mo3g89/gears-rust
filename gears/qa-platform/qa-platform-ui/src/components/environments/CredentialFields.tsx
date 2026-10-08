@@ -11,8 +11,8 @@
  *
  * Values are collected into `credentials`, keyed by `FieldDesc.key`, each
  * externally tagged `{"material": "…"}` for a pasted value. That is the shape
- * Task 18b Step 2 defined, and this is its first UI caller — until now the
- * dialog sent the pre-plugin `kubeconfig` pair, which Task 18b kept accepted
+ * the gear defines, and this is its first UI caller — until now the
+ * dialog sent the pre-plugin `kubeconfig` pair, which the gear kept accepted
  * precisely so this component could be the change that stops sending it.
  *
  * A `{"reference": "…"}` value is the other arm: a credstore reference the
@@ -38,7 +38,7 @@ interface CredentialFieldsProps {
 /**
  * Every required field carries a value.
  *
- * The gear enforces this itself (`require_declared_secrets`, Critical C-2) —
+ * The gear enforces this itself (`require_declared_secrets`) —
  * this is the form telling the operator before the round trip, not the rule.
  */
 export function missingRequired(schema: FieldDesc[], values: CredentialValues): string[] {

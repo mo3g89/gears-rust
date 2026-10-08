@@ -9,11 +9,23 @@ import {
 } from '@/api/hooks';
 import {
   NotificationLogSection,
+  RunOutcomePolicySection,
   normalizeNotificationsConfig,
   resolveManagerUiBaseUrl,
   DEFAULT_FORM,
 } from './notificationsShared';
 import type { NotificationsConfig } from '@/api/types';
+
+/**
+ * One saved document, three buttons that save it. The toast names whichever
+ * one was pressed so an operator can tell their change landed, not which
+ * fields were written — every save sends the whole form.
+ */
+const SAVED_MESSAGES: Record<'email' | 'slack' | 'outcome', string> = {
+  email: 'Email notification settings saved',
+  slack: 'Slack notification settings saved',
+  outcome: 'Run completion policy saved',
+};
 
 export function NotificationsLayoutPage() {
   const { data, isLoading } = useNotificationsConfig();
@@ -27,7 +39,7 @@ export function NotificationsLayoutPage() {
     }
   }, [data]);
 
-  const saveNotifications = (channel: 'email' | 'slack') => {
+  const saveNotifications = (channel: 'email' | 'slack' | 'outcome') => {
     const managerUiBaseUrl = resolveManagerUiBaseUrl(form.manager_ui_base_url);
 
     update.mutate(
@@ -64,12 +76,7 @@ export function NotificationsLayoutPage() {
         },
       },
       {
-        onSuccess: () =>
-          toast.success(
-            channel === 'email'
-              ? 'Email notification settings saved'
-              : 'Slack notification settings saved'
-          ),
+        onSuccess: () => toast.success(SAVED_MESSAGES[channel]),
         onError: (err) =>
           toast.error('Failed to save notification settings', { description: String(err) }),
       }
@@ -86,6 +93,13 @@ export function NotificationsLayoutPage() {
 
   return (
     <div className="space-y-4">
+      <RunOutcomePolicySection
+        form={form}
+        isSaving={update.isPending}
+        onSave={() => saveNotifications('outcome')}
+        setForm={setForm}
+      />
+
       <Outlet
         context={{
           form,

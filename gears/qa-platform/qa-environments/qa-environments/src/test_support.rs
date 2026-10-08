@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::AuthZResolverApi;
@@ -79,6 +80,81 @@ pub async fn inmem_db() -> Db {
     .expect("failed to run qa-environments migrations");
 
     db
+}
+
+/// The Postgres image the `postgres` tier runs against. Pinned, not inherited
+/// from `testcontainers-modules`, for the reason qa-insights' `PG_IMAGE_TAG`
+/// records; the same value as that gear's pin.
+#[cfg(feature = "postgres")]
+pub const PG_IMAGE_TAG: &str = "15-alpine";
+
+/// A live Postgres container with this gear's real migrations applied, and a
+/// pool onto it. Hold the harness for as long as the pool is used: dropping it
+/// tears the database down.
+#[cfg(feature = "postgres")]
+pub struct PgHarness {
+    /// More than one connection, unlike [`inmem_db`]: the variable-upsert race
+    /// needs two transactions overlapping inside the server.
+    pub db: Db,
+    /// The same database's URL, for a raw connection that reads `pg_locks`
+    /// (`Db` exposes none).
+    pub url: String,
+    _container: testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
+}
+
+#[cfg(feature = "postgres")]
+pub async fn pg_db() -> PgHarness {
+    use testcontainers::{ContainerRequest, ImageExt, runners::AsyncRunner};
+    use testcontainers_modules::postgres::Postgres;
+
+    let container = ContainerRequest::from(Postgres::default())
+        .with_tag(PG_IMAGE_TAG)
+        .with_env_var("POSTGRES_PASSWORD", "pass")
+        .with_env_var("POSTGRES_USER", "user")
+        .with_env_var("POSTGRES_DB", "app")
+        .start()
+        .await
+        .expect("postgres container starts");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("the container publishes 5432");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+    while tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .is_err()
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the postgres container on {port}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    let url = format!("postgres://user:pass@127.0.0.1:{port}/app");
+    let db = connect_db(
+        &url,
+        ConnectOpts {
+            max_conns: Some(8),
+            min_conns: Some(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("failed to connect to the postgres container");
+    run_migrations_for_testing(
+        &db,
+        crate::infra::storage::migrations::Migrator::migrations(),
+    )
+    .await
+    .expect("failed to run qa-environments migrations against postgres");
+
+    PgHarness {
+        db,
+        url,
+        _container: container,
+    }
 }
 
 /// Shared decision logic for the permissive `AuthZ` test doubles used across
@@ -234,7 +310,7 @@ impl AuthZResolverApi for DenyAllAuthZ {
 /// `ssh_keys_tests` peeks into the mock's map instead; going through `get`
 /// costs ten more lines and exercises one more real edge.
 pub struct RecordingCredStore {
-    secrets: Mutex<HashMap<String, StoredSecret>>,
+    secrets: Mutex<HashMap<String, RecordedSecret>>,
     /// When true every operation fails with `CredStoreError::Internal` — the
     /// only way to reach the "credstore write failed, so no row exists" path.
     failing: bool,
@@ -251,7 +327,7 @@ pub struct RecordingCredStore {
 }
 
 /// One entry of [`RecordingCredStore`]'s store.
-struct StoredSecret {
+struct RecordedSecret {
     bytes: Vec<u8>,
     sharing: SharingMode,
 }
@@ -324,7 +400,7 @@ impl RecordingCredStore {
     pub fn seed(&self, raw_ref: &str, value: &str) {
         self.secrets.lock().unwrap().insert(
             raw_ref.to_owned(),
-            StoredSecret {
+            RecordedSecret {
                 bytes: value.as_bytes().to_vec(),
                 sharing: SharingMode::Tenant,
             },
@@ -401,7 +477,7 @@ impl CredStoreClientV1 for RecordingCredStore {
         }
         secrets.insert(
             key.as_ref().to_owned(),
-            StoredSecret {
+            RecordedSecret {
                 bytes: value.as_bytes().to_vec(),
                 sharing,
             },
@@ -421,7 +497,7 @@ impl CredStoreClientV1 for RecordingCredStore {
         self.write_result()?;
         self.secrets.lock().unwrap().insert(
             key.as_ref().to_owned(),
-            StoredSecret {
+            RecordedSecret {
                 bytes: value.as_bytes().to_vec(),
                 sharing,
             },
@@ -708,6 +784,7 @@ pub fn build_services_with_plugin_port(
         None,
         None,
         max_variables,
+        crate::config::ObservationConfig::default().effective_observe_timeout(),
     )
 }
 
@@ -722,8 +799,8 @@ pub fn build_services_with_plugin_port(
 /// signal a metered one does.
 #[allow(
     clippy::too_many_arguments,
-    reason = "one argument per collaborator `AppServices::new` wires, plus the one scalar \
-              knob; the container's own constructor carries the same allowance for the same \
+    reason = "one argument per collaborator `AppServices::new` wires, plus the two scalar \
+              knobs; the container's own constructor carries the same allowance for the same \
               reason"
 )]
 pub fn build_services_with_plugin_port_and_metrics(
@@ -735,6 +812,7 @@ pub fn build_services_with_plugin_port_and_metrics(
     metrics: Option<Arc<dyn ObservationMetrics>>,
     plugin_metrics: Option<Arc<dyn PluginMetrics>>,
     max_variables: usize,
+    observe_timeout: Duration,
 ) -> Arc<ConcreteAppServices> {
     let db: Arc<DBProvider<DbError>> = Arc::new(DBProvider::new(db));
 
@@ -750,6 +828,7 @@ pub fn build_services_with_plugin_port_and_metrics(
         metrics,
         plugin_metrics,
         max_variables,
+        observe_timeout,
     ))
 }
 
@@ -770,6 +849,7 @@ pub fn build_services_tenant_scoped_with_plugin_and_metrics(
         Some(metrics),
         None,
         crate::config::QaEnvironmentsConfig::default().max_variables,
+        crate::config::ObservationConfig::default().effective_observe_timeout(),
     )
 }
 
@@ -795,12 +875,13 @@ pub fn build_services_tenant_scoped_with_plugin_and_plugin_metrics(
         None,
         Some(plugin_metrics),
         crate::config::QaEnvironmentsConfig::default().max_variables,
+        crate::config::ObservationConfig::default().effective_observe_timeout(),
     )
 }
 
 /// Services wired with [`TenantScopedAuthZ`], a fresh [`RecordingCredStore`]
-/// (so a seeded `kubeconfig_credstore_ref` resolves), a [`NoopRunnerSecretWriter`] and a
-/// caller-supplied product-plugin port — the shape every observation test
+/// (so a seeded credential reference resolves), a [`NoopRunnerSecretWriter`]
+/// and a caller-supplied product-plugin port — the shape every observation test
 /// wants.
 pub fn build_services_tenant_scoped_with_plugin(
     db: Db,
@@ -813,6 +894,28 @@ pub fn build_services_tenant_scoped_with_plugin(
         Arc::new(NoopRunnerSecretWriter),
         product_plugins,
         crate::config::QaEnvironmentsConfig::default().max_variables,
+    )
+}
+
+/// [`build_services_tenant_scoped_with_plugin`] with a caller-chosen
+/// observation deadline and a plugin-boundary metrics adapter, for the test
+/// that waits one out and checks how the abandoned call was counted.
+pub fn build_services_tenant_scoped_with_plugin_and_observe_timeout(
+    db: Db,
+    product_plugins: Arc<dyn ProductPluginPort>,
+    plugin_metrics: Arc<dyn PluginMetrics>,
+    observe_timeout: Duration,
+) -> Arc<ConcreteAppServices> {
+    build_services_with_plugin_port_and_metrics(
+        db,
+        Arc::new(TenantScopedAuthZ),
+        Arc::new(RecordingCredStore::new()),
+        Arc::new(NoopRunnerSecretWriter),
+        product_plugins,
+        None,
+        Some(plugin_metrics),
+        crate::config::QaEnvironmentsConfig::default().max_variables,
+        observe_timeout,
     )
 }
 
@@ -848,7 +951,7 @@ pub fn build_services_tenant_scoped_with_limit(
 }
 
 /// Convenience: build services with [`TenantScopedAuthZ`], a fresh
-/// [`RecordingCredStore`] (so a seeded `kubeconfig_credstore_ref` resolves),
+/// [`RecordingCredStore`] (so a seeded credential reference resolves),
 /// and a caller-supplied [`RunnerSecretWriter`] double — for tests exercising
 /// `EnvironmentsService::observe_environment`/`refresh_environment`.
 pub fn build_services_tenant_scoped_with_observer(
@@ -861,7 +964,7 @@ pub fn build_services_tenant_scoped_with_observer(
 /// [`build_services_tenant_scoped_with_observer`] plus a caller-supplied
 /// plugin port, for the tests that need a product whose plugin declares more
 /// than VHP's one required secret — VHI's two are what
-/// `materialise_runner_secret` (D4) exists to serve, and the VHP-shaped port
+/// `materialise_runner_secret` exists to serve, and the VHP-shaped port
 /// this module otherwise defaults to cannot express that case.
 pub fn build_services_tenant_scoped_with_observer_and_port(
     db: Db,
@@ -879,7 +982,7 @@ pub fn build_services_tenant_scoped_with_observer_and_port(
 }
 
 // ---------------------------------------------------------------------------
-// Product-plugin doubles (Task 15)
+// Product-plugin doubles
 // ---------------------------------------------------------------------------
 
 /// A `QaProductPluginV1` double: declared schemas a test chooses, a scripted
@@ -1271,7 +1374,7 @@ impl ProductPluginPort for FixedPluginPort {
 ///
 /// **The default since Task 19**, and the reason the default changed: an
 /// environment's credentials can now only be stored under a key its product's
-/// plugin declares (ruling F-13), so a services double with no plugin cannot
+/// plugin declares, so a services double with no plugin cannot
 /// create the fixture almost every test needs. [`no_plugin_port`] used to be
 /// the default on the argument that a permissive stand-in hides a gap — true
 /// while the plugin was only needed to *observe*, and now inverted: with no
@@ -1461,6 +1564,47 @@ impl QaProductPluginV1 for SequencedPlugin {
     }
 }
 
+/// A `QaProductPluginV1` whose `observe` never returns — the black-holing
+/// target the observation deadline exists for.
+pub struct HangingPlugin;
+
+#[async_trait]
+impl QaProductPluginV1 for HangingPlugin {
+    fn credential_schema(&self) -> Vec<FieldDesc> {
+        vhp_shaped_credential_schema()
+    }
+
+    fn observed_schema(&self) -> Vec<FieldDesc> {
+        vhp_shaped_observed_schema()
+    }
+
+    async fn validate_credentials(
+        &self,
+        input: &CredentialInput,
+    ) -> Result<Vec<CredentialClassification>, PluginFailure> {
+        Ok(classify_against_schema(&self.credential_schema(), input))
+    }
+
+    async fn observe(&self, _env: &EnvironmentHandle<'_>) -> PluginObservation {
+        std::future::pending().await
+    }
+
+    async fn prepare_run_access(
+        &self,
+        _env: &EnvironmentHandle<'_>,
+    ) -> Result<RunAccess, PluginFailure> {
+        unimplemented!("dispatch is qa-runs' side of the contract, not this gear's")
+    }
+
+    fn runner(&self, _observed: Option<&ObservedAttrs>) -> RunnerSpec {
+        unimplemented!("dispatch is qa-runs' side of the contract, not this gear's")
+    }
+
+    fn env_contract(&self) -> RunVarContract {
+        unimplemented!("dispatch is qa-runs' side of the contract, not this gear's")
+    }
+}
+
 /// One `Detected` outcome carrying the version and build attributes, health
 /// `NotAttempted` — the shape most tests want, spelled once.
 #[must_use]
@@ -1590,5 +1734,72 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
     type Writer = CapturedLogsWriter;
     fn make_writer(&'a self) -> Self::Writer {
         CapturedLogsWriter(Arc::clone(&self.0))
+    }
+}
+
+/// One secret [`SharingCredStore`] holds: who owns it, in which tenant,
+/// shared how.
+pub struct StoredSecret {
+    /// The reference, a bare name as every credential reference is.
+    pub reference: &'static str,
+    pub value: &'static str,
+    pub tenant: Uuid,
+    pub owner: Uuid,
+    pub sharing: SharingMode,
+}
+
+/// A credential store that applies credstore's sharing rule to the caller.
+///
+/// `credstore_sdk::test_util::MockCredStoreClient` (and [`RecordingCredStore`])
+/// answer the same value to every caller, so neither can tell a user's read
+/// from the qa-environments system actor's — the distinction a refresh and the
+/// observation cycle have to make. This double applies the visibility predicate
+/// of credstore's resolver (`resolve_for_get` in
+/// `gears/credstore/credstore/src/infra/storage/repo_impl/reads.rs`) for a
+/// one-tenant chain: `Private` is visible to its owner only, `Tenant` and
+/// `Shared` to every subject of the owning tenant. A miss is `Ok(None)`, the
+/// SDK's single anti-enumeration surface. Read-only: every write takes the
+/// trait's default, which fails.
+pub struct SharingCredStore {
+    secrets: Vec<StoredSecret>,
+}
+
+impl SharingCredStore {
+    #[must_use]
+    pub const fn new(secrets: Vec<StoredSecret>) -> Self {
+        Self { secrets }
+    }
+
+    fn visible(secret: &StoredSecret, ctx: &SecurityContext, key: &SecretRef) -> bool {
+        secret.reference == key.as_ref()
+            && secret.tenant == ctx.subject_tenant_id()
+            && match secret.sharing {
+                SharingMode::Private => secret.owner == ctx.subject_id(),
+                SharingMode::Tenant | SharingMode::Shared => true,
+            }
+    }
+}
+
+#[async_trait]
+impl CredStoreClientV1 for SharingCredStore {
+    async fn get(
+        &self,
+        ctx: &SecurityContext,
+        key: &SecretRef,
+    ) -> Result<Option<GetSecretResponse>, CredStoreError> {
+        Ok(self
+            .secrets
+            .iter()
+            .find(|s| Self::visible(s, ctx, key))
+            .map(|s| GetSecretResponse {
+                value: SecretValue::new(s.value.as_bytes().to_vec()),
+                id: Uuid::nil(),
+                owner_tenant_id: TenantId(s.tenant),
+                sharing: s.sharing,
+                is_inherited: false,
+                version: 1,
+                secret_type: SecretType::generic().gts_id().to_owned(),
+                expires_at: None,
+            }))
     }
 }

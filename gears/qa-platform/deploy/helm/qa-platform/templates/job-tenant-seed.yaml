@@ -48,7 +48,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: tenant-seed
-          image: "{{ .Values.images.postgres.repository }}:{{ .Values.images.postgres.tag }}"
+          image: {{ include "qa-platform.image" .Values.images.postgres | quote }}
           # `command:`, not `args:`, and deliberately so: this container
           # genuinely means to REPLACE the postgres:16 image's ENTRYPOINT
           # (docker-entrypoint.sh, which would try to start a server) with the

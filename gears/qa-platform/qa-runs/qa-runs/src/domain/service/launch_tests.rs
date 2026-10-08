@@ -117,7 +117,7 @@ impl Builder {
             Arc::clone(&self.runs),
             Arc::clone(&self.catalog) as Arc<dyn QaCatalogClientV1>,
             Arc::clone(&self.environments) as Arc<dyn QaEnvironmentsClientV1>,
-            // Task 15: a terminal transition releases the run's live log channel.
+            // A terminal transition releases the run's live log channel.
             Arc::clone(&logs) as Arc<dyn crate::domain::service::LogFanout>,
             Arc::clone(&self.admitter) as Arc<dyn Admitter>,
             Arc::clone(&dispatcher) as Arc<dyn InlineDispatcher>,
@@ -1341,6 +1341,120 @@ async fn a_denied_target_plan_read_is_forbidden_rather_than_a_catalog_fault() {
         harness.runs.created().is_empty(),
         "resolution runs before the run row is created"
     );
+}
+
+/// The resource type qa-catalog raises a branch's refusals against
+/// (`qa-catalog/src/api/rest/error.rs`, `TestRepoResourceError`), so the
+/// fixtures below carry the category, resource type and message the real gear
+/// sends.
+#[toolkit::api::canonical_prelude::resource_error(toolkit_gts::gts_id!(
+    "cf.qa.catalog.test_repo.v1~"
+))]
+struct CatalogTestRepoError;
+
+/// Launch a plan whose `get_plan` answers `refusal`, and render the launch's
+/// error the way the REST boundary does: `(status, wire body, domain error
+/// text)`. The domain text is what the log line and the answer read; a row
+/// records the fixed sentence `DomainError::recorded_text` gives instead.
+async fn launch_against_a_refusing_plan(refusal: QaCatalogError) -> (u16, String, String) {
+    let harness = Builder::new()
+        .catalog(MockCatalog::new().with_failing_plan(REPO_ID, "tests/plan.yaml", refusal))
+        .build()
+        .await;
+
+    let err = harness
+        .service
+        .launch(&ctx(OWNER_TENANT), plan_request())
+        .await
+        .unwrap_err();
+    assert!(
+        harness.runs.created().is_empty(),
+        "resolution runs before the run row is created"
+    );
+
+    let text = err.to_string();
+    let canonical: toolkit_canonical_errors::CanonicalError = err.into();
+    let problem = toolkit_canonical_errors::Problem::from_error(&canonical)
+        .expect("a problem must serialize");
+    let status = problem.status.expect("a problem always carries a status");
+    let body = serde_json::to_string(&problem).expect("a problem must serialize");
+    (status, body, text)
+}
+
+/// **A branch the catalog has no synced content for is the caller's 400, with
+/// the catalog's own sentence.** It used to be folded into the opaque
+/// `DomainError::Catalog` 500, and its message was lost on the way: the
+/// sentence lives in the refusal's precondition violation, not in its
+/// `detail`, so even the log line read only "Operation precondition not met".
+#[tokio::test]
+async fn a_catalog_failed_precondition_is_a_400_carrying_the_catalogs_message() {
+    let message = format!(
+        "Repository {REPO_ID} has no synced content for branch '26.8': the repository's \
+         last sync failed: remote rejected https://***@git.example.invalid/repo.git"
+    );
+    let refusal = CatalogTestRepoError::failed_precondition()
+        .with_precondition_violation("sync_state", message.clone(), "NOT_SYNCED")
+        .with_resource(REPO_ID.to_string())
+        .create();
+
+    let (status, body, text) = launch_against_a_refusing_plan(refusal).await;
+
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.contains("has no synced content for branch '26.8'"),
+        "{body}"
+    );
+    assert!(
+        text.contains("has no synced content for branch '26.8'"),
+        "the domain error, which is what the log line renders, must carry the \
+         catalog's sentence rather than the category title: {text}"
+    );
+}
+
+/// A branch, plan or repository the catalog says does not exist is a 404
+/// naming it, not a 500.
+#[tokio::test]
+async fn a_catalog_not_found_is_a_404_carrying_the_catalogs_message() {
+    let refusal = CatalogTestRepoError::not_found(format!(
+        "Branch '26.8' does not exist in repository {REPO_ID}"
+    ))
+    .with_resource(REPO_ID.to_string())
+    .create();
+
+    let (status, body, text) = launch_against_a_refusing_plan(refusal).await;
+
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("Branch '26.8' does not exist"), "{body}");
+    assert!(text.contains("Branch '26.8' does not exist"), "{text}");
+}
+
+/// A request the catalog rejects as malformed is a 400, not a 500.
+#[tokio::test]
+async fn a_catalog_invalid_argument_is_a_400_carrying_the_catalogs_message() {
+    let refusal = CatalogTestRepoError::invalid_argument()
+        .with_field_violation("branch", "must not be empty", "VALIDATION")
+        .create();
+
+    let (status, body, text) = launch_against_a_refusing_plan(refusal).await;
+
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("must not be empty"), "{body}");
+    assert!(text.contains("branch: must not be empty"), "{text}");
+}
+
+/// **The other half: a catalog that cannot answer is still this gear's opaque
+/// 500.** A remote that cannot be listed comes back `ServiceUnavailable`; that
+/// is not the caller's to fix, and its text stays in the log.
+#[tokio::test]
+async fn a_catalog_that_cannot_answer_is_still_an_opaque_500() {
+    let refusal = toolkit_canonical_errors::CanonicalError::service_unavailable()
+        .with_detail("Repository synchronization failed")
+        .create();
+
+    let (status, body, _text) = launch_against_a_refusing_plan(refusal).await;
+
+    assert_eq!(status, 500, "{body}");
+    assert!(!body.contains("synchronization"), "{body}");
 }
 
 /// Every nested plan unresolvable: parallel at tier `Default`, and still no
@@ -2770,7 +2884,7 @@ async fn a_refused_launch_releases_its_runs_log_channel() {
 // The `Collect` run kind
 // ---------------------------------------------------------------------------
 
-/// The report route qa-insights will serve (Task 30). Its *shape* mirrors
+/// The report route qa-insights will serve. Its *shape* mirrors
 /// legacy's `format!("{}/api/collect/{}/{}", base, repo.id, branch)`
 /// (`manager/src/services/collect.rs:90`), but qa-runs never builds it: the
 /// runner posts wherever it is told, which is exactly what lets another gear own

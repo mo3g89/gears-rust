@@ -254,6 +254,315 @@ mod tests {
         }
     }
 
+    /// qa-catalog's repository resource type, for the `CatalogRefused` samples
+    /// in the status table below: a refusal the catalog raises carries the
+    /// catalog's type, not a run's.
+    #[toolkit_canonical_errors::resource_error(toolkit_canonical_errors::gts_id!(
+        "cf.qa.catalog.test_repo.v1~"
+    ))]
+    struct CatalogTestRepoError;
+
+    /// One row per `DomainError` variant: the pattern, one or more samples of
+    /// it, and every operation whose handler can return it.
+    ///
+    /// The macro builds an **exhaustive `match` with no wildcard** from the
+    /// patterns, so a new variant does not compile here until it has a row,
+    /// and a row cannot exist without its samples and its operations. The
+    /// test also asserts each sample lands on its own row, so a sample filed
+    /// under the wrong pattern fails rather than testing nothing.
+    macro_rules! status_table {
+        ($($pattern:pat => { $($sample:expr => $ops:expr;)+ })+) => {
+            /// The row a variant belongs to, from an exhaustive `match`.
+            fn row_tag(error: &crate::domain::error::DomainError) -> &'static str {
+                use crate::domain::error::DomainError;
+                match error {
+                    $($pattern => stringify!($pattern),)+
+                }
+            }
+
+            /// `(row tag, sample, operations that can answer it)`.
+            fn status_rows() -> Vec<(
+                &'static str,
+                crate::domain::error::DomainError,
+                Vec<(&'static str, &'static str)>,
+            )> {
+                use crate::domain::error::DomainError;
+                vec![$($((stringify!($pattern), $sample, Vec::from($ops)),)+)+]
+            }
+        };
+    }
+
+    // The operations, by the path and method they are registered on.
+    const LAUNCH: (&str, &str) = ("/qa/v1/runs", "post");
+    const LIST_RUNS: (&str, &str) = ("/qa/v1/runs", "get");
+    const GET_RUN: (&str, &str) = ("/qa/v1/runs/{id}", "get");
+    const CANCEL: (&str, &str) = ("/qa/v1/runs/{id}/cancel", "post");
+    const RERUN: (&str, &str) = ("/qa/v1/runs/{id}/rerun", "post");
+    const LOGS: (&str, &str) = ("/qa/v1/runs/{id}/logs", "get");
+    const LIST_QUEUE: (&str, &str) = ("/qa/v1/queue", "get");
+    const DEQUEUE: (&str, &str) = ("/qa/v1/queue/{id}", "delete");
+    const FORCE_START: (&str, &str) = ("/qa/v1/queue/{id}/force-start", "post");
+    const LIST_SCHEDULES: (&str, &str) = ("/qa/v1/schedules", "get");
+    const CREATE_SCHEDULE: (&str, &str) = ("/qa/v1/schedules", "post");
+    const GET_SCHEDULE: (&str, &str) = ("/qa/v1/schedules/{id}", "get");
+    const REPLACE_SCHEDULE: (&str, &str) = ("/qa/v1/schedules/{id}", "put");
+    const DELETE_SCHEDULE: (&str, &str) = ("/qa/v1/schedules/{id}", "delete");
+    const SCHEDULE_TICKS: (&str, &str) = ("/qa/v1/schedules/{id}/ticks", "get");
+    const SCHEDULE_NOTIFICATIONS: (&str, &str) = ("/qa/v1/schedules/{id}/notifications", "put");
+
+    const SAMPLE_ID: uuid::Uuid = uuid::Uuid::from_u128(0x10);
+
+    // Which handler can answer which variant, from the service method behind
+    // each operation (its `# Errors` section and body):
+    //
+    // - Every operation compiles a policy scope and touches the database, so
+    //   `Forbidden`, `Database`, `CorruptState` and `Internal` are on all of them.
+    // - Launch and re-run share `LaunchService::launch`, and force-start reaches
+    //   the same inline dispatch, so they share the admission, catalog,
+    //   environment and executor outcomes.
+    // - The two list reads answer `Validation` for a `$filter`, `$orderby` or
+    //   cursor the repository refuses; the queue read also for the legacy
+    //   `platform_id` parameter.
+    // - A schedule write runs `LaunchService::resolve_target_exists`, which turns
+    //   the catalog's and environments' not-found into `Validation`, so the
+    //   `CatalogRefused` that reaches a schedule write is never a 404.
+    //
+    // `CatalogRefused` renders whatever status qa-catalog gave it, and
+    // `DomainError::from_catalog` admits only a not-found, a failed
+    // precondition and an invalid argument. It is sampled at 404 and at 400
+    // for that reason.
+    const ALL_OPERATIONS: [(&str, &str); 16] = [
+        LAUNCH,
+        LIST_RUNS,
+        GET_RUN,
+        CANCEL,
+        RERUN,
+        LOGS,
+        LIST_QUEUE,
+        DEQUEUE,
+        FORCE_START,
+        LIST_SCHEDULES,
+        CREATE_SCHEDULE,
+        GET_SCHEDULE,
+        REPLACE_SCHEDULE,
+        DELETE_SCHEDULE,
+        SCHEDULE_TICKS,
+        SCHEDULE_NOTIFICATIONS,
+    ];
+
+    status_table! {
+        DomainError::RunNotFound { .. } => {
+            DomainError::RunNotFound { id: SAMPLE_ID }
+                => [GET_RUN, LOGS, CANCEL, RERUN, DEQUEUE, FORCE_START];
+        }
+        DomainError::QueueRowNotFound { .. } => {
+            DomainError::QueueRowNotFound { id: SAMPLE_ID } => [DEQUEUE, FORCE_START];
+        }
+        DomainError::ScheduleNotFound { .. } => {
+            DomainError::ScheduleNotFound { id: SAMPLE_ID } => [
+                GET_SCHEDULE,
+                REPLACE_SCHEDULE,
+                DELETE_SCHEDULE,
+                SCHEDULE_TICKS,
+                SCHEDULE_NOTIFICATIONS,
+            ];
+        }
+        DomainError::Validation { .. } => {
+            DomainError::Validation {
+                field: "plan_path".to_owned(),
+                message: "must not be empty".to_owned(),
+            } => [
+                LAUNCH,
+                RERUN,
+                FORCE_START,
+                LIST_RUNS,
+                LIST_QUEUE,
+                CREATE_SCHEDULE,
+                REPLACE_SCHEDULE,
+                SCHEDULE_NOTIFICATIONS,
+            ];
+        }
+        DomainError::InvalidCron { .. } => {
+            DomainError::InvalidCron {
+                expression: "99 * * * *".to_owned(),
+                message: "minute out of range".to_owned(),
+            } => [CREATE_SCHEDULE, REPLACE_SCHEDULE];
+        }
+        DomainError::InvalidParameters(_) => {
+            DomainError::InvalidParameters(
+                crate::domain::params::validate(
+                    &[qa_runs_sdk::RunParameter {
+                        name: String::new(),
+                        value: "v".to_owned(),
+                    }],
+                    &qa_product_sdk::access::RunVarContract::default(),
+                )
+                .expect_err("an empty parameter name must not validate"),
+            ) => [LAUNCH, RERUN, FORCE_START];
+        }
+        DomainError::CorruptState { .. } => {
+            DomainError::CorruptState {
+                what: "run.state",
+                id: SAMPLE_ID,
+                value: "sample".to_owned(),
+            } => ALL_OPERATIONS;
+        }
+        DomainError::RunNameExists { .. } => {
+            DomainError::RunNameExists {
+                name: "smoke-1".to_owned(),
+            } => [LAUNCH, RERUN];
+        }
+        DomainError::ScheduleNameExists { .. } => {
+            DomainError::ScheduleNameExists {
+                name: "nightly".to_owned(),
+            } => [CREATE_SCHEDULE, REPLACE_SCHEDULE];
+        }
+        DomainError::QueueRowExists { .. } => {
+            DomainError::QueueRowExists { run_id: SAMPLE_ID } => [LAUNCH, RERUN];
+        }
+        DomainError::IllegalTransition { .. } => {
+            DomainError::IllegalTransition {
+                id: SAMPLE_ID,
+                state: qa_runs_sdk::RunState::Running,
+                action: "be cancelled".to_owned(),
+            } => [LAUNCH, RERUN, CANCEL, DEQUEUE, FORCE_START];
+        }
+        DomainError::QueueRowNotQueued { .. } => {
+            DomainError::QueueRowNotQueued {
+                id: SAMPLE_ID,
+                state: qa_runs_sdk::QueueState::Running,
+            } => [CANCEL, DEQUEUE, FORCE_START];
+        }
+        DomainError::ExecutorFailed(_) => {
+            DomainError::ExecutorFailed("sample".to_owned())
+                => [LAUNCH, RERUN, CANCEL, FORCE_START];
+        }
+        DomainError::QueueFull { .. } => {
+            DomainError::QueueFull {
+                environment_id: SAMPLE_ID,
+                queued: 3,
+                limit: 3,
+            } => [LAUNCH, RERUN];
+        }
+        DomainError::ConcurrencyLimit { .. } => {
+            DomainError::ConcurrencyLimit { limit: 4 } => [LAUNCH, RERUN, FORCE_START];
+        }
+        DomainError::AmbiguousBranch { .. } => {
+            DomainError::AmbiguousBranch {
+                plan_id: SAMPLE_ID,
+                groups: 2,
+            } => [LAUNCH, RERUN, FORCE_START];
+        }
+        DomainError::Catalog(_) => {
+            DomainError::Catalog("sample".to_owned())
+                => [LAUNCH, RERUN, FORCE_START, CREATE_SCHEDULE, REPLACE_SCHEDULE];
+        }
+        DomainError::CatalogRefused(_) => {
+            DomainError::CatalogRefused(
+                CatalogTestRepoError::not_found("Branch '26.8' does not exist")
+                    .with_resource("r")
+                    .create(),
+            ) => [LAUNCH, RERUN, FORCE_START];
+            DomainError::CatalogRefused(
+                CatalogTestRepoError::failed_precondition()
+                    .with_precondition_violation("sync_state", "not synced", "NOT_SYNCED")
+                    .create(),
+            ) => [LAUNCH, RERUN, FORCE_START, CREATE_SCHEDULE, REPLACE_SCHEDULE];
+            DomainError::CatalogRefused(
+                CatalogTestRepoError::invalid_argument()
+                    .with_field_violation("branch", "malformed", "VALIDATION")
+                    .create(),
+            ) => [LAUNCH, RERUN, FORCE_START, CREATE_SCHEDULE, REPLACE_SCHEDULE];
+        }
+        DomainError::Environments(_) => {
+            DomainError::Environments("sample".to_owned())
+                => [LAUNCH, RERUN, FORCE_START, CREATE_SCHEDULE, REPLACE_SCHEDULE];
+        }
+        DomainError::Forbidden => {
+            DomainError::Forbidden => ALL_OPERATIONS;
+        }
+        DomainError::Database { .. } => {
+            DomainError::database("sample") => ALL_OPERATIONS;
+        }
+        DomainError::Internal(_) => {
+            DomainError::Internal("sample".to_owned()) => ALL_OPERATIONS;
+        }
+    }
+
+    /// **Every status a run, queue or schedule handler can answer is declared
+    /// on its route.**
+    ///
+    /// `make qa-openapi-check` cannot see this class: it compares the generated
+    /// document with the committed one, and an undeclared response is missing
+    /// from both. So this starts from the code. `status_table!` lists, for every
+    /// `DomainError` variant, the operations whose service method can return it;
+    /// each sample is rendered through the real `From<DomainError> for
+    /// CanonicalError` and the resulting status must be a key of each listed
+    /// operation's `responses`. Re-mapping a variant to a new status, dropping
+    /// an `.error_xxx` from a route, and adding a variant all fail here: the
+    /// last one at compile time, in `row_tag`'s exhaustive `match`.
+    ///
+    /// What it cannot see is a service starting to return an existing variant
+    /// from an operation its row does not list; the row is a reading of the
+    /// code, kept beside it.
+    #[test]
+    fn every_run_queue_and_schedule_operation_declares_each_status_its_service_can_answer() {
+        use toolkit_canonical_errors::CanonicalError;
+
+        let openapi = OpenApiRegistryImpl::new();
+        let _router = register_operations(Router::new(), &openapi);
+        let doc = openapi
+            .build_openapi(&OpenApiInfo::default())
+            .expect("the OpenAPI document must build");
+        let rendered = serde_json::to_value(&doc).expect("the document must serialize");
+
+        // The table covers every operation this gear registers.
+        let mut registered: Vec<(String, String)> = rendered["paths"]
+            .as_object()
+            .expect("paths is an object")
+            .iter()
+            .flat_map(|(path, item)| {
+                item.as_object()
+                    .expect("a path item is an object")
+                    .keys()
+                    .map(move |method| (path.clone(), method.clone()))
+            })
+            .collect();
+        registered.sort();
+        let mut covered: Vec<(String, String)> = ALL_OPERATIONS
+            .iter()
+            .map(|(path, method)| ((*path).to_owned(), (*method).to_owned()))
+            .collect();
+        covered.sort();
+        assert_eq!(
+            covered, registered,
+            "ALL_OPERATIONS must name every registered operation"
+        );
+
+        let mut undeclared = Vec::new();
+        for (tag, sample, operations) in status_rows() {
+            assert_eq!(
+                row_tag(&sample),
+                tag,
+                "a sample is filed under a row that is not its variant: {sample:?}"
+            );
+            let name = format!("{sample:?}");
+            let status = CanonicalError::from(sample).status_code().to_string();
+            for (path, method) in operations {
+                let responses = &rendered["paths"][path][method]["responses"];
+                assert!(responses.is_object(), "{method} {path} is not registered");
+                if responses.get(&status).is_none() {
+                    undeclared.push(format!("{method} {path}: {status} from {name}"));
+                }
+            }
+        }
+        assert!(
+            undeclared.is_empty(),
+            "statuses the code answers and the route does not declare:\n{}",
+            undeclared.join("\n")
+        );
+    }
+
     /// **Every schedule operation is on the method it is documented for.**
     ///
     /// Route registration is a composition point, and this is the shape of
@@ -454,7 +763,7 @@ mod tests {
         );
     }
 
-    /// **`GET /qa/v1/queue` publishes `environment_id`, not `environment_id`, as
+    /// **`GET /qa/v1/queue` publishes `environment_id`, not `platform_id`, as
     /// its plain query parameter.**
     ///
     /// Important-4 of the Task 25 review, Mutation B: reverting
@@ -464,7 +773,7 @@ mod tests {
     /// [`crate::api::rest::dto::QueueQuery::environment_id`], which the
     /// mutation never touches. Under that mutation the published document
     /// would advertise a parameter the endpoint silently ignores: a Task 26
-    /// caller would send `environment_id` exactly as the (wrong) document says,
+    /// caller would send `platform_id` exactly as the (wrong) document says,
     /// and get an unfiltered queue back with no error.
     #[test]
     fn the_queue_endpoint_publishes_environment_id_not_platform_id_as_its_parameter() {

@@ -22,7 +22,7 @@ pub mod mapper;
 pub mod migrations;
 pub mod odata;
 
-pub(crate) mod db;
+pub mod db;
 mod queue_sea_repo;
 mod run_logs_sea_repo;
 mod runs_sea_repo;
@@ -60,7 +60,7 @@ pub use schedules_sea_repo::OrmSchedulesRepository;
 /// `api::rest::handlers` drives a `ConcreteAppServices` from.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-pub(crate) mod test_db {
+pub mod test_db {
     use qa_runs_sdk::{ExclusiveTier, NewSchedule, RunParameter, RunSource, RunState, RunTarget};
     use sea_orm_migration::MigratorTrait;
     use time::OffsetDateTime;

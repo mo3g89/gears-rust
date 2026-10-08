@@ -80,14 +80,15 @@
 //!
 //! *Rejected:* enumerating a *different* table per ticker — `qa_jira_config` for
 //! the poller, say. Three enumerations is three cross-tenant reads and three
-//! scopes for one question, and R87 ("one scope per resource type") is about not
+//! scopes for one question, and "one scope per resource type" (`jira.rs`'s
+//! header, "The results reads compile their own scope") is about not
 //! reading two resources under one scope, not about splitting one question across
 //! three. The poller's own `active_config` early-return already makes a tenant
 //! with no JIRA configuration a single cheap read per pass
 //! (`jira_poller.rs`, Step 0 point 2), so the narrower enumeration would buy one
 //! `SELECT` per idle tenant per pass and cost two more cross-tenant scopes.
 //!
-//! # The authority split, which is the part R86 is about
+//! # The authority split, which is the part the explicit-`tenant_id` rule is about
 //!
 //! This is the only place in the crate that mints a scope for a **nil-tenant**
 //! actor ([`system_actor::for_ticker_enumeration`]), and it is the only place
@@ -101,10 +102,11 @@
 //! from anywhere else"), and its `list_enabled` returns each row paired with its
 //! own tenant for exactly this.
 //!
-//! R86 itself does not bite here and it is worth saying why rather than leaving
-//! it to a reviewer: R86 is about a `.one()` over a possibly-multi-tenant scope
-//! silently picking a row. This read returns a `Vec`, has no single row to pick,
-//! and a `tenant_id` equality predicate would make it answer its own question.
+//! The explicit-`tenant_id` rule itself does not bite here and it is worth saying
+//! why rather than leaving it to a reviewer: it is about a `.one()` over a
+//! possibly-multi-tenant scope silently picking a row. This read returns a `Vec`,
+//! has no single row to pick, and a `tenant_id` equality predicate would make it
+//! answer its own question.
 //!
 //! # This scope is elevated, not PEP-compiled, and that is why the tickers are
 //! # not idle under the shipped dev PDP
@@ -135,7 +137,6 @@
 
 use std::sync::Arc;
 
-use authz_resolver_sdk::PolicyEnforcer;
 use toolkit_security::AccessScope;
 
 use crate::domain::error::DomainError;
@@ -151,20 +152,17 @@ use crate::domain::system_actor::{self, TenantBound};
 /// No `Clone + 'static` bound, like
 /// [`crate::domain::service::results::ResultsService`] and unlike the
 /// reconciler: the one read below opens no transaction.
+///
+/// **It holds no `PolicyEnforcer`, and that is the guard.** It used to keep one,
+/// unread since the enumeration moved to `domain::elevated`, under a
+/// `dead_code` allowance, so that a recording `AuthZ` double could be wired in
+/// and shown never to be asked. With no enforcer on the struct the read cannot
+/// consult the PEP at all: reintroducing that would mean putting the field and
+/// the constructor parameter back, which is a visible change to the one caller
+/// in `domain::service`, not a silent one-line edit in [`Self::scope`].
 pub struct TenantDirectory<R> {
     db: Arc<DbProvider>,
     results: R,
-    /// Unused by [`Self::scope`] since the ticker enumeration moved to
-    /// `domain::elevated` — kept on the struct, and required by [`Self::new`],
-    /// so the tests that prove it is genuinely never asked
-    /// (`tenants_tests::RecordingAuthZ`) can still wire an `AuthZ` double in
-    /// through the same constructor every other caller uses.
-    #[allow(
-        dead_code,
-        reason = "read by no method, but its presence is exactly what the RecordingAuthZ \
-                   guard test needs to wire a double in and prove unused"
-    )]
-    policy_enforcer: PolicyEnforcer,
 }
 
 impl<R> TenantDirectory<R>
@@ -172,12 +170,8 @@ where
     R: ResultsRepository,
 {
     #[must_use]
-    pub const fn new(db: Arc<DbProvider>, results: R, policy_enforcer: PolicyEnforcer) -> Self {
-        Self {
-            db,
-            results,
-            policy_enforcer,
-        }
+    pub const fn new(db: Arc<DbProvider>, results: R) -> Self {
+        Self { db, results }
     }
 
     /// Every tenant this gear holds projected results for, ascending.
@@ -208,17 +202,13 @@ where
     ///
     /// [`system_actor::for_ticker_enumeration`] is still called, for its
     /// audit-logging side effect only — the `SecurityContext` it returns is
-    /// discarded rather than handed to `self.policy_enforcer`. See
+    /// discarded; there is no enforcer on this type to hand it to. See
     /// `domain::elevated`'s module doc for why this one read bypasses the PEP,
     /// and this module's header, "This scope is elevated, not PEP-compiled",
     /// for what that means for a deployment running the shipped dev PDP.
     ///
-    /// `self.policy_enforcer` is unused here and stays on the struct only
-    /// because [`Self::new`]'s signature is otherwise unchanged from before this
-    /// method stopped consulting it; `tenants_tests`' `RecordingAuthZ` double
-    /// pins that it is genuinely never asked. An associated function rather
-    /// than a `&self` method for exactly that reason — nothing on `self` is
-    /// read any more.
+    /// An associated function rather than a `&self` method: nothing on `self`
+    /// is read.
     fn scope() -> AccessScope {
         let _enumeration = system_actor::for_ticker_enumeration();
         crate::domain::elevated::enumeration_scope()

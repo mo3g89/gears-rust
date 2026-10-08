@@ -47,10 +47,10 @@ const ROW_3: Uuid = Uuid::from_u128(0x2003);
 // dispatch_one
 // ---------------------------------------------------------------------------
 
-/// The happy path, in the order parity spec §3.4 rules 4-6 require:
-/// **force-sync, then bundle, then start** — and the sync is forced, because the
-/// source system drops the recency marker before syncing so a cached checkout
-/// cannot be returned (`SyncRequest::force`'s own doc;
+/// The happy path, in the order launch rules 4-6 require: **force-sync, then
+/// bundle, then start** — and the sync is forced, because the source system
+/// drops the recency marker before syncing so a cached checkout cannot be
+/// returned (`SyncRequest::force`'s own doc;
 /// `manager/src/services/test_repos.rs:503-508`).
 #[tokio::test]
 async fn dispatch_one_force_syncs_then_bundles_then_starts() {
@@ -191,7 +191,7 @@ async fn the_kubeconfig_mount_and_the_assembled_variable_come_from_one_value() {
         "the executor would otherwise resolve the kubeconfig to a path the run's \
          KUBECONFIG does not name"
     );
-    assert_eq!(credstore_ref, "credstore://kubeconfig");
+    assert_eq!(credstore_ref, "sv-staging-kubeconfig");
     assert_eq!(
         *mode, None,
         "this task changes no value: the source system's kubeconfig volume sets \
@@ -365,7 +365,8 @@ async fn a_run_with_no_deadline_gets_zero_and_an_overdue_one_gets_one() {
     assert_eq!(executor.submitted()[0].timeout_seconds, 1);
 }
 
-/// Decision D4's bounded retry: a bundle build that fails immediately after this
+/// The bounded retry (DESIGN §3.3, "Reads do not serialize against a snapshot
+/// rewrite"): a bundle build that fails immediately after this
 /// dispatch's own force-sync is retried **once**, which closes the window
 /// qa-catalog's clear-then-rewrite snapshot widened past legacy's in-place
 /// worktree update.
@@ -395,9 +396,9 @@ async fn a_bundle_build_that_fails_after_the_force_sync_is_retried_once() {
     );
 }
 
-/// **And only once.** A loop would turn a genuinely unbuildable group — a deleted
-/// path, a branch without the files — into a hang instead of a failed run, which
-/// decision D4 rules out explicitly.
+/// **And only once.** A loop would turn a genuinely unbuildable group — a
+/// deleted path, a branch without the files — into a hang instead of a failed
+/// run, which that DESIGN section rules out explicitly.
 #[tokio::test]
 async fn a_bundle_build_is_retried_only_once() {
     let run = run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Dispatching);
@@ -419,6 +420,92 @@ async fn a_bundle_build_is_retried_only_once() {
         catalog.bundle_builds(),
         2,
         "exactly two attempts, never more"
+    );
+}
+
+/// The resource type qa-catalog raises a branch's refusals against
+/// (`qa-catalog/src/api/rest/error.rs`, `TestRepoResourceError`).
+#[toolkit::api::canonical_prelude::resource_error(toolkit_gts::gts_id!(
+    "cf.qa.catalog.test_repo.v1~"
+))]
+struct CatalogTestRepoError;
+
+/// **Dispatch classifies a catalog refusal the way a launch does.** A run whose
+/// recorded branch the remote no longer has is refused by the catalog's sync
+/// with a `NotFound` naming the branch; that is the caller's 404 with the
+/// catalog's sentence, not an opaque `DomainError::Catalog` 500.
+#[tokio::test]
+async fn a_catalog_refusal_at_dispatch_keeps_its_category_and_message() {
+    let run = run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Dispatching);
+    let catalog = Arc::new(FakeCatalog::serving(&["tests/a.py"]));
+    *catalog.fail_sync.lock().unwrap() = Some(
+        CatalogTestRepoError::not_found("Branch '26.8' does not exist in repository r")
+            .with_resource("r")
+            .create(),
+    );
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(OWNER_TENANT, run)])))
+        .catalog(Arc::clone(&catalog))
+        .build()
+        .await;
+
+    let error = fakes
+        .dispatch
+        .dispatch_one(&ctx(OWNER_TENANT), RUN_1, None)
+        .await
+        .expect_err("a refused sync fails the dispatch");
+
+    assert!(
+        error.to_string().contains("Branch '26.8' does not exist"),
+        "{error}"
+    );
+    let canonical: toolkit_canonical_errors::CanonicalError = error.into();
+    assert_eq!(canonical.status_code(), 404, "{canonical:?}");
+}
+
+/// **A catalog refusal at dispatch.** The error returned upward keeps the catalog's sentence
+/// (the inline caller's own answer), and the run row records only the
+/// refusal's category: `qa_runs.error` is read by run readers who never had
+/// `TEST_REPO/GET`, and this sentence carries the repository's `sync_error`.
+#[tokio::test]
+async fn a_catalog_refusal_at_dispatch_records_its_category_not_the_catalogs_sentence() {
+    const LEAK: &str = "git.internal.example";
+    let run = run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Dispatching);
+    let catalog = Arc::new(FakeCatalog::serving(&["tests/a.py"]));
+    *catalog.fail_sync.lock().unwrap() = Some(
+        CatalogTestRepoError::failed_precondition()
+            .with_precondition_violation(
+                "sync_state",
+                format!(
+                    "Repository r has no synced content for branch '26.8': the repository's \
+                     last sync failed: remote rejected https://***@{LEAK}/repo.git"
+                ),
+                "NOT_SYNCED",
+            )
+            .with_resource("r")
+            .create(),
+    );
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(OWNER_TENANT, run)])))
+        .catalog(Arc::clone(&catalog))
+        .build()
+        .await;
+
+    let error = fakes
+        .dispatch
+        .dispatch_one(&ctx(OWNER_TENANT), RUN_1, None)
+        .await
+        .expect_err("a refused sync fails the dispatch");
+
+    assert!(error.to_string().contains(LEAK), "{error}");
+    let recorded = fakes
+        .runs
+        .error_of(RUN_1)
+        .expect("the run records something");
+    assert_eq!(recorded, crate::domain::error::CATALOG_BRANCH_NOT_SYNCED);
+    assert!(
+        !recorded.contains(LEAK),
+        "qa_runs.error carried the remote: {recorded}"
     );
 }
 
@@ -2864,7 +2951,7 @@ async fn an_unreadable_executor_does_not_stop_the_tick_observing_live_runs() {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch through the product plugin (Task 18)
+// Dispatch through the product plugin
 // ---------------------------------------------------------------------------
 
 /// **The end-to-end ladder assertion Task 18 owes.**
@@ -2974,12 +3061,12 @@ async fn a_plugin_variable_overrides_an_environment_variable_end_to_end() {
 /// 1. the credential slot is **reference-only** — dispatch resolves no
 ///    plaintext, which is what `prepare_run_access` is specified around;
 /// 2. its reference and key come from the `credentials` column, which Task
-///    18b gave a writer — reversing rulings D-19/E-17, which preferred the
-///    legacy column precisely *because* nothing wrote this one (ruling F-2).
+///    18b gave a writer — reversing the earlier preference for the
+///    legacy column, chosen precisely *because* nothing wrote this one.
 ///    **Task 19 dropped that column and the fallback to it**, so this is the
 ///    only path now: the key is stored beside the reference, and no product
 ///    literal is needed in this gear;
-/// 4. `config` arrives verbatim (ruling D-9).
+/// 4. `config` arrives verbatim.
 #[tokio::test]
 async fn the_plugin_is_handed_a_reference_only_slot_keyed_by_its_own_schema() {
     let run = run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Dispatching);
@@ -2987,7 +3074,7 @@ async fn the_plugin_is_handed_a_reference_only_slot_keyed_by_its_own_schema() {
     let environment = qa_environments_sdk::Environment {
         credentials: vec![qa_environments_sdk::EnvironmentCredential {
             key: fakes::PLUGIN_SECRET_KEY.to_owned(),
-            credstore_ref: "credstore://the-maintained-one".to_owned(),
+            credstore_ref: "the-maintained-one".to_owned(),
         }],
         config: serde_json::json!({ "operator_set": "value" }),
         ..fakes::environment_fixture(PLATFORM_A)
@@ -3016,11 +3103,10 @@ async fn the_plugin_is_handed_a_reference_only_slot_keyed_by_its_own_schema() {
         recorded.slots.as_slice(),
         [(
             fakes::PLUGIN_SECRET_KEY.to_owned(),
-            "credstore://the-maintained-one".to_owned()
+            "the-maintained-one".to_owned()
         )],
         "the reference and key come from `credentials`, the column Task 18b \
-         gave a writer, not from the pre-plugin single-reference column \
-         (ruling F-2)"
+         gave a writer and, since Task 19, the only one holding a reference"
     );
     assert_eq!(
         recorded.config,
@@ -3038,24 +3124,23 @@ async fn the_plugin_is_handed_a_reference_only_slot_keyed_by_its_own_schema() {
     let [MountSpec::Secret { credstore_ref, .. }] = spec.access.mounts.as_slice() else {
         panic!("one secret mount")
     };
-    assert_eq!(credstore_ref, "credstore://the-maintained-one");
+    assert_eq!(credstore_ref, "the-maintained-one");
 }
 
 // Two tests were deleted here by Task 19, with the column they were about.
 //
 // `an_environment_written_before_task_18b_falls_back_to_the_legacy_column`
-// covered the fallback ruling F-2 dropped along with
-// `kubeconfig_credstore_ref`, and
-// `a_plugin_with_two_required_credentials_cannot_dispatch_yet` covered
+// covered the fallback Task 19 dropped along with `kubeconfig_credstore_ref`,
+// and `a_plugin_with_two_required_credentials_cannot_dispatch_yet` covered
 // `AMBIGUOUS_CREDENTIAL`, which that fallback was the only route to. See the
 // note where the constant stood in `dispatch_spec.rs` for where the rule went:
 // `qa-environments` refuses the same shape at the **write** now, and
-// `the_pre_plugin_pair_cannot_bind_to_a_plugin_with_no_sole_required_secret`
-// is the test that holds it.
+// `the_pre_plugin_pair_cannot_bind_to_a_plugin_with_no_sole_required_secret` is
+// the test that holds it.
 //
 // What still holds dispatch's side: `plugin_dispatch` builds one
 // `CredentialSlot` per entry in `credentials`, and the golden `RunSpec`
-// fixture is byte-identical across this change (E-11).
+// fixture is byte-identical across this change.
 
 /// An observed environment reaches the plugin **with** its observation, which is
 /// where a detected base URL or namespace comes from.
@@ -3099,9 +3184,10 @@ async fn an_observed_environment_reaches_the_plugin_with_its_attributes() {
 /// returned exactly the type's default. Cutting both wires left 908 tests and
 /// the golden fixture green.
 ///
-/// So `ScriptedPlugin` now declares a runner and an account that are **not**
-/// the defaults, and this asserts both arrive. D11 — a runner shape varies per
-/// product — has an enforcement point for the first time.
+/// So `ScriptedPlugin` now declares a runner and an account that are **not** the
+/// defaults, and this asserts both arrive. The runner shape is per product
+/// (`QaProductPluginV1::runner`, DESIGN §3.7, "`qa-product-sdk`"), and that has
+/// an enforcement point for the first time.
 #[tokio::test]
 async fn the_plugins_runner_and_service_account_reach_the_spec() {
     let run = run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Dispatching);
@@ -3141,10 +3227,11 @@ async fn the_plugins_runner_and_service_account_reach_the_spec() {
 // `PluginUnavailable::NoProduct`'s own text rather than the unresolvable-plugin
 // one -- a distinction worth pinning while both were reachable from a row.
 //
-// The row shape is now unrepresentable. `NoProduct` itself still exists on the
-// port because qa-catalog's resolver can answer it, and
-// `a_run_whose_product_names_an_unregistered_plugin_cannot_dispatch` covers
-// the arm that is still reachable from here.
+// The row shape is now unrepresentable, and the finding-#38 triage deleted the
+// `NoProduct` variant too: `infra::product_plugin` maps every catalog-side
+// failure to `Unresolvable`, so nothing could construct it.
+// `a_run_whose_product_names_an_unregistered_plugin_cannot_dispatch` covers the
+// arm that is reachable from here.
 
 /// A product whose plugin cannot be resolved fails the dispatch the same way,
 /// and so does a deployment with no resolver at all. Both are configuration
@@ -3154,7 +3241,7 @@ async fn an_unresolvable_plugin_and_an_absent_resolver_both_fail_the_dispatch() 
     for (reason, expected) in [
         (
             crate::domain::ports::product_plugin::PluginUnavailable::Unresolvable,
-            "names no product plugin",
+            "check the product's plugin binding",
         ),
         (
             crate::domain::ports::product_plugin::PluginUnavailable::ResolverAbsent,
@@ -3180,6 +3267,11 @@ async fn an_unresolvable_plugin_and_an_absent_resolver_both_fail_the_dispatch() 
         assert!(
             error.to_string().contains(expected),
             "{reason:?} must say {expected:?}: {error}"
+        );
+        assert!(
+            !error.to_string().contains("names no product plugin"),
+            "a product names a plugin since Task 20a made `plugin_instance_id` \
+             NOT NULL, so the text must not offer that as a cause: {error}"
         );
         assert!(executor.submitted().is_empty());
     }
@@ -3445,10 +3537,7 @@ impl crate::domain::ports::metrics::DispatchMetrics for PanickingMeter {
         panic!("a metrics adapter must never be able to fail the path it measures");
     }
 
-    fn free_to_start_unanchored(
-        &self,
-        _reason: crate::domain::ports::metrics::UnanchoredReason,
-    ) {
+    fn free_to_start_unanchored(&self, _reason: crate::domain::ports::metrics::UnanchoredReason) {
         panic!("a metrics adapter must never be able to fail the path it measures");
     }
 }
@@ -4197,7 +4286,10 @@ async fn every_run_in_a_parallel_batch_shares_the_free_instant_that_admitted_it(
 
     let report = fakes.dispatch.run_tick().await;
 
-    assert_eq!(report.claimed, 2, "premise: both rows must drain in one tick");
+    assert_eq!(
+        report.claimed, 2,
+        "premise: both rows must drain in one tick"
+    );
     let series = probe.collect();
     assert_eq!(
         series.histogram_count(QA_RUNS_FREE_TO_START_DURATION),

@@ -8,8 +8,8 @@
 //! file-level rows over
 //! [`ResultsRepository::list_for_universe`](crate::domain::repos::ResultsRepository::list_for_universe)
 //! and the case-level rows over
-//! [`ResultsRepository::case_rows_for_runs`](crate::domain::repos::ResultsRepository::case_rows_for_runs)
-//! (Task 25b), and none of those tiers is reachable from here.
+//! [`ResultsRepository::case_rows_for_runs`](crate::domain::repos::ResultsRepository::case_rows_for_runs),
+//! and none of those tiers is reachable from here.
 //!
 //! # The brief's two tests, and where they are
 //!
@@ -145,13 +145,13 @@
 //!   the `eq_ignore_ascii_case` special case ahead of the comparator, including
 //!   what happens between *two* unknowns.
 //! * [`the_build_distribution_collapses_absent_blank_and_literal_unknown_builds`]
-//!   — ruling R13: three inputs, one bar, and legacy cannot tell them apart
-//!   either.
+//!   — three inputs, one bar, and legacy cannot tell them apart either.
 //! * [`the_build_distribution_picks_the_latest_run_id_by_a_strictly_greater_scan`]
-//!   and [`the_build_tests_snapshots_come_back_in_test_file_order`] — ruling
-//!   R14's determinism, and the tie it decides.
+//!   and [`the_build_tests_snapshots_come_back_in_test_file_order`] — the
+//!   `(repo_id, test_file)` ordering's determinism, and the tie it decides.
 //! * [`the_build_distribution_passes_an_unrecognized_status_through_and_counts_it_nowhere`]
-//!   — ruling R13's seventh classification, and the bar of zeroes it produces.
+//!   — the status-classification table's seventh row, and the bar of zeroes it
+//!   produces.
 //! * [`the_build_distribution_is_empty_without_snapshots`] — the early return and
 //!   the universe membership check, together.
 //! * [`build_tests_are_ranked_failed_then_passed_then_skipped_then_other`],
@@ -723,7 +723,7 @@ fn percentages_are_rounded_to_one_decimal_and_an_empty_universe_is_zero() {
 /// this task's: legacy fills it **outside** the fold, in the handler
 /// (`:769-779`), from `load_collect_counts` (`:2672-2693`) with
 /// `UniverseTest::static_case_count` as the fallback.
-/// `domain::analytics::universe::expected_cases` (Task 29) is that fold, and
+/// `domain::analytics::universe::expected_cases` is that fold, and
 /// it is called from `AnalyticsService::overview` **after** `summarize`
 /// returns — which is why the field is present and zero out of `summarize`
 /// itself rather than absent.
@@ -1449,11 +1449,12 @@ fn a_day_without_a_run_renders_not_run() {
 /// The brief writes this test as four calls to `bucketize_status` itself. Those
 /// are already pinned, by Task 20's
 /// `only_the_uppercase_spellings_bucket_and_skipped_is_not_run`
-/// (`universe_tests.rs:444-452`), so this is the same rule asserted where it can
-/// still be lost: **at the two folds**, which is ruling R5's actual risk. A fold
-/// that reached for `domain::service::ingest::classify` instead would put this
-/// row in a `Skipped` bucket the heatmap has no colour for and the trend has no
-/// counter for, and nothing else in this crate would fail.
+/// (`universe_tests.rs:444-452`), so this is the same rule asserted where it
+/// can still be lost: **at the two folds**, which is the status-classification
+/// table's actual risk. A fold that reached for
+/// `domain::service::ingest::classify` instead would put this row in a
+/// `Skipped` bucket the heatmap has no colour for and the trend has no counter
+/// for, and nothing else in this crate would fail.
 ///
 /// The distinction the brief flags is visible here too: this cell reads
 /// `NOT_RUN` for a run that *happened*, exactly as
@@ -1717,7 +1718,7 @@ fn the_frozen_clock_and_the_row_fixtures_agree_about_today() {
 }
 
 // ---------------------------------------------------------------------------
-// The flaky detector, the quality vectors and the grouped summaries (Task 23)
+// The flaky detector, the quality vectors and the grouped summaries
 // ---------------------------------------------------------------------------
 
 /// One row per status, all of them dated [`TODAY`], for `test_file`.
@@ -2560,17 +2561,17 @@ fn the_environment_grouping_does_not_narrow_the_universe() {
 }
 
 // ---------------------------------------------------------------------------
-// The build distribution and the build-tests fold (Task 24)
+// The build distribution and the build-tests fold
 // ---------------------------------------------------------------------------
 
 /// One file-level row carrying a chosen build and a chosen instant.
 ///
 /// `build` is an `Option<&str>` and is written through **verbatim**, blanks
-/// included, because ruling R13's collapse — `None`, `"  "` and the literal
+/// included, because the build collapse — `None`, `" "` and the literal
 /// `"unknown"` landing in one bucket — is not expressible over a fixture that
 /// normalizes for the fold. `test_support::exec_row_at` hardcodes
-/// `Some("9.1.0-4412")`, so a build test built on it could not vary the field at
-/// all.
+/// `Some("9.1.0-4412")`, so a build test built on it could not vary the field
+/// at all.
 ///
 /// The run id is named for the same reason [`row`]'s is: the distribution's
 /// `latest_run_id` is picked by a scan over the snapshots, and a fixture with
@@ -2773,10 +2774,10 @@ fn the_build_distribution_sorts_unknown_last_and_the_rest_newest_first() {
     assert_eq!(order, vec!["1.10.0", "1.2.1", "1.2", "unknown", "UNKNOWN"]);
 }
 
-/// Ruling R13's collapse, at the one place that reads
-/// [`ExecRow::build`](crate::domain::analytics::ExecRow::build): a row with **no**
-/// build, a row whose build is blank and a row whose build is the literal
-/// `"unknown"` all land in the *same* bucket.
+/// The build collapse, at the one place that reads
+/// [`ExecRow::build`](crate::domain::analytics::ExecRow::build): a row with
+/// **no** build, a row whose build is blank and a row whose build is the
+/// literal `"unknown"` all land in the *same* bucket.
 ///
 /// Legacy applies `normalize_optional(row.app_build.as_deref())
 /// .unwrap_or_else(|| "unknown".to_string())` while *building* the row
@@ -2812,7 +2813,7 @@ fn the_build_distribution_collapses_absent_blank_and_literal_unknown_builds() {
 /// `latest_run_id` is picked by the strictly-`>` first-wins scan at `:1572-1579`,
 /// and an exact tie therefore resolves to whichever snapshot came first.
 ///
-/// Two assertions, and the second is ruling R14's:
+/// Two assertions, and the second is the deterministic ordering's:
 ///
 /// * **Strictly greater wins.** The newer snapshot's run replaces the older
 ///   one's, whatever order the snapshots arrive in.
@@ -2851,9 +2852,9 @@ fn the_build_distribution_picks_the_latest_run_id_by_a_strictly_greater_scan() {
     );
 }
 
-/// Ruling R14's determinism: [`latest_per_test_snapshot`] returns its snapshots
-/// ordered by `test_file`, where legacy returns `latest.into_values()` (`:1652`)
-/// in a `HashMap`'s arbitrary order.
+/// Determinism: [`latest_per_test_snapshot`] returns its snapshots ordered by
+/// `test_file`, where legacy returns `latest.into_values()` (`:1652`) in a
+/// `HashMap`'s arbitrary order.
 ///
 /// Both the universe order and the row order disagree with the answer, so a fold
 /// that leaked either one fails. This is the one departure from legacy in this
@@ -2997,13 +2998,14 @@ fn build_tests_join_their_metadata_off_the_universe_entry() {
 /// [`bucketize_status`](crate::domain::analytics::universe::bucketize_status) and
 /// not [`build_status_rank`]: an unrecognized status is passed through verbatim.
 ///
-/// Ruling R13's seventh row of `domain::service::ingest`'s table. The consequence
-/// on the chart is that such a build gets a **bar with no counters at all** —
-/// legacy's aggregation `match` has an empty `_ => {}` arm (`:1569`) but the
-/// `entry(..).or_default()` above it (`:1555`) has already created the bucket, so
-/// the build is listed with `passed`, `failed` and `executed_total` all zero and a
-/// `latest_run_id` set. Reach for `bucketize_status` here and the status renders
-/// as `NOT_RUN`; reach for `build_stats_map`'s split and `executed_total` reads 1.
+/// The seventh row of `domain::service::ingest`'s status-classification table.
+/// The consequence on the chart is that such a build gets a **bar with no
+/// counters at all** — legacy's aggregation `match` has an empty `_ => {}` arm
+/// (`:1569`) but the `entry(..).or_default()` above it (`:1555`) has already
+/// created the bucket, so the build is listed with `passed`, `failed` and
+/// `executed_total` all zero and a `latest_run_id` set. Reach for
+/// `bucketize_status` here and the status renders as `NOT_RUN`; reach for
+/// `build_stats_map`'s split and `executed_total` reads 1.
 #[test]
 fn the_build_distribution_passes_an_unrecognized_status_through_and_counts_it_nowhere() {
     let universe = vec![universe_test("tests/a.py")];
@@ -3049,7 +3051,7 @@ fn the_build_distribution_is_empty_without_snapshots() {
 }
 
 /// The stable `sort_by` at `api_build_tests:442-452` is the **second** place
-/// [`latest_per_test_snapshot`]'s order is observable, and ruling R14 made that
+/// [`latest_per_test_snapshot`]'s order is observable, and this port made that
 /// order deterministic for both.
 ///
 /// Two entries tied on *both* sort keys keep their arrival order, and arrival

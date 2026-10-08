@@ -233,17 +233,17 @@ pub struct ExecRow {
     /// Legacy's `normalize_optional` also maps `""` to absent. That collapse is
     /// the consumer's too, for the same reason.
     ///
-    /// **Task 24 applied it, at both folds that report the value** — and its first
-    /// pass applied it at one, because this doc claimed there was only one.
-    /// Corrected under controller ruling R15. The rule is
+    /// **Task 24 applied it, at both folds that report the value** — and its
+    /// first pass applied it at one, because this doc claimed there was only one.
+    /// Corrected since. The rule is
     /// [`universe::collapse_build`](super::analytics::universe::collapse_build)
     /// and its label is
     /// [`universe::UNKNOWN_BUILD`](super::analytics::universe::UNKNOWN_BUILD);
     /// the two folds that collapse are
     /// [`universe::build_latest_map`](super::analytics::universe::build_latest_map)
-    /// — whose output reaches the wire as `AnalyticsListItem::last_build`
-    /// (legacy `:1422`, over a `LatestInfo::build` that legacy fills at `:1203`
-    /// from an **already normalized** row) — and
+    /// — whose output reaches the wire as `AnalyticsListItem::last_build` (legacy
+    /// `:1422`, over a `LatestInfo::build` that legacy fills at `:1203` from an
+    /// **already normalized** row) — and
     /// [`aggregates::latest_per_test_snapshot`](super::analytics::aggregates::latest_per_test_snapshot).
     ///
     /// The cost the paragraph above describes is now measured and pinned rather
@@ -294,15 +294,15 @@ pub struct ExecRow {
     /// them.
     ///
     /// **The fallback is the *run's* instant, not the row's**, and this doc said
-    /// `created_at` until controller Ruling C. Legacy's `ExecRowRaw` is a
-    /// `SELECT … r.finished_at, r.created_at` off `run_results`
-    /// (`manager/src/routes/analytics.rs:961`), so its `:1028`
+    /// `created_at` until the analytics reads moved to the run's instant.
+    /// Legacy's `ExecRowRaw` is a `SELECT … r.finished_at, r.created_at` off
+    /// `run_results` (`manager/src/routes/analytics.rs:961`), so its `:1028`
     /// `row.finished_at.unwrap_or(row.created_at)` is the run's creation instant
     /// — where `qa_test_results.created_at` is when *this row* was written, and
     /// ingest rewrites a run's rows on every result event. Reading the row's
     /// would have made an unfinished run's position in the newest-first order
-    /// move every time another of its results landed, and with it which row
-    /// every downstream latest-wins fold calls latest.
+    /// move every time another of its results landed, and with it which row every
+    /// downstream latest-wins fold calls latest.
     /// `qa_insights_sdk::TestResultRecord::run_created_at` carries the column and
     /// `infra::storage::results_sea_repo::effective_ts` the expression.
     pub ts: OffsetDateTime,

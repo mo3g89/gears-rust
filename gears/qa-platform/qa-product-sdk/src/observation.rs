@@ -91,9 +91,7 @@ pub enum FailureClass {
 /// # Why `detail` is `&'static str`
 ///
 /// This is the enforcement point for the "Credential containment" rule in
-/// `gears/qa-platform/docs/features/product-plugins.md` (no section
-/// numbers in that document; `PRODUCT-PLUGINS-DESIGN.md`, cited here before
-/// the docs squash, no longer exists). The rule exists because a measured
+/// `gears/qa-platform/docs/features/product-plugins.md` and ADR-0008. The rule exists because a measured
 /// leak on 2026-08-28 put a PEM private key on the platform page: a serde
 /// error quoted the whole offending scalar, and for a document that *is* one
 /// scalar the offending scalar is the whole document.
@@ -119,7 +117,7 @@ pub struct PluginFailure {
     /// that "namespaces virtuozzo not found" is what makes a broken
     /// environment *fixable* rather than merely broken. A plugin must never
     /// put its own formatting here — only text it received. The
-    /// `assert_no_leak` harness (Task 4) is what checks that it didn't.
+    /// `assert_no_leak` harness is what checks that it didn't.
     pub remote_message: Option<String>,
 }
 
@@ -251,11 +249,11 @@ pub struct RoleProjection {
 
 /// Copy the role-claimed attributes out of a plugin's opaque map.
 ///
-/// This is decision **D10**: observation is fully plugin-defined, and the
-/// platform still gets indexable `observed_version` / `observed_build` /
-/// `observed_base_url` columns and a deterministic `APP_VERSION` / `APP_BUILD`
-/// for `qa-runs` to snapshot. Blank projects to `None`, never to `Some("")` —
-/// an empty `APP_VERSION` reaching every test is the failure this guards.
+/// Observation is fully plugin-defined, and the platform still gets indexable
+/// `observed_version` / `observed_build` / `observed_base_url` columns and a
+/// deterministic `APP_VERSION` / `APP_BUILD` for `qa-runs` to snapshot. Blank
+/// projects to `None`, never to `Some("")` — an empty `APP_VERSION` reaching
+/// every test is the failure this guards.
 #[must_use]
 pub fn project_roles(schema: &[FieldDesc], attrs: &ObservedAttrs) -> RoleProjection {
     let mut out = RoleProjection::default();

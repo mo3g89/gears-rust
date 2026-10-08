@@ -28,11 +28,11 @@ use qa_environments_sdk as sdk;
 ///
 /// This is exactly `SshKeyDto`'s convention
 /// (`qa-catalog/qa-catalog/src/api/rest/dto.rs`), which withholds its own
-/// `credstore_ref` for the same reason and says so. The reference stays on the
-/// SDK model (`qa_environments_sdk::Environment::kubeconfig_credstore_ref`)
-/// for in-process consumers — `qa-runs` resolves the kubeconfig from it when it
-/// builds a dispatch spec — and on the column. Only the REST projection drops
-/// it. The `name` is what identifies an environment to a human.
+/// `credstore_ref` for the same reason and says so. The references stay on the
+/// SDK model (`qa_environments_sdk::Environment::credentials`) for in-process
+/// consumers — `qa-runs` builds a dispatch spec's credential slots from them —
+/// and on the column. Only the REST projection drops them. The `name` is what
+/// identifies an environment to a human.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct EnvironmentDto {
@@ -81,17 +81,17 @@ pub struct EnvironmentDto {
     ///
     /// Non-secret, which is why it is published here at all: it is a URL an
     /// operator already knows, not a credential. It replaced `vhp_base_url`,
-    /// which Task 19 dropped.
+    /// which the gear dropped.
     pub observed_base_url: Option<String>,
     /// The most recent health verdict: `ok`, `degraded`, `down` or `unknown`.
     /// `unknown` covers both "nothing has looked" and "a look failed" —
     /// [`Self::health_checked_at`] is what tells those apart, being `null`
-    /// only in the first case.
-    pub health_state: String,
+    /// only in the first case. See [`HealthStateDto`].
+    pub health_state: HealthStateDto,
     /// Why the most recent health read reached that state, when there is
     /// something to say. Classified text only: a fixed string chosen by
     /// failure variant, or a remote service's own message — never a formatted
-    /// error and never anything derived from a credential (**D12**).
+    /// error and never anything derived from a credential.
     pub health_detail: Option<String>,
     /// When the most recent health read ran, or `null` if nothing ever looked.
     #[serde(with = "time::serde::rfc3339::option")]
@@ -102,10 +102,51 @@ pub struct EnvironmentDto {
     pub updated_at: OffsetDateTime,
 }
 
+/// An environment's coarse health verdict: `ok`, `degraded`, `down` or
+/// `unknown`.
+//
+// Mirrors `qa_product_sdk::observation::HealthState`, which carries no
+// `utoipa` schema. `EnvironmentDto::health_state` was a `String` filled from
+// `HealthState::as_str` while the closed enum sat beside it (the third pass, a
+// sibling of review finding #35); the published schema is now a four-value
+// `enum`. The spellings are unchanged. A stored value this build does not know
+// is already `unknown` by the time it gets here (`from_str_or_unknown`), so the
+// closed set is what the server can actually send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum HealthStateDto {
+    Ok,
+    Degraded,
+    Down,
+    Unknown,
+}
+
+impl From<sdk::HealthState> for HealthStateDto {
+    fn from(state: sdk::HealthState) -> Self {
+        match state {
+            sdk::HealthState::Ok => Self::Ok,
+            sdk::HealthState::Degraded => Self::Degraded,
+            sdk::HealthState::Down => Self::Down,
+            sdk::HealthState::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<HealthStateDto> for sdk::HealthState {
+    fn from(state: HealthStateDto) -> Self {
+        match state {
+            HealthStateDto::Ok => Self::Ok,
+            HealthStateDto::Degraded => Self::Degraded,
+            HealthStateDto::Down => Self::Down,
+            HealthStateDto::Unknown => Self::Unknown,
+        }
+    }
+}
+
 impl From<sdk::Environment> for EnvironmentDto {
     fn from(p: sdk::Environment) -> Self {
-        // `p.kubeconfig_credstore_ref` is intentionally dropped here — see the
-        // struct doc comment. Do not add it back.
+        // The credential references are intentionally dropped here — see the
+        // struct doc comment. Do not add them back.
         Self {
             id: p.id,
             name: p.name,
@@ -119,20 +160,19 @@ impl From<sdk::Environment> for EnvironmentDto {
 
             version_detect_error: p.version_detect_error,
             version_detected_at: p.version_detected_at,
-            // `p.credentials` is intentionally dropped, for the same reason as
-            // `p.kubeconfig_credstore_ref` above: it carries credstore
-            // references, and under `SharingMode::Tenant` a reference is a
-            // read path to the material. `p.config` is withheld too — it is
-            // operator-set and non-secret, but no caller in this plan reads it
-            // and the create/patch DTOs are where an operator's own values
-            // belong.
+            // `p.credentials` is intentionally dropped, for the struct doc
+            // comment's reason: it carries credstore references, and under
+            // `SharingMode::Tenant` a reference is a read path to the material.
+            // `p.config` is withheld too — it is operator-set and non-secret,
+            // but no caller in this plan reads it and the create/patch DTOs are
+            // where an operator's own values belong.
             observed_attrs: p
                 .observed_attrs
                 .iter()
                 .map(|(key, value)| (key.to_owned(), value.to_owned()))
                 .collect(),
             observed_base_url: p.observed_base_url,
-            health_state: p.health_state.as_str().to_owned(),
+            health_state: p.health_state.into(),
             health_detail: p.health_detail,
             health_checked_at: p.health_checked_at,
             created_at: p.created_at,
@@ -145,7 +185,7 @@ impl From<sdk::Environment> for EnvironmentDto {
 ///
 /// Externally tagged, so a body reads
 /// `{"credentials": {"kubeconfig": {"material": "apiVersion: v1\n…"}}}` or
-/// `{"credentials": {"kubeconfig": {"reference": "credstore://kc/staging"}}}`.
+/// `{"credentials": {"kubeconfig": {"reference": "kc-staging"}}}`.
 /// The tag is what makes "exactly one of a document and a reference"
 /// unrepresentable rather than validated — see
 /// `sdk::CredentialSubmission`, whose shape this mirrors.
@@ -204,16 +244,17 @@ fn submitted_credentials(
 
 /// REST DTO for creating a new target environment.
 ///
-/// # Two ways to supply the kubeconfig
+/// # Where the credential goes
 ///
-/// `kubeconfig_credstore_ref` names a secret the caller has already
-/// registered; `kubeconfig` is the **document** itself, for the operator who
-/// has a file to paste and no reference to name. Exactly one must be present
-/// — the service rejects both, and rejects neither with the same
-/// `kubeconfig_credstore_ref must not be empty` error it always gave.
-/// `kubeconfig_credstore_ref` is therefore `Option<String>` where it used to
-/// be a required `String`; the required-ness moved from the schema to the
-/// pair-wise rule, because neither field alone can be required any more.
+/// `credentials` is the channel: each entry is keyed by the product plugin's
+/// own field and carries a document or a reference. The pre-plugin pair is a
+/// second spelling of one entry — `kubeconfig_credstore_ref` names a secret
+/// the caller has already registered, `kubeconfig` is the **document** itself
+/// — and at most one of the two may be present: the service rejects both. A
+/// create that supplies no credential through either channel is rejected on
+/// `credentials` (the pair's old `kubeconfig_credstore_ref must not be empty`
+/// error went with the plugin path). `kubeconfig_credstore_ref` is therefore
+/// `Option<String>` where it used to be a required `String`.
 ///
 /// `Debug` is hand-written to redact `kubeconfig` (the precedent is
 /// `qa-catalog`'s `CreateSshKeyReq`, which mirrors credstore's own
@@ -238,9 +279,9 @@ pub struct CreateEnvironmentReq {
     /// the document (`{"material": …}`) or a credstore reference
     /// (`{"reference": …}`). This is the plugin-shaped channel; the
     /// `kubeconfig`/`kubeconfig_credstore_ref` pair above is the pre-plugin
-    /// spelling of one entry of it and is still accepted so the shipped UI
-    /// keeps working. Supplying both spellings of the same field is a
-    /// validation error.
+    /// spelling of one entry of it and is still accepted for clients that
+    /// send it. Supplying both spellings of the same field is a validation
+    /// error.
     pub credentials: Option<std::collections::BTreeMap<String, CredentialSubmissionDto>>,
     /// Optional per-environment default branch override. Absent, `null`, or an
     /// empty/whitespace-only string all mean "no override"; the service
@@ -311,14 +352,18 @@ impl TryFrom<CreateEnvironmentReq> for sdk::NewEnvironment {
 
 /// REST DTO for partially updating a target environment.
 ///
+/// `product_id` has no cleared state at all: the column is `NOT NULL` since
+/// Task 20b and `sdk::EnvironmentPatch::product_id` is `Option<Uuid>`, so
+/// absent and `null` both mean "keep the stored product".
+///
 /// `serde_with` is not a workspace dependency, so — unlike
-/// `sdk::EnvironmentPatch`'s nested `Option<Option<_>>` fields — `product_id`
-/// and `description` here cannot distinguish an explicit JSON `null` (meaning
+/// `sdk::EnvironmentPatch`'s nested `Option<Option<_>>` `description` —
+/// `description` here cannot distinguish an explicit JSON `null` (meaning
 /// "clear this field") from the key being absent: both deserialize to `None`
 /// and are mapped to "leave unchanged" (`sdk::EnvironmentPatch`'s outer `None`).
 /// There is currently no REST-exposed way to clear a previously-set
-/// `product_id` or `description` back to empty; only SDK/local-client
-/// callers using `sdk::EnvironmentPatch` directly can do that.
+/// `description` back to empty; only SDK/local-client callers using
+/// `sdk::EnvironmentPatch` directly can do that.
 ///
 /// # `default_branch` is the exception, and deliberately so
 ///
@@ -363,9 +408,9 @@ pub struct UpdateEnvironmentReq {
     /// the document (`{"material": …}`) or a credstore reference
     /// (`{"reference": …}`). This is the plugin-shaped channel; the
     /// `kubeconfig`/`kubeconfig_credstore_ref` pair above is the pre-plugin
-    /// spelling of one entry of it and is still accepted so the shipped UI
-    /// keeps working. Supplying both spellings of the same field is a
-    /// validation error.
+    /// spelling of one entry of it and is still accepted for clients that
+    /// send it. Supplying both spellings of the same field is a validation
+    /// error.
     pub credentials: Option<std::collections::BTreeMap<String, CredentialSubmissionDto>>,
     pub available: Option<bool>,
     /// Per-environment default branch override. See the struct doc's table: absent
@@ -520,13 +565,13 @@ mod tests {
             is_default: true,
             version_detect_error: Some("namespaces \"virtuozzo\" not found".to_owned()),
             version_detected_at: Some(now),
-            // The plugin-shaped half (Task 14). Populated, and with values
+            // The plugin-shaped half. Populated, and with values
             // distinct from their legacy twins above, so
             // `environment_dto_from_sdk_carries_every_field_it_publishes` can
             // tell a field read from the wrong source.
             credentials: vec![sdk::EnvironmentCredential {
                 key: "kubeconfig".to_owned(),
-                credstore_ref: "credstore://plugin-ref".to_owned(),
+                credstore_ref: "plugin-ref".to_owned(),
             }],
             observed_attrs: {
                 let mut attrs = qa_product_sdk::observation::ObservedAttrs::default();
@@ -544,12 +589,14 @@ mod tests {
         }
     }
 
-    /// Every field the DTO has is carried through, and the one field it
-    /// deliberately does not have stays absent from the serialized body.
+    /// Every field the DTO has is carried through, and the fields it
+    /// deliberately does not have stay absent from the serialized body.
     ///
-    /// The name is no longer `preserves_all_fields`: `kubeconfig_credstore_ref`
-    /// is on the SDK model and is *dropped* on purpose (see the struct doc), so
-    /// a name promising a total mapping would be a false claim.
+    /// The name is no longer `preserves_all_fields`: `credentials` and `config`
+    /// are on the SDK model and are *dropped* on purpose (see the struct doc;
+    /// `kubeconfig_credstore_ref` was the dropped field until Task 19 removed
+    /// it from the model altogether), so a name promising a total mapping
+    /// would be a false claim.
     #[test]
     #[allow(
         clippy::cognitive_complexity,
@@ -572,7 +619,7 @@ mod tests {
         assert_eq!(dto.created_at, p.created_at);
         assert_eq!(dto.updated_at, p.updated_at);
 
-        // The five plugin-shaped fields this DTO does publish (Task 14).
+        // The five plugin-shaped fields this DTO does publish.
         assert_eq!(
             dto.observed_attrs,
             std::collections::BTreeMap::from([
@@ -582,10 +629,22 @@ mod tests {
         );
         assert_eq!(dto.observed_base_url, p.observed_base_url);
         assert_eq!(
-            dto.health_state, "degraded",
-            "health_state goes on the wire as HealthState::as_str, not as a \
-             serde-renamed enum"
+            serde_json::to_value(dto.health_state).unwrap(),
+            serde_json::json!("degraded"),
+            "health_state goes on the wire in HealthState::as_str's spelling"
         );
+        for state in [
+            sdk::HealthState::Ok,
+            sdk::HealthState::Degraded,
+            sdk::HealthState::Down,
+            sdk::HealthState::Unknown,
+        ] {
+            assert_eq!(
+                serde_json::to_value(HealthStateDto::from(state)).unwrap(),
+                serde_json::json!(state.as_str())
+            );
+            assert_eq!(sdk::HealthState::from(HealthStateDto::from(state)), state);
+        }
         assert_eq!(dto.health_detail, p.health_detail);
         assert_eq!(dto.health_checked_at, p.health_checked_at);
 
@@ -605,7 +664,7 @@ mod tests {
             "EnvironmentDto must not publish the credstore reference: {body}"
         );
         assert!(
-            !body.contains("credentials") && !body.contains("credstore://plugin-ref"),
+            !body.contains("credentials") && !body.contains("plugin-ref"),
             "nor the same reference in plugin shape -- `credentials` carries \
              credstore references, so it is withheld for exactly the reason \
              `kubeconfig_credstore_ref` is: {body}"
@@ -631,7 +690,7 @@ mod tests {
             "product_id": "00000000-0000-0000-0000-000000009001",
             "credentials": {
                 "kubeconfig": { "material": "apiVersion: v1\n" },
-                "api_token": { "reference": "credstore://tokens/prod" }
+                "api_token": { "reference": "tokens-prod" }
             }
         }"#;
 
@@ -652,7 +711,7 @@ mod tests {
             matches!(
                 new.credentials.get("api_token"),
                 Some(sdk::CredentialSubmission::Reference(reference))
-                    if reference == "credstore://tokens/prod"
+                    if reference == "tokens-prod"
             ),
             "`reference` must become the credstore-reference arm: {:?}",
             new.credentials.get("api_token")
@@ -676,7 +735,7 @@ mod tests {
             name: "staging-a".to_owned(),
             product_id: Some(Uuid::new_v4()),
             description: None,
-            kubeconfig_credstore_ref: Some("credstore://ref".to_owned()),
+            kubeconfig_credstore_ref: Some("staging-a-kubeconfig".to_owned()),
             kubeconfig: None,
             credentials: None,
             default_branch: Some("release-9.0".to_owned()),
@@ -758,7 +817,7 @@ mod tests {
             name: Some("renamed".to_owned()),
             product_id: Some(product_id),
             description: Some("new desc".to_owned()),
-            kubeconfig_credstore_ref: Some("credstore://new".to_owned()),
+            kubeconfig_credstore_ref: Some("renamed-kubeconfig".to_owned()),
             kubeconfig: None,
             credentials: None,
             available: Some(false),
@@ -787,7 +846,7 @@ mod tests {
         assert_eq!(patch.description, Some(Some("new desc".to_owned())));
         assert_eq!(
             patch.kubeconfig_credstore_ref,
-            Some("credstore://new".to_owned())
+            Some("renamed-kubeconfig".to_owned())
         );
         assert_eq!(patch.available, Some(false));
     }

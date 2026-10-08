@@ -215,6 +215,7 @@ async fn a_cycle_that_cannot_list_its_environments_is_unstarted_not_completed() 
         Some(probe.adapter()),
         None,
         crate::config::QaEnvironmentsConfig::default().max_variables,
+        crate::config::ObservationConfig::default().effective_observe_timeout(),
     );
 
     let report = services
@@ -527,6 +528,7 @@ async fn a_refused_observation_is_not_a_detected_one() {
         Some(probe.adapter()),
         None,
         crate::config::QaEnvironmentsConfig::default().max_variables,
+        crate::config::ObservationConfig::default().effective_observe_timeout(),
     );
 
     let report = denied
@@ -706,7 +708,7 @@ async fn a_cycle_with_no_pipeline_configured_behaves_exactly_as_an_unmetered_one
 }
 
 // ---------------------------------------------------------------------------
-// The plugin boundary (Task 40)
+// The plugin boundary
 // ---------------------------------------------------------------------------
 //
 // The families above measure what this gear does. These measure what the code
@@ -864,7 +866,7 @@ async fn every_plugin_answer_is_counted_under_its_own_class() {
 ///
 /// The population rule, stated as the difference between two families that a
 /// naive reading would expect to move together. `observe_through_plugin` has
-/// four exits before the round trip; on all of them the observation is still
+/// three exits before the round trip; on all of them the observation is still
 /// counted and still recorded — a failure persisted as a value, which is this
 /// gear's central rule — but **nothing was called**, so nothing may be timed.
 ///
@@ -903,6 +905,7 @@ async fn an_unresolvable_plugin_is_observed_but_never_timed() {
         Some(probe.adapter()),
         Some(probe.adapter()),
         crate::config::QaEnvironmentsConfig::default().max_variables,
+        crate::config::ObservationConfig::default().effective_observe_timeout(),
     );
     let report = unresolvable
         .environments
@@ -965,6 +968,7 @@ async fn a_plugin_call_and_its_observation_are_two_series_over_one_event() {
         Some(probe.adapter()),
         Some(probe.adapter()),
         crate::config::QaEnvironmentsConfig::default().max_variables,
+        crate::config::ObservationConfig::default().effective_observe_timeout(),
     );
     services
         .environments
@@ -1175,6 +1179,7 @@ async fn every_recorded_duration_tracks_the_work_it_measures() {
         Some(probe.adapter()),
         Some(probe.adapter()),
         crate::config::QaEnvironmentsConfig::default().max_variables,
+        crate::config::ObservationConfig::default().effective_observe_timeout(),
     );
     services
         .environments

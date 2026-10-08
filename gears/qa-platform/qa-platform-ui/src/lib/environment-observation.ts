@@ -21,7 +21,7 @@ import { EnvironmentInfo } from '@/api/types';
  * comment was first written: nothing in this deployment read nodes, pods or namespaces, so
  * there was no healthy/degraded/unhealthy distinction to draw and none was invented here.
  *
- * That changed at Task 5 and changed again at Task 19: `EnvironmentInfo.health_state` carries a
+ * That has changed: `EnvironmentInfo.health_state` carries a
  * plugin health verdict. `healthDotClass` and `healthLabel` below are
  * the cluster-health half this file's original doc said did not exist; `environmentObservation`
  * above is unchanged and is still the reachability/version half, used as `healthDotClass`'s
@@ -107,13 +107,14 @@ export function countObservations(environments: EnvironmentInfo[]): ObservationC
 /**
  * The dot beside an environment's name: its plugin's health verdict.
  *
- * **Reads `health_state` since Task 19**, which replaced the five `cluster_*`
+ * **Reads `health_state`**, which replaced the five `cluster_*`
  * columns. The old function fell back to `environmentObservation`'s reachability
  * dot whenever `cluster` was null, because a build without the cluster-health
  * feature had no verdict at all. There is no such build now -- every
  * observation goes through the product plugin and every plugin returns a
- * verdict -- and `unknown` is that verdict's honest value for an environment
- * nothing has looked at, so the fallback would only ever mask it.
+ * verdict. The reachability dot is still what `unknown` (and any value this UI
+ * does not recognise) shows: `unknown` carries no verdict to colour, and whether
+ * the last attempt reached the environment at all is the one thing left to say.
  */
 export function healthDotClass(environment: EnvironmentInfo): string {
   switch (environment.health_state) {
@@ -131,7 +132,7 @@ export function healthDotClass(environment: EnvironmentInfo): string {
 /**
  * The health text beside the dot, and its tooltip.
  *
- * `health_detail` is the plugin's own CLASSIFIED text (decision D12) -- never a
+ * `health_detail` is the plugin's own CLASSIFIED text -- never a
  * formatted error -- so it is safe to surface verbatim. For an environment
  * nothing has observed, the reachability label says more than "unknown" does.
  */

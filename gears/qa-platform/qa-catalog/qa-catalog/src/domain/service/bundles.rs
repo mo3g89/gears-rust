@@ -32,7 +32,8 @@ use toolkit_security::SecurityContext;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
-use super::plans::{content_root_dir, require_synced, resolve_under_root, validate_rel_path};
+use super::branch_snapshot::{BranchSync, ensure_branch_snapshot};
+use super::plans::{resolve_under_root, validate_rel_path};
 use super::{DbProvider, actions, resources};
 use crate::domain::error::DomainError;
 use crate::domain::ports::bundle_store::BundleStore;
@@ -47,6 +48,9 @@ pub struct BundlesService<B: BundlesRepository, R: TestReposRepository> {
     repos_repo: Arc<R>,
     store: Arc<dyn BundleStore>,
     repos_dir: PathBuf,
+    /// Syncs a branch a bundle build finds without a snapshot — see
+    /// [`ensure_branch_snapshot`].
+    branch_sync: Arc<dyn BranchSync>,
     /// `QaCatalogConfig::bundle_ttl_seconds` — every created bundle expires
     /// this long after creation.
     bundle_ttl: time::Duration,
@@ -62,7 +66,7 @@ pub struct BundlesService<B: BundlesRepository, R: TestReposRepository> {
 }
 
 impl<B: BundlesRepository, R: TestReposRepository> BundlesService<B, R> {
-    /// Nine constructor arguments, not a `Deps` struct: the one caller is
+    /// Ten constructor arguments, not a `Deps` struct: the one caller is
     /// `AppServices::new`, which already takes a `ServiceDeps` and unpacks it
     /// here, so a second struct would be one wrapper unpacked into another at
     /// the same call site. `super::repos::ReposService::new` carries the same
@@ -74,6 +78,7 @@ impl<B: BundlesRepository, R: TestReposRepository> BundlesService<B, R> {
         repos_repo: Arc<R>,
         store: Arc<dyn BundleStore>,
         repos_dir: PathBuf,
+        branch_sync: Arc<dyn BranchSync>,
         bundle_ttl: time::Duration,
         download_signing_secret: BundleDownloadSigningSecret,
         metrics: Arc<dyn BundleDownloadMetrics>,
@@ -85,6 +90,7 @@ impl<B: BundlesRepository, R: TestReposRepository> BundlesService<B, R> {
             repos_repo,
             store,
             repos_dir,
+            branch_sync,
             bundle_ttl,
             download_signing_secret,
             metrics,
@@ -484,9 +490,13 @@ impl<B: BundlesRepository + 'static, R: TestReposRepository> BundlesService<B, R
     }
 
     /// Resolve the repository (tenancy precheck under its own `TEST_REPO/GET`
-    /// scope), require it synced for the requested branch, and return the
+    /// scope), make sure the requested branch has a snapshot, and return the
     /// canonicalized content root together with the repository-relative path it
     /// was reached by.
+    ///
+    /// A branch without a snapshot is synced first when the remote has it,
+    /// under the caller's `ctx` and so under its `SYNC` grant — the same step
+    /// plan reads take; see `super::branch_snapshot`.
     ///
     /// The second element is what makes the archive self-describing: it is the
     /// prefix every entry is written under, so the extracted tree keeps the
@@ -508,8 +518,14 @@ impl<B: BundlesRepository + 'static, R: TestReposRepository> BundlesService<B, R
             .await?
             .ok_or(DomainError::NotFound { id: req.repo_id })?;
 
-        require_synced(&repo, &req.branch)?;
-        let root = content_root_dir(&self.repos_dir, &repo, &req.branch)?;
+        let (repo, root) = ensure_branch_snapshot(
+            self.branch_sync.as_ref(),
+            &self.repos_dir,
+            ctx,
+            repo,
+            &req.branch,
+        )
+        .await?;
         Ok((root, repo.content_root))
     }
 }
@@ -586,10 +602,12 @@ const BUNDLE_DOWNLOAD_HKDF_SALT: &[u8] = b"qa-catalog/bundle-download/v1";
 ///
 /// # What it buys, stated precisely
 ///
-/// Whoever holds the root secret can still derive any tenant's key on demand —
-/// unavoidable for any scheme that derives every tenant's key from one
-/// configured value without an out-of-band per-tenant secret store, which this
-/// design does not ask for. What the derivation buys is that a *derived* key,
+/// Whoever holds the root secret can still derive any tenant's key on demand;
+/// that is inherent in deriving every tenant's key from one configured value.
+/// It is accepted only while the platform serves no tenant other than the
+/// operator's own. Before it serves any other, the root must become per-tenant
+/// and be held in the credential store (ADR-0008, "Consequences", the entry on
+/// the two HMAC roots). What the derivation buys is that a *derived* key,
 /// leaked alone, verifies for the one tenant it was derived for and not for
 /// every tenant at once — and, more concretely here, that the tag on a given
 /// bundle's URL is bound to that bundle's owning tenant without the caller

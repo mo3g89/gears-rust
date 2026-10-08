@@ -31,7 +31,8 @@ pub struct Model {
     pub target_custom_plan_id: Option<Uuid>,
     /// Where a `collect` run's runner posts its per-file case counts. `NULL` for
     /// every other kind, and legal-but-`NULL` for a collect run that reports
-    /// nowhere — see `m20260818_000006_collect_target`.
+    /// nowhere — the column came from `m20260818_000006_collect_target`
+    /// (folded into `migrations::m20260813_000003_initial` by the docs squash).
     pub target_collect_url: Option<String>,
     /// Physical column stays `environment_id`: Phase B renames the aggregate and
     /// this Rust field, not the column. The rename to the column itself is

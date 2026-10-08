@@ -51,7 +51,7 @@ describe('productIdOfRow', () => {
     expect(productIdOfRow({ repo_id: null, plan_id: null }, repos, customPlans)).toBeNull();
   });
 
-  // Round 2 review finding: `CustomPlan.product_id` does not exist in the gear at all
+  // `CustomPlan.product_id` does not exist in the gear at all
   // (it is always `null` -- see `customPlanFromDto`), so resolution has to go through
   // the plan's *effective* tests instead. These three cover the edges the fix added.
   describe('a custom-plan run, resolved through its tests’ repositories', () => {
@@ -102,7 +102,7 @@ describe('keepForProduct', () => {
     expect(kept.some((r) => r.repo_id === 'repo-b')).toBe(false);
   });
 
-  it('drops an unresolvable row (spec D4: hidden, not shown with a marker)', () => {
+  it('drops an unresolvable row (hidden, not shown with a marker)', () => {
     const kept = keepForProduct(rows, 'prod-1', repos, customPlans);
     expect(kept.some((r) => r.repo_id === 'repo-deleted')).toBe(false);
   });

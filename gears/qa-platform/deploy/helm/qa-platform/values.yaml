@@ -186,18 +186,44 @@ argo:
   # deployment-verification credential that lives in the realm and in this
   # chart, not a credential handed to code the platform does not own.
   #
-  # A dev literal by default -- override it on any deployment a stranger can
-  # reach:
+  # REQUIRED, AND DELIBERATELY EMPTY, exactly like keycloak.adminPassword and
+  # the two signing secrets below. It was the bare literal
+  # `qa-platform-workflow-dev-secret` -- committed, published in this file and
+  # hardcoded a second time in verify-k8s.sh -- with no `required` and no
+  # gate: the client sits OUTSIDE realm-qa-platform.json's `{{if devMode}}`
+  # block (that block wraps `users` and nothing else), so every install got a
+  # `serviceAccountsEnabled`, `fullScopeAllowed` client whose secret anybody
+  # could read off this repository. runner-networkpolicy.yaml's rule 3 opens
+  # 0.0.0.0/0 minus the cluster CIDRs, so "not reachable from outside" was
+  # never the thing keeping it shut.
   #
-  #   --set argo.workflowClientSecret="$(openssl rand -hex 24)"
-  workflowClientSecret: qa-platform-workflow-dev-secret
+  # keycloak-realm-secret.yaml's `required` refuses to render without it, and
+  # separately refuses that dev literal unless devMode=true -- the same two
+  # guards, in the same shape, that keycloak.adminPassword gets. It must also
+  # be at least 16 characters once trimmed, in devMode too: `checksum/realm`
+  # on the Keycloak pod is a sha256 of the rendered realm, readable with
+  # `get pods`, so a short secret is an offline guess. The client
+  # itself stays: verify-k8s.sh check 16 needs a non-browser credential and
+  # the realm's only other client (qa-platform-ui) has direct grants off on
+  # purpose.
+  #
+  #   --set-file argo.workflowClientSecret=<(printf '%s' "$(openssl rand -hex 24)")
+  #
+  # ON AN EXISTING RELEASE THAT NEVER SET IT the next `helm upgrade` fails,
+  # naming this value, and changes nothing in the cluster -- the same outcome,
+  # for the same reason, as the two signing secrets below. Note that Keycloak
+  # imports a realm only on a FIRST start against an empty database, so
+  # CHANGING this value takes effect when the Keycloak pod restarts (its H2
+  # store is ephemeral by design); keycloak-deployment.yaml now carries a
+  # `checksum/realm` annotation, so a changed realm rolls that pod by itself.
+  workflowClientSecret: ""
 
 # qa-runs' own gear config -- `QaRunsConfig`, not `ArgoExecutorConfig`. Rendered
 # into the SAME fragment as the `argo:` block above (see
 # gears-argo-configmaps.yaml), because that fragment is the only insertion point
 # this chart has into `gears.qa-runs.config` and this chart always inserts it:
 # gears/qa-platform/config/qa-platform-stack.yaml is embedded VERBATIM by
-# gears-config-configmap.yaml (`.Files.Get`, one transform, byte-pinned by
+# gears-config-secret.yaml (`.Files.Get`, one transform, byte-pinned by
 # tests/check_chart_file_sync.py), so a key that is not in that committed file
 # cannot be templated into it.
 #
@@ -240,19 +266,38 @@ images:
     repository: qa-platform-pytest-runner
     tag: "1"
     pullPolicy: IfNotPresent
+  # THIRD-PARTY IMAGES ARE PINNED BY DIGEST (second review, finding #95): a tag
+  # is a mutable pointer, and these run with cluster credentials on every
+  # install/upgrade. `qa-platform.image` renders repository:tag@digest, and
+  # check_image_pins.py refuses a third-party image without one. The digest is
+  # the multi-arch index digest of `tag` (`docker buildx imagetools inspect`);
+  # the tag stays for the reader. To bump: change tag AND digest together and
+  # run `make qa-pins-online`. To override on one install:
+  # `--set images.postgres.tag=16.16 --set images.postgres.digest=sha256:...`
+  # (an empty digest renders the bare tag, which the guard forbids in the
+  # committed values but which an operator may choose for their own cluster).
+  # `16.15` is the tag postgres:16 resolved to when this digest was taken.
   postgres:
     repository: postgres
-    tag: "16"
+    tag: "16.15"
+    digest: "sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54"
+  # `26.0.8` is the patch tag this digest belongs to (quay.io's tag API lists
+  # 26.0, 26.0.8 and 26.0.8-1 on it). The floating `26.0` read as "whatever
+  # 26.0.x is current" while the digest pinned one build; the tag now says
+  # which build the pin is.
   keycloak:
     repository: quay.io/keycloak/keycloak
-    tag: "26.0"
+    tag: "26.0.8"
+    digest: "sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858"
   # First-party, Kubernetes-project-published, immutable version tag --
   # NEVER `latest` on a hook that runs on every install/upgrade.
   #
   # OVERRIDE THIS TO MATCH YOUR CLUSTER. kubectl's skew policy tolerates +/-1
   # minor from the API server, so this default works on 1.35-1.37 and not
   # beyond. Read your server's minor with `kubectl version` and set
-  # `--set images.kubectl.tag=vX.Y.Z` if it is outside that window.
+  # `--set images.kubectl.tag=vX.Y.Z --set images.kubectl.digest=sha256:...`
+  # (or `--set images.kubectl.digest=` to drop the pin) if it is outside that
+  # window.
   #
   # The tag was chosen as an exact match for the cluster this chart was first
   # developed against (k3s v1.36.3) and verified by pulling it; an exact match
@@ -264,10 +309,19 @@ images:
   kubectl:
     repository: registry.k8s.io/kubectl
     tag: v1.36.3
+    digest: "sha256:6e4fce3c83651edb91b74bc67701c5cd263dd8aa3cd4254b1798d6425a5ab789"
 
 postgres:
   user: qa
-  password: qa
+  # REQUIRED, AND DELIBERATELY EMPTY, exactly like keycloak.adminPassword.
+  # postgres-secret.yaml's `required` refuses to render without it, and
+  # refuses the committed fixture `qa` unless devMode=true. Postgres applies
+  # it only when it initialises an EMPTY data directory: on an existing
+  # release, change the role's password inside Postgres before changing this
+  # (UPGRADING.md).
+  #
+  #   --set-file postgres.password=<(printf '%s' "$(openssl rand -hex 24)")
+  password: ""
   persistence:
     size: 20Gi
     storageClass: ""
@@ -281,14 +335,26 @@ gears:
   # ClusterIP Service. 9464 is the OpenTelemetry project's conventional
   # Prometheus exporter port. Changing it here changes the containerPort, the
   # Service port, the pod's `prometheus.io/port` annotation AND the `bind_addr`
-  # inside the gears' own config -- gears-config-configmap.yaml rewrites the
+  # inside the gears' own config -- gears-config-secret.yaml rewrites the
   # last of those from this value, so the four cannot drift apart.
   metricsPort: 9464
+  # RUST_LOG for the gears and the migrate job, in tracing's EnvFilter syntax
+  # (e.g. `info,qa_runs=debug`). The chart REFUSES to render a value that makes
+  # the global level, or a pingora/oagw/cf_gears_oagw/api-gateway target (or a
+  # prefix of one: EnvFilter matches targets by prefix), more verbose than
+  # info: pingora (which oagw proxies through) prints whole request
+  # lines at debug and trace, and the Slack webhook path in them is a
+  # credential. Raise other targets freely. `_helpers.tpl`'s
+  # `qa-platform.rustLog` holds the parse; check_log_level_redaction.py the
+  # guard.
   logLevel: info
+  # Set true only to debug the proxy path itself, knowing the logs then carry
+  # Slack webhook credentials: it lifts the refusal above.
+  allowVerboseProxyLogs: false
   persistence:
     size: 20Gi
     storageClass: ""
-  # Set true only if Task 1 measured the pod->node hostPort hairpin as broken.
+  # Set true only if the pod->node hostPort hairpin was measured as broken.
   hostAliases:
     enabled: false
 
@@ -299,10 +365,17 @@ ui:
     https: 443
 
 # THROWAWAY-STAND ESCAPE HATCH, and nothing else. Default false. Setting it
-# true is what lets keycloak.adminPassword stay at the fixture value "admin"
-# (keycloak-deployment.yaml otherwise refuses to render, citing this value) --
-# it does not relax any other guard in this chart. Set it only on a stand you
-# are prepared to lose, never on anything with a real user in it.
+# true PERMITS the three well-known literals that are otherwise refused at
+# render time: keycloak.adminPassword may be set to "admin"
+# (keycloak-deployment.yaml refuses that value outside devMode),
+# argo.workflowClientSecret may be set to the dev literal
+# `qa-platform-workflow-dev-secret` (keycloak-realm-secret.yaml), and
+# postgres.password may be set to "qa" (postgres-secret.yaml). It does NOT
+# supply any of them: all three values are still required and have no committed
+# default, so the render fails in devMode too until you pass them. It also
+# seeds the realm's two fixture application users. It relaxes nothing else in
+# this chart. Set it only on a stand you are prepared to lose, never on
+# anything with a real user in it.
 devMode: false
 
 keycloak:
@@ -317,7 +390,7 @@ keycloak:
   # keycloak-deployment.yaml's `required` now refuses to render without this
   # set, and separately refuses the literal value "admin" unless devMode=true.
   #
-  #   --set keycloak.adminPassword="$(openssl rand -base64 24)"
+  #   --set-file keycloak.adminPassword=<(printf '%s' "$(openssl rand -base64 24)")
   adminPassword: ""
 
 # AN OVERRIDE, NOT AN INPUT. Empty means "use the realm this chart carries"
@@ -337,23 +410,25 @@ keycloakRealmJson: ""
 # length); the `sig` query parameter qa-insights signs with this key is what
 # stops an anonymous caller writing case counts for any tenant it names.
 # qa-insights refuses every report, fail-closed, when this is empty or shorter
-# than 16 characters -- which is the state every deployment was in until
-# 2026-09-03, and half the reason `qa_test_case_collect` was empty.
+# than 16 characters, and since 2026-10-07 the chart refuses to render it
+# shorter than 16 characters once trimmed -- the empty state is the one every
+# deployment was in until 2026-09-03, and half the reason
+# `qa_test_case_collect` was empty.
 #
 # REQUIRED, AND DELIBERATELY EMPTY, exactly like keycloak.adminPassword above.
-# gears-config-configmap.yaml's `required` refuses to render without it.
+# gears-config-secret.yaml's `required` refuses to render without it.
 #
 # EMPTY USED TO BE "SAFE", and that sentence stood here until 2026-09-21. The
 # template substituted a per-render `randAlphaNum 32` for the committed dev
 # literal, argued safe because the URL is signed and the report verified by the
 # same running gears process. Two things changed. gears-deployment.yaml now
-# hashes the ConfigMap into a pod annotation, so a re-render rolls the pod --
+# hashes the gears config object into a pod annotation, so a re-render rolls the pod --
 # which means a random in there would give every `helm upgrade`, even a no-op
 # one, a fresh key and a Recreate outage. And a random is not auditable: the
 # operator cannot answer "what key is this stand signing with" from anything
 # they typed.
 #
-#   --set collectReportSigningSecret="$(openssl rand -hex 24)"
+#   --set-file collectReportSigningSecret=<(printf '%s' "$(openssl rand -hex 24)")
 #
 # ON AN EXISTING RELEASE THAT NEVER SET IT -- which is every release installed
 # before this change -- the next `helm upgrade` FAILS, naming this value, and
@@ -377,7 +452,8 @@ collectReportSigningSecret: ""
 #
 # qa-catalog refuses EVERY download, fail-closed, when this is empty or shorter
 # than 16 characters, so a deployment in that state runs no tests at all. The
-# gears log one WARN at boot naming this setting.
+# gears log one WARN at boot naming this setting, and since 2026-10-07 the chart
+# refuses to render it shorter than 16 characters once trimmed.
 #
 # REQUIRED, AND DELIBERATELY EMPTY, for the reason collectReportSigningSecret
 # above gives at length -- plus the one that is specific to this value and is
@@ -387,7 +463,7 @@ collectReportSigningSecret: ""
 # upgrade` on a stand that had never set this rotated it, and an in-flight
 # workflow's fetch_bundle.py exited 1 with a 403 before running a single test.
 #
-#   --set bundleDownloadSigningSecret="$(openssl rand -hex 24)"
+#   --set-file bundleDownloadSigningSecret=<(printf '%s' "$(openssl rand -hex 24)")
 #
 # ON AN EXISTING RELEASE THAT NEVER SET IT the next `helm upgrade` fails and
 # changes nothing -- see collectReportSigningSecret above for why that is the
@@ -488,7 +564,7 @@ uiServiceClusterIP: ""
 # that and, with push also off, you are back to the all-no-op state: nothing
 # observable, nothing misbehaving.
 #
-# `endpoint` IS REQUIRED WHEN `enabled` IS TRUE -- gears-config-configmap.yaml
+# `endpoint` IS REQUIRED WHEN `enabled` IS TRUE -- gears-config-secret.yaml
 # refuses to render the pair otherwise. The committed config's value is the
 # loopback address, which is right under `cargo run` beside a local collector
 # and wrong in a pod, whose 127.0.0.1 is itself; enabling without re-pointing

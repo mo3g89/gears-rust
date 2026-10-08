@@ -8,11 +8,13 @@
 // fan-out over a product's repositories, a read-modify-write — lives in `hooks.ts` and
 // calls into here.
 //
-// The field-level justification for each transform is `gears/qa-platform/docs/DESIGN.md` §3.6,
-// cited by row number. Where a legacy field has no gear source at all, the transform
+// The field-level justification for each transform is in its own comment
+// (`gears/qa-platform/docs/DESIGN.md` §3.6 "qa-platform-ui" says the same).
+// Where a legacy field has no gear source at all, the transform
 // leaves it absent (`null`/`undefined`/`[]`) and says so — it never fills one with a
 // plausible-looking default, because a confident wrong number is worse than a visibly
 // missing one.
+//
 
 import type { components } from './generated/openapi';
 import type {
@@ -65,7 +67,7 @@ type S = components['schemas'];
 // ---------------------------------------------------------------------------
 // Wire-type aliases.
 //
-// These were widenings: `generated/openapi.d.ts` predated Task 25's rename and
+// These were widenings: `generated/openapi.d.ts` predated the `platform_id` -> `environment_id` rename and
 // the product-plugin columns, so each of these intersected a generated DTO with
 // the field it actually carried. The schema is regenerated and declares those
 // fields itself, so the intersections are gone and these are plain aliases —
@@ -113,7 +115,7 @@ export type AnalyticsOverviewDtoWithEnvironmentGroup = Omit<
 };
 
 // ---------------------------------------------------------------------------
-// Pagination envelope (CONTRACT-DIFF X2)
+// Pagination envelope
 // ---------------------------------------------------------------------------
 
 /** The gears' page envelope. `{ items, page_info }` — **not** OData's `{ value, count }`,
@@ -129,10 +131,10 @@ export interface Page<T> {
  *
  * The pagination is **discarded** here, and that is a real loss rather than a tidy-up:
  * legacy's pager was page-N-of-M and the gears answer next/previous cursors with no
- * total (X2), so there is nothing to hand a page-number control. A real paged UI would
+ * total, so there is nothing to hand a page-number control. A real paged UI would
  * keep `page_info.next_cursor` and drive a next/previous pager from it — that belongs in
  * the components, so it is raised in the report rather than faked here. `total` is
- * emphatically **not** synthesised from `items.length` (§7.3).
+ * emphatically **not** synthesised from `items.length`.
  *
  * Tolerates a missing/malformed body by answering `[]`: a component that maps over
  * `undefined` crashes, where one that maps over `[]` renders its empty state.
@@ -163,13 +165,13 @@ export const MAX_PAGE_LIMIT = 500;
  *
  * Two kinds, because the gears' OData layer is **typed** and gets this wrong loudly:
  * a string field wants a single-quoted literal with embedded quotes doubled, and a
- * uuid-typed field wants the uuid **bare**. Driven live during this task:
+ * uuid-typed field wants the uuid **bare**. Driven live against the gear:
  *
  *     $filter=run_id eq '1a9adedc-…'  -> 400  "Type mismatch for field run_id: expected Uuid, got string"
  *     $filter=run_id eq 1a9adedc-…    -> 200
  *
- * `CONTRACT-DIFF` §10 listed the `run_id` round trip as inferred-not-driven; this is the
- * concrete form the inference was missing.
+ * The `run_id` round trip was inferred rather than driven until this helper gave
+ * it a concrete form.
  */
 export function odataLiteral(value: string, kind: 'string' | 'uuid' = 'string'): string {
   if (kind === 'uuid') {
@@ -193,16 +195,13 @@ function clampLimit(limit: number): number {
 /**
  * The query string for `GET /qa/v1/test-results`.
  *
- * Two things about the bound, both load-bearing:
+ * About the bound:
  *
- *  - It is spelled **`limit`**, not `$top`. `$top` is not declared on this route and is
- *    **silently ignored** — verified live in Task 6, where `?$top=1` and `?$top=0` both
- *    returned the full default page of 200. A test asserting `$top=5` would have passed
- *    while the bound had no effect at all.
- *  - `limit` itself is **undeclared in `/openapi.json`** (X2 — it is declared only on
- *    `/qa/v1/queue`). It does work, driven live, but because it is undeclared it is
- *    **not policed by `make ui-contract`**: regenerating the wire types will never tell
- *    us if it goes away.
+ *  - It is spelled **`limit`**, the spelling this helper sends. `$top` binds the same slot
+ *    in the toolkit's `OData` extractor (`ODataParams`, `libs/toolkit/src/api/odata.rs`),
+ *    and sending both is a 400.
+ *  - `limit` is declared on every `OData` list route, and the contract keeps it declared
+ *    (`qa-platform-openapi`'s `every_odata_list_operation_declares_limit_and_cursor`).
  *
  * `$filter` on this route allows only `id, run_id, test_file, test_name,
  * run_finished_at`, so the file is the one axis legacy's `?file=` maps onto. There is no
@@ -218,7 +217,7 @@ export function recentResultsQuery(args: { file: string; limit: number }): strin
 }
 
 // ---------------------------------------------------------------------------
-// Plan identity (CONTRACT-DIFF X6)
+// Plan identity
 // ---------------------------------------------------------------------------
 
 const PLAN_ID_SEPARATOR = '~';
@@ -250,7 +249,7 @@ function base64UrlDecode(text: string): string | null {
  * Pack a gear plan's identity — `(repo_id, path)` — into the single opaque string every
  * component still passes around as `plan_id`.
  *
- * X6: legacy's `plan_id` was a synthetic id; a gear plan has no id at all. Rather than
+ * Legacy's `plan_id` was a synthetic id; a gear plan has no id at all. Rather than
  * change ~15 component call sites to carry a pair, the pair travels encoded and the
  * adapters own the encoding. The encoding has to survive being dropped into a **URL path
  * segment** — `Link to={`/plans/${plan.id}`}` at `PlanList`, `FlakyTestsCard`,
@@ -289,7 +288,7 @@ export function decodePlanId(planId: string | null | undefined): { repo_id: stri
 /**
  * The value the **analytics** routes want in their `plan_id` query parameter.
  *
- * X6's second half: `/qa/v1/analytics/plan/{tests,builds,test-history}` keep the
+ * Second half of the same change: `/qa/v1/analytics/plan/{tests,builds,test-history}` keep the
  * parameter *name* `plan_id` but its *value* is the plan's **path**, "matched across
  * every repository the caller can see" — same name, different value space, and no
  * repository disambiguation. So an encoded id is unpacked to its path here; a string
@@ -301,7 +300,7 @@ export function analyticsPlanId(planId: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Run target (CONTRACT-DIFF rows 4, 41, 49)
+// Run target
 // ---------------------------------------------------------------------------
 
 /** Fold a `RunTargetDto` back into the opaque `plan_id` + `run_kind` pair legacy carried.
@@ -345,10 +344,10 @@ export function targetFromPlanId(planId: string, testFile?: string | null): S['R
  * Build a `LaunchRunReq`.
  *
  * **A null `environment_id` is passed through, not refused.** (Renamed from
- * `platform_id` at Task 25; the measurement below predates that rename and is quoted
+ * `platform_id`; the measurement below predates that rename and is quoted
  * as it was taken.)
  *
- * This function used to throw on one, on the strength of CONTRACT-DIFF row 3's claim
+ * This function used to throw on one, on the strength of the legacy-contract claim
  * that such a run "is accepted and then never queued — a silent dead end". That reading
  * was wrong, and the misreading is specifically of the word *queued*. `admission.rs`
  * does answer `Admission::Unqueued` for a platformless run, but `Unqueued`'s own doc
@@ -388,12 +387,12 @@ export function launchReqFromForm(args: {
 }
 
 // ---------------------------------------------------------------------------
-// Durations (CONTRACT-DIFF X3, row 5)
+// Durations
 // ---------------------------------------------------------------------------
 
 /**
  * The `"2m 5s"` string legacy's `WorkflowRun.duration` carried, derived from the two
- * instants the gear does send. `RunDto` has no `duration` field at all (row 5), and
+ * instants the gear does send. `RunDto` has no `duration` field at all, and
  * `DashboardRunDto.duration` — which does exist — is documented as exactly this
  * rendering, and as `null` unless the run has both a start and a finish. So this is a
  * reproduction of a known format, not a new one.
@@ -421,7 +420,7 @@ export function formatRunDuration(startedAt?: string | null, finishedAt?: string
 }
 
 // ---------------------------------------------------------------------------
-// Runs (CONTRACT-DIFF rows 5, 9, 10)
+// Runs
 // ---------------------------------------------------------------------------
 
 /**
@@ -430,15 +429,15 @@ export function formatRunDuration(startedAt?: string | null, finishedAt?: string
  * `state` -> `phase` **without re-casing**: the gears' set is qa-runs' lowercase
  * `created | queued | dispatching | running | succeeded | failed | canceled | timed_out |
  * expired | error`, and `RunDto.state`'s own doc says a client ported from legacy "must
- * re-map, not merely re-case" (X4). Title-casing it here would manufacture phases legacy
+ * re-map, not merely re-case". Title-casing it here would manufacture phases legacy
  * understood out of states it never had, so `isActiveRun` in `types.ts` learns the real
  * set instead.
  *
- * Fields with no gear source are left `null`, not filled: `product_key` (§7.9 — the gear
+ * Fields with no gear source are left `null`, not filled: `product_key` (the gear
  * sends `null` for it on the dashboard and has no field for it here at all), `repo_name`,
  * `source_ref`, `source_ref_kind` and every `slack_*`.
  *
- * `result` passes straight through (Task 10) — `RunsTable.tsx` and `RunDetailPage.tsx` are
+ * `result` passes straight through — `RunsTable.tsx` and `RunDetailPage.tsx` are
  * what make a `succeeded` run's non-zero `skipped` visible now that a skip no longer fails
  * the run itself.
  */
@@ -455,8 +454,8 @@ export function runFromDto(dto: RunDtoWithEnvironmentId): WorkflowRun {
     app_version: dto.app_version ?? null,
     app_build: dto.app_build ?? null,
     test_version: dto.test_version ?? null,
-    // X1: legacy drew a platform *name* here. `RunDto` carries only the uuid (as
-    // `environment_id`, renamed from `platform_id` at Task 25) and resolving it is a
+    // Legacy drew a platform *name* here. `RunDto` carries only the uuid (as
+    // `environment_id`, renamed from `platform_id`) and resolving it is a
     // qa-environments lookup; `hooks.ts` does that where it already holds the
     // environment list, and leaves the uuid otherwise.
     platform: dto.environment_id ?? null,
@@ -476,7 +475,7 @@ export function runFromDto(dto: RunDtoWithEnvironmentId): WorkflowRun {
 }
 
 /** Replace each run's `platform` uuid with the environment's name, where the name is known.
- *  X1 in the one direction the UI actually renders. A uuid with no matching environment is
+ *  The UI renders the name, not the uuid. A uuid with no matching environment is
  *  left as-is rather than blanked — an unresolvable id is still an identifier. */
 export function withEnvironmentNames(runs: WorkflowRun[], environmentNameById: Map<string, string>): WorkflowRun[] {
   return runs.map((run) =>
@@ -487,7 +486,7 @@ export function withEnvironmentNames(runs: WorkflowRun[], environmentNameById: M
 }
 
 /** `RunTestResultDto` -> `TestResult`. `logs` is `''` — the empty string is this gear's
- *  honest "no per-test log slice", which §8-C2 records as **not recoverable** (the run's
+ *  honest "no per-test log slice", which is **not recoverable** (the run's
  *  own SSE stream is the whole run's output, not one test's). `TestResultsTable` already
  *  truthiness-checks it, so `''` renders no error block rather than a fabricated one. */
 export function testResultFromDto(dto: S['RunTestResultDto'], cases?: S['TestCaseResultDto'][]): TestResult {
@@ -504,9 +503,9 @@ export function testResultFromDto(dto: S['RunTestResultDto'], cases?: S['TestCas
 }
 
 /** `RunDetailDto` -> `RunDetails`. The gear's shape is `RunDto` **flattened** (which
- *  since Task 10 carries `result` itself) plus `test_results`; legacy nested the run
- *  under a `run` key, so it is re-nested here (§7.2). `reportportal_url` is gone from
- *  both sides — Task 8 removed the surface — so it is left off rather than sent as `''`.
+ *  carries `result` itself) plus `test_results`; legacy nested the run
+ *  under a `run` key, so it is re-nested here. `reportportal_url` is gone from
+ *  both sides — the surface is gone — so it is left off rather than sent as `''`.
  *
  *  `casesByFile` carries the per-function breakdown `RunTestResultDto` has no room for;
  *  it is recoverable from `GET /qa/v1/test-case-results` and `hooks.ts` fetches it. */
@@ -523,7 +522,7 @@ export function runDetailsFromDto(
 }
 
 /** Group `test-case-results` rows by their `test_file`, which is how `TestResult.cases`
- *  is scoped (§8-C2 — the case rows exist, just on their own collection). */
+ *  is scoped (the case rows exist, just on their own collection). */
 export function groupCasesByFile(cases: S['TestCaseResultDto'][]): Map<string, S['TestCaseResultDto'][]> {
   const out = new Map<string, S['TestCaseResultDto'][]>();
   for (const row of cases) {
@@ -575,27 +574,26 @@ export function parseRunLogSse(body: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Run queue (CONTRACT-DIFF row 14)
+// Run queue
 // ---------------------------------------------------------------------------
 
 /**
  * `QueueEntryDto` -> `RunQueueEntry`.
  *
- * `state` is passed through **unchanged**, including `cancelled` with two `l`s: X4 records
- * that the queue row's spelling differs from the run's one-`l` `canceled` deliberately,
+ * `state` is passed through **unchanged**, including `cancelled` with two `l`s: the queue row's spelling differs from the run's one-`l` `canceled` deliberately,
  * and legacy's own `RunQueueEntry.state` union already used the two-`l` form. Normalising
  * them together would be inventing a single vocabulary the gears do not have. It no longer
- * needs an `as` cast (Task 20): `QueueEntryDto.state` is a schema-level enum, and
+ * needs an `as` cast: `QueueEntryDto.state` is a schema-level enum, and
  * `RunQueueEntry['state']` is aliased onto it, so the assignment type-checks on its own and
  * a gear-side change to the seven names fails `tsc` here rather than passing through a cast.
  *
- * `target_id` is a **documented substitution**, in the sense of §7.10. `QueueEntryDto`
+ * `target_id` is a **documented substitution**: the gear has no such field. `QueueEntryDto`
  * has no target of any kind, and `target_id` is the queued row's primary label at
  * `QueuedRunsCard.tsx:144` (and in both of its confirm dialogs), so leaving it `''` would
  * render an unlabelled row and a confirm reading `Cancel queued run ""?`. The run id is
  * substituted instead: it is a real identifier for the same row, it is not fabricated,
  * and it changes what the column *means* (a run uuid where legacy drew a plan id) — which
- * is why it is recorded as a finding rather than done quietly.
+ * is why it is recorded here rather than done quietly.
  */
 export function queueEntryFromDto(dto: QueueEntryDtoWithEnvironmentId): RunQueueEntry {
   return {
@@ -618,7 +616,7 @@ export function queueEntryFromDto(dto: QueueEntryDtoWithEnvironmentId): RunQueue
 }
 
 // ---------------------------------------------------------------------------
-// Plans (CONTRACT-DIFF rows 2, 3)
+// Plans
 // ---------------------------------------------------------------------------
 
 /** What `hooks.ts` knows about a plan's repository and product, gathered from the lists it
@@ -648,8 +646,7 @@ function dirNameOf(path: string): string {
  * `string[]`, and `''` is what "no description" has always meant to every reader of it.
  *
  * `source` is `'git'` because in this deployment it can only be git: a repository is
- * creatable from a git URL and nothing else, and the archive-upload route does not exist
- * (§8-C4). That is a fact about the deployment, not a default standing in for a field.
+ * creatable from a git URL and nothing else, and the archive-upload route does not exist. That is a fact about the deployment, not a default standing in for a field.
  */
 export function planFromDto(dto: S['PlanDto'], ctx: PlanContext = {}): TestPlanInfo {
   return {
@@ -682,17 +679,16 @@ export function planFromDto(dto: S['PlanDto'], ctx: PlanContext = {}): TestPlanI
 /**
  * `PlanDto` -> one `TestFileInfo` per test file.
  *
- * This is the degraded stand-in for `GET /tests`, which has **no backend at all**
- * (§8-C1): the gears publish 22 qa-catalog operations and none of them is a test-file
+ * This is the degraded stand-in for `GET /tests`, which has **no backend at all** : the gears publish 22 qa-catalog operations and none of them is a test-file
  * catalog. What is real here is the path, the plan it belongs to, and the repository and
  * product above it — all of it read off `PlanDto`. What is *not* real is every metadata
  * column the catalog page renders (`title`, `component`, `description`, `quality_vectors`,
  * `versions`, `loc`), so every one of them is left absent and `tags` is `[]` — the plan's
  * own tags are the *plan's*, not this file's, and attributing them here would be the
- * fabrication §8-C1 warns about.
+ * fabrication.
  *
- * §8-C1's actual question — degrade the `/tests` surface to a path list, or remove it the
- * way §6.5 removed three settings pages — is still a human's to answer. This keeps four
+ * The open question — degrade the `/tests` surface to a path list, or remove it the
+ * way three settings pages were removed — is still a human's to answer. This keeps four
  * routed pages working in the meantime instead of 404ing them, and is reported as such.
  */
 export function testFilesFromPlan(dto: S['PlanDto'], ctx: PlanContext = {}): TestFileInfo[] {
@@ -713,15 +709,15 @@ export function testFilesFromPlan(dto: S['PlanDto'], ctx: PlanContext = {}): Tes
 }
 
 // ---------------------------------------------------------------------------
-// Dashboard (CONTRACT-DIFF row 1)
+// Dashboard
 // ---------------------------------------------------------------------------
 
 /** `DashboardRunDto` -> `WorkflowRun`. A ten-field projection, so most of `WorkflowRun`
- *  is absent by construction (row 1 lists what the projection drops) — including
+ *  is absent by construction (`DashboardRunDto` drops the rest) — including
  *  `is_validation`, which is left off rather than sent as `false`: "not a validation run"
  *  and "we were not told" are different claims. `duration` is the gear's own rendered
  *  string here, not derived. `product_key` is bound to what the gear sends, which its own
- *  doc says is *"always `null` today"* (§7.9). */
+ *  doc says is *"always `null` today"*. */
 export function dashboardRunFromDto(dto: DashboardRunDtoWithEnvironmentId): WorkflowRun {
   return {
     name: dto.name,
@@ -768,9 +764,9 @@ function flakyCardFromDto(dto: S['FlakyTestCardDto']): FlakyTestCard {
  * `DashboardStatsDto` -> `DashboardStats`.
  *
  * `total_plans`, `total_schedules` and `platforms_summary` are **omitted**, not zeroed.
- * `DashboardStatsDto` has no such fields (§8-C3), a `0` next to a "Total plans" label is
+ * `DashboardStatsDto` has no such fields, a `0` next to a "Total plans" label is
  * a confident false claim rather than an empty state, and nothing renders them any more:
- * Task 8a replaced the platform strip with a labelled-unavailable card and the KPI strip
+ * the platform strip was replaced with a labelled-unavailable card and the KPI strip
  * never bound the other two. They are optional on `DashboardStats` for this reason.
  *
  * `queued_runs`, which the gear adds, has no legacy field and no consumer, so it is not
@@ -803,12 +799,12 @@ export function dashboardFromDto(dto: DashboardStatsDtoWithEnvironmentIds): Dash
 }
 
 // ---------------------------------------------------------------------------
-// Test results (CONTRACT-DIFF row 7)
+// Test results
 // ---------------------------------------------------------------------------
 
 /** `TestResultDto` -> `TestRunResult`. `phase`, `short_error` and `reportportal_url` have
  *  no gear source at all and stay null. Note `started_at` is fed from `run_finished_at`,
- *  which is *a different instant* — row 7 records the swap; there is no run-start on this
+ *  which is *a different instant* — this is a deliberate swap; there is no run-start on this
  *  DTO. */
 export function testRunResultFromDto(dto: TestResultDtoWithEnvironmentId): TestRunResult {
   return {
@@ -827,7 +823,7 @@ export function testRunResultFromDto(dto: TestResultDtoWithEnvironmentId): TestR
 }
 
 // ---------------------------------------------------------------------------
-// Schedules (CONTRACT-DIFF rows 18-24)
+// Schedules
 // ---------------------------------------------------------------------------
 
 function tagsToCommaString(tags: string[] | undefined): string | null {
@@ -845,7 +841,7 @@ function commaStringToTags(value: string | null | undefined): string[] {
 /**
  * `ScheduleDto` -> `ScheduleInfo`.
  *
- * Three inversions in one shape, all of them from row 18:
+ * Three inversions in one shape:
  *  - `enabled` -> `suspended`, **negated**. Getting this backwards would show every
  *    running schedule as paused and vice versa.
  *  - `include_tags`/`exclude_tags` array -> the comma string the edit form still edits.
@@ -855,7 +851,7 @@ function commaStringToTags(value: string | null | undefined): string[] {
  *    `null` *is* "auto".
  *
  * `schedule_id` carries the gear's uuid, because every write addresses the row by it
- * while the UI addresses schedules by name (X1). `plan_name`, `product_key`,
+ * while the UI addresses schedules by name. `plan_name`, `product_key`,
  * `product_name` and `description` have no gear field, and `recent_runs` is `[]` — the
  * strip is rebuilt from a separate runs query, not deserialised off this shape.
  */
@@ -895,7 +891,7 @@ export function scheduleFromDto(dto: ScheduleDtoWithEnvironmentId): ScheduleInfo
  * `#[serde(default)]` was refused there: an omitted field would turn every edit that did
  * not show the user the toggle into a silent disable, and a defaulted one into a silent
  * re-enable. So the caller must state it, and `useSuspendSchedule`/`useResumeSchedule`
- * read the schedule first and re-send everything else unchanged (row 21) rather than
+ * read the schedule first and re-send everything else unchanged rather than
  * PUT a partial record onto a route that replaces.
  *
  * `name` comes from `opts.name` when the caller is round-tripping an existing schedule,
@@ -904,10 +900,10 @@ export function scheduleFromDto(dto: ScheduleDtoWithEnvironmentId): ScheduleInfo
  *
  * The form's three `slack_*` fields are **not** here: `NewScheduleReq` carries no
  * notification fields at all, so a create that sets them needs a follow-up
- * `PUT .../notifications` (row 19). The caller makes that second call; silently dropping
- * them is the bug row 19 warns about.
+ * `PUT .../notifications`. The caller makes that second call; silently dropping
+ * them is a bug.
  *
- * A **null `environment_id` is passed through** (renamed from `platform_id` at Task 25),
+ * A **null `environment_id` is passed through** (renamed from `platform_id`),
  * for the same reason `launchReqFromForm`
  * stopped refusing one: the claim that such a schedule "saves and then never fires" was
  * a misreading of `Admission::Unqueued`. `qa-runs`' `schedules.rs` states the opposite
@@ -937,7 +933,7 @@ export function scheduleReqFromForm(
 
 /** `UpdateScheduleNotificationsForm` -> `UpdateScheduleNotificationsReq`. `slack_enabled`
  *  and `slack_events` are required on the gear where legacy's `channel`/`events` were
- *  optional (row 24), so an absent `events` becomes `[]` — "notify on nothing" — rather
+ *  optional, so an absent `events` becomes `[]` — "notify on nothing" — rather
  *  than an omitted key the gear would reject. */
 export function scheduleNotificationsReq(
   form: UpdateScheduleNotificationsForm
@@ -950,7 +946,7 @@ export function scheduleNotificationsReq(
 }
 
 // ---------------------------------------------------------------------------
-// Test repositories (CONTRACT-DIFF rows 29, 30, 33, 35, 37)
+// Test repositories
 // ---------------------------------------------------------------------------
 
 /** `TestRepositoryDto` -> `TestRepository`. `content_root` -> `tests_root`.
@@ -958,7 +954,7 @@ export function scheduleNotificationsReq(
  *  **`ssh_key_id` is no longer derived from the DTO; `has_token` now comes from
  *  `has_credential` instead of `credential_ref`.** The DTO used to publish the raw
  *  `credential_ref` and this adapter forwarded it into `ssh_key_id` — the gear's read
- *  DTO no longer does that (review finding #2: a LIST/GET caller could redeem the
+ *  DTO no longer does that (a LIST/GET caller could redeem the
  *  credstore reference for the repository's git credentials), so deriving `ssh_key_id`
  *  from it here would just re-open the leak the gear closed. `ssh_key_id` is hardcoded
  *  `null` because nothing reads it: no component prefills an edit form from it. The
@@ -991,12 +987,12 @@ export function repoFromDto(dto: S['TestRepositoryDto']): TestRepository {
 /**
  * `CreateTestRepositoryForm` -> `CreateTestRepoReq` (identical to `UpdateTestRepoReq`).
  *
- * **X7 is the one place a rename adapter is wrong**, and this is that place: the form's
+ * **This is the one place a rename adapter is wrong**, and this is that place: the form's
  * `token` is a *pasted secret* and the gear's `credential_ref` is a *credstore
  * reference*. Forwarding the paste as the reference would store a credential in a field
  * that is read back to every caller. So a pasted token is refused here, and only an
  * already-referenced credential (`ssh_key_id`) is sent. Wiring the credstore write is not
- * in this task's scope — the refusal is what keeps the gap visible instead of silently
+ * out of scope for the adapter — the refusal is what keeps the gap visible instead of silently
  * leaking.
  *
  * `default_branch` is required on the gear where the form's is optional, so an empty one
@@ -1023,19 +1019,18 @@ export function repoReqFromForm(form: CreateTestRepositoryForm): S['CreateTestRe
 }
 
 // ---------------------------------------------------------------------------
-// SSH keys (CONTRACT-DIFF rows 38, 39)
+// SSH keys
 // ---------------------------------------------------------------------------
 
 /**
  * `SshKeyDto` -> `SshKeyInfo`.
  *
  * `updated_at` is set to `created_at`, and that is a **derivation from a route census
- * rather than a copied instant** — review round 1 asked for the field to be dropped
- * instead, and dropping it is wrong here for two independent reasons.
+ * rather than a copied instant**. Dropping the field instead would be wrong here for two independent reasons.
  *
  * First, it is not unknown: qa-environments publishes exactly three ssh-key operations —
- * `GET /qa/v1/ssh-keys`, `POST /qa/v1/ssh-keys`, `DELETE /qa/v1/ssh-keys/{id}` (re-checked
- * against the live document for this round; there is no `PUT` and no `PATCH`) — so a key
+ * `GET /qa/v1/ssh-keys`, `POST /qa/v1/ssh-keys`, `DELETE /qa/v1/ssh-keys/{id}` (checked
+ * against the live document; there is no `PUT` and no `PATCH`) — so a key
  * **cannot** be updated, and `updated_at == created_at` is necessarily true of every key
  * that can exist. That is the same kind of claim as `source: 'git'` above: a fact about
  * what this deployment can do, not a default standing in for a field. Contrast
@@ -1044,8 +1039,8 @@ export function repoReqFromForm(form: CreateTestRepositoryForm): S['CreateTestRe
  * Second, the field is **rendered**: `pages/settings/SettingsSshKeysPage.tsx:108` draws
  * `new Date(key.updated_at).toLocaleString()` as the key's only timestamp. Leaving it
  * absent renders the string **"Invalid Date"** on a live page — which is the exact defect
- * class that round's other findings are about, introduced to avoid a value that is true.
- * Making it optional therefore needs a component edit this task may not make.
+ * class of a default standing in for a value, introduced to avoid a value that is true.
+ * Making it optional would therefore need a component edit.
  */
 export function sshKeyFromDto(dto: S['SshKeyDto']): SshKeyInfo {
   return {
@@ -1057,18 +1052,18 @@ export function sshKeyFromDto(dto: S['SshKeyDto']): SshKeyInfo {
 }
 
 /** `CreateSshKeyForm` -> `CreateSshKeyReq`. The rename is `private_key` ->
- *  `private_key_pem`, and X7 notes the name is load-bearing: PEM specifically. */
+ *  `private_key_pem`, and the name is load-bearing: PEM specifically. */
 export function sshKeyReqFromForm(form: CreateSshKeyForm): S['CreateSshKeyReq'] {
   return { name: form.name, private_key_pem: form.private_key };
 }
 
 // ---------------------------------------------------------------------------
-// Custom plans (CONTRACT-DIFF rows 42, 46, 47; Step 1a.1)
+// Custom plans
 // ---------------------------------------------------------------------------
 
 /** `CustomPlanDto` -> `CustomPlan`. `files: {repo_id, plan_path, path}[]` folds back into
- *  legacy's `{plan_id, test_file}[]` (X6). `included_plans`, `nodes`, `parallelism`,
- *  `product_id` and `description` have no gear field (§8-C6, §8-C7) and are left absent —
+ *  legacy's `{plan_id, test_file}[]`. `included_plans`, `nodes`, `parallelism`,
+ *  `product_id` and `description` have no gear field and are left absent —
  *  note this means a saved plan does **not** round-trip its "whole plans" selection: it
  *  comes back as the expanded file list, which is what the gear stores. */
 export function customPlanFromDto(dto: S['CustomPlanDto']): CustomPlan {
@@ -1111,7 +1106,7 @@ export interface CustomPlanFilesInput {
  * **This is not an optimisation.** `UpsertCustomPlanReq` has no `included_plans` field at
  * all, so without this expansion the editor's "Whole plans" tab saves cleanly, the gear
  * stores a plan with an empty file list, and the plan then **runs nothing** — a control
- * that appears to work and does not. Task 8a kept that tab precisely because, unlike a
+ * that appears to work and does not. that tab is kept precisely because, unlike a
  * node graph, an included plan *is* expressible in `files`; expanding it is the price.
  *
  * The walk mirrors `src/lib/customPlanTests.ts`'s existing client-side resolution: a
@@ -1200,8 +1195,7 @@ export async function expandCustomPlanFiles(
  * `CreateCustomPlanForm` + the expanded files -> `UpsertCustomPlanReq`.
  *
  * `description`, `product_id`, `included_plans`, `nodes` and `parallelism` have nowhere to
- * go (row 46); the first two are already gone from the UI (Task 8a) and the DAG three are
- * §8-C6.
+ * go; the first two are already gone from the UI and the DAG three have no gear equivalent.
  *
  * **`PUT /qa/v1/custom-plans/{id}` is a replace, not a merge**, and `UpsertCustomPlanReq`
  * declares `tags` and `timeout_seconds` optional (`generated/openapi.d.ts:5264-5270`), so
@@ -1227,18 +1221,18 @@ export function customPlanReq(
 }
 
 // ---------------------------------------------------------------------------
-// Environments (CONTRACT-DIFF rows 50-56)
+// Environments
 // ---------------------------------------------------------------------------
 
 
-/** `EnvironmentDto` -> `EnvironmentInfo`. `observed_version`/`observed_build` are the renames
- *  §6.3 category 2 is about. The observation half is now the plugin's own
+/** `EnvironmentDto` -> `EnvironmentInfo`. `observed_version`/`observed_build` are renames of the
+ *  legacy version/build fields. The observation half is now the plugin's own
  *  `observed_attrs` map plus `health_state`/`health_detail`; `observed_namespace`,
  *  `vhp_base_url` and the five `cluster_*` columns it used to read were dropped by
- *  Task 19, and `ClusterHealth` went with them (user decision U4).
+ *  the gear, and `ClusterHealth` went with them (the node inventory is deliberately not replaced).
  *  `version_detected_at` and `version_detect_error` are still served directly. `available` IS carried
- *  since Task 21 (a fixed leading column in the environments table);
- *  `kubeconfig_credstore_ref` is not, and Task 19 dropped it anyway. */
+ *  (a fixed leading column in the environments table);
+ *  `kubeconfig_credstore_ref` is not, and the gear dropped it anyway. */
 type EnvironmentDtoWithPluginFields = S['EnvironmentDto'];
 
 export function environmentFromDto(dto: EnvironmentDtoWithPluginFields): EnvironmentInfo {
@@ -1255,7 +1249,7 @@ export function environmentFromDto(dto: EnvironmentDtoWithPluginFields): Environ
     version: dto.observed_version ?? null,
     build: dto.observed_build ?? null,
     // The plugin's own map, replacing `observed_namespace`/`vhp_base_url`,
-    // which Task 19 dropped. `{}` for an environment no cycle has observed --
+    // which the gear dropped. `{}` for an environment no cycle has observed --
     // an empty map renders as "not observed" in every descriptor column, which
     // is the honest reading.
     observed_attrs: dto.observed_attrs ?? {},
@@ -1274,10 +1268,10 @@ export function environmentFromDto(dto: EnvironmentDtoWithPluginFields): Environ
 /**
  * `EnvironmentDto` -> `EnvironmentDetails`.
  *
- * Was, before Task 5, a genuine partial substitute (§7.11): the cluster half had no source
+ * Was once a genuine partial substitute: the cluster half had no source
  * anywhere in the gears, so it was left off entirely rather than filled with a `0` or an
- * `"unknown"` (§8-C3). It has no source again, for the opposite reason -- Task 19 dropped
- * the columns and U4 declined to replace the node inventory. What qa-environments observes
+ * `"unknown"`. It has no source again, for the opposite reason -- the gear dropped
+ * the columns and the node inventory is deliberately not replaced. What qa-environments observes
  * now is the plugin's own attributes, served on
  * `EnvironmentDto`'s plugin-shaped observation fields, and `environmentFromDto` maps them,
  * so this is a straight reuse rather than a degraded one.
@@ -1288,8 +1282,10 @@ export function environmentDetailsFromDto(dto: EnvironmentDtoWithPluginFields): 
 
 // The bound a credstore reference used to inherit from its own column:
 // `qa_environments.kubeconfig_credstore_ref` was `varchar(1024)` (gears migration
-// `m20260814_000006_platform_default_branch.rs`, predating the table's rename to
-// `qa_environments`). Task 19's `m20260903_000012` dropped that column -- references
+// `m20260814_000006_platform_default_branch.rs`, since folded into
+// `m20260812_000001_initial` by the docs squash, predating the table's rename to
+// `qa_environments`). `m20260903_000012` (folded into
+// `m20260812_000001_initial` by the docs squash) dropped that column -- references
 // now live inside the `credentials` JSON array, which imposes no width of its own --
 // so this is no longer a schema fact. It is kept as a sanity bound on what this
 // adapter will treat as a reference rather than as a pasted document, and 1024 is
@@ -1300,9 +1296,9 @@ const MAX_CREDSTORE_REF_LENGTH = 1024;
 
 /** `atob` the value if -- and only if -- it is shaped like base64; `null` otherwise.
  *
- *  m-4 (Task 26 review): this used to cite `CreateEnvironmentDialog.tsx:47` calling
+ *  This used to cite `CreateEnvironmentDialog.tsx:47` calling
  *  `btoa(kubeconfig.trim())`, but that dialog has carried no `kubeconfig` textarea and no
- *  `btoa` call since Task 22 replaced it with descriptor-driven `CredentialFields` — the
+ *  `btoa` call since descriptor-driven `CredentialFields` replaced it — the
  *  citation was stale even before this file's own rename repointed its path without
  *  re-reading the claim. No current dialog base64-encodes a kubeconfig; the caller this
  *  decode actually guards is `updateEnvironmentReqFromForm`'s `kubeconfig` field, which the
@@ -1357,8 +1353,9 @@ function looksLikeKubeconfigDocument(text: string): boolean {
  *  binary -- one line of high bytes is still "one line" -- and the adapter would send
  *  `"\u00b5\u00e6\u00a6j\u00e8u\u00c9n\u00b2\u00d7\u00ab"` to the gear as a reference, with no error, for the input
  *  `teamaprodcluster`. Every reference this system actually uses is ASCII: credstore's own
- *  charset is `[a-zA-Z0-9_-]` (`credstore_sdk::SecretRef::new`) and this repo's other
- *  spelling is `credstore://team-a/prod`. */
+ *  charset is `[a-zA-Z0-9_-]` (`credstore_sdk::SecretRef::new`). A URL-shaped
+ *  `credstore://team-a/prod` is not a reference the gear accepts: the write is refused with a
+ *  400 naming `kubeconfig_credstore_ref`. */
 function looksLikeCredstoreReference(text: string): boolean {
   return (
     !text.includes('\n') &&
@@ -1380,7 +1377,7 @@ function isPlausibleText(text: string): boolean {
  *
  *  This is what decides whether a base64 *decode* is believed. Both values this adapter can
  *  send are ASCII: a kubeconfig is YAML text, and a credstore reference is
- *  `[a-zA-Z0-9_-]` or a `credstore://…` spelling. Base64 of anything else decodes to bytes
+ *  `[a-zA-Z0-9_-]`. Base64 of anything else decodes to bytes
  *  spread over the whole 0-255 range, so the chance a short accidental decode is printable
  *  ASCII throughout is roughly `(95/256)^n` -- about five in a million for twelve bytes.
  *  A decode that is not printable ASCII is therefore strong evidence the input was never
@@ -1407,7 +1404,7 @@ function classifyKubeconfigValue(
 
 /** The one kubeconfig field the gear should receive, from whatever the form holds.
  *
- *  X7 used to be a **refusal** here: the gear's column held a credstore reference, the
+ *  This used to be a **refusal** here: the gear's column held a credstore reference, the
  *  form collected a document, and the adapter threw rather than store a secret in a field
  *  read back to every caller. That refusal fixed the 500 and removed the capability, which
  *  is not what was wanted. The gear now takes a raw `kubeconfig` -- writing it to credstore
@@ -1470,24 +1467,25 @@ function kubeconfigFieldsFromFormValue(
   );
 }
 
-/** `CreateEnvironmentForm` -> `CreateEnvironmentReq`. The X7 rename is a **forward** now, not a
- *  refusal: see `kubeconfigFieldsFromFormValue`. `namespace`/`vhp_base_url` have no gear
- *  field and are dropped (CONTRACT-DIFF row 52). */
-/** `CreateEnvironmentReq.credentials` -- the plugin-shaped map Task 18b Step 2
+/** `CreateEnvironmentReq.credentials` -- the plugin-shaped map the gear
  *  added, and absent from the stale generated schema. See
  *  `EnvironmentDtoWithPluginFields` for why this is declared rather than cast. */
 type CreateEnvironmentReqWithCredentials = S['CreateEnvironmentReq'] & {
   credentials?: Record<string, { material: string }>;
 };
 
+/** `CreateEnvironmentForm` -> `CreateEnvironmentReq`. Sends the plugin-shaped `credentials`
+ *  map and never the pre-plugin `kubeconfig`/`kubeconfig_credstore_ref` pair;
+ *  `kubeconfigFieldsFromFormValue` serves only the update path. The form has no
+ *  `namespace`/`vhp_base_url` fields: the gear dropped those columns. */
 export function createEnvironmentReqFromForm(
   form: CreateEnvironmentForm,
 ): CreateEnvironmentReqWithCredentials {
   return {
     name: form.name,
-    // **The plugin-shaped map, and nothing else.** Task 18b left the
+    // **The plugin-shaped map, and nothing else.** The gear kept the
     // pre-plugin `kubeconfig`/`kubeconfig_credstore_ref` pair accepted
-    // precisely so this task could be the change that stops sending it, and
+    // precisely so the UI could stop sending it first, and
     // this is that change. The gear still folds the pair for any other client
     // until a follow-up deletes it from the DTOs.
     credentials: form.credentials,
@@ -1500,7 +1498,8 @@ export function createEnvironmentReqFromForm(
 
 /** `UpdateEnvironmentForm` -> `UpdateEnvironmentReq`. A true partial (`PATCH`), so only the keys
  *  the form actually carries are sent — an omitted key leaves the field alone, unlike the
- *  schedules PUT. `namespace`/`vhp_base_url` have no gear field and are dropped. */
+ *  schedules PUT. The form has no `namespace`/`vhp_base_url` fields: the gear dropped those
+ *  columns. */
 export function updateEnvironmentReqFromForm(form: UpdateEnvironmentForm): S['UpdateEnvironmentReq'] {
   const req: S['UpdateEnvironmentReq'] = {};
   if (form.description !== undefined) req.description = form.description;
@@ -1528,7 +1527,7 @@ export function updateEnvironmentReqFromForm(form: UpdateEnvironmentForm): S['Up
 }
 
 // ---------------------------------------------------------------------------
-// Observed versions (CONTRACT-DIFF rows 65, 66; §5-E, §7.10)
+// Observed versions
 // ---------------------------------------------------------------------------
 
 /** One environment's observed version, with its build alongside. */
@@ -1543,15 +1542,15 @@ export interface ObservedEnvironmentVersion {
  *
  * An environment with a null `observed_version` is **dropped**, not rendered as `"null"` or
  * `""` — an empty version dropdown is a true statement about a deployment that observes
- * no versions, and §9 already decided the Analytics page labels that rather than
+ * no versions, and the Analytics page labels that state rather than
  * inventing a value. Do **not** hardcode a fallback such as `unknown`: the smoke script
  * passes `version=unknown` as a probe, and shipping it as a default would present a
  * fabricated filter as a real one.
  *
- * The `build` is carried but is **never** used as a branch. §5-E: §6.3 category 2 sent
+ * The `build` is carried but is **never** used as a branch: the legacy mapping sent
  * both `observed-versions` and `observed-branches` to these two fields, and a build is
  * not a branch. `useObservedProductBranches` is fed from the repository's git branches
- * instead (§7.10).
+ * instead.
  */
 export function observedFromEnvironments(
   environments: Array<{ id: string; observed_version?: string | null; observed_build?: string | null }>
@@ -1568,7 +1567,7 @@ export function observedFromEnvironments(
 }
 
 /** Distinct observed versions, sorted, for the Analytics version dropdown. Empty in every
- *  deployment this plan produces — see §9.1 — and honestly so. */
+ *  deployment this plan produces, and honestly so. */
 export function distinctObservedVersions(
   environments: Array<{ id: string; observed_version?: string | null; observed_build?: string | null }>
 ): string[] {
@@ -1578,13 +1577,13 @@ export function distinctObservedVersions(
 }
 
 // ---------------------------------------------------------------------------
-// Products and coverage (CONTRACT-DIFF rows 58, 60, 62)
+// Products and coverage
 // ---------------------------------------------------------------------------
 
 /** `ProductDto` -> `Product`. `folder` -> `tests_folder`, and the nullability flips: the
  *  gear's is nullable where legacy's was required, so a null folder becomes `''` — the
  *  same "no folder" the required field always spelled. */
-/** `ProductDto.plugin_instance_id` -- required on the gear since Task 20a, and
+/** `ProductDto.plugin_instance_id` -- required on the gear, and
  *  absent from the stale generated schema. See `EnvironmentDtoWithPluginFields`. */
 type ProductDtoWithPlugin = S['ProductDto'] & { plugin_instance_id?: string | null };
 
@@ -1602,9 +1601,9 @@ export function productFromDto(dto: ProductDtoWithPlugin): Product {
 }
 
 /** `CreateProductReq.plugin_instance_id` -- absent from the stale generated
- *  schema (same F-21 reasoning as `ProductDtoWithPlugin` above, the read
+ *  schema (same reasoning as `ProductDtoWithPlugin` above, the read
  *  path's mirror) and **optional here**, deliberately unlike `ProductDto`'s:
- *  see `productReqFromForm`'s `currentBinding` parameter (ruling G-2) for why
+ *  see `productReqFromForm`'s `currentBinding` parameter for why
  *  omitting the key, not sending an empty or repeated one, is what this type
  *  has to allow. */
 type CreateProductReqWithPlugin = S['CreateProductReq'] & { plugin_instance_id?: string };
@@ -1613,20 +1612,21 @@ type CreateProductReqWithPlugin = S['CreateProductReq'] & { plugin_instance_id?:
  *  `description` is required on the gear where the form's is optional, so an absent one
  *  becomes `''` rather than an omitted key the gear would reject.
  *
- *  `plugin_instance_id` is **not** just passed through -- ruling **G-2**. `qa-catalog`
+ *  `plugin_instance_id` is **not** just passed through. `qa-catalog`
  *  re-validates *any* `Some(id)` it receives against the live per-process plugin registry
  *  (`domain/service/products.rs:165-167`); it does not compare the incoming id to what is
  *  already stored. So resending a product's own current binding on every save is not a
  *  no-op -- it is a rebind request that must re-resolve, and it 400s for any product bound
- *  to a plugin this deployment does not run (every product `m20260903_000003` backfilled to
- *  VHP, on a non-VHP deployment, for instance). Ruling **D-18** made `None` mean "leave the
+ *  to a plugin this deployment does not run (every product `m20260903_000003`, folded into
+ *  `m20260812_000002_initial` by the docs squash, backfilled to VHP, on a non-VHP deployment,
+ *  for instance). The gear makes `None` mean "leave the
  *  binding alone" for exactly this reason; the key has to be omitted, not sent as `''` or
  *  `null` -- an empty string is not "no selection" to the gear, it is a value, and
  *  `validation.rs:83-100` rejects it explicitly, which is a worse failure than the one
- *  D-18 exists to avoid.
+ *  that rule exists to avoid.
  *
  *  `currentBinding` is the product's *stored* `plugin_instance_id` (omitted entirely on
- *  create, where there is no prior binding to compare against -- Step 3's guard already
+ *  create, where there is no prior binding to compare against -- the create form's guard already
  *  guarantees `form.plugin_instance_id` is non-empty there, so it is always sent). The key
  *  is included only when the form is naming a plugin genuinely different from what is
  *  already stored -- a deliberate rebind -- or omitted otherwise, which covers both "the
@@ -1656,14 +1656,14 @@ export function productReqFromForm(
  * because the only consumer is a **per-product** card whose own caption reads *"Coverage
  * belongs to this product and is calculated per reported product version."*
  * (`ProductCoverageCard.tsx:96`). Handing that card every product's rows would make the
- * caption false and put another product's numbers in this product's chart. This is §7.6's
- * pattern — a client-side filter where a server filter never existed — and it is safe for
- * the same reason rows 29 and 50 are: the key is on the row. The gear sends `product_key`,
+ * caption false and put another product's numbers in this product's chart. This is a
+ * client-side filter where a server filter never existed, and it is safe because
+ * the key is on the row. The gear sends `product_key`,
  * not `product_id`, so the caller resolves the id to a key first.
  *
  * The array is **empty in every deployment today** — the endpoint's own published doc says
  * nothing in this system measures a coverage point and no number is folded out of ingested
- * results to fill the gap (§8-C8) — and the live call site already renders an honest empty
+ * results to fill the gap — and the live call site already renders an honest empty
  * state, so no zero is ever displayed. But that is a *deployment* fact, not a code
  * guarantee, which is why the filter is here rather than resting on the emptiness.
  *
@@ -1671,8 +1671,8 @@ export function productReqFromForm(
  * back-filled with `Date.now()`, which would fabricate a measurement time. `collected_at`
  * is both sorted on and rendered as a date (`ProductCoverageCard.tsx:18` and `:114`), so on
  * a deployment that ever measures coverage that column reads "Invalid Date" and the sort
- * comparator returns `NaN`. That needs a component edit this task may not make; it is
- * recorded as a §8-C8 consequence in `CONTRACT-DIFF` §11.9. `product_id` is the product
+ * comparator returns `NaN`. That needs a component edit outside the adapter layer; it is
+ * a known gap. `product_id` is the product
  * asked for — the caller's own input, echoed back, not a value invented for the row.
  */
 export function coveragePointsFromDto(
@@ -1695,12 +1695,12 @@ export function coveragePointsFromDto(
 }
 
 // ---------------------------------------------------------------------------
-// Analytics (CONTRACT-DIFF rows 67-75)
+// Analytics
 // ---------------------------------------------------------------------------
 
 /** `PlanTestAnalyticsDto` -> `TestAnalytics`. `last_run_name` is now the run's uuid; the
  *  gear keeps `last_environment` as a name *and* adds `last_environment_id` (renamed from
- *  `last_platform`/`last_platform_id` at Task 25), so the name is used and the uuid
+ *  `last_platform`/`last_platform_id`), so the name is used and the uuid
  *  dropped. The read is bounded to the trailing 90 days where legacy had no window (row
  *  67) — a semantic difference no adapter can undo. */
 export function testAnalyticsFromDto(dto: PlanTestAnalyticsDtoWithEnvironment): TestAnalytics {
@@ -1717,7 +1717,7 @@ export function testAnalyticsFromDto(dto: PlanTestAnalyticsDtoWithEnvironment): 
   };
 }
 
-/** `PlanTestHistoryDto` -> `TestHistory`. `run_name` is now a uuid (row 69). */
+/** `PlanTestHistoryDto` -> `TestHistory`. `run_name` is now a uuid. */
 export function testHistoryFromDto(dto: S['PlanTestHistoryDto']): TestHistory {
   return {
     test_name: dto.test_name,
@@ -1729,7 +1729,7 @@ export function testHistoryFromDto(dto: S['PlanTestHistoryDto']): TestHistory {
   };
 }
 
-/** `BuildTestDetailDto` -> `BuildTestDetailItem`. `run_name` -> the run uuid (row 71). */
+/** `BuildTestDetailDto` -> `BuildTestDetailItem`. `run_name` -> the run uuid. */
 export function buildTestDetailFromDto(dto: S['BuildTestDetailDto']): BuildTestDetailItem {
   return {
     test_file: dto.test_file,
@@ -1772,22 +1772,22 @@ function analyticsListItemFromDto(dto: AnalyticsListItemDtoWithEnvironment): Ana
  *  - `product_key` is absent from the DTO, so it is `''` (the page renders it as a label
  *    beside a product it already knows).
  *  - `build_distribution[].latest_run_name` is now `latest_run_id`.
- *  - `grouped.environment[]` (renamed from `grouped.platform[]` at Task 25) carries
+ *  - `grouped.environment[]` (renamed from `grouped.platform[]`) carries
  *    `environment` (a nullable *name*) plus `environment_id`, where `grouped.component`/
  *    `.tag` keep a bare `value`. The three are one chart in the UI, so the environment
  *    arm is projected onto `value` using the name, falling back to the uuid when the name
  *    is null — an unresolved environment is still identifiable, and blanking it would
  *    silently merge every unnamed environment into one bar.
  *
- * `scope` no longer needs an `as AnalyticsScope` cast (Task 20 fix round): the gear
+ * `scope` no longer needs an `as AnalyticsScope` cast: the gear
  * publishes the echoed scope as a two-value schema enum, and `AnalyticsScope` is aliased
  * onto it, so a gear-side change to the pair fails `tsc` here instead of passing through
- * a cast. `group_by` still needs its cast — `AnalyticsOverviewDto.group_by` is still a
- * `String` on the wire.
+ * a cast. `group_by` lost its cast the same way (the third pass): the gear publishes it as
+ * the four-value `AnalyticsGroupByDto`, and `AnalyticsGroupBy` is aliased onto it.
  *
- * §9 is about the *values* on this shape, not the shape: every execution-scoped counter
- * is 0 by construction in this deployment, and the decision recorded there is a banner in
- * `pages/AnalyticsPage.tsx` (Task 11's), not a number invented here.
+ * The concern is the *values* on this shape, not the shape: every execution-scoped counter
+ * is 0 by construction in this deployment, and the decision is a banner in
+ * `pages/AnalyticsPage.tsx`, not a number invented here.
  */
 export function analyticsOverviewFromDto(
   dto: AnalyticsOverviewDtoWithEnvironmentGroup,
@@ -1798,12 +1798,12 @@ export function analyticsOverviewFromDto(
     product_key: '',
     version: dto.version,
     scope: dto.scope,
-    // The DTO echoes back the *path* it was given (X6); the components hand this straight
+    // The DTO echoes back the *path* it was given; the components hand this straight
     // back into `plan_id`-shaped props, so the caller's own opaque id is preserved when
     // there is one.
     plan_id: requested.plan_id ?? dto.plan_id ?? null,
     branch: dto.branch ?? null,
-    group_by: dto.group_by as AnalyticsOverview['group_by'],
+    group_by: dto.group_by,
     group_value: dto.group_value ?? null,
     summary: dto.summary,
     lists: {
@@ -1847,12 +1847,12 @@ export function analyticsOverviewFromDto(
 }
 
 /** `SavedViewDto` -> `AnalyticsSavedView`. `(repo_id, plan_path)` folds back into the
- *  opaque `plan_id` (X6). `query_json` is passed through untouched — the gear never
+ *  opaque `plan_id`. `query_json` is passed through untouched — the gear never
  *  inspects it, so a legacy `plan_id` buried inside one is **not** reconciled with the new
- *  vocabulary (row 73), which is a real and reported limitation rather than something to
+ *  vocabulary, which is a real and reported limitation rather than something to
  *  rewrite blindly.
  *
- *  `scope` no longer needs an `as AnalyticsScope` cast (Task 20): the gear publishes it as
+ *  `scope` no longer needs an `as AnalyticsScope` cast: the gear publishes it as
  *  a two-value schema enum (`SavedViewScopeDto`), so `"all" | "plan"` is what the generated
  *  type already says. It is a *different* schema from `AnalyticsScopeDto`, which is what
  *  `AnalyticsScope` is aliased onto — same value space, separate contracts — and the two
@@ -1871,7 +1871,7 @@ export function savedViewFromDto(dto: S['SavedViewDto']): AnalyticsSavedView {
 }
 
 /** `AnalyticsSavedViewPayload` -> `NewSavedViewReq`. `(repo_id, plan_path)` must be
- *  supplied **together** (X6), so an id that does not decode sends neither half rather
+ *  supplied **together**, so an id that does not decode sends neither half rather
  *  than one and a 400. */
 export function savedViewReqFromPayload(payload: AnalyticsSavedViewPayload): S['NewSavedViewReq'] {
   const decoded = payload.plan_id ? decodePlanId(payload.plan_id) : null;
@@ -1885,10 +1885,10 @@ export function savedViewReqFromPayload(payload: AnalyticsSavedViewPayload): S['
 }
 
 // ---------------------------------------------------------------------------
-// JIRA (CONTRACT-DIFF rows 76, 77, 96, 97)
+// JIRA
 // ---------------------------------------------------------------------------
 
-/** `JiraSettingsDto` -> `JiraConfig`. X7: `api_token` is now
+/** `JiraSettingsDto` -> `JiraConfig`. `api_token` is now
  *  `api_token_credstore_ref`, so what the form shows is a *reference*, never a token. */
 export function jiraConfigFromDto(dto: S['JiraSettingsDto']): JiraConfig {
   return {
@@ -1906,10 +1906,10 @@ export function jiraConfigFromDto(dto: S['JiraSettingsDto']): JiraConfig {
  *
  *  Unlike the kubeconfig case below, nothing is refused here, and that is a limit rather
  *  than a choice: a credstore reference and an API token are both opaque single-line
- *  strings, so there is no signal to refuse on. The gap is therefore in the **label** —
- *  a field captioned "API token" that in fact stores a reference — which is a copy change
- *  in `SettingsJiraPage`, not something an adapter can fix. Reported as an X7 follow-up.
- *  Note the failure is not a leak: a pasted token would be stored as a reference that
+ *  strings, so there is no signal to refuse on. The guard is therefore the **label**:
+ *  `SettingsJiraPage` captions the field "API token credential reference" and says it is
+ *  never the token itself, and the gear refuses anything outside credstore's
+ *  `[a-zA-Z0-9_-]` syntax with a 400. Note the failure is not a leak: a pasted token would be stored as a reference that
  *  resolves to nothing, so JIRA calls fail rather than the token being served back as a
  *  secret. */
 export function jiraConfigReq(config: JiraConfig): S['JiraSettingsDto'] {
@@ -1925,7 +1925,7 @@ export function jiraConfigReq(config: JiraConfig): S['JiraSettingsDto'] {
 
 /** `JiraBugDto` -> `JiraBug`. `id` changes from a number to a uuid, so `JiraBug.id` is a
  *  string now; `(repo_id, plan_path)` folds into `plan_id` and `environment_id` (renamed
- *  from `platform_id` at Task 25) into `platform` (row 97). */
+ *  from `platform_id`) into `platform`. */
 export function jiraBugFromDto(dto: JiraBugDtoWithEnvironmentId): JiraBug {
   return {
     id: dto.id,
@@ -1945,7 +1945,7 @@ export function jiraBugFromDto(dto: JiraBugDtoWithEnvironmentId): JiraBug {
  * The query string for `GET /qa/v1/jira/open-bugs`.
  *
  * `repo_id` and `plan_path` are a **co-requirement**: `/openapi.json` marks neither
- * individually required, and both readings are right. Driven live during this task:
+ * individually required, and both readings are right. Driven live against the gear:
  *
  *     (neither)                -> 200 []
  *     ?repo_id=<uuid>          -> 400 "repo_id and plan_path must be supplied together, or not at all"
@@ -1967,7 +1967,7 @@ export function openBugsQuery(planId?: string | null): string {
 }
 
 // ---------------------------------------------------------------------------
-// Variables (CONTRACT-DIFF rows 82-85, §8-C10)
+// Variables
 // ---------------------------------------------------------------------------
 
 /**
@@ -1975,7 +1975,7 @@ export function openBugsQuery(planId?: string | null): string {
  *
  * `GET /qa/v1/variables?environment_id=<uuid>` is **additive**, not a filter: its own doc
  * says "List global pipeline variables, **plus** an environment's variables when
- * `environment_id` is given", and that is what it does. Driven live during this task with
+ * `environment_id` is given", and that is what it does. Driven live against the gear with
  * three seeded rows (field named `platform_id` at the time; qa-environments' Environment
  * rename later carried this query parameter and `VariableDto`/`UpsertVariableReq` field
  * to `environment_id`, with no behaviour change — the 404 body's wording changed with it,
@@ -1989,11 +1989,11 @@ export function openBugsQuery(planId?: string | null): string {
  *     ?environment_id=not-a-uuid     -> 400
  *
  * So the parameter is genuinely honoured (a 404 and a 400 prove it is read, not ignored),
- * *and* §7.6's client-side partition is still needed — legacy's
+ * *and* a client-side partition is still needed — legacy's
  * `/platforms/{name}/variables` returned the platform's **own** set, and the server
  * filter alone answers a superset of it.
  *
- * There is no `secure` flag on either side any more: §8-C10, closed by Task 8a by
+ * There is no `secure` flag on either side any more: that gap was closed by
  * removing the affordance rather than by defaulting the field.
  */
 export function partitionEnvironmentVariables(
@@ -2014,7 +2014,7 @@ export interface VariableWritePlan {
 /**
  * Turn the whole-set save the editor performs into the per-item writes the gear takes.
  *
- * The granularity **inverts** here (row 83): legacy's `PUT /settings/variables` replaced
+ * The granularity **inverts** here: legacy's `PUT /settings/variables` replaced
  * the entire set atomically, and the gear upserts one row at a time by natural key with a
  * separate `DELETE /qa/v1/variables/{id}`. So the editor's full list is diffed against
  * the last read and turned into one PUT per changed row plus one DELETE per removed row.
@@ -2064,17 +2064,17 @@ export function variableWritePlan(
 }
 
 // ---------------------------------------------------------------------------
-// Notifications (CONTRACT-DIFF rows 86-91)
+// Notifications
 // ---------------------------------------------------------------------------
 
-/** `NotificationConfigDto` -> `NotificationsConfig`. X7: `slack_webhook_url` is now
- *  `slack_webhook_credstore_ref`, so the input holds a reference. The gear's extra
+/** `NotificationConfigDto` -> `NotificationsConfig`. Legacy's `slack_webhook_url` is
+ *  now `slack_webhook_credstore_ref`, on both sides, so the input holds a reference. The gear's extra
  *  required `run_queue_queued_slack_enabled` has no legacy field and is not carried into
  *  the UI shape — but it **is** round-tripped on write (see `notificationsConfigReq`), so
  *  saving the form does not silently clear it. */
 export function notificationsConfigFromDto(dto: S['NotificationConfigDto']): NotificationsConfig {
   return {
-    slack_webhook_url: dto.slack_webhook_credstore_ref,
+    slack_webhook_credstore_ref: dto.slack_webhook_credstore_ref,
     slack_channel: dto.slack_channel,
     manager_ui_base_url: dto.manager_ui_base_url,
     slack_enabled: dto.slack_enabled,
@@ -2109,7 +2109,7 @@ export function notificationsConfigReq(
   }
   return {
     ...previous,
-    slack_webhook_credstore_ref: config.slack_webhook_url,
+    slack_webhook_credstore_ref: config.slack_webhook_credstore_ref,
     slack_channel: config.slack_channel,
     manager_ui_base_url: config.manager_ui_base_url,
     slack_enabled: config.slack_enabled,
@@ -2129,8 +2129,8 @@ export function notificationsConfigReq(
 }
 
 /** `NotificationLogEntryDto` -> `NotificationLogEntry`. `id` becomes a uuid string and
- *  `workflow_name` becomes the run's uuid — row 91: the log line loses its
- *  human-readable run name, and rendering one would need an X1 lookup per line. A null
+ *  `workflow_name` becomes the run's uuid — the log line loses its
+ *  human-readable run name, and rendering one would need a run-uuid-to-name lookup per line. A null
  *  `run_id` becomes `null`, not the string `"null"`. */
 export function notificationLogEntryFromDto(dto: S['NotificationLogEntryDto']): NotificationLogEntry {
   return {
@@ -2149,7 +2149,7 @@ export function notificationLogEntryFromDto(dto: S['NotificationLogEntryDto']): 
  *
  * The gear answers `200 RunDto` when the run started and `202 QueuedRunDto` when it was
  * queued behind an exclusive run. Legacy's union was `{workflow_name}` vs
- * `{queue_id, state: 'queued'}`, and **`state` is gone** from the queued arm (rows 4, 17).
+ * `{queue_id, state: 'queued'}`, and **`state` is gone** from the queued arm.
  * `isQueued` narrows on `'queue_id' in response`, which still works, so the discriminator
  * survives; the `state` literal is re-supplied here rather than left off, because
  * re-typing the union would be a change every `isQueued` call site can see.
@@ -2168,7 +2168,7 @@ export function launchResponseFromDto(
 }
 
 /** `NotificationPreviewDto` -> `ScheduledRunNotificationPreviewResponse`. Field-for-field
- *  the same names (row 89) but not the same types: `blocks: unknown[]` there is not
+ *  the same names but not the same types: `blocks: unknown[]` there is not
  *  assignable to `SlackMessagePreview`'s `Array<Record<string, unknown>>` prop, and
  *  `event` is a plain `string` there rather than the UI's literal union. That mismatch is
  *  why `types.ts` keeps this shape hand-written, and this is where the narrowing happens —

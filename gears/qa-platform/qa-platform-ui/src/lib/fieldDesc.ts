@@ -2,7 +2,7 @@
  * Rendering rules for a product plugin's field descriptors.
  *
  * A plugin declares what its observations mean — `observed_schema()` — and this
- * turns that into columns and detail rows. Before Task 21 the environments
+ * turns that into columns and detail rows. Before it was descriptor-driven, the environments
  * table hardcoded "Namespace" and "VHP URL", which is the coupling this whole
  * branch exists to remove: those are two of VHP's attributes, not two facts
  * every product has.

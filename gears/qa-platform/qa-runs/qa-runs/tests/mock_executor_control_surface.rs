@@ -18,13 +18,10 @@
 
 use std::collections::BTreeMap;
 
-use qa_runs::domain::error::DomainError;
-use qa_runs::domain::ports::run_executor::{
-    ExecutionEvent, ExecutionNode, NodeOutcome, RunAccess, RunEnv, RunExecutor, RunSpec, RunnerSpec,
+use qa_runs::{
+    DomainError, ExecutionEvent, ExecutionNode, ExecutorOutcome, LogResume, MockRunExecutor,
+    NodeOutcome, RunAccess, RunEnv, RunExecutor, RunSpec, RunnerSpec,
 };
-use qa_runs::domain::repos::LogResume;
-use qa_runs::domain::state_machine::ExecutorOutcome;
-use qa_runs::infra::executor::mock::MockRunExecutor;
 use uuid::Uuid;
 
 fn spec_for(run_id: Uuid) -> RunSpec {

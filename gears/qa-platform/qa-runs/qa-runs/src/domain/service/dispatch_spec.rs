@@ -1,4 +1,4 @@
-//! Run → [`RunSpec`] translation: parity spec §3.4 rules 4, 5 and 6.
+//! Run → [`RunSpec`] translation: launch rules 4, 5 and 6 (`launch`'s module doc).
 //!
 //! The half of dispatch that turns a stored run into something the execution plane
 //! can accept — force-sync, bundle build, node list, environment assembly — and
@@ -58,7 +58,7 @@ struct PluginDispatch {
     /// `env` is **moved out** before the spec is built — see
     /// [`DispatchService::build_spec`].
     access: RunAccess,
-    /// The runner shape, per product (**D11**).
+    /// The runner shape, per product.
     runner: RunnerSpec,
     /// The names this product reserves on top of the platform's floor.
     contract: RunVarContract,
@@ -67,9 +67,9 @@ struct PluginDispatch {
 /// A plugin that cannot be reached or cannot answer fails the dispatch.
 ///
 /// [`DomainError::Internal`] rather than `Validation`: every one of these is a
-/// **platform misconfiguration**, not a fault in the request — the environment
-/// names no product, the product names no plugin, the deployment carries no
-/// resolver — so a 4xx would blame the caller for something no caller can fix.
+/// **platform misconfiguration**, not a fault in the request — the product
+/// names no resolvable plugin, or the deployment carries no resolver — so a 4xx
+/// would blame the caller for something no caller can fix.
 /// The *text* is what matters, and it is fixed, operator-facing, and names the
 /// action that resolves it; `record_failed` puts it on the run row, which is
 /// where an operator reads it.
@@ -82,8 +82,8 @@ fn plugin_error(detail: &'static str) -> DomainError {
 // It refused a dispatch whose environment held one **unkeyed** reference in
 // `kubeconfig_credstore_ref` while its plugin declared more than one required
 // secret -- one column cannot say which of two credentials it holds. Task 19
-// dropped that column and ruling F-2 dropped the fallback that read it, so
-// there is no unkeyed reference left for dispatch to be ambiguous about.
+// dropped that column and the fallback that read it, so there is no unkeyed
+// reference left for dispatch to be ambiguous about.
 //
 // The rule itself did not go away, it moved to where the ambiguity now
 // arises: `qa-environments`' `desugar_legacy_credential_pair` refuses the
@@ -140,7 +140,7 @@ fn executor_deadline(run: &Run, now: OffsetDateTime) -> u64 {
 
 /// A node's stable label.
 ///
-/// One node per repository group (parity spec §3.4 step 5), so the group's
+/// One node per repository group (launch rule 5), so the group's
 /// repository id is the only thing that distinguishes them. Not sanitised to a
 /// DNS-1123 label: that constraint came from Argo task names and ADR-0001 removes
 /// it, so [`ExecutionNode::name`] says an adapter with its own naming rules
@@ -224,16 +224,12 @@ fn push_if_present(into: &mut Vec<RunVar>, name: &str, value: Option<&str>) {
     }
 }
 
-fn catalog_error(error: &qa_catalog_sdk::QaCatalogError) -> DomainError {
-    DomainError::Catalog(error.to_string())
-}
-
 impl<R, Q> DispatchService<R, Q>
 where
     R: RunsRepository,
     Q: QueueRepository,
 {
-    /// Parity spec §3.4 rules 4 and 5, then the submit.
+    /// Launch rules 4 and 5, then the submit.
     pub(super) async fn submit(
         &self,
         ctx: &SecurityContext,
@@ -280,7 +276,7 @@ where
                     },
                 )
                 .await
-                .map_err(|error| catalog_error(&error))?;
+                .map_err(DomainError::from_catalog)?;
             let bundle = self.build_bundle(ctx, *repo_id, &branch, files).await?;
             bundle_ids.push(bundle.id);
             nodes.push(ExecutionNode {
@@ -318,11 +314,11 @@ where
 
     /// Build one group's bundle, retrying **once** on failure.
     ///
-    /// # Decision D4's bounded retry, and why it is exactly one
+    /// # The bounded retry, and why it is exactly one
     ///
-    /// `DECOMPOSITION.md:126` records that reads do not serialize against
-    /// snapshot rewrites, and decision D4 accepted that at parity: legacy's
-    /// readers walk the checkout with no lock either
+    /// DESIGN §3.3, "Reads do not serialize against a snapshot rewrite", accepts,
+    /// at parity with the source system, that reads do not serialize against
+    /// snapshot rewrites: legacy's readers walk the checkout with no lock either
     /// (`manager/src/services/test_repos.rs:405-406`, `:452-456` — writers only).
     /// One honest difference in degree survives, and it is the reason this retry
     /// exists: legacy updates a branch directory via `git worktree`, rewriting
@@ -334,8 +330,8 @@ where
     ///
     /// So one retry, closing only the widened part. **Not a loop**: a genuinely
     /// unbuildable group — a deleted path, a branch without the files — would
-    /// then hang the dispatcher on it instead of failing the run, and the D4
-    /// resolution is explicit that no new snapshot machinery is added.
+    /// then hang the dispatcher on it instead of failing the run, and that
+    /// section is explicit that no new snapshot machinery is added.
     ///
     /// The retry re-issues the *bundle build*, not the sync: this call already
     /// force-synced, so a second sync would re-open the same window rather than
@@ -360,12 +356,12 @@ where
                     branch,
                     error = %first,
                     "the bundle build failed immediately after this dispatch's own \
-                     force-sync; retrying once (decision D4)",
+                     force-sync; retrying once",
                 );
                 self.catalog
                     .create_bundle(ctx, request)
                     .await
-                    .map_err(|error| catalog_error(&error))
+                    .map_err(DomainError::from_catalog)
             }
         }
     }
@@ -392,7 +388,7 @@ where
                     .catalog
                     .get_plan(ctx, *repo_id, branch, path)
                     .await
-                    .map_err(|error| catalog_error(&error))?;
+                    .map_err(DomainError::from_catalog)?;
                 plan.test_files
                     .into_iter()
                     .map(|file| (*repo_id, file))
@@ -406,7 +402,7 @@ where
                     .catalog
                     .get_custom_plan(ctx, *id)
                     .await
-                    .map_err(|error| catalog_error(&error))?;
+                    .map_err(DomainError::from_catalog)?;
                 plan.files
                     .into_iter()
                     .map(|entry| (entry.repo_id, entry.path))
@@ -429,21 +425,21 @@ where
             // repo lacking the branch fails `sync_repository_branch_by_id` and
             // is dropped by `run_collect_cycle` (`:168-176`) rather than
             // failing the cycle — that one belongs to the trigger, which is
-            // qa-insights' (Task 30).
+            // qa-insights'.
             //
             // The file-level skip is not reproduced here because it is not
             // collect-specific: `RunTarget::Plan` above has the identical
             // exposure — a `plan.yaml` naming a file that is not on the branch
             // reaches `create_bundle` the same way — and qa-catalog exposes no
             // existence probe to filter with. Recorded rather than silently
-            // diverged; closing it is a qa-catalog capability (Task 7), and it
+            // diverged; closing it is a qa-catalog capability, and it
             // must close both kinds at once or it has only moved the hazard.
             RunTarget::Collect { repo_id, .. } => {
                 let plans = self
                     .catalog
                     .list_plans(ctx, *repo_id, branch)
                     .await
-                    .map_err(|error| catalog_error(&error))?;
+                    .map_err(DomainError::from_catalog)?;
                 plans
                     .into_iter()
                     .flat_map(|plan| plan.test_files)
@@ -495,7 +491,7 @@ where
                 .catalog
                 .get_test_meta(ctx, repo_id, branch, &files)
                 .await
-                .map_err(|error| catalog_error(&error))?;
+                .map_err(DomainError::from_catalog)?;
             let kept: Vec<String> = files
                 .into_iter()
                 .filter(|path| {
@@ -515,55 +511,45 @@ where
 
     /// Ask this environment's product plugin how a run reaches it.
     ///
-    /// Three plugin calls behind one environment read — spec §4.4's parallel
-    /// block, made sequentially because two of the three are synchronous and
-    /// the third is a pure function of the handle. **No plaintext credential is
-    /// resolved anywhere in here**, which is the property
+    /// Three plugin calls behind one environment read — in the source system a
+    /// parallel block, made sequential here because two of the three are
+    /// synchronous and the third is a pure function of the handle. **No plaintext
+    /// credential is resolved anywhere in here**, which is the property
     /// `prepare_run_access` is specified around: the handle carries a
     /// `credstore_ref` and no value, and the executor is what resolves the
-    /// reference (spec §5.2, ruling D-19).
+    /// reference (ADR-0008, "Decision Outcome": secrets travel as references).
     ///
-    /// # The slots come from `Environment::credentials`, falling back to the
-    /// legacy column
+    /// # The slots come from `Environment::credentials`, and only from there
     ///
-    /// This was the other way round until Task 18b (rulings D-19/E-17), and
-    /// the reason is what the fallback is still for. **Nothing wrote the
-    /// `credentials` column**: it was backfilled once by `m20260903_000011`
-    /// and had no writer, so it went stale the first time a kubeconfig was
-    /// rotated — and a rotation *deletes* the superseded secret, so a stale
-    /// reference resolves to nothing or, far worse, hands a plugin material
-    /// for an environment that has moved on.
+    /// Until Task 18b this read preferred the legacy single-reference column,
+    /// because **nothing wrote the `credentials` column**: it was backfilled
+    /// once by `m20260903_000011` (folded into
+    /// `migrations::m20260812_000001_initial` by the docs squash) and had no
+    /// writer, so it went stale the first time a kubeconfig was rotated — and a
+    /// rotation *deletes* the superseded secret, so a stale reference resolves
+    /// to nothing or, far worse, hands a plugin material for an environment
+    /// that has moved on.
     ///
     /// Task 18b gave it a writer in `qa-environments`: every create and every
     /// credential-bearing update maintains it through the product's own
-    /// plugin. So it is current by construction for any row written since, and
-    /// it is the only one of the two that can carry more than one credential.
-    /// The fallback serves rows written before Task 18b, which still have
-    /// `credentials = []` and a live legacy reference; Task 19 re-derives the
-    /// column and drops both the column and this fallback.
+    /// plugin, so it is current by construction, and it is the only shape that
+    /// can carry more than one credential. Task 19 dropped the legacy column
+    /// and the fallback that read it (keyed by `sole_required_secret_key`).
+    /// Every reference is stored beside its key now, so *n* keyed references
+    /// need no disambiguation, and the one ambiguous shape — a single unkeyed
+    /// legacy reference for a plugin with no sole required secret — is refused
+    /// at the write, by `qa-environments`' `desugar_legacy_credential_pair`.
     ///
-    /// On the fallback path the **key** is the plugin's own —
-    /// `sole_required_secret_key` over `credential_schema()` — so no product
-    /// literal enters this gear. A schema with two required secrets resolves
-    /// to nothing and refuses the dispatch: one column holds one reference and
-    /// cannot say which of the two it is, and a guess would mount the wrong
-    /// material under the right name. On the preferred path the key is stored
-    /// beside the reference, so [`AMBIGUOUS_CREDENTIAL`] is unreachable for a
-    /// row with a populated `credentials` — *n* keyed references need no
-    /// disambiguation. The constant stays because the fallback still reaches
-    /// it.
-    ///
-    /// Neither path resolves plaintext. Both build
+    /// Nothing here resolves plaintext. Every slot is a
     /// [`CredentialSlot::reference_only`], which is the shape
     /// `prepare_run_access` is specified to work from.
     ///
     /// # Errors
     ///
     /// [`DomainError::Internal`] carrying fixed operator-facing text when the
-    /// environment names no product, its product names no resolvable plugin,
-    /// the resolver is absent, the legacy column cannot be keyed (fallback
-    /// path only), or the plugin itself refuses to prepare access. [`DomainError::Environments`] when the
-    /// environment cannot be read at all.
+    /// environment's product names no resolvable plugin, the resolver is
+    /// absent, or the plugin itself refuses to prepare access.
+    /// [`DomainError::Environments`] when the environment cannot be read at all.
     async fn plugin_dispatch(
         &self,
         ctx: &SecurityContext,
@@ -575,10 +561,11 @@ where
             .await
             .map_err(|error| environments_error(&error))?;
 
-        // `NoProduct` is not reachable from a row since Task 20b made
-        // `qa_environments.product_id` NOT NULL. The variant stays on
-        // `PluginUnavailable` because qa-catalog's resolver can still answer
-        // it -- a product row that names a plugin this binary does not carry.
+        // An environment with no product is unrepresentable since Task 20b made
+        // `qa_environments.product_id` NOT NULL, and the resolver
+        // (`infra::product_plugin`) reports every catalog-side failure as
+        // `Unresolvable`, so the `NoProduct` variant this port used to carry was
+        // constructible from nowhere and was deleted in the finding-#38 triage.
         let product_id = environment.product_id;
         let plugin = self
             .product_plugins
@@ -586,12 +573,13 @@ where
             .await
             .map_err(|unavailable| plugin_error(unavailable.detail()))?;
 
-        // **One source since Task 19** (ruling F-2): `credentials` is where an
+        // **One source since Task 19**: `credentials` is where an
         // environment's credential references live, and `m20260903_000012`
-        // populated it for every row that had a legacy one. The fallback that
-        // stood here derived a key from the plugin for a single unkeyed
-        // reference; there is no unkeyed reference any more, so
-        // `AMBIGUOUS_CREDENTIAL` is refused at the *write* now
+        // (folded into `migrations::m20260812_000001_initial` by the docs
+        // squash) populated it for every row that had a legacy one. The
+        // fallback that stood here derived a key from the plugin for a single
+        // unkeyed reference; there is no unkeyed reference any more, so
+        // the ambiguous shape is refused at the *write* now
         // (`desugar_legacy_credential_pair`) rather than at dispatch.
         let slots: Vec<CredentialSlot> = {
             environment
@@ -615,7 +603,7 @@ where
             (!environment.observed_attrs.is_empty()).then_some(&environment.observed_attrs);
         let handle = EnvironmentHandle {
             slots: &slots,
-            // Verbatim, per ruling D-9: the plugin reads its own keys out of
+            // Verbatim: the plugin reads its own keys out of
             // the operator-set configuration, and this gear does not know what
             // they are called.
             config: &environment.config,
@@ -630,7 +618,7 @@ where
                 // construction; `remote_message` is the sanctioned channel for text
                 // a *remote* sent, and `prepare_run_access` talks to no remote — it
                 // reads the handle. Nothing derived from a credential can reach a
-                // message here (**D12**).
+                // message here.
                 plugin_error(failure.detail.unwrap_or(ACCESS_REFUSED))
             })?;
 
@@ -667,12 +655,12 @@ where
     /// since Task 18 that source is the **product plugin** —
     /// `prepare_run_access` returns it, along with `E2E_VHP_BASE_URL` and
     /// `VPADM_BASE_DOMAIN`, from the environment's `observed_attrs` role
-    /// projections. This method reads neither `observed_namespace` nor
-    /// `vhp_base_url`; it reads `product_id`, `kubeconfig_credstore_ref`,
-    /// `config` and `observed_attrs`. (Corrected at the Phase E review — the
-    /// sentence still described the inline block Task 18 deleted, in a file
-    /// Task 19 greps to decide which columns are safe to drop.) The secrets
-    /// map handed to
+    /// projections. The environment read behind it (`plugin_dispatch`) uses
+    /// `product_id`, `credentials`, `config` and `observed_attrs`. The
+    /// `observed_namespace` and `vhp_base_url` columns that the inline block
+    /// Task 18 deleted used to read were dropped by Task 19, as was
+    /// `kubeconfig_credstore_ref`, the single-reference column this read
+    /// used before `credentials`. The secrets map handed to
     /// [`RunEnv::new`] is therefore **empty**, so `RP_API_KEY` is not bound.
     /// Recorded as an obligation for Task 16 and feature 2.7, not as a silent
     /// gap.
@@ -711,7 +699,7 @@ where
 
         // **The plugin's variables are LIFTED OUT, not copied.** They belong in
         // one place — the assembled environment, at the tier the platform
-        // decides (**D8**) — and `RunSpec::access`' own doc says the executor
+        // decides — and `RunSpec::access`' own doc says the executor
         // must not read this channel. Taking it makes that field *empty* rather
         // than merely ignored, so there is no second, untiered copy of a run's
         // environment for a future adapter to find and use.

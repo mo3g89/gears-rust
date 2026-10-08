@@ -115,6 +115,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{CanonicalError, DomainError};
+    use crate::domain::error::EgressFailure;
     use crate::domain::service::resources;
 
     #[test]
@@ -223,6 +224,108 @@ mod tests {
         .into();
         assert_eq!(ce.status_code(), 501);
         assert!(matches!(ce, CanonicalError::Unimplemented { .. }), "{ce:?}");
+    }
+
+    /// A relay that refused, timed out or could not be reached is **503**,
+    /// with the far side's own answer in the body.
+    ///
+    /// The status is the whole point: every one of these used to be
+    /// `DomainError::Internal`, which `opaque_internal` renders as
+    /// `500 An internal error occurred` with the relay's words discarded — so
+    /// an operator testing their own SMTP settings was told this gear broke,
+    /// for a wrong password on their own relay.
+    ///
+    /// **It shipped as 502 for one commit**, via an `Http::status_code`
+    /// override on this same category. That made the RFC-9457 `type` say
+    /// `service_unavailable` while the status line said `502`, so the override
+    /// was withdrawn — see `domain::error`'s `upstream_egress`. The assertion
+    /// below therefore pins the status **and** the category **and** the
+    /// absence of an override: a reintroduced override is exactly the
+    /// regression this test exists to catch, and `status_code()` alone would
+    /// report it as a plain status change.
+    #[test]
+    fn a_failed_relay_is_503_carrying_the_relays_own_answer() {
+        let ce: CanonicalError = DomainError::UpstreamEgress {
+            channel: "email".to_owned(),
+            endpoint: "smtp.corp.example".to_owned(),
+            failure: EgressFailure::Authentication,
+            detail: "permanent error (535): 5.7.8 Authentication credentials invalid".to_owned(),
+        }
+        .into();
+
+        assert_eq!(ce.status_code(), 503, "{ce:?}");
+        assert!(
+            matches!(ce, CanonicalError::ServiceUnavailable { .. }),
+            "the category is what the RFC-9457 type is derived from: {ce:?}"
+        );
+        assert_eq!(
+            ce.http_status_override(),
+            None,
+            "no transport override: the digit and the type must tell one story, which is why \
+             the 502 this replaced was withdrawn"
+        );
+        let rendered = format!("{ce:?}");
+        assert!(
+            rendered.contains("5.7.8"),
+            "the relay's own refusal must reach the caller, or this is the 500 it replaced: \
+             {rendered}"
+        );
+        // The allow-listed relay host is deployment configuration, and
+        // `ServiceUnavailableBuilder::with_detail`'s own caller contract says
+        // no hostnames. It is logged instead.
+        assert!(
+            !rendered.contains("smtp.corp.example"),
+            "the relay host must not be rendered into the body: {rendered}"
+        );
+    }
+
+    /// `POST /qa/v1/jira/bugs`' handler maps through `as_jira_error`, which
+    /// must pass a JIRA outage through as the same 503 the plain conversion
+    /// gives, naming the `jira` channel and its failure class.
+    #[test]
+    fn as_jira_error_answers_a_jira_outage_as_503_naming_the_channel_and_class() {
+        let wrapped = super::as_jira_error(DomainError::UpstreamEgress {
+            channel: "jira".to_owned(),
+            endpoint: "jira.corp.example".to_owned(),
+            failure: EgressFailure::Unreachable,
+            detail: "create issue: the gateway could not reach JIRA (HTTP 503)".to_owned(),
+        });
+
+        assert_eq!(wrapped.status_code(), 503, "{wrapped:?}");
+        assert!(
+            matches!(wrapped, CanonicalError::ServiceUnavailable { .. }),
+            "{wrapped:?}"
+        );
+        let rendered = format!("{wrapped:?}");
+        assert!(rendered.contains("jira"), "{rendered}");
+        assert!(
+            rendered.contains(EgressFailure::Unreachable.as_str()),
+            "the failure class must reach the caller: {rendered}"
+        );
+    }
+
+    /// The four failure kinds are told apart **structurally**, not by grepping
+    /// the rendered message.
+    ///
+    /// A test that read the kind out of the message text would pass whenever
+    /// some other check fired with a string that happened to contain the same
+    /// word — which is how a pass-either-way guard gets written. The
+    /// discriminator is an enum, so this compares the enum.
+    #[test]
+    fn the_four_egress_failure_kinds_are_distinct() {
+        let kinds = [
+            EgressFailure::Authentication,
+            EgressFailure::Timeout,
+            EgressFailure::Unreachable,
+            EgressFailure::Rejected,
+        ];
+        let phrases: std::collections::BTreeSet<&str> = kinds.iter().map(|k| k.as_str()).collect();
+        assert_eq!(
+            phrases.len(),
+            kinds.len(),
+            "two egress failure kinds render the same phrase, so an operator cannot tell \
+             them apart: {phrases:?}"
+        );
     }
 
     /// The three opaque variants, and the property that matters is not the
@@ -341,9 +444,10 @@ mod tests {
         assert_eq!(wrapped.status_code(), 404);
     }
 
-    /// **`as_jira_error` re-attributes `Validation` from the JIRA registry
-    /// path (Task 33's R85 pairing rule) to the JIRA resource, not the
-    /// test-result one the blanket `match` would otherwise pick.**
+    /// **`as_jira_error` re-attributes `Validation` from the JIRA registry path
+    /// (Task 33's together-or-neither `repo_id`/`plan_path` pairing rule) to the
+    /// JIRA resource, not the test-result one the blanket `match` would
+    /// otherwise pick.**
     ///
     /// Without this renderer, `domain::service::jira::JiraService::open_bugs`'s
     /// `plan_path` refusal would fall through to the blanket `match` and name

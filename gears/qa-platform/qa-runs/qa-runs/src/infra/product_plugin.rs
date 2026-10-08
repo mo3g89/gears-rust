@@ -8,11 +8,10 @@
 //! would make this gear **fail to boot** in a deployment where `qa-catalog`
 //! initialises after it, or is absent. Lazy resolution makes the same
 //! deployment fail only where the capability is actually needed — one run's
-//! dispatch, with the run's own error saying so — which is design §4.2's
-//! principle and the ruling (D-14) `qa-catalog` already applied to its
-//! types-registry client for the identical reason. `qa-environments`'
-//! `infra::product_plugin` is the same adapter for the same trait, arrived at
-//! the same way.
+//! dispatch, with the run's own error saying so — the same lazy resolution
+//! `qa-catalog` already applies to its types-registry client, for the identical
+//! reason. `qa-environments`' `infra::product_plugin` is the same adapter for
+//! the same trait, arrived at the same way.
 //!
 //! The hub lookup is a `TypeId` hash probe, so doing it per dispatch costs
 //! nothing measurable next to the catalog reads and the bundle builds around
@@ -70,8 +69,9 @@ impl ProductPluginPort for HubProductPluginResolver {
         };
 
         // `QaCatalogError`'s own message is not returned or persisted: the far
-        // side already logged which of the three causes it was (no such
-        // product, no plugin bound, plugin not registered), and this gear
+        // side already logged which of the two causes it was (no such
+        // product, or plugin not registered -- "no plugin bound" has been
+        // unrepresentable since Task 20a), and this gear
         // records the port's fixed text instead. `%error` here is a log line,
         // not a stored or published value — and it is qa-catalog's own
         // canonical error, never anything derived from a credential.

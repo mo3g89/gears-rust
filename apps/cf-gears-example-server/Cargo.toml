@@ -71,32 +71,35 @@ bss-pricing = ["dep:bss_pricing"]
 #
 # ADR-0001: this is what puts `kube`/`k8s-openapi` in a `--features
 # qa-platform` build, which it was not in before. That is the containment
-# PRODUCT-PLUGINS-DESIGN.md 4.1 amended ADR-0001 to: `kube` is named
+# ADR-0001's Amendments section records ("`qa-connector-k8s` is unconditional,
+# not feature-gated, and that is consistent with this ADR"): `kube` is named
 # unconditionally by exactly one qa-platform crate (`qa-connector-k8s`) and
 # reaches a binary only through a product plugin that links it. Not "by one
 # crate in the workspace" — `qa-environments` and `qa-runs` still name it
-# behind `platform-observation` and `argo` respectively, and `--features
+# behind `runner-secret` and `argo` respectively, and `--features
 # "$(cat gears/qa-platform/deploy/cargo-features.argo)"` puts all three in the
 # tree today. `qa-platform` is still off by default here (`default = []`), so
-# the waiver's "reachable only through a cargo feature that is off by default"
-# holds unchanged; what changed is that the Kubernetes edge now arrives with
-# the product plugin instead of with the separate `platform-observation` switch
-# below, which Task 19 deletes.
+# ADR-0001's Confirmation criterion (`kube` reaches `qa-runs`' tree only under
+# its `argo` feature) holds unchanged; what changed is that the Kubernetes
+# edge now arrives with the product plugin as well as through those two
+# switches (the `platform-observation` switch that used to be a third no
+# longer exists).
 #
-# The cost, recorded in ADR-0001's 2026-09-04 amendment rather than only here:
+# The cost, recorded in ADR-0001's Amendments section rather than only here:
 # because `qa-connector-k8s` has no feature gate and this list names the plugin
 # unconditionally, there is no longer any way to build the `qa-platform`
 # feature without `kube`. Before Phase C there was, and that build is what the
 # feature gate bought.
 qa-platform = ["dep:qa-environments", "dep:qa-catalog", "dep:qa-runs", "dep:qa-insights", "dep:qa-vhp-product-plugin", "dep:qa-vhi-product-plugin"]
 # The Argo Workflows execution adapter inside qa-runs. OFF unless named
-# explicitly, which is ADR-0001's 2026-08-27 waiver condition 1: "the
-# kube/k8s-openapi dependency is optional and reachable only through a cargo
-# feature that is off by default". `qa-runs?/argo` (with the `?`) does NOT pull
+# explicitly, which is what ADR-0001's Decision Outcome requires ("`kube` and
+# `k8s-openapi` enter `qa-runs`' tree only when `argo` is enabled").
+# `qa-runs?/argo` (with the `?`) does NOT pull
 # qa-runs in on its own -- naming this feature without `qa-platform` compiles
 # nothing extra -- which is the same shape as `k8s = ["chat-engine?/k8s"]`
-# above. Passed by gears/qa-platform/deploy/remote/sync.sh --argo through the
-# image's CARGO_FEATURES build arg, and by nothing else.
+# above. Passed by gears/qa-platform/deploy/remote/deploy-k8s.sh, which reads
+# the canonical list gears/qa-platform/deploy/cargo-features.argo (it names
+# `qa-runs-argo`) into the image's CARGO_FEATURES build arg, and by nothing else.
 qa-runs-argo = ["qa-runs?/argo"]
 # Decision D4's runner-`Secret` writer in qa-environments
 # (`infra::runner_secret_writer`) -- the only Kubernetes client left in that

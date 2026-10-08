@@ -26,7 +26,7 @@ use crate::domain::service::RegisteredProductPlugin;
 /// `PlatformDto` drop their credstore refs for the same reason. Do not add it
 /// back. The reference stays on the SDK model
 /// (`qa_catalog_sdk::TestRepository::credential_ref`), which is where the sync
-/// path reads it. Review finding #2.
+/// path reads it.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct TestRepositoryDto {
@@ -124,8 +124,8 @@ impl From<CreateTestRepoReq> for sdk::NewTestRepository {
 /// `default_branch` is mutable. It selects the branch used when a caller
 /// names none; it does not identify the repository's synced content, so
 /// changing it invalidates nothing already materialized. Changing `url` or
-/// `content_root` clears the synced state, so content reads reject until the
-/// next sync.
+/// `content_root` clears the synced state, so the next content read of a
+/// branch syncs it from the new location first.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
 pub struct UpdateTestRepoReq {
@@ -378,16 +378,12 @@ pub struct ProductDto {
     /// Full GTS instance id of the product plugin that owns this product's
     /// behaviour — the whole composed id, not the plugin's instance segment.
     ///
-    /// **Always present since Task 20a.** The column is `NOT NULL`
-    /// (`m20260903_000004`) and `From<sdk::Product>` wraps a `String`, so this
+    /// **Always present.** The column is `NOT NULL`
+    /// (`m20260903_000004`, folded into `migrations::m20260812_000002_initial`
+    /// by the docs squash) and `From<sdk::Product>` wraps a `String`, so this
     /// field is never `null` on the wire. The `Option` survives only so the
-    /// response shape does not change under clients that already parse it;
-    /// Task 22 is where the UI stops needing that.
-    ///
-    /// It used to read "`null` while the column is still nullable … such a
-    /// product has no resolvable plugin", which described a value this API can
-    /// no longer return — on a public response field, in rustdoc (review
-    /// finding IMPORTANT-4).
+    /// response shape stays stable for clients that already parse it, and
+    /// clients may treat the value as a non-null string.
     pub plugin_instance_id: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -418,18 +414,16 @@ pub struct CreateProductReq {
     pub key: String,
     pub description: String,
     pub folder: Option<String>,
-    /// Full GTS instance id of the owning product plugin. **Required since
-    /// Task 20a**: absent or `null` is a 400 from
+    /// Full GTS instance id of the owning product plugin. **Required**:
+    /// absent or `null` is a 400 from
     /// `TryFrom<CreateProductReq>` naming `GET /qa/v1/product-plugins`, and a
     /// bare instance segment, a type id, or an id no plugin registers is
     /// rejected with a 400 rather than stored as an id that resolves to
     /// nothing.
     ///
     /// It stays `Option` on the wire so the refusal can say *where to find a
-    /// valid id*, which serde's "missing field" cannot. The doc used to say
-    /// absence "leaves the product unbound, which is accepted only while the
-    /// column is nullable" — untrue as of the commit that added the refusal
-    /// twelve lines below it (review finding IMPORTANT-4).
+    /// valid id*, which serde's "missing field" cannot. Absence never leaves
+    /// the product unbound: it is always refused.
     ///
     /// A missing key deserializes to `None` unaided — see
     /// [`CustomPlanFileDto::plan_path`] for the measurement behind not
@@ -443,13 +437,14 @@ pub struct CreateProductReq {
 ///
 /// # Why the DTO keeps the `Option` when the domain type does not
 ///
-/// **D6** says every product names a plugin, and the domain type makes that
+/// Every product names a plugin (`qa_products.plugin_instance_id` is NOT NULL,
+/// DESIGN §3.8, "qa-catalog schema"), and the domain type makes that
 /// unrepresentable rather than validated — which is the shape this codebase
-/// prefers everywhere. But a *wire* field that is simply absent has to produce
-/// an answer an operator can act on, and serde's "missing field
+/// prefers everywhere. But a *wire* field that is simply absent has to produce an
+/// answer an operator can act on, and serde's "missing field
 /// `plugin_instance_id`" does not say where a value comes from. The shipped UI
-/// cannot send this field until Task 22, so that answer is the one a real
-/// caller will meet (finding FW-1).
+/// cannot send this field until Task 22, so that answer is the one a real caller
+/// will meet (finding FW-1).
 ///
 /// So the `Option` survives exactly one layer, and this conversion is where it
 /// dies, with the message that names `GET /qa/v1/product-plugins`.
@@ -1109,7 +1104,7 @@ impl From<sdk_plugin::FieldDesc> for FieldDescDto {
 ///
 /// `credential_schema` renders the environment credential form;
 /// `observed_schema` describes what observing an environment of this product
-/// can yield, and which of those values claim a platform role. Tasks 21-22
+/// can yield, and which of those values claim a platform role. The UI
 /// render both.
 ///
 /// Note what is **not** here: no failure class, no health vocabulary, and no
@@ -1300,7 +1295,7 @@ mod product_plugin_dto_tests {
         };
 
         let err = sdk::NewProduct::try_from(req)
-            .expect_err("a product that names no plugin must be refused (D6)");
+            .expect_err("a product that names no plugin must be refused");
 
         let DomainError::Validation { field, message } = err else {
             panic!("expected a validation error, got {err:?}");

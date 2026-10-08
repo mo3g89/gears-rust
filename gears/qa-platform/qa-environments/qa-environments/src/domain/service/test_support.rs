@@ -45,7 +45,7 @@ pub(super) fn environment(id: Uuid, available: bool) -> Environment {
         is_default: false,
         version_detect_error: None,
         version_detected_at: None,
-        // Nor through the plugin path (Task 14). Every value is the one a
+        // Nor through the plugin path. Every value is the one a
         // never-observed environment really holds -- which is also what each
         // column defaults to.
         credentials: Vec::new(),
@@ -104,6 +104,15 @@ impl EnvironmentsRepository for MockEnvironmentsRepository {
         id: Uuid,
     ) -> Result<Option<Environment>, DomainError> {
         Ok(self.environment.as_ref().filter(|p| p.id == id).cloned())
+    }
+
+    async fn owner_tenant<C: DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &AccessScope,
+        _id: Uuid,
+    ) -> Result<Option<Uuid>, DomainError> {
+        unimplemented!("not exercised by the service-layer unit tests")
     }
 
     async fn list_page<C: DBRunner>(

@@ -383,7 +383,7 @@ fn the_contract_reserves_the_four_target_facts() {
     assert!(reserved.contains(VINFRA_PASSWORD_FILE_VAR));
     assert!(
         !reserved.contains(BASE_URL_VAR),
-        "parity with VHP's E2E_VHP_BASE_URL, which decision D3 deliberately leaves overridable"
+        "parity with VHP's E2E_VHP_BASE_URL, which is deliberately overridable by a run parameter"
     );
 }
 

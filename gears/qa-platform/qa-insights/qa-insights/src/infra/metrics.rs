@@ -255,7 +255,7 @@ pub fn build_default_adapter() -> Arc<QaInsightsMetricsMeter> {
 /// that the call site calls the port.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(crate) mod probe {
+pub mod probe {
     use std::sync::Arc;
 
     use opentelemetry::metrics::MeterProvider;

@@ -90,8 +90,7 @@
           justify, not a faithful expression of "the target and nothing
           else": egress to 0.0.0.0/0 EXCEPT the cluster's OWN pod and
           Service CIDRs (`.Values.argo.podCidr` / `.Values.argo.serviceCidr`
-          -- fix round 6), plus loopback and link-local. Full reasoning is
-          in task-8-report.md.
+          -- fix round 6), plus loopback and link-local. The reasoning follows.
 
           FIX ROUND 6, REPLACING A WRONG FIRST CUT: the original except list
           excluded ALL of RFC1918 (every private address), reasoned as "the
@@ -107,7 +106,7 @@
           stroke: a pod carrying this same label could reach an arbitrary
           public address but not a private one this platform exists to
           test against -- measured directly on a live cluster, not
-          assumed. See task-8-report.md for the measurement; it does not
+          assumed. The measurement does not
           belong in this file, which states the property the fix
           establishes, not the specific addresses that proved the prior
           rule wrong.

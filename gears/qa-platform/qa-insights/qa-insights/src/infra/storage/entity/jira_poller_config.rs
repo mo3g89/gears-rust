@@ -27,10 +27,10 @@ pub struct Model {
     /// (`manager/src/services/jira_poller.rs:26-27`) — the clamp belongs in the
     /// domain, not here and not in the DDL.
     pub poll_interval_seconds: i64,
-    /// The global gate on relaunching a run when a bug resolves. Legacy needs
-    /// *both* this and a new build (`jira_poller.rs:61-70`, D8). Turning it off
-    /// does not stop bugs closing — see
-    /// [`super::jira_bug::Model::resolved_at`].
+    /// The global gate on relaunching a run when a bug resolves. Legacy needs *both*
+    /// this and a new build (`jira_poller.rs:61-70`; the new-build gate,
+    /// `JiraPollerService::maybe_rerun`). Turning it off does not stop bugs closing —
+    /// see [`super::jira_bug::Model::resolved_at`].
     pub auto_rerun_on_resolve: bool,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,

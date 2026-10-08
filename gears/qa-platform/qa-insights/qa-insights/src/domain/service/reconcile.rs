@@ -67,6 +67,26 @@
 //!    needs a way to record "ingested, zero rows", which is a schema change no
 //!    task owns.
 //!
+//!    **This is not only a cost, it is a hazard, and the notification
+//!    producer had to be built around it.** Such a run reaches
+//!    [`ReconcileService::reproject`] on every pass, so it reaches the
+//!    run-completed notification on every pass, and it can never be
+//!    suppressed by a claim seeded from `qa_test_results` because it is not
+//!    in that table. 1095 of the dev stand's 2326 finished runs were that
+//!    shape on 2026-09-29. `m20260929_000004_run_completed_notification_cutoff`
+//!    is what makes them silent; see `reproject`'s own doc.
+//!
+//!    **The pass is silent but it was not free, and that was a second
+//!    hazard** (final review, finding 6): every pass repeated two cross-gear
+//!    reads that could produce nothing and appended another audit row saying
+//!    what the previous pass already said — unbounded, on a tenant whose
+//!    sweep has wedged and whose floor therefore never moves.
+//!    `NotifyService::already_decided` now ends such a pass on one indexed
+//!    claim read. What is still repeated per tick is the *projection* — the
+//!    `get_run`, the empty result read and the delete-nothing this item
+//!    already priced — and the cutoff read for a run that is history, which
+//!    deliberately claims nothing.
+//!
 //! ## And one behaviour legacy could not have: a tenant's backfill can wedge
 //!
 //! Recorded beside the two above because it is the same class of statement — a
@@ -115,9 +135,14 @@
 //!
 //! Per tenant:
 //!
-//! 1. Read the watermark. The floor is `watermark - lookback`, or the beginning
-//!    of time when the mark is unset.
-//! 2. `list_runs_finished_since(floor, page_size)`, oldest first.
+//! 1. Read the watermark row. The floor is `watermark - lookback`, or the
+//!    beginning of time when the mark is unset. The row also carries a
+//!    [`SweepCursor`] — the `(finished_at, id)` key the *previous* pass stopped
+//!    on, if it stopped short of catching up — and the walk starts there
+//!    instead, but only when that cursor vouches for this pass' window — its
+//!    recorded floor at or before this pass' floor, its position at or after
+//!    it (`first_page_of`'s honour rule). See step 6.
+//! 2. `list_runs_finished_since(cursor, page_size)`, oldest first.
 //! 3. Diff the page's run ids against `ingested_run_ids_between(floor, ...)`.
 //! 4. Backfill each missing run **through the same projection the rebuild
 //!    endpoint uses** — [`Self::reproject`], which reads via
@@ -130,6 +155,17 @@
 //!    path, only as a bug in the one path both take.
 //! 5. Advance the watermark to the newest `finished_at` that was successfully
 //!    accounted for, **and only that far**.
+//! 6. Persist the key of that same run as the [`SweepCursor`], or **erase** the
+//!    cursor if the pass caught up.
+//!
+//! **Step 6 is finding #122's fix, and it exists because step 1's floor sits
+//! behind the mark.** A lookback window holding more runs than
+//! `MAX_PAGES_PER_SWEEP * page_size` lets a pass spend its whole budget without
+//! reaching the mark, where the step-5 advance is a monotonic no-op — so before
+//! the cursor, the next tick derived the same floor and repeated the same work
+//! forever. [`MAX_PAGES_PER_SWEEP`] carries the whole account, including what
+//! keeps the cursor from becoming a second watermark and what it costs the
+//! stall alarm.
 //!
 //! **Step 5 stops at the first failure.** The page is oldest-first, so on a
 //! failure the sweep advances to the last run *before* it and returns. Skipping
@@ -297,9 +333,12 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::ports::RunsReader;
-use crate::domain::repos::{ResultsRepository, WatermarkKind, WatermarkRepository};
+use crate::domain::ports::{MAX_FINISHED_RUNS_PAGE, RunsReader};
+use crate::domain::repos::{
+    ResultsRepository, SweepCursor, WatermarkKind, WatermarkRepository, Watermarks,
+};
 use crate::domain::service::ingest::IngestService;
+use crate::domain::service::notify::RunCompletionNotifier;
 use crate::domain::service::{actions, refuse_scope_beyond_tenant, resources};
 use crate::domain::system_actor::{self, SystemActorSite, TenantBound};
 
@@ -316,9 +355,76 @@ const DIFF_UPPER_SLACK: Duration = Duration::seconds(1);
 /// for why it must), and "until it catches up" over a gear that has been wedged
 /// for days is unbounded work on a 5-minute ticker. This bounds it: at the
 /// default `reconcile_page_size` of 200 a single pass still walks 10,000 runs,
-/// far more than any real backlog between two ticks, and a pass that spends the
-/// whole budget still leaves the mark further forward than it found it — so the
-/// next tick resumes rather than repeating.
+/// far more than any real backlog between two ticks.
+///
+/// # The budget can be spent **before** the mark, which is what made this a
+/// # wedge — and what the resume cursor now ends
+///
+/// The walk starts at `floor = mark - lookback`, deliberately *behind* the
+/// mark, so a lookback window holding more than
+/// `MAX_PAGES_PER_SWEEP * page_size` runs lets a pass spend every page without
+/// ever reaching past the mark. Every one of those pages is real work — runs
+/// read, a diff run against them — and [`WatermarkRepository::advance`] is
+/// monotonic, so handing it an instant at or behind the mark succeeds and
+/// changes nothing. Second review, finding #122.
+///
+/// **Until this change the next tick derived the same floor and did it again,
+/// forever.** The window is historical data that never drains on its own, so
+/// nothing in the sweep could ever clear it; the remedy was an operator's — a
+/// `POST /qa/v1/insights/rebuild` over the window, or a narrower
+/// `reconcile_lookback_seconds`.
+///
+/// It is now the sweep's. A pass that ends short of catching up persists the
+/// `(finished_at, id)` key of the last run it consumed as a
+/// [`SweepCursor`], and the next tick resumes from it instead of re-deriving
+/// the floor — so a window of any size drains in `ceil(window / budget)` ticks.
+/// Three properties keep that from quietly becoming a second watermark, and
+/// each is a test:
+///
+/// * **It is honoured only where it vouches for the window.** The cursor
+///   records the floor its pass walked from, and [`ReconcileService::sweep`]
+///   honours it only when that floor is at or before the floor it derives and
+///   the cursor's position is at or after it — so `[floor, at]` is a range the
+///   stored pass consumed. A floor that moved forward during a drain keeps the
+///   cursor; a wider-lookback reader's earlier floor discards it. The cost —
+///   the effective lookback shrinks while a drain moves the mark — is on
+///   `first_page_of`.
+/// * **A caught-up pass erases it.** The tick after a drain finishes is back to
+///   `mark - lookback` and re-walks the whole lookback, which is how a run
+///   *written* with a `finished_at` behind the cursor is still picked up — the
+///   reason the floor sits behind the mark in the first place.
+/// * **The mark's monotonicity is untouched.** The cursor is a second, separate
+///   column with the opposite rule (it may move backwards and be erased), not a
+///   relaxation of [`WatermarkRepository::advance`].
+///
+/// # The alarm reads the cursor, and a healthy drain does not escalate
+///
+/// [`warn_if_budget_spent`] still fires on such a pass and
+/// [`ReconcileOutcome::caught_up`] still stays `false`, because the walk really
+/// did stop with more to read. A pass draining a window that sits behind the
+/// mark moves neither the mark nor `caught_up`, so `crate::gear::stall_of`
+/// could not tell it from a wedge and escalated a healthy tenant to `ERROR`
+/// once the drain needed more than `crate::gear::WEDGED_PASSES_BEFORE_ERROR`
+/// ticks. Finding #122's residual B closed that: a pass whose
+/// [`ReconcileOutcome::sweep_cursor_at`] rises past the highest cursor that
+/// ticker has seen under the same mark is progress, and the `ERROR` now means
+/// the cursor high-water has stopped rising.
+///
+/// **That idea was measured and rejected twice before it shipped**, and both
+/// objections are answered rather than dismissed — `crate::gear::stall_of`'s
+/// doc carries the account. In one line each: the shared row is read through
+/// one ticker's own consecutive outcomes and high-watered, so another
+/// replica's oscillating writes count as progress at most once; and a replica
+/// wedge re-walks the same ground every pass and so writes the same cursor
+/// every pass, which reads as standing still.
+/// [`reconcile_tests::a_replica_wedge_on_mixed_lookbacks_still_escalates`](reconcile_tests)
+/// builds that wedge from real sweeps — two replicas on different lookbacks
+/// whose older band is wider than a budget, so neither can honour the other's
+/// cursor — and drives it through the real `stall_of` per replica.
+///
+/// A late-written run older than the lookback that a mark-advancing drain has
+/// shrunk (see `first_page_of`, "The known cost") is not something any pass
+/// reports; `POST /qa/v1/insights/rebuild` over the window is the remedy.
 const MAX_PAGES_PER_SWEEP: u32 = 50;
 
 /// How many pages one [`ReconcileService::rebuild`] will walk before answering
@@ -443,9 +549,12 @@ pub struct ReconcileOutcome {
     /// indistinguishable from success to everyone who is not reading the log at
     /// that moment.
     ///
-    /// Always `None` from [`ReconcileService::reconcile_once`]: the sweep
-    /// records where it got to in the watermark, which is a durable resume point
-    /// rather than one a caller has to carry.
+    /// Always `None` from [`ReconcileService::reconcile_once`]: the sweep's
+    /// resume points are durable rather than carried by a caller. The mark is
+    /// one of them, and since finding #122 the
+    /// [`SweepCursor`] is the other — which is the case the mark cannot serve,
+    /// because a pass that spends its budget behind its own mark advances it
+    /// nowhere. See [`MAX_PAGES_PER_SWEEP`].
     pub resume_from: Option<OffsetDateTime>,
     /// Whether the sweep stopped early on a failed backfill. `true` means the
     /// page was not fully consumed and the next sweep resumes at the gap.
@@ -467,6 +576,41 @@ pub struct ReconcileOutcome {
     /// port's rather than the run's: a run returned with no `finished_at` from a
     /// finished-since listing. It is still the run to look at.
     pub stopped_at_run: Option<Uuid>,
+    /// Where this tenant's within-window resume cursor stands **after** this
+    /// pass, whether or not this pass is what put it there. `None` means the
+    /// row holds no cursor — the steady state, and what a caught-up pass
+    /// leaves.
+    ///
+    /// # An input to `crate::gear::stall_of`, through a high-water
+    ///
+    /// A tenant draining a lookback window wider than one pass' page budget
+    /// moves neither [`Self::watermark_at`] (the runs are behind the mark) nor
+    /// [`Self::caught_up`], so on those two fields alone it is a wedge. This
+    /// field tells them apart: **a drain moves this instant forward pass after
+    /// pass; a wedge does not.** `stall_of` counts a pass under a standing mark
+    /// as progress when this instant rises past
+    /// `crate::gear::TenantProgress::cursor_high_water`, and the stall `WARN`
+    /// and escalation `ERROR` both carry it.
+    ///
+    /// It used to be documented here as something that **must not** become an
+    /// input, for two reasons that still hold and that the high-water answers:
+    ///
+    /// 1. **It is shared state.** Two replicas sweep one tenant under
+    ///    `NoopLeaderElector` and write one cursor row, so this instant can
+    ///    move because the *other* replica moved it, and can alternate between
+    ///    two positions. Compared against the *highest* value one ticker has
+    ///    seen under the current mark rather than the previous pass', an
+    ///    oscillation counts as progress at most once.
+    /// 2. **A pass-local "did I advance" is `true` on every pass of a genuine
+    ///    wedge** in which each pass does real work. The comparison is across
+    ///    consecutive passes, not within one: a replica wedge re-walks the same
+    ///    ground and writes the same cursor every pass, which reads as standing
+    ///    still.
+    ///    `reconcile_tests::a_replica_wedge_on_mixed_lookbacks_still_escalates`
+    ///    is that wedge, built and measured, and
+    ///    `crate::gear::tests::the_resume_cursor_high_water_is_an_input_to_stall_of`
+    ///    is what goes red if the cursor is taken out of the decision again.
+    pub sweep_cursor_at: Option<OffsetDateTime>,
 }
 
 impl ReconcileOutcome {
@@ -501,8 +645,18 @@ impl ReconcileOutcome {
 struct PageStep {
     /// What this page scanned and backfilled.
     outcome: ReconcileOutcome,
-    /// The newest instant this page fully accounted for, if any.
-    advance_to: Option<OffsetDateTime>,
+    /// The `(finished_at, id)` key of the last run this page **fully
+    /// accounted for**, if any.
+    ///
+    /// Two things read it and both need the whole key rather than the instant:
+    /// [`Walk::advance_to`] takes its `finished_at` for the watermark, and
+    /// [`ReconcileService::sweep`] persists it whole as the
+    /// [`SweepCursor`] the next tick resumes from. It used to be an
+    /// `Option<OffsetDateTime>` named `advance_to`, and widening it here rather
+    /// than adding a second field beside it is deliberate: the walk pages on
+    /// one keyset and this module is not going to acquire a second notion of
+    /// where it is.
+    consumed: Option<FinishedRunCursor>,
     /// Where the next page starts, or `None` to end the walk.
     next_cursor: Option<FinishedRunCursor>,
     /// This page came back short of `page_size` with no gap in it: qa-runs has
@@ -515,11 +669,9 @@ struct PageStep {
 struct Walk {
     /// Every page's contribution so far.
     outcome: ReconcileOutcome,
-    /// The newest instant any page fully accounted for. Separate from
-    /// [`ReconcileOutcome::watermark_at`], which is where the stored mark
-    /// *ends up* — the two differ whenever this one is at or behind the mark,
-    /// since [`WatermarkRepository::advance`] is monotonic.
-    advance_to: Option<OffsetDateTime>,
+    /// The key of the newest run any page fully accounted for. See
+    /// [`PageStep::consumed`] for why it is the whole key.
+    consumed: Option<FinishedRunCursor>,
 }
 
 impl Walk {
@@ -533,19 +685,72 @@ impl Walk {
             self.outcome.stopped_at_gap = true;
             self.outcome.stopped_at_run = step.outcome.stopped_at_run;
         }
-        // Pages walk forward, so a later page's instant is the later one.
-        if step.advance_to.is_some() {
-            self.advance_to = step.advance_to;
+        // Pages walk forward, so a later page's key is the later one.
+        if step.consumed.is_some() {
+            self.consumed = step.consumed;
         }
         step.next_cursor
+    }
+
+    /// The newest instant this walk fully accounted for, for
+    /// [`WatermarkRepository::advance`].
+    ///
+    /// Separate from [`ReconcileOutcome::watermark_at`], which is where the
+    /// stored mark *ends up* — the two differ whenever this one is at or behind
+    /// the mark, since that advance is monotonic. Derived from
+    /// [`Self::consumed`] rather than tracked beside it, so the instant the
+    /// mark moves to and the key the cursor records cannot name two different
+    /// runs.
+    fn advance_to(&self) -> Option<OffsetDateTime> {
+        self.consumed.map(FinishedRunCursor::at)
+    }
+
+    /// The [`SweepCursor`] this pass leaves behind, given the floor it walked
+    /// from, or `None` when it has nothing durable to say.
+    ///
+    /// `None` on a caught-up pass is the **reset** that keeps this from being a
+    /// second watermark — the caller turns it into an erase. `None` on a pass
+    /// that consumed nothing is a different `None`, and the caller treats it
+    /// differently: see [`ReconcileService::sweep`].
+    fn resume_cursor(&self, floor: OffsetDateTime) -> Option<SweepCursor> {
+        if self.outcome.caught_up {
+            return None;
+        }
+        self.consumed.and_then(|at| {
+            // `after_id` is `Some` for every cursor `consume_page` builds — it
+            // constructs them with `FinishedRunCursor::after` — and `and_then`
+            // rather than an `expect` because a resume point standing on an
+            // assumption is exactly the shape that stranded three days of data
+            // once already. Answering `None` costs one re-derivation of the
+            // floor, which is the sweep's ordinary behaviour.
+            at.after_id().map(|run_id| SweepCursor {
+                window_floor: floor,
+                at: at.at(),
+                run_id,
+            })
+        })
     }
 }
 
 /// The page budget is spent and the walk is ending short of caught up.
 ///
-/// A WARN rather than an error: the mark still moved as far as this pass got,
-/// so the next tick resumes rather than repeating — which is exactly the
-/// property the single-page sweep did not have.
+/// A WARN rather than an error, because the ordinary case of this is a large
+/// backlog being worked through: the mark moves as far as this pass got and
+/// the next tick resumes from there, which is exactly the property the
+/// single-page sweep did not have.
+///
+/// **The mark is not always what carries the progress**, and this doc said it
+/// was until finding #122: a lookback window wider than the whole budget lets a
+/// pass spend every page *behind* its own mark, where the advance is a
+/// monotonic no-op. What the next tick resumes from in that case is the
+/// [`SweepCursor`] this pass persists, not the mark — see
+/// [`MAX_PAGES_PER_SWEEP`]. Either way the next tick continues rather than
+/// repeating, which is the property the single-page sweep did not have and
+/// which the cursor is what makes true in general.
+///
+/// The line stays, and the walk still leaves [`ReconcileOutcome::caught_up`]
+/// `false`, because "this pass did not finish" is a fact an operator should be
+/// able to see whether or not the next one picks it up.
 fn warn_if_budget_spent(
     tenant: TenantBound,
     page_number: u32,
@@ -561,8 +766,77 @@ fn warn_if_budget_spent(
         scanned,
         %cursor,
         "the sweep spent its page budget before catching up; the mark advances as far as this \
-         pass got and the next tick resumes from there",
+         pass got, the resume cursor records where it stopped, and the next tick continues \
+         from there",
     );
+}
+
+/// Where [`ReconcileService::sweep`]'s first page starts: after the stored
+/// resume cursor when it vouches for this pass' window, and at `floor`
+/// otherwise.
+///
+/// # The honour rule: `window_floor <= floor && at >= floor`
+///
+/// A stored cursor `{window_floor: F_w, at: K}` records that its pass consumed
+/// every run in `[F_w, K]` that qa-runs listed — the keyset walk is
+/// oldest-first and stops at the first failure, so there is no hole inside
+/// that range. A pass whose own floor sits inside it (`F_w <= floor <= K`) is
+/// about to walk `[floor, ..)`, and `[floor, K]` is a subset of what the cursor
+/// vouches for, so resuming strictly after `K` skips nothing the stored pass
+/// did not consume. The cursor this pass then writes carries **its own**
+/// floor, which is still truthful: it names a subset of the range covered.
+///
+/// Both halves are load-bearing:
+///
+/// * **`window_floor <= floor`.** A cursor says nothing about the band before
+///   its own floor. A replica carrying a *wider* lookback (an older floor)
+///   must never honour a narrower replica's cursor, or it would step over
+///   `[floor, F_w)` — the late-arrival band its wider lookback exists for.
+/// * **`at >= floor`.** A cursor standing behind this pass' floor names no
+///   position inside this window.
+///
+/// **This was an equality test until the third review pass (finding #122,
+/// residual A).** Equality discarded the cursor on the very tick a drain moved
+/// the mark, so a drain that crossed the mark re-walked the lookback from the
+/// new floor — work its previous pass had done — and a window wider than the
+/// budget took extra ticks to drain for no coverage gained.
+///
+/// # The known cost: the effective lookback shrinks during a mark-advancing drain
+///
+/// While a drain is resuming across a moving floor, no pass re-reads
+/// `[floor, K]`. A run *written* into that band after the stored pass listed it
+/// is therefore not seen until the drain catches up, erases the cursor, and the
+/// next tick walks from `mark - lookback` again — by which point the mark has
+/// moved on by however far the drain carried it. A late run older than
+/// `mark_at_catch_up - lookback` is outside every later window and is recovered
+/// only by `POST /qa/v1/insights/rebuild`. That is the price of not
+/// re-walking: the equality rule re-read `[floor, K]` on every tick the mark
+/// moved, and paid for that coverage with a repeated walk each time.
+///
+/// Without a cursor the first page takes the inclusive instant bound: the mark
+/// names a run this gear has already consumed once, and re-reading it is how a
+/// run written after an earlier pass' cutoff is still picked up. With one, the
+/// pass resumes strictly after the last run the previous pass consumed — the
+/// same `after` bound every page within a pass already uses.
+fn first_page_of(
+    tenant: TenantBound,
+    floor: OffsetDateTime,
+    stored: Option<SweepCursor>,
+) -> FinishedRunCursor {
+    let Some(stored) = stored.filter(|stored| stored.window_floor <= floor && stored.at >= floor)
+    else {
+        return FinishedRunCursor::starting_at(floor);
+    };
+    debug!(
+        tenant_id = %tenant.get(),
+        %floor,
+        stored_floor = %stored.window_floor,
+        resume_at = %stored.at,
+        resume_run = %stored.run_id,
+        "a previous pass consumed this window up to its cursor; resuming after it rather than \
+         re-walking from the floor",
+    );
+    FinishedRunCursor::after(stored.at, stored.run_id)
 }
 
 /// The reconcile sweep.
@@ -576,6 +850,13 @@ pub struct ReconcileService<R, W> {
     watermarks: W,
     runs: Arc<dyn RunsReader>,
     ingest: Arc<IngestService<R>>,
+    /// The run-completed notification producer — see [`Self::reproject`]'s
+    /// "Notification, after the commit".
+    ///
+    /// `Arc<dyn …>` rather than a third type parameter: the notification
+    /// repository is a type this module never otherwise mentions, and
+    /// [`RunCompletionNotifier`]'s own doc carries why the seam is a trait.
+    notifier: Arc<dyn RunCompletionNotifier>,
     /// Used by [`Self::rebuild`] and by nothing else in this type.
     ///
     /// The sweep does **not** touch it, and that asymmetry is the module's
@@ -587,6 +868,12 @@ pub struct ReconcileService<R, W> {
     /// and serves every resource type.
     policy_enforcer: PolicyEnforcer,
     lookback: Duration,
+    /// The page both walks ask qa-runs for, **already bounded by
+    /// [`MAX_FINISHED_RUNS_PAGE`]** — see [`Self::new`].
+    ///
+    /// That bound is what makes `page.len() >= self.page_size` a sound test for
+    /// "the listing came back capped": the comparison is only meaningful while
+    /// the number on the right is one qa-runs will actually honour.
     page_size: u32,
 }
 
@@ -601,23 +888,55 @@ where
     R: ResultsRepository + Clone + 'static,
     W: WatermarkRepository + Clone + 'static,
 {
-    /// # Eight parameters, and a params struct was the rejected alternative
+    /// # Nine parameters, and a params struct was the rejected alternative
     ///
     /// `clippy::too_many_arguments` fires at eight, and the fix it implies — a
     /// `ReconcileDeps` struct — would have exactly one construction site
     /// ([`crate::domain::service::AppServices::new`]) which would unpack it
     /// again immediately. What such a struct buys elsewhere is protection
     /// against transposing two arguments of the same type, and there is none to
-    /// buy here: all eight types are distinct (`Arc<DBProvider<_>>`, `R`, `W`,
-    /// `Arc<dyn RunsReader>`, `Arc<IngestService<R>>`, `PolicyEnforcer`,
-    /// `Duration`, `u32`), so any transposition is a compile error rather than a
-    /// silent swap. `expect` rather than `allow`, so that if a later task
-    /// shortens the list the attribute itself goes red.
+    /// buy here: all nine types are distinct (`Arc<DBProvider<_>>`, `R`, `W`,
+    /// `Arc<dyn RunsReader>`, `Arc<IngestService<R>>`,
+    /// `Arc<dyn RunCompletionNotifier>`, `PolicyEnforcer`, `Duration`, `u32`),
+    /// so any transposition is a compile error rather than a silent swap.
+    /// `expect` rather than `allow`, so that if a later task shortens the list
+    /// the attribute itself goes red.
+    ///
+    /// **It said "eight" until this task added `notifier`**, and the count is
+    /// corrected here rather than left to read as the reviewed number: a doc
+    /// that miscounts its own signature is how the next addition gets waved
+    /// through.
     #[expect(
         clippy::too_many_arguments,
-        reason = "all eight parameter types are distinct, so a params struct would guard against \
+        reason = "all nine parameter types are distinct, so a params struct would guard against \
                   nothing the compiler does not already catch"
     )]
+    ///
+    /// # `page_size` is bounded here, and this is not a duplicate of the
+    /// # configuration's own clamp
+    ///
+    /// [`crate::config::QaInsightsConfig::effective_reconcile_page_size`] is
+    /// where an **operator** is told their number was lowered: it clamps once,
+    /// at `init`, and says so at `WARN`. This is where the *type* stops being
+    /// able to hold a number qa-runs will not honour, silently, because the
+    /// warning already happened and a second one per construction would be
+    /// noise.
+    ///
+    /// They are one rule because they are one constant. Both walks in this
+    /// module decide "was that page capped?" by comparing the rows they got
+    /// against [`Self::page_size`], and that comparison is *wrong* — not
+    /// approximate, wrong, and silently so — for any value above
+    /// [`MAX_FINISHED_RUNS_PAGE`]: qa-runs answers with the cap and says
+    /// nothing, the walk reads a full page as a short one, sets `caught_up`,
+    /// and `crate::gear::stall_of` then declines to escalate because it
+    /// requires `!caught_up`. Bounding the stored value rather than each
+    /// comparison means a third comparison added later cannot forget.
+    ///
+    /// **It is floored at one for the same reason** (finding #122's residual
+    /// C): a page of zero rows is empty, an empty listing is `caught_up`, and
+    /// the sweep would report itself caught up on nothing, every tick, in
+    /// silence. The configuration's clamp raises `0` and warns; this makes a
+    /// `0` unrepresentable in a constructed service.
     #[must_use]
     pub const fn new(
         db: Arc<DBProvider<DomainError>>,
@@ -625,6 +944,7 @@ where
         watermarks: W,
         runs: Arc<dyn RunsReader>,
         ingest: Arc<IngestService<R>>,
+        notifier: Arc<dyn RunCompletionNotifier>,
         policy_enforcer: PolicyEnforcer,
         lookback: Duration,
         page_size: u32,
@@ -635,9 +955,17 @@ where
             watermarks,
             runs,
             ingest,
+            notifier,
             policy_enforcer,
             lookback,
-            page_size,
+            // `if` rather than `u32::min`/`clamp`, which are not `const`.
+            page_size: if page_size == 0 {
+                1
+            } else if page_size < MAX_FINISHED_RUNS_PAGE {
+                page_size
+            } else {
+                MAX_FINISHED_RUNS_PAGE
+            },
         }
     }
 
@@ -645,15 +973,30 @@ where
     ///
     /// # Errors
     ///
-    /// [`DomainError::Internal`] when qa-runs cannot be listed at all — the
-    /// sweep did nothing and the watermark did not move. A *per-run* backfill
-    /// failure is **not** an error: it stops the sweep, leaves the watermark
-    /// short of the gap, and is reported as
+    /// [`DomainError::Internal`] when qa-runs cannot be listed. **The watermark
+    /// still carries whatever earlier pages of the same pass earned** — the
+    /// walk persists before it propagates, so an error here means "this pass
+    /// did not finish", not "this pass did nothing"; see [`Self::sweep`].
+    /// A failure on the *first* page is the case where those come to the same
+    /// thing, and the mark is untouched.
+    ///
+    /// A *per-run* backfill failure is **not** an error: it stops the sweep,
+    /// leaves the watermark short of the gap, and is reported as
     /// [`ReconcileOutcome::stopped_at_gap`], because the sweep did useful work
     /// and the caller is a ticker that should log and try again rather than
     /// treat it as a fault.
     ///
-    /// [`DomainError::Database`] from the watermark read or advance.
+    /// [`DomainError::Database`] from the watermark read or advance. A failed
+    /// advance takes precedence over a failed listing, which is the only way
+    /// the two can be reported at once.
+    ///
+    /// **Every `Err` from here is still reported and still escalates**:
+    /// `crate::gear::reconcile_pass` routes it through the same
+    /// `report_reconcile_outcome` an `Ok` goes through, so a tenant whose
+    /// sweep fails pass after pass reaches `ERROR` on the same
+    /// `WEDGED_PASSES_BEFORE_ERROR` schedule a wedged one does. It handled this
+    /// arm with a bare `warn!` until the second review's #123, which meant a
+    /// permanent failure could never raise anything above `WARN`.
     pub async fn reconcile_once(
         &self,
         tenant: TenantBound,
@@ -671,6 +1014,12 @@ where
             stopped_at_gap = outcome.stopped_at_gap,
             caught_up = outcome.caught_up,
             watermark_at = ?outcome.watermark_at,
+            // Beside `watermark_at` for the reason `result_rows_written` sits
+            // beside `backfilled`: a pass with an unmoved mark and a
+            // *forward-moving* cursor is a large window draining, and a pass
+            // with both standing still is wedged. One of those needs an
+            // operator and the other does not.
+            sweep_cursor_at = ?outcome.sweep_cursor_at,
             // `Debug`, not `Display`: the field is an `Option` and a `None`
             // rendered as an empty string is indistinguishable from a missing
             // field in a structured sink.
@@ -799,9 +1148,11 @@ where
     /// is listed. The whole measurement is on
     /// [`refuse_scope_beyond_tenant`](crate::domain::service::refuse_scope_beyond_tenant).
     ///
-    /// [`DomainError::Internal`] when qa-runs cannot be listed at all. A
-    /// *per-run* failure is not an error — see [`Self::reconcile_once`], which
-    /// says the same thing for the same reason.
+    /// [`DomainError::Internal`] when qa-runs cannot be listed at all — on the
+    /// first page. A listing that fails on a later page is a partial answer
+    /// carrying [`ReconcileOutcome::resume_from`], not an error; see
+    /// `Self::replay_window`. A *per-run* failure is not an error either — see
+    /// [`Self::reconcile_once`], which says the same thing for the same reason.
     pub async fn rebuild(
         &self,
         ctx: &SecurityContext,
@@ -865,13 +1216,22 @@ where
     /// counterpart for. What they *do* share — the cursor, the page budget, the
     /// per-run projection, the stop-at-the-first-failure rule — is shared code.
     ///
+    /// # A listing failure after the first page is a partial answer
+    ///
+    /// Answered `Ok` with `caught_up = false` and
+    /// [`ReconcileOutcome::resume_from`] on the last run fully consumed — the
+    /// same shape as spending the page budget, logged at `WARN` with the
+    /// error. Until finding #122's residual D it was an `Err` that discarded
+    /// the report of the pages already replayed, on the grounds that re-running
+    /// the window is idempotent. It is, but it is also the whole window again,
+    /// and the operator was left without the one value that lets them continue
+    /// instead.
+    ///
     /// # Errors
     ///
-    /// [`DomainError::Internal`] when qa-runs cannot be listed, on any page.
-    /// A listing that fails on page three discards the report of pages one and
-    /// two rather than answering a partial success, exactly as [`Self::sweep`]
-    /// does: re-running the same window is idempotent and total, so the operator
-    /// loses nothing but a number.
+    /// [`DomainError::Internal`] when qa-runs cannot be listed on the **first**
+    /// page: nothing was observed, so there is no position to resume from and
+    /// "the window held nothing" must not be what the caller reads.
     async fn replay_window(
         &self,
         ctx: &SecurityContext,
@@ -883,13 +1243,33 @@ where
         let mut cursor = FinishedRunCursor::starting_at(from);
         let mut outcome = ReconcileOutcome::default();
 
-        for _ in 1..=MAX_PAGES_PER_REBUILD {
+        for page_number in 1..=MAX_PAGES_PER_REBUILD {
             // The caller's own context, not a system actor: see decision 4 in
             // this module's header.
-            let page = self
+            let page = match self
                 .runs
                 .list_runs_finished_since(ctx, cursor, self.page_size)
-                .await?;
+                .await
+            {
+                Ok(page) => page,
+                Err(error) if page_number == 1 => return Err(error),
+                Err(error) => {
+                    // `caught_up` stays `false`; the pages before this one are
+                    // replayed and `cursor` stands on the last run they
+                    // consumed. See this function's doc.
+                    outcome.resume_from = Some(cursor.at());
+                    warn!(
+                        tenant_id = %tenant.get(),
+                        page = page_number,
+                        scanned = outcome.scanned,
+                        resume_from = %cursor.at(),
+                        %error,
+                        "the rebuild could not list qa-runs part way through the window; the \
+                         response carries the instant to resume from",
+                    );
+                    return Ok(outcome);
+                }
+            };
 
             // Measured on the page *as listed*: it is the listing that was
             // capped, and the upper-bound cut below can leave a full page
@@ -928,13 +1308,12 @@ where
             }
 
             let Some(next) = consumed else {
-                // A full page that yielded no cursor at all. Unreachable with a
-                // sane `reconcile_page_size` — a saturated page that did not
-                // cross the upper bound is non-empty and every run on it carries
-                // an instant — but a configured `0` makes every page "saturated"
-                // and empty, and a walk that answered that with another
-                // identical listing would be the spin this whole change is
-                // about.
+                // A full page that yielded no cursor at all. Unreachable: the
+                // page size is at least one (`Self::new` floors it), so a
+                // saturated page that did not cross the upper bound is
+                // non-empty and every run on it carries an instant. Answered
+                // rather than asserted, because a walk that met it with another
+                // identical listing would spin.
                 outcome.resume_from = Some(cursor.at());
                 return Ok(outcome);
             };
@@ -1067,6 +1446,53 @@ where
     /// *consumed*, and a page always steps. Two consequences fall out: there is
     /// no de-duplication left to do, because no run is listed twice in a walk,
     /// and there is no un-pageable window left to report.
+    ///
+    /// # The cursor now survives the pass, and that is finding #122
+    ///
+    /// Everything above is about one pass. Between passes the walk restarted at
+    /// `mark - lookback` and **only** there, which left one window it could not
+    /// drain: a lookback holding more runs than [`MAX_PAGES_PER_SWEEP`] pages.
+    /// Such a pass spends every page behind its own mark, the advance is a
+    /// monotonic no-op, and the next tick derives the identical floor. Real work
+    /// on every tick, no progress on any, and only the `WARN` and
+    /// [`crate::gear`]'s escalation ladder to say so.
+    ///
+    /// So a pass that ends short of catching up persists its last consumed key
+    /// as a [`SweepCursor`] and the next tick resumes from it. Three things make
+    /// that a *within-window* resume rather than a second mark, and the order
+    /// matters:
+    ///
+    /// 1. The cursor carries the floor its pass walked from, and this function
+    ///    honours it only when that floor is at or before this pass' floor and
+    ///    the cursor stands at or after it (`first_page_of`'s honour rule). A
+    ///    mark that moved during a drain keeps the cursor — `[floor, at]` is
+    ///    still a range the stored pass consumed — and a replica with a wider
+    ///    lookback, whose floor is earlier, discards it.
+    /// 2. A caught-up pass **erases** it, unconditionally. So the tick after a
+    ///    drain finishes starts at `mark - lookback` again and re-reads the
+    ///    whole lookback — which is the only reason the lookback works at all:
+    ///    a run can be *written* with a `finished_at` earlier than one already
+    ///    swept, and re-reading is how it is found.
+    /// 3. A pass that consumed nothing writes nothing, leaving an earlier pass'
+    ///    cursor standing. A listing that fails on page one has observed no
+    ///    position, and erasing on no observation is the same mistake #123's
+    ///    `?` made with the mark.
+    ///
+    /// **Two replicas share the row and neither can skip a run.** Under the
+    /// shipped `NoopLeaderElector` every replica is the leader
+    /// ([`crate::infra::leader`]'s header: election here is an optimisation, not
+    /// mutual exclusion), so the write is last-writer-wins with no monotonic
+    /// predicate — it has to be, since the cursor must be erasable. What makes
+    /// that safe is *what the value is*: every cursor `{window_floor, at}`
+    /// written is a claim that every run listed in `[window_floor, at]` was
+    /// consumed — by its writer, or by the earlier pass whose cursor its writer
+    /// honoured, which the honour rule only allows when that earlier range
+    /// covers `[window_floor, ..]`. A replica can therefore only move the
+    /// cursor to a position some pass genuinely walked to, or backwards to an
+    /// earlier one. Backwards costs a repeated page, which every write on this
+    /// path is idempotent under. There is no interleaving that leaves a run
+    /// between the two positions unread.
+    /// [`SweepCursor`]'s own doc carries the argument.
     async fn sweep(&self, tenant: TenantBound) -> Result<ReconcileOutcome, DomainError> {
         // `for_reconcile_sweep`, not `for_event_ingest`: the `site` on the audit
         // line is the whole reason `system_actor` has one factory per flow, and
@@ -1079,21 +1505,30 @@ where
         // `ReconcileOutcome::watermark_at`, and the whole point of that field
         // is that "where the mark stands" must be a value this pass observed
         // rather than one inferred from the walk.
-        let mark_before = self.mark(&scope).await?;
+        let marks = self.marks(&scope).await?;
+        let mark_before = marks.last_reconciled_finished_at;
         let floor = mark_before.map_or(OffsetDateTime::UNIX_EPOCH, |mark| mark - self.lookback);
-        // The first page takes the inclusive instant bound: the mark names a
-        // run this gear has already consumed once, and re-reading it is how a
-        // run written after an earlier pass' cutoff is still picked up. Every
-        // page after it resumes strictly after the last run consumed.
-        let mut cursor = FinishedRunCursor::starting_at(floor);
+
+        let mut cursor = first_page_of(tenant, floor, marks.sweep_cursor);
         let mut walk = Walk::default();
 
+        // **Held, not propagated with `?`.** See the section below on why a
+        // page failure must not take the walk's earned progress with it.
+        let mut failure: Option<DomainError> = None;
+
         for page_number in 1..=MAX_PAGES_PER_SWEEP {
-            let Some(step) = self.sweep_page(&ctx, tenant, &scope, cursor).await? else {
-                // An empty listing carries the same fact a short page does:
-                // qa-runs has nothing past the cursor.
-                walk.outcome.caught_up = true;
-                break;
+            let step = match self.sweep_page(&ctx, tenant, &scope, cursor).await {
+                Ok(Some(step)) => step,
+                Ok(None) => {
+                    // An empty listing carries the same fact a short page does:
+                    // qa-runs has nothing past the cursor.
+                    walk.outcome.caught_up = true;
+                    break;
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
             };
             let Some(next) = walk.absorb(&step) else {
                 break;
@@ -1107,8 +1542,38 @@ where
             debug!(tenant_id = %tenant.get(), %floor, "reconcile sweep found no runs in the window");
         }
 
-        if let Some(at) = walk.advance_to {
+        // **Before the failure is propagated, and that ordering is the fix for
+        // finding #123.** `sweep_page` used to be called with `?`, so a
+        // failure on page k returned from here with pages 1..k-1 already
+        // written to `qa_test_results` and the mark still where the pass found
+        // it. The next tick recomputed the same floor, re-walked the same
+        // pages, and lost them again — for as long as qa-runs stayed
+        // unreachable, and once more on the pass after it recovered.
+        //
+        // Advancing is safe precisely because `advance_to` is the newest
+        // instant a page **fully accounted for**: `sweep_page`'s own failures
+        // are both raised before `consume_page` runs, so a failed page
+        // contributes nothing to it, and a page that stopped at a gap
+        // contributes only the runs before the gap. There is no case where
+        // this moves the mark past a run the sweep did not consume.
+        if let Some(at) = walk.advance_to() {
+            // `?`, so a watermark write that fails wins over a listing that
+            // failed: the listing failure is a transient the next tick
+            // retries, while a mark that cannot be written is the fault that
+            // makes retrying pointless. Either way the pass ends in `Err`.
             self.advance_watermark(tenant, at).await?;
+        }
+
+        // Finding #122's fix. After the advance, because `advance` is what
+        // creates the tenant's row; before the failure is propagated, for the
+        // same reason the advance is — a pass that ended in an error still
+        // earned whatever it consumed. See `Self::persist_resume_point`.
+        let sweep_cursor_at = self
+            .persist_resume_point(tenant, &walk, floor, marks.sweep_cursor)
+            .await?;
+
+        if let Some(error) = failure {
+            return Err(error);
         }
 
         // `max`, because `WatermarkRepository::advance` is monotonic: handing
@@ -1117,7 +1582,10 @@ where
         // only thing a caller comparing consecutive passes can reason from.
         // `None` orders below every `Some`, so an unset mark and a first
         // advance both come out right.
-        outcome.watermark_at = walk.advance_to.max(mark_before);
+        outcome.watermark_at = walk.advance_to().max(mark_before);
+        // Where the row stands, for the operator and for
+        // `crate::gear::stall_of`'s cursor high-water. See the field's own doc.
+        outcome.sweep_cursor_at = sweep_cursor_at;
 
         Ok(outcome)
     }
@@ -1170,34 +1638,106 @@ where
 
         Ok(Some(PageStep {
             outcome,
-            advance_to: consumed.map(FinishedRunCursor::at),
+            consumed,
             next_cursor,
             caught_up,
         }))
     }
 
-    /// This tenant's reconcile mark as it stands before the sweep runs.
+    /// This tenant's persisted sweep state as it stands before the sweep runs:
+    /// the reconcile mark and the within-window resume cursor.
     ///
-    /// `None` means this gear has never swept this tenant, and
-    /// [`Self::sweep`] turns that into a floor at the beginning of time —
-    /// `page_size` and [`MAX_PAGES_PER_SWEEP`] are what keep that first pass
-    /// finite. Legacy reads every workflow on every cycle, so starting from the
-    /// beginning *once* is not the aggressive choice; it is the one that makes
-    /// the projection complete.
+    /// A missing `last_reconciled_finished_at` means this gear has never swept
+    /// this tenant, and [`Self::sweep`] turns that into a floor at the
+    /// beginning of time — `page_size` and [`MAX_PAGES_PER_SWEEP`] are what
+    /// keep that first pass finite. Legacy reads every workflow on every cycle,
+    /// so starting from the beginning *once* is not the aggressive choice; it
+    /// is the one that makes the projection complete.
     ///
-    /// **This used to be `floor()` and return the subtracted instant.** The
-    /// mark itself is now the return value because the sweep needs it twice —
-    /// once to derive the floor and once as the "before" half of
-    /// [`ReconcileOutcome::watermark_at`] — and re-deriving a mark from a floor
-    /// by adding the lookback back on would be a second, silently divergent
-    /// spelling of the same value.
-    async fn mark(&self, scope: &AccessScope) -> Result<Option<OffsetDateTime>, DomainError> {
+    /// **This used to be `floor()` and return the subtracted instant**, then
+    /// `mark()` and return the instant itself. It is the whole
+    /// [`Watermarks`] now because the sweep
+    /// needs three things out of one row — the floor, the "before" half of
+    /// [`ReconcileOutcome::watermark_at`], and the resume cursor — and reading
+    /// the row three times, or re-deriving one value from another, is how two
+    /// spellings of one position come to disagree.
+    async fn marks(&self, scope: &AccessScope) -> Result<Watermarks, DomainError> {
         let conn = self.db.conn()?;
-        Ok(self
-            .watermarks
-            .get(&conn, scope)
-            .await?
-            .last_reconciled_finished_at)
+        self.watermarks.get(&conn, scope).await
+    }
+
+    /// Write, erase, or deliberately leave alone this tenant's resume cursor,
+    /// according to how the walk ended.
+    ///
+    /// The three arms are three different facts and collapsing any two of them
+    /// reintroduces a defect this module has already shipped:
+    ///
+    /// * **Caught up: erase.** This is the reset. The next tick is back to
+    ///   `mark - lookback` and re-walks the whole lookback, which is the only
+    ///   reason a run *written* with a `finished_at` behind an earlier sweep is
+    ///   ever found. A cursor that survived a caught-up pass would be a second
+    ///   monotonic mark with the lookback dead behind it.
+    /// * **Stopped short with a position: write it.** The next tick continues
+    ///   the window instead of re-deriving the same floor and doing the same
+    ///   work forever, which is finding #122.
+    /// * **Stopped short with no position: write nothing.** A listing that
+    ///   failed on the first page, or a gap on the first run, observed no
+    ///   position at all. Erasing on no observation throws away an earlier
+    ///   pass' progress — the same mistake #123's `?` made with the mark.
+    ///
+    /// Answers **where the row stands afterwards**, which is
+    /// [`ReconcileOutcome::sweep_cursor_at`] — the third arm makes that
+    /// different from "what this pass wrote", so it is returned from the one
+    /// place that decides rather than reconstructed by the caller.
+    async fn persist_resume_point(
+        &self,
+        tenant: TenantBound,
+        walk: &Walk,
+        floor: OffsetDateTime,
+        stored: Option<SweepCursor>,
+    ) -> Result<Option<OffsetDateTime>, DomainError> {
+        match (walk.outcome.caught_up, walk.resume_cursor(floor)) {
+            (true, _) => {
+                self.write_sweep_cursor(tenant, None).await?;
+                Ok(None)
+            }
+            (false, Some(cursor)) => {
+                self.write_sweep_cursor(tenant, Some(cursor)).await?;
+                Ok(Some(cursor.at))
+            }
+            // Nothing written, so the row still holds whatever this pass read
+            // at its start — including a cursor this pass did not honour,
+            // which is what the row holds and therefore what to report.
+            (false, None) => Ok(stored.map(|stored| stored.at)),
+        }
+    }
+
+    /// Record or erase this tenant's within-window resume cursor, in its own
+    /// transaction.
+    ///
+    /// Its own transaction for [`Self::advance_watermark`]'s reason and not for
+    /// a stronger one: the cursor is advisory, so a crash between the advance
+    /// and this write costs one re-walk of a window and never a run. It is a
+    /// separate statement from the advance rather than one row update because
+    /// the two have opposite rules — the mark is monotonic and this must be
+    /// able to move backwards and to erase. See
+    /// [`WatermarkRepository::set_sweep_cursor`].
+    async fn write_sweep_cursor(
+        &self,
+        tenant: TenantBound,
+        cursor: Option<SweepCursor>,
+    ) -> Result<(), DomainError> {
+        let tenant_id = tenant.get();
+        let watermarks = self.watermarks.clone();
+        self.db
+            .transaction(move |tx| {
+                Box::pin(async move {
+                    watermarks
+                        .set_sweep_cursor(tx, &AccessScope::for_tenant(tenant_id), cursor)
+                        .await
+                })
+            })
+            .await
     }
 
     /// The run ids in this window that already have a projection.
@@ -1335,6 +1875,61 @@ where
     /// sharing one. Neither helper serves both flows, so neither needs to thread
     /// it further.
     ///
+    /// # Notification, after the commit — this gear's only producer for
+    /// # `notify_run_completed`
+    ///
+    /// The run's terminal transition, as far as this gear can observe one, is
+    /// the instant its projection lands. So this is where
+    /// [`RunCompletionNotifier::notify_run_completed`] is called, and it is
+    /// called **after** [`Self::notify_run_completed`]'s transaction has
+    /// committed, never from inside it: that call ends in an SMTP conversation
+    /// or a Slack webhook, and an open database transaction held across
+    /// network egress pins a connection and its locks for the length of a
+    /// ten-second relay timeout. It is also skipped entirely on the
+    /// `read_run_projection` → `None` arm above, which returns before this
+    /// point: a run qa-runs no longer has is not a run that just finished.
+    ///
+    /// **Both callers notify, and three things are why that is safe.**
+    /// [`Self::consume_page`] reaches this only for a run the diff found
+    /// missing, but [`Self::replay`] reaches it for *every* run in an
+    /// operator's window — so a rebuild over a month of history would, with
+    /// nothing else in place, mail a month of finished runs at once.
+    ///
+    /// * `m20260929_000004_run_completed_notification_cutoff` records when
+    ///   this deployment began notifying, and
+    ///   [`NotifyService::notify_run_completed`](crate::domain::service::notify::NotifyService::notify_run_completed)
+    ///   declines any run that finished before it. That closes the whole class
+    ///   at once, without depending on any table being a faithful census of
+    ///   what was ingested.
+    /// * `m20260929_000003_seed_run_completed_notification_claims` inserts one
+    ///   claim row per already-projected run per run-completed channel, which
+    ///   makes every run this gear had already ingested read as "already
+    ///   sent" — the correct semantics, because `qa_run_notifications` **is**
+    ///   the record of what has been notified, not a suppression list bolted
+    ///   beside one.
+    /// * The **claim a declined channel takes anyway**
+    ///   ([`NotifyService::decline_run_completed_channel`](crate::domain::service::notify)),
+    ///   which is what the first two could not cover: a run that finished
+    ///   *after* the upgrade and was never sent — because routing declined it,
+    ///   or no webhook or SMTP destination was configured — has no seeded claim
+    ///   and is not history, so before that claim existed a rebuild announced
+    ///   it as soon as the channel was turned on. The two migrations are
+    ///   upgrade-time answers; this one is the standing invariant, and it is
+    ///   what makes a rebuild safe to run on a stand whose notification
+    ///   settings have changed since. `DESIGN.md` §3.9 states the consequence
+    ///   for operators.
+    ///
+    /// **Neither migration replaces the other**, and the case that separates
+    /// them is
+    /// item 2 of this module's header: a run with genuinely zero results
+    /// leaves no row in `qa_test_results`, so the claim seed can never name it
+    /// and the diff never calls it ingested — it is re-projected on every
+    /// single pass and reaches this function every time. Measured on the dev
+    /// stand 2026-09-29, that is 1095 of 2326 finished runs. Only the cutoff
+    /// covers them. Conversely the cutoff cannot judge a run whose
+    /// `finished_at` lands after the migration's own clock through skew, and
+    /// there the claim row is what answers.
+    ///
     /// # Fixed in Task 5a: the read used to happen inside this function's own
     /// # transaction, and that was the bug
     ///
@@ -1430,16 +2025,57 @@ where
         // `for<'a> FnOnce(&'a DbTx<'a>) -> … + 'a`, which the compiler resolves
         // to `'static`, so a borrowed `&AccessScope` cannot cross it. Only the
         // write needs this now; the read above already ran to completion.
-        let scope = scope.clone();
-        self.db
+        let owned_scope = scope.clone();
+        let rows = self
+            .db
             .transaction(move |tx| {
                 Box::pin(async move {
                     ingest
-                        .write_run_projection(tx, &scope, tenant, run_id, projection)
+                        .write_run_projection(tx, &owned_scope, tenant, run_id, projection)
                         .await
                 })
             })
-            .await
+            .await?;
+
+        // **After the commit, never inside it.** See this function's
+        // "Notification, after the commit" section.
+        self.notify_run_completed(site, tenant, run_id).await;
+
+        Ok(rows)
+    }
+
+    /// Tell [`RunCompletionNotifier`] that `run_id` finished, and swallow its
+    /// failure.
+    ///
+    /// # Why the failure is swallowed rather than returned
+    ///
+    /// [`Self::reproject`]'s `Err` is what makes
+    /// [`ReconcileOutcome::stopped_at_gap`] true, and a gap stops the sweep and
+    /// pins the watermark short of the run — permanently, for that tenant,
+    /// until an operator intervenes (this module's header, "a tenant's backfill
+    /// can wedge"). The projection is the thing that must not advance past a
+    /// hole; a notification that did not go out is not a hole in it. Letting a
+    /// PDP hiccup or a notification-table failure wedge a tenant's *ingest*
+    /// would trade the gear's whole purpose for its least critical side effect.
+    ///
+    /// [`RunCompletionNotifier::notify_run_completed`] already swallows every
+    /// *send* failure into the audit log, so what reaches here is a denial or a
+    /// database failure — both of which a `WARN` names and a human fixes.
+    async fn notify_run_completed(&self, site: SystemActorSite, tenant: TenantBound, run_id: Uuid) {
+        // The same actor the read above was issued under, minted fresh rather
+        // than threaded: `site.context` is what keeps the tenant on the
+        // context and the tenant of the projection provably the same value
+        // (`domain::system_actor`'s `SystemActorSite`).
+        let ctx = site.context(tenant);
+        if let Err(error) = self.notifier.notify_run_completed(&ctx, run_id).await {
+            warn!(
+                run_id = %run_id,
+                tenant_id = %tenant.get(),
+                error = %error,
+                "the run-completed notification could not be attempted; the projection is \
+                 unaffected and the sweep continues",
+            );
+        }
     }
 }
 

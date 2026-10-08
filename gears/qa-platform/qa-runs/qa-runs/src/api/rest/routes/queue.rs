@@ -7,6 +7,7 @@ use toolkit::api::operation_builder::{OperationBuilder, OperationBuilderODataExt
 
 use super::{API_TAG, License};
 use crate::api::rest::{dto, handlers};
+use crate::infra::storage::db::PAGE_LIMITS;
 use crate::infra::storage::odata::QueueFilterField;
 
 pub(super) fn register_queue_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
@@ -14,14 +15,15 @@ pub(super) fn register_queue_routes(mut router: Router, openapi: &dyn OpenApiReg
     router = OperationBuilder::get("/qa/v1/queue")
         .operation_id("qa_runs.list_queue")
         .summary("Read the run queue")
-        .description(
+        .description(format!(
             "One page of run-queue rows, newest first, all states. `queue_position` is \
              1-based among an environment's queued rows and is computed over the rows this \
              request returned - so a narrow page understates it, and filtering by \
              environment_id is the way to get a position you can rely on. `limit` defaults to \
-             200 and is clamped to 1-500; new callers should use $top instead, which wins \
-             when both are given.",
-        )
+             {}, must be 1 or more and is capped at {}; `$top` is the same parameter, and \
+             sending both is a 400.",
+            PAGE_LIMITS.default, PAGE_LIMITS.max
+        ))
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
@@ -29,7 +31,10 @@ pub(super) fn register_queue_routes(mut router: Router, openapi: &dyn OpenApiReg
         .query_param_typed(
             "limit",
             false,
-            "Bare page size; defaults to 200, clamped to 1-500. $top takes precedence.",
+            format!(
+                "Page size; defaults to {}, 1 or more, capped at {}; 0 is a 400. `$top` is the same parameter, and sending both is a 400.",
+                PAGE_LIMITS.default, PAGE_LIMITS.max
+            ),
             "integer",
         )
         .handler(handlers::queue::list_queue)
@@ -40,6 +45,15 @@ pub(super) fn register_queue_routes(mut router: Router, openapi: &dyn OpenApiReg
         )
         .with_odata_filter::<QueueFilterField>()
         .with_odata_orderby::<QueueFilterField>()
+        // The toolkit's `OData` extractor binds `limit` and `cursor` on every
+        // route it serves (`ODataParams`); `with_odata_filter` declares neither,
+        // so `cursor` is declared here and `limit` above. `qa-platform-openapi`'s
+        // `every_odata_list_operation_declares_limit_and_cursor` keeps it so.
+        .query_param(
+            "cursor",
+            false,
+            "Opaque token from the previous page's `next_cursor`. `$skiptoken` is the same parameter.",
+        )
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
@@ -91,6 +105,11 @@ pub(super) fn register_queue_routes(mut router: Router, openapi: &dyn OpenApiReg
             StatusCode::OK,
             "The run that was started",
         )
+        // 400 and 404 are reachable through the dispatch this starts inline: a
+        // branch with no runnable test files, or qa-catalog refusing the run's
+        // repository or branch (`DomainError::CatalogRefused`), answered with
+        // the catalog's own status.
+        .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)

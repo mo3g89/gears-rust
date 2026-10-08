@@ -245,7 +245,7 @@ pub struct QaRunsConfig {
     /// `max_concurrent_runs: 0` and keeps it" without naming anywhere it could
     /// be set. `gears/qa-platform/config/qa-platform-stack.yaml` had no such
     /// key; the Helm chart embeds that file **verbatim** (`.Files.Get` in
-    /// `gears-config-configmap.yaml`, byte-pinned by
+    /// `gears-config-secret.yaml`, byte-pinned by
     /// `deploy/helm/tests/check_chart_file_sync.py`), and the file's own comment
     /// says it is baked into the image and cannot be edited per deployment. It
     /// is now `--set qaRuns.maxConcurrentRuns=0` on the chart, rendered into
@@ -511,7 +511,7 @@ pub struct ArgoExecutorConfig {
     /// source system does it (`argo.rs:504-521`) and what keeps
     /// `run_executor.rs:85-86` — "qa-runs never reads a secret's contents" —
     /// literally true of this adapter. Materialising those Secrets is somebody
-    /// else's job and is not done today; see the adapter's module docs (D4).
+    /// else's job and is not done today; see the adapter's module docs.
     pub secret_name_prefix: String,
 
     /// `spec.securityContext.runAsUser` (and the container's own) for the

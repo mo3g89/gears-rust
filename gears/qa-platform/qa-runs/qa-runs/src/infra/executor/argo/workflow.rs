@@ -296,10 +296,10 @@ struct RenderedMount<'a> {
 /// (`qa-vhp-product-plugin`'s `prepare_run_access` returns one
 /// `MountSpec::Secret` and nothing else).
 ///
-/// So it refuses, and the refusal names what has to be built. Spec §5.3 records
-/// what happened the last time this interface carried a speculative shape:
-/// `VolumeSpec` was deleted because a field no task populated "invites a plugin
-/// author to fill it in and be silently dropped".
+/// So it refuses, and the refusal names what has to be built. The last time
+/// this interface carried a speculative shape: `VolumeSpec` was deleted because
+/// a field no task populated "invites a plugin author to fill it in and be
+/// silently dropped".
 ///
 /// # 2. Two mounts cannot share a directory
 ///
@@ -625,7 +625,7 @@ pub fn build(spec: &RunSpec, cfg: &ArgoExecutorConfig, name: &str) -> Value {
     });
 
     // The run's own account wins over the deployment's. A plugin naming one is
-    // making a statement about how its runner authenticates (**D11**), which
+    // making a statement about how its runner authenticates, which
     // the deployment default cannot know; a plugin naming none — every plugin
     // today — leaves the deployment's value exactly where it was.
     if let Some(account) = non_blank(spec.access.service_account.as_deref())
@@ -1006,12 +1006,9 @@ mod tests {
         let mut run = spec(vec![node("a")]);
         run.env = RunEnv::new(
             BTreeMap::new(),
-            [(
-                "RP_API_KEY".to_owned(),
-                SecretRef::new("credstore://rp/token"),
-            )]
-            .into_iter()
-            .collect(),
+            [("RP_API_KEY".to_owned(), SecretRef::new("rp-token"))]
+                .into_iter()
+                .collect(),
         );
         let workflow = build(&run, &cfg(), "w");
 
@@ -1019,9 +1016,9 @@ mod tests {
         assert!(entry.get("value").is_none(), "no literal for a reference");
         let secret = &entry["valueFrom"]["secretKeyRef"];
         assert_eq!(
-            secret["name"], "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-3cfaa05d68d19420",
-            "the reference's punctuation each becomes a dash in the readable head, and the \
-             digest suffix is what actually keeps the mapping injective"
+            secret["name"], "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-fdb73ddbdba9b931",
+            "the Secret name is the readable head plus a digest suffix derived from the \
+             tenant and the reference; the suffix is what keeps the mapping injective"
         );
         assert_eq!(secret["key"], "value");
         assert_eq!(
@@ -1034,7 +1031,7 @@ mod tests {
         assert!(
             !serde_json::to_string(&workflow)
                 .expect("serialisable")
-                .contains("credstore://"),
+                .contains("rp-token"),
             "the reference's own text must not appear as a value anywhere either"
         );
     }

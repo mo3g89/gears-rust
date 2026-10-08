@@ -63,7 +63,7 @@ const CONFIG_PATH: &str = "../../config/qa-platform.yaml";
 const EXPECTED_VENDOR: &str = "virtuozzo-vhp";
 const EXPECTED_PRIORITY: i64 = 100;
 
-// --- The VHI product plugin (Task 9) ---------------------------------------
+// --- The VHI product plugin ---------------------------------------
 //
 // Same shape as the VHP consts above. `config/qa-platform.yaml` now carries a
 // `gears.qa-vhi-product-plugin` stanza too (added in the same fix round that

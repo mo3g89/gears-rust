@@ -46,7 +46,7 @@ ignored = ["cluster-sdk", "testcontainers", "testcontainers-modules"]
 # writer, so the ingest races this gear's projection has to survive cannot be
 # falsified there with *or* without a fix — that is what this tier exists for.
 #
-# Declared at the skeleton (Task 9) rather than at the task that first writes a
+# Declared at the skeleton rather than at the task that first writes a
 # test under it, because the comment block above is load-bearing for
 # `cargo-shear` and re-deriving it is expensive. **Nothing consumes the feature
 # yet**; the first consumers are the ingest-race guards of Tasks 13-15, whose
@@ -108,7 +108,7 @@ qa-catalog = { path = "../../qa-catalog/qa-catalog" }
 qa-environments = { path = "../../qa-environments/qa-environments" }
 qa-runs = { path = "../../qa-runs/qa-runs" }
 
-# Task 40: the intended long-term home of `infra::leader`'s `LeaderElector`.
+# The intended long-term home of `infra::leader`'s `LeaderElector`.
 # **Declared and deliberately unused**, exactly as qa-runs declares it, and the
 # reversal of a decision `infra/leader/mod.rs` recorded at Task 15: that header
 # said a declared-and-unused crate with a `cargo-shear` ignore was "a cost worth
@@ -133,11 +133,12 @@ cluster-sdk = { workspace = true }
 authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", path = "../../../system/authz-resolver/authz-resolver-sdk" }
 
 # The SMTP follow-up: `CredStoreClientV1`, `SecretRef` and `SecretValue`, behind
-# the `MailClient` adapter that dials a relay. `slack_oagw`'s "Finding B" named
-# the absence of this dependency as one of the two things that would have to
-# change before a notification credential could be resolved in this gear at all;
-# SMTP is the case where the other candidate (an oagw capability) cannot apply,
-# because oagw speaks HTTP and SMTP is not HTTP.
+# the `MailClient` adapter that dials a relay — and, since the third review pass,
+# behind the Slack adapter too, which resolves the tenant's webhook URL itself
+# because a webhook's credential is its URL path and oagw's auth plugins inject
+# only headers (`infra::notify::slack_oagw`, "Delivery"; ADR-0011's 2026-09-30
+# amendment). SMTP cannot go through oagw at all, because oagw speaks HTTP and
+# SMTP is not HTTP.
 credstore-sdk = { workspace = true }
 
 # ---------------------------------------------------------------------------
@@ -149,9 +150,13 @@ credstore-sdk = { workspace = true }
 # tail comment so the later task adds it back rather than rediscovering it.
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-# Task 16: `Router`, `Extension`, `Json` on the REST handlers and routes.
+# `StreamExt::next` for `infra::jira::oagw_client::read_capped`, which walks a
+# response body stream itself so it can enforce a size cap (`Body::into_bytes`
+# buffers a stream whole).
+futures-util = { workspace = true }
+# `Router`, `Extension`, `Json` on the REST handlers and routes.
 axum = { workspace = true }
-# Task 16: `StatusCode` in the `OperationBuilder` response declarations, which
+# `StatusCode` in the `OperationBuilder` response declarations, which
 # every sibling gear also imports directly rather than through the prelude.
 http = { workspace = true }
 # The SMTP follow-up: `infra::notify::mail_smtp`'s transport, message builder and
@@ -177,13 +182,13 @@ hex = { workspace = true }
 # `toolkit-gts`'s macros delegate to. Same pairing qa-catalog's and
 # qa-environments' Cargo.toml carry.
 gts = { workspace = true }
-# Task 11: the eleven `infra/storage/entity/*.rs` entities. `sea-orm-migration`
+# The eleven `infra/storage/entity/*.rs` entities. `sea-orm-migration`
 # re-exports the crate, but a `DeriveEntityModel` expansion names `::sea_orm`
 # directly, so the direct dependency is required rather than stylistic.
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
 serde = { workspace = true }
-# Task 25b: the encoding axum's `Query` extractor uses, so query DTOs can be
+# The encoding axum's `Query` extractor uses, so query DTOs can be
 # driven in a test without building a request (`api::rest::dto`). Was a
 # `[dev-dependencies]` entry until Task 30, which gave it a first production
 # caller: `domain::service::collect::CollectService::collect_url` encodes the
@@ -199,7 +204,7 @@ serde = { workspace = true }
 # pipeline `toolkit`'s telemetry init installed and never builds one.
 opentelemetry = { workspace = true }
 serde_urlencoded = { workspace = true }
-# Task 12: the two `JSONB` columns cross `infra::storage::mapper` as
+# The two `JSONB` columns cross `infra::storage::mapper` as
 # `sea_orm`'s `Json` (i.e. `serde_json::Value`) on one side and a plain
 # `String`/typed struct on the other. `qa-insights-sdk` is deliberately
 # `serde`-free, so neither `SavedView::query_json` nor
@@ -207,10 +212,10 @@ serde_urlencoded = { workspace = true }
 # builds the documents by hand. Was a `[dev-dependency]` at Task 11.
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-# Task 11: every `TIMESTAMPTZ` column is an `OffsetDateTime`, on the entities
+# Every `TIMESTAMPTZ` column is an `OffsetDateTime`, on the entities
 # and on the repository traits' timestamp parameters.
 time = { workspace = true }
-# Task 39: `tokio::time::timeout` around `infra::notify::slack_oagw`'s one
+# `tokio::time::timeout` around `infra::notify::slack_oagw`'s one
 # `oagw` call — the mechanism behind `SlackOagwClient::REQUEST_TIMEOUT`'s
 # ten-second bound (that module's header has the legacy citation). Promoted
 # here from `[dev-dependencies]` a task earlier than the ledger there forecast
@@ -235,17 +240,17 @@ schemars = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
-# Task 11: the repository traits speak in contract types -- `TestResultRecord`,
+# The repository traits speak in contract types -- `TestResultRecord`,
 # `SavedView`, `JiraBug`, `CollectCount`, `NotificationConfig` and the rest.
 qa-insights-sdk = { path = "../qa-insights-sdk" }
 
-# Task 13: the reads the ingest projection makes -- `Run` and `RunTestResult`
+# The reads the ingest projection makes -- `Run` and `RunTestResult`
 # cross the `RunsReader` port, so this gear's domain names qa-runs' contract
 # types. The **gear** crate `qa-runs` above is the `deps` token; this is the
 # contract.
 qa-runs-sdk = { path = "../../qa-runs/qa-runs-sdk" }
 
-# Task 20: `UniverseTest` crosses the `CatalogReader` port and is the input type
+# `UniverseTest` crosses the `CatalogReader` port and is the input type
 # of the analytics universe core, so this gear's domain names qa-catalog's
 # contract. Same shape as `qa-runs-sdk` above, and for the same reason. The
 # ledger below forecast this entry for "the `CatalogReader` port's adapter", and
@@ -261,7 +266,7 @@ qa-runs-sdk = { path = "../../qa-runs/qa-runs-sdk" }
 # it alone left this copy standing.
 qa-catalog-sdk = { path = "../../qa-catalog/qa-catalog-sdk" }
 
-# Task 32: `ServiceGatewayClientV1`, `CreateUpstreamRequest`, `Body` and the
+# `ServiceGatewayClientV1`, `CreateUpstreamRequest`, `Body` and the
 # apikey auth plugin id — the JIRA egress in `infra::jira::oagw_client`. The
 # ledger below forecast this entry for "Tasks 32/39 — the JIRA and Slack egress";
 # Task 32 is the first half, and Task 39's Slack adapter needs no further entry.
@@ -269,7 +274,7 @@ qa-catalog-sdk = { path = "../../qa-catalog/qa-catalog-sdk" }
 # initialisation order, this is the contract the adapter names.
 oagw-sdk = { workspace = true }
 
-# Task 25a: `QaEnvironmentsClientV1` and `Environment` (renamed from
+# `QaEnvironmentsClientV1` and `Environment` (renamed from
 # `TargetPlatform`), behind the `EnvironmentReader` port -- the adapter that
 # turns `ExecRow::platform_id` into the label the overview's platform breakdown
 # draws.
@@ -290,14 +295,14 @@ oagw-sdk = { workspace = true }
 # qa-environments mandatory in every deployment that links this one.
 qa-environments-sdk = { path = "../../qa-environments/qa-environments-sdk" }
 
-# Task 15: `CancellationToken`, on `infra::leader`'s `LeaderWorkFn`. The plan's
+# `CancellationToken`, on `infra::leader`'s `LeaderWorkFn`. The plan's
 # ledger forecast this for Task 40, which is when the *tickers* arrive; the
 # elector they run under is created one task earlier, because the reconciler's
 # "only one instance sweeps" contract needs somewhere to be enforced.
 tokio-util = { workspace = true }
 
 toolkit = { workspace = true }
-# Task 16: `api::rest::error`, the single `From<DomainError> for CanonicalError`.
+# `api::rest::error`, the single `From<DomainError> for CanonicalError`.
 # `axum` for `IntoResponse` on the error body, `utoipa` for the error schemas the
 # `error_4xx`/`error_500` route declarations register — the same feature pair all
 # three sibling gears enable.
@@ -305,11 +310,11 @@ toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
 # `sqlite` and `pg` both, matching the three sibling gears: the unit tier runs
 # on in-memory SQLite and the deployed backend is Postgres.
 toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
-# Task 11: `#[derive(Scopable)]` plus the `#[secure(...)]` tenancy annotation on
+# `#[derive(Scopable)]` plus the `#[secure(...)]` tenancy annotation on
 # every entity. This is what makes `SecureORM` able to scope a query at all.
 toolkit-db-macros = { workspace = true }
 toolkit-macros = { workspace = true }
-# Task 17: the two `OData` collections. `FilterField`/`FieldKind` on the field
+# The two `OData` collections. `FilterField`/`FieldKind` on the field
 # enums in `infra::storage::odata`, `ODataQuery` on the repository and service
 # read methods, and `Page<T>` as the response body.
 #
@@ -318,11 +323,11 @@ toolkit-macros = { workspace = true }
 # compile without it. Same feature qa-runs enables, for the same route
 # declaration.
 toolkit-odata = { workspace = true, features = ["with-utoipa"] }
-# Task 11: `AccessScope`, which every repository-trait method takes. The ledger
+# `AccessScope`, which every repository-trait method takes. The ledger
 # below assigned this to Task 12 and named `SecurityContext`; the *traits* take
 # the already-compiled `AccessScope`, so it lands one task earlier.
 toolkit-security = { workspace = true }
-# Task 16: `ToSchema` on the REST DTOs, emitted by `#[toolkit_macros::api_dto]`.
+# `ToSchema` on the REST DTOs, emitted by `#[toolkit_macros::api_dto]`.
 # `features = ["time"]` is what gives `OffsetDateTime` a schema, and the rebuild
 # request is two instants — without it the request DTO does not compile.
 utoipa = { workspace = true, features = ["time"] }
@@ -420,6 +425,7 @@ testcontainers-modules = { workspace = true, optional = true }
 # Test-only
 # ---------------------------------------------------------------------------
 [dev-dependencies]
+bytes = { workspace = true }
 # `tokio` is **not** here. It lived in this section from Task 10 (the migration
 # module's schema tests' `#[tokio::test]`) until Task 39 promoted it to
 # `[dependencies]` proper — see that entry for why — and the redundant
@@ -439,7 +445,7 @@ testcontainers-modules = { workspace = true, optional = true }
 # that consumer needed, so it was deleted along with the event-broker
 # dependency once that was established (`src/gear.rs`'s header); `time` is and
 # remains the only instant type this gear's own domain, schema and SDK use.
-# Task 40: `tower::ServiceExt::oneshot`, which is how
+# `tower::ServiceExt::oneshot`, which is how
 # `tests/ingest_idempotence.rs` drives the router `register_rest` returns without
 # binding a TCP listener. Test-only by construction — nothing in `src/` names
 # `tower` — and the same crate `axum` already builds on, so it adds no new
@@ -465,3 +471,7 @@ parking_lot = { workspace = true }
 # test` — and `cargo hack --each-feature`, which is a green gate, builds this
 # package on its own, where it would not.
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+# Captures the raw `tracing` output of one test (a thread-local default
+# subscriber writing to a buffer), so the JIRA poller's "a refused credential
+# is one error per pass" is asserted against the lines really emitted.
+tracing-subscriber = { workspace = true }

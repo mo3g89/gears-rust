@@ -864,6 +864,11 @@ pub(super) struct MockCatalog {
     /// [`Self::unresolvable_plans`], though a test should only ever put one
     /// `(repo_id, plan_path)` in one of the two.
     pub(super) denied_plans: Vec<(Uuid, String)>,
+    /// `(repo_id, plan_path)` pairs whose `get_plan` answers the given error
+    /// verbatim — for a refusal whose *category* and message are the point,
+    /// such as a branch the catalog has no synced content for. Checked before
+    /// [`Self::denied_plans`].
+    pub(super) failing_plans: Vec<((Uuid, String), QaCatalogError)>,
     /// Every `(repo_id, plan_path)` `get_plan` was asked for, in order.
     pub(super) plan_lookups: Mutex<Vec<(Uuid, String)>>,
     pub(super) custom_plan: Option<CustomPlan>,
@@ -896,6 +901,7 @@ impl MockCatalog {
             plans_by_path: Vec::new(),
             unresolvable_plans: Vec::new(),
             denied_plans: Vec::new(),
+            failing_plans: Vec::new(),
             plan_lookups: Mutex::new(Vec::new()),
             custom_plan: None,
             metas: Vec::new(),
@@ -940,6 +946,18 @@ impl MockCatalog {
     /// must fail rather than resolve as if the plan simply were not there.
     pub(super) fn with_denied_plan(mut self, repo_id: Uuid, plan_path: &str) -> Self {
         self.denied_plans.push((repo_id, plan_path.to_owned()));
+        self
+    }
+
+    /// Make `(repo_id, plan_path)`'s `get_plan` answer `error` as given.
+    pub(super) fn with_failing_plan(
+        mut self,
+        repo_id: Uuid,
+        plan_path: &str,
+        error: QaCatalogError,
+    ) -> Self {
+        self.failing_plans
+            .push(((repo_id, plan_path.to_owned()), error));
         self
     }
 
@@ -1161,6 +1179,13 @@ impl QaCatalogClientV1 for MockCatalog {
             .unwrap()
             .push((repo_id, path.to_owned()));
 
+        if let Some((_, error)) = self
+            .failing_plans
+            .iter()
+            .find(|((r, p), _)| *r == repo_id && p == path)
+        {
+            return Err(error.clone());
+        }
         if self
             .denied_plans
             .iter()
@@ -1412,22 +1437,23 @@ pub(super) fn platform_fixture(version: Option<&str>, build: Option<&str>) -> En
         version_detect_error: None,
         version_detected_at: None,
         // **The credential lives here since Task 19.** This fixture used to
-        // carry `kubeconfig_credstore_ref: "credstore://kubeconfig"` with an
+        // carry `kubeconfig_credstore_ref: "sv-staging-kubeconfig"` with an
         // empty `credentials` beside it, and dispatch derived the key from the
-        // plugin. The column is gone, `m20260903_000012` moved every row's
-        // reference into this list, and `plugin_dispatch` reads only this --
-        // so an empty list here would mean "this environment stores no
-        // credential", which is a different fixture.
-        // Keyed with the **scripted plugin's own** key, because that is what
-        // the key now has to be: before Task 19 dispatch derived it from
+        // plugin. The column is gone, `m20260903_000012` (folded into
+        // `migrations::m20260812_000001_initial` by the docs squash) moved
+        // every row's reference into this list, and `plugin_dispatch` reads
+        // only this -- so an empty list here would mean "this environment
+        // stores no credential", which is a different fixture. Keyed with the
+        // **scripted plugin's own** key, because that is what the key now has
+        // to be: before Task 19 dispatch derived it from
         // `sole_required_secret_key(plugin.credential_schema())` for a single
-        // unkeyed legacy reference, so any key in the fixture would do. The
-        // key is read from the row now, so a fixture keyed "kubeconfig" would
-        // be an environment whose credential this plugin does not declare --
-        // which is a real state, and a different test.
+        // unkeyed legacy reference, so any key in the fixture would do. The key
+        // is read from the row now, so a fixture keyed "kubeconfig" would be an
+        // environment whose credential this plugin does not declare -- which is
+        // a real state, and a different test.
         credentials: vec![qa_environments_sdk::EnvironmentCredential {
             key: crate::domain::service::admission::tests::fakes::PLUGIN_SECRET_KEY.to_owned(),
-            credstore_ref: "credstore://kubeconfig".to_owned(),
+            credstore_ref: "sv-staging-kubeconfig".to_owned(),
         }],
         // Nothing has been observed through the plugin path (qa-environments
         // Task 14): every observation value is the one a never-observed
@@ -2277,7 +2303,7 @@ impl Fleet {
 
     /// Every tick row under `tenant`.
     ///
-    /// Predates `SchedulesRepository::list_ticks` (WS5 Task 1), which reads by
+    /// Predates `SchedulesRepository::list_ticks`, which reads by
     /// **schedule id**, scoped for `qa.schedule` - not by tenant across every
     /// schedule, which is what these assertions about a cross-tenant claim
     /// need. So this still goes at the entity directly, through the same

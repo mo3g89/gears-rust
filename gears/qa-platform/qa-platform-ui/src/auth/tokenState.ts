@@ -29,8 +29,7 @@
  * on this deployment it is actively harmful: an unauthenticated tab left on
  * `/runs` was measured issuing 20 `/qa/v1` requests in 25 seconds (34 once
  * the stack had been seeded), all 401, with no end condition — which is
- * what wedged the gateway's rate limiter for twelve hours (see the Task 15
- * report). The structural half of the fix is
+ * what wedged the gateway's rate limiter for twelve hours. The structural half of the fix is
  * `RequireAuth`, which stops the queries mounting at all; this counter is the
  * half that covers a token going bad *while* the app is running.
  */

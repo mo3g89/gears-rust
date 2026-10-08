@@ -1,8 +1,18 @@
 {
   "components": {
     "schemas": {
+      "AnalyticsGroupByDto": {
+        "description": "The grouping an analytics overview was computed under, echoed back.\n`environment` matches the domain vocabulary rather than the column name; the\nother three keep the stored spelling.",
+        "enum": [
+          "none",
+          "component",
+          "tag",
+          "environment"
+        ],
+        "type": "string"
+      },
       "AnalyticsListItemDto": {
-        "description": "One test as the three overview lists draw it.\n\n**Three of its fields carry an id where a reader might expect a label**, and\neach is named for what it carries:\n\n* The plan is [`Self::repo_id`] + [`Self::plan_path`]. A plan has no UUID in\n  this subsystem — `qa_insights_sdk`'s header records that it is materialized\n  on read from qa-catalog — so the pair *is* the identity.\n* The environment is [`Self::last_environment_id`] **and**\n  [`Self::last_environment`] (renamed from `last_environment_id`/`last_platform`\n  at ruling G-3): the id, and the name qa-environments resolved for it. Both,\n  rather than only the name, because the name is `null` for an environment\n  the caller cannot see, and a client that has to draw *something* needs the\n  id to disambiguate two unresolved bars.\n* The run is [`Self::last_run_id`]. **There is no run-name read in this\n  gear**: `RunsReader` has no bulk name lookup, and a per-item `get_run`\n  would be an N+1 across a gear boundary on a list whose length is the\n  universe size. Named for what it carries rather than a `last_run_name`\n  with a UUID inside it, which is the discipline Task 23 applied to the\n  environment id.",
+        "description": "One test as the three overview lists draw it.\n\n**Three of its fields carry an id where a reader might expect a label**, and\neach is named for what it carries:\n\n* The plan is [`Self::repo_id`] + [`Self::plan_path`]. A plan has no UUID in\n  this subsystem — `qa_insights_sdk`'s header records that it is materialized\n  on read from qa-catalog — so the pair *is* the identity.\n* The environment is [`Self::last_environment_id`] **and**\n  [`Self::last_environment`] (renamed from `last_platform_id`/`last_platform`):\n  the id, and the name qa-environments resolved for it. Both,\n  rather than only the name, because the name is `null` for an environment\n  the caller cannot see, and a client that has to draw *something* needs the\n  id to disambiguate two unresolved bars.\n* The run is [`Self::last_run_id`]. **There is no run-name read in this\n  gear**: `RunsReader` has no bulk name lookup, and a per-item `get_run`\n  would be an N+1 across a gear boundary on a list whose length is the\n  universe size. Named for what it carries rather than a `last_run_name`\n  with a UUID inside it, which is the discipline applied to the\n  environment id.",
         "properties": {
           "case_status": {
             "description": "The per-case verdict of the latest run, in the **case**-level vocabulary,\nwhich is wider than the file-level one: it adds `XFAIL` and `XPASS`.\n`null` when that run reported no cases.",
@@ -191,8 +201,8 @@
             "type": "array"
           },
           "group_by": {
-            "description": "`none` | `component` | `tag` | `environment`.",
-            "type": "string"
+            "$ref": "#/components/schemas/AnalyticsGroupByDto",
+            "description": "`none` | `component` | `tag` | `environment` — see\n[`AnalyticsGroupByDto`]."
           },
           "group_value": {
             "description": "Normalized: trimmed, and `null` when blank.",
@@ -448,13 +458,13 @@
         "type": "object"
       },
       "CreateEnvironmentReq": {
-        "description": "REST DTO for creating a new target environment.\n\n# Two ways to supply the kubeconfig\n\n`kubeconfig_credstore_ref` names a secret the caller has already\nregistered; `kubeconfig` is the **document** itself, for the operator who\nhas a file to paste and no reference to name. Exactly one must be present\n— the service rejects both, and rejects neither with the same\n`kubeconfig_credstore_ref must not be empty` error it always gave.\n`kubeconfig_credstore_ref` is therefore `Option<String>` where it used to\nbe a required `String`; the required-ness moved from the schema to the\npair-wise rule, because neither field alone can be required any more.\n\n`Debug` is hand-written to redact `kubeconfig` (the precedent is\n`qa-catalog`'s `CreateSshKeyReq`, which mirrors credstore's own\n`CreateSecretRequestDto`): a kubeconfig carries `client-key-data`, i.e. a\nclient private key, so a future `debug!(\"{req:?}\")` anywhere would\notherwise write private key material into the logs. The redaction makes\nthat structurally impossible rather than a convention.",
+        "description": "REST DTO for creating a new target environment.\n\n# Where the credential goes\n\n`credentials` is the channel: each entry is keyed by the product plugin's\nown field and carries a document or a reference. The pre-plugin pair is a\nsecond spelling of one entry — `kubeconfig_credstore_ref` names a secret\nthe caller has already registered, `kubeconfig` is the **document** itself\n— and at most one of the two may be present: the service rejects both. A\ncreate that supplies no credential through either channel is rejected on\n`credentials` (the pair's old `kubeconfig_credstore_ref must not be empty`\nerror went with the plugin path). `kubeconfig_credstore_ref` is therefore\n`Option<String>` where it used to be a required `String`.\n\n`Debug` is hand-written to redact `kubeconfig` (the precedent is\n`qa-catalog`'s `CreateSshKeyReq`, which mirrors credstore's own\n`CreateSecretRequestDto`): a kubeconfig carries `client-key-data`, i.e. a\nclient private key, so a future `debug!(\"{req:?}\")` anywhere would\notherwise write private key material into the logs. The redaction makes\nthat structurally impossible rather than a convention.",
         "properties": {
           "credentials": {
             "additionalProperties": {
               "$ref": "#/components/schemas/CredentialSubmissionDto"
             },
-            "description": "Credentials keyed by the product plugin's own field key, each either\nthe document (`{\"material\": …}`) or a credstore reference\n(`{\"reference\": …}`). This is the plugin-shaped channel; the\n`kubeconfig`/`kubeconfig_credstore_ref` pair above is the pre-plugin\nspelling of one entry of it and is still accepted so the shipped UI\nkeeps working. Supplying both spellings of the same field is a\nvalidation error.",
+            "description": "Credentials keyed by the product plugin's own field key, each either\nthe document (`{\"material\": …}`) or a credstore reference\n(`{\"reference\": …}`). This is the plugin-shaped channel; the\n`kubeconfig`/`kubeconfig_credstore_ref` pair above is the pre-plugin\nspelling of one entry of it and is still accepted for clients that\nsend it. Supplying both spellings of the same field is a validation\nerror.",
             "propertyNames": {
               "type": "string"
             },
@@ -532,7 +542,7 @@
             "type": "string"
           },
           "plugin_instance_id": {
-            "description": "Full GTS instance id of the owning product plugin. **Required since\nTask 20a**: absent or `null` is a 400 from\n`TryFrom<CreateProductReq>` naming `GET /qa/v1/product-plugins`, and a\nbare instance segment, a type id, or an id no plugin registers is\nrejected with a 400 rather than stored as an id that resolves to\nnothing.\n\nIt stays `Option` on the wire so the refusal can say *where to find a\nvalid id*, which serde's \"missing field\" cannot. The doc used to say\nabsence \"leaves the product unbound, which is accepted only while the\ncolumn is nullable\" — untrue as of the commit that added the refusal\ntwelve lines below it (review finding IMPORTANT-4).\n\nA missing key deserializes to `None` unaided — see\n[`CustomPlanFileDto::plan_path`] for the measurement behind not\nputting a `#[serde(default)]` here.",
+            "description": "Full GTS instance id of the owning product plugin. **Required**:\nabsent or `null` is a 400 from\n`TryFrom<CreateProductReq>` naming `GET /qa/v1/product-plugins`, and a\nbare instance segment, a type id, or an id no plugin registers is\nrejected with a 400 rather than stored as an id that resolves to\nnothing.\n\nIt stays `Option` on the wire so the refusal can say *where to find a\nvalid id*, which serde's \"missing field\" cannot. Absence never leaves\nthe product unbound: it is always refused.\n\nA missing key deserializes to `None` unaided — see\n[`CustomPlanFileDto::plan_path`] for the measurement behind not\nputting a `#[serde(default)]` here.",
             "type": [
               "string",
               "null"
@@ -602,7 +612,7 @@
         "type": "object"
       },
       "CredentialSubmissionDto": {
-        "description": "One submitted credential on the wire: either the document or a reference.\n\nExternally tagged, so a body reads\n`{\"credentials\": {\"kubeconfig\": {\"material\": \"apiVersion: v1\\n…\"}}}` or\n`{\"credentials\": {\"kubeconfig\": {\"reference\": \"credstore://kc/staging\"}}}`.\nThe tag is what makes \"exactly one of a document and a reference\"\nunrepresentable rather than validated — see\n`sdk::CredentialSubmission`, whose shape this mirrors.\n\n`Debug` is hand-written and redacts [`Self::Material`], for\n`CreateEnvironmentReq`'s reason: a derived `Debug` here is the 2026-08-28\nleak with a new field name. A reference is not redacted, matching\n`kubeconfig_credstore_ref`'s long-standing treatment in these same\nhand-written impls — it is withheld from *responses* (`EnvironmentDto`\ndrops it) because under `SharingMode::Tenant` it is a read path to the\nmaterial, but the caller of a request already holds it.",
+        "description": "One submitted credential on the wire: either the document or a reference.\n\nExternally tagged, so a body reads\n`{\"credentials\": {\"kubeconfig\": {\"material\": \"apiVersion: v1\\n…\"}}}` or\n`{\"credentials\": {\"kubeconfig\": {\"reference\": \"kc-staging\"}}}`.\nThe tag is what makes \"exactly one of a document and a reference\"\nunrepresentable rather than validated — see\n`sdk::CredentialSubmission`, whose shape this mirrors.\n\n`Debug` is hand-written and redacts [`Self::Material`], for\n`CreateEnvironmentReq`'s reason: a derived `Debug` here is the 2026-08-28\nleak with a new field name. A reference is not redacted, matching\n`kubeconfig_credstore_ref`'s long-standing treatment in these same\nhand-written impls — it is withheld from *responses* (`EnvironmentDto`\ndrops it) because under `SharingMode::Tenant` it is a read path to the\nmaterial, but the caller of a request already holds it.",
         "oneOf": [
           {
             "description": "The document itself. Written to credstore under a reference this gear\ngenerates and then owns.",
@@ -750,7 +760,7 @@
             ]
           },
           "environment_id": {
-            "description": "The environment the run occupied, as an id. Resolving it to a display\nname is a qa-environments lookup this gear does not make yet.\n\nSourced from `qa_runs_sdk::Run::environment_id` (this crate's own\n`test_result::Model` is not involved here — this row never touches\n`qa_test_results`), so it is qa-runs' own physical column, one gear\nover, that this field projects. Renamed from `platform_id` (Task 25)\n— see [`TestResultDto::environment_id`]'s doc for why: the same\nrename applies on both sides of the boundary, even though the source\ncolumn this field is sourced from is qa-runs', not this crate's own.",
+            "description": "The environment the run occupied, as an id. Resolving it to a display\nname is a qa-environments lookup this gear does not make yet.\n\nSourced from `qa_runs_sdk::Run::environment_id` (this crate's own\n`test_result::Model` is not involved here — this row never touches\n`qa_test_results`), so it is qa-runs' own physical column, one gear\nover, that this field projects. Renamed from `platform_id`\n— see [`TestResultDto::environment_id`]'s doc for why: the same\nrename applies on both sides of the boundary, even though the source\ncolumn this field is sourced from is qa-runs', not this crate's own.",
             "format": "uuid",
             "type": [
               "string",
@@ -929,7 +939,7 @@
         "type": "object"
       },
       "EnvironmentDto": {
-        "description": "REST DTO for a registered target environment.\n\nNever carries the kubeconfig document, and — since 2026-08-27, by a human\ndecision — not its **credstore reference** either. The material is stored\nunder [`SharingMode::Tenant`](credstore_sdk::SharingMode::Tenant), so any\ntenant member holding the reference can read it back through credstore's own\n`GET /credstore/v1/secrets/{ref}`. This DTO is returned on **every**\nenvironment read and write path, i.e. to every `qa.platform` GET/LIST-authorized\ncaller, so publishing the reference handed every tenant member a working read\npath to a kubeconfig's `client-key-data` — a client private key — the moment\nthe create form began accepting pasted documents (`EnvironmentsService`).\n\nThis is exactly `SshKeyDto`'s convention\n(`qa-catalog/qa-catalog/src/api/rest/dto.rs`), which withholds its own\n`credstore_ref` for the same reason and says so. The reference stays on the\nSDK model (`qa_environments_sdk::Environment::kubeconfig_credstore_ref`)\nfor in-process consumers — `qa-runs` resolves the kubeconfig from it when it\nbuilds a dispatch spec — and on the column. Only the REST projection drops\nit. The `name` is what identifies an environment to a human.",
+        "description": "REST DTO for a registered target environment.\n\nNever carries the kubeconfig document, and — since 2026-08-27, by a human\ndecision — not its **credstore reference** either. The material is stored\nunder [`SharingMode::Tenant`](credstore_sdk::SharingMode::Tenant), so any\ntenant member holding the reference can read it back through credstore's own\n`GET /credstore/v1/secrets/{ref}`. This DTO is returned on **every**\nenvironment read and write path, i.e. to every `qa.platform` GET/LIST-authorized\ncaller, so publishing the reference handed every tenant member a working read\npath to a kubeconfig's `client-key-data` — a client private key — the moment\nthe create form began accepting pasted documents (`EnvironmentsService`).\n\nThis is exactly `SshKeyDto`'s convention\n(`qa-catalog/qa-catalog/src/api/rest/dto.rs`), which withholds its own\n`credstore_ref` for the same reason and says so. The references stay on the\nSDK model (`qa_environments_sdk::Environment::credentials`) for in-process\nconsumers — `qa-runs` builds a dispatch spec's credential slots from them —\nand on the column. Only the REST projection drops them. The `name` is what\nidentifies an environment to a human.",
         "properties": {
           "available": {
             "type": "boolean"
@@ -960,15 +970,15 @@
             ]
           },
           "health_detail": {
-            "description": "Why the most recent health read reached that state, when there is\nsomething to say. Classified text only: a fixed string chosen by\nfailure variant, or a remote service's own message — never a formatted\nerror and never anything derived from a credential (**D12**).",
+            "description": "Why the most recent health read reached that state, when there is\nsomething to say. Classified text only: a fixed string chosen by\nfailure variant, or a remote service's own message — never a formatted\nerror and never anything derived from a credential.",
             "type": [
               "string",
               "null"
             ]
           },
           "health_state": {
-            "description": "The most recent health verdict: `ok`, `degraded`, `down` or `unknown`.\n`unknown` covers both \"nothing has looked\" and \"a look failed\" —\n[`Self::health_checked_at`] is what tells those apart, being `null`\nonly in the first case.",
-            "type": "string"
+            "$ref": "#/components/schemas/HealthStateDto",
+            "description": "The most recent health verdict: `ok`, `degraded`, `down` or `unknown`.\n`unknown` covers both \"nothing has looked\" and \"a look failed\" —\n[`Self::health_checked_at`] is what tells those apart, being `null`\nonly in the first case. See [`HealthStateDto`]."
           },
           "id": {
             "format": "uuid",
@@ -992,7 +1002,7 @@
             "type": "object"
           },
           "observed_base_url": {
-            "description": "The environment's base domain (`https://…`), as the plugin's\n`FieldRole::BaseUrl` attribute. `null` means never conclusively\ndetected.\n\nNon-secret, which is why it is published here at all: it is a URL an\noperator already knows, not a credential. It replaced `vhp_base_url`,\nwhich Task 19 dropped.",
+            "description": "The environment's base domain (`https://…`), as the plugin's\n`FieldRole::BaseUrl` attribute. `null` means never conclusively\ndetected.\n\nNon-secret, which is why it is published here at all: it is a URL an\noperator already knows, not a credential. It replaced `vhp_base_url`,\nwhich the gear dropped.",
             "type": [
               "string",
               "null"
@@ -1050,7 +1060,7 @@
         "type": "object"
       },
       "EnvironmentGroupSummaryDto": {
-        "description": "One bar of the environment breakdown.\n\n# Why this is not a [`GroupSummaryDto`]\n\nThe other two breakdowns bucket by a string the row itself carries, so their\nbars are `GroupSummary { value: String, .. }`. An execution row carries the\nenvironment as a `Uuid`, and the name comes from qa-environments — which can\ndecline to resolve it, for an environment deleted since the run executed or\none in another tenant, two cases `domain::ports::EnvironmentReader::names`\ndeliberately makes indistinguishable.\n\nSo the bar carries **both**: [`Self::environment_id`], which always\nidentifies the bucket, and [`Self::environment`], which is the label when\nthere is one. Collapsing them into a `value: String` would force a choice\nbetween dropping an unresolvable bar — silent data loss on a chart whose\njob is comparison — and rendering a UUID into a field a client will draw\nas a name, which is the exact outcome Task 23 typed `PlatformGroupSummary`\naround a `Uuid` to prevent.\n\nRenamed from `PlatformGroupSummaryDto`, with its `environment_id`/`platform`\nfields, to `EnvironmentGroupSummaryDto` with `environment_id`/`environment`\n(Task 25) — see [`TestResultDto::environment_id`]'s doc for why.",
+        "description": "One bar of the environment breakdown.\n\n# Why this is not a [`GroupSummaryDto`]\n\nThe other two breakdowns bucket by a string the row itself carries, so their\nbars are `GroupSummary { value: String, .. }`. An execution row carries the\nenvironment as a `Uuid`, and the name comes from qa-environments — which can\ndecline to resolve it, for an environment deleted since the run executed or\none in another tenant, two cases `domain::ports::EnvironmentReader::names`\ndeliberately makes indistinguishable.\n\nSo the bar carries **both**: [`Self::environment_id`], which always\nidentifies the bucket, and [`Self::environment`], which is the label when\nthere is one. Collapsing them into a `value: String` would force a choice\nbetween dropping an unresolvable bar — silent data loss on a chart whose\njob is comparison — and rendering a UUID into a field a client will draw\nas a name, which is the exact outcome that typing `PlatformGroupSummary`\naround a `Uuid` to prevent.\n\nRenamed from `PlatformGroupSummaryDto`, with its `platform_id`/`platform`\nfields, to `EnvironmentGroupSummaryDto` with `environment_id`/`environment`\n— see [`TestResultDto::environment_id`]'s doc for why.",
         "properties": {
           "environment": {
             "description": "`null` when qa-environments resolved no name for\n[`Self::environment_id`].",
@@ -1104,7 +1114,7 @@
         "description": "One recent failure, as the dashboard's failure card.\n\n`qa_insights_sdk::FailedTestCard`, keyed by a run id and by the plan pair.\nEvery field is\non the wire: unlike [`DashboardStatsDto`], nothing here is omitted, because\nevery column is computed — the list itself is empty when nothing failed, which\nis a measurement rather than a gap.",
         "properties": {
           "environment_id": {
-            "description": "The environment the run occupied, as an id rather than a name — the same\nsubstitution [`DashboardRunDto::environment_id`] documents.\nRenamed from `platform_id` (Task 25) — see\n[`TestResultDto::environment_id`]'s doc for why.",
+            "description": "The environment the run occupied, as an id rather than a name — the same\nsubstitution [`DashboardRunDto::environment_id`] documents.\nRenamed from `platform_id` — see\n[`TestResultDto::environment_id`]'s doc for why.",
             "format": "uuid",
             "type": [
               "string",
@@ -1422,7 +1432,7 @@
             "type": "array"
           },
           "environment": {
-            "description": "**Ordered by resolved name**, with the bars qa-environments could not\nname last, ordered by id.\n\nTask 23's fold orders by id because that is all it has, so the sort\nhappens here, where the names exist. **A rendered order changes when an\nenvironment is\nrenamed**, which is the correct direction and a change to expect rather than a\nregression to hunt.\n\nRenamed from `platform` (Task 25), alongside its element type\n(`PlatformGroupSummaryDto` → [`EnvironmentGroupSummaryDto`]).",
+            "description": "**Ordered by resolved name**, with the bars qa-environments could not\nname last, ordered by id.\n\nThe fold orders by id because that is all it has, so the sort\nhappens here, where the names exist. **A rendered order changes when an\nenvironment is\nrenamed**, which is the correct direction and a change to expect rather than a\nregression to hunt.\n\nRenamed from `platform`, alongside its element type\n(`PlatformGroupSummaryDto` → [`EnvironmentGroupSummaryDto`]).",
             "items": {
               "$ref": "#/components/schemas/EnvironmentGroupSummaryDto"
             },
@@ -1442,6 +1452,16 @@
           "environment"
         ],
         "type": "object"
+      },
+      "HealthStateDto": {
+        "description": "An environment's coarse health verdict: `ok`, `degraded`, `down` or\n`unknown`.",
+        "enum": [
+          "ok",
+          "degraded",
+          "down",
+          "unknown"
+        ],
+        "type": "string"
       },
       "HeatmapDataDto": {
         "description": "The heatmap: a day axis and one row per test.\n\nRows are in the universe's order — **not** sorted, unlike the lists — and a\nfile listed by two plans is two identical rows.",
@@ -1504,7 +1524,7 @@
             "type": "string"
           },
           "environment_id": {
-            "description": "Renamed from `platform_id` (Task 25) — see\n[`TestResultDto::environment_id`]'s doc for why.",
+            "description": "Renamed from `platform_id` — see\n[`TestResultDto::environment_id`]'s doc for why.",
             "format": "uuid",
             "type": [
               "string",
@@ -1640,7 +1660,7 @@
             ]
           },
           "environment_id": {
-            "description": "`null` launches a run with no target environment. Such a run is never\nqueued and never blocks anything. Renamed from `platform_id`\n(Task 25) — see [`RunDto::environment_id`]'s doc for why.",
+            "description": "`null` launches a run with no target environment. Such a run is never\nqueued and never blocks anything. Renamed from `platform_id`\n— see [`RunDto::environment_id`]'s doc for why.",
             "format": "uuid",
             "type": [
               "string",
@@ -1800,7 +1820,7 @@
             "type": "boolean"
           },
           "environment_id": {
-            "description": "`null` schedules a run with no target environment. Renamed from\n`platform_id` (Task 25) — see [`RunDto::environment_id`]'s doc for why.",
+            "description": "`null` schedules a run with no target environment. Renamed from\n`platform_id` — see [`RunDto::environment_id`]'s doc for why.",
             "format": "uuid",
             "type": [
               "string",
@@ -1847,7 +1867,7 @@
         "type": "object"
       },
       "NotificationConfigDto": {
-        "description": "The tenant's notification settings, on the wire —\n`GET/PUT /qa/v1/settings/notifications`. Unlike\n[`JiraSettingsDto`], no field here needed a **rename** —\n[`Self::slack_webhook_credstore_ref`] is already named for what it holds.\n\n**The name was the only thing that was already right** (Phase C's final\nreview, Important 1). That field is a credential-store reference and never a\nURL — possession of a Slack incoming-webhook URL *is* the authorization to\npost, so the column is as sensitive as a JIRA API token's reference — and\nuntil that review nothing enforced it, so an operator following the field's\nown name was the only thing keeping the secret out of a document\n`GET /qa/v1/settings/notifications` hands to any holder of\n`gts.cf.qa.insights.notification_config.v1~/get`.\n`domain::service::notify::NotifyService::save_config` now applies the JIRA\nsurface's own syntax check to it. The one asymmetry that remains with\n[`JiraSettingsDto`] is that an empty value here *clears* the reference\ninstead of preserving the stored one — see that method's doc.",
+        "description": "The tenant's notification settings, on the wire —\n`GET/PUT /qa/v1/settings/notifications`. Unlike\n[`JiraSettingsDto`], no field here needed a **rename** —\n[`Self::slack_webhook_credstore_ref`] is already named for what it holds.\n\n**That field is a credential-store reference and never a\nURL** — possession of a Slack incoming-webhook URL *is* the authorization to\npost, so the column is as sensitive as a JIRA API token's reference, and\n`GET /qa/v1/settings/notifications` hands the document to any holder of\n`gts.cf.qa.insights.notification_config.v1~/get`.\n`domain::service::notify::NotifyService::save_config` applies the JIRA\nsurface's own syntax check to it. The one asymmetry that remains with\n[`JiraSettingsDto`] is that an empty value here *clears* the reference\ninstead of preserving the stored one — see that method's doc.",
         "properties": {
           "email_enabled": {
             "type": "boolean"
@@ -1903,6 +1923,7 @@
             "type": "boolean"
           },
           "slack_webhook_credstore_ref": {
+            "description": "Credstore **reference** to the Slack incoming webhook, never the URL.\nThe secret it names holds the full\n`https://hooks.slack.com/services/…` URL; the Slack adapter resolves it\nat send time and refuses anything else before dialling.",
             "type": "string"
           }
         },
@@ -1972,7 +1993,7 @@
         "description": "`POST /qa/v1/settings/notifications/preview`'s response.",
         "properties": {
           "blocks": {
-            "description": "Slack Block Kit blocks: literally the `blocks` array the tenant's\nSlack would receive, so this endpoint's contract is Slack's wire\nformat rather than this gear's own. Encoded from\n`domain::ports::SlackBlock` by `infra::notify::block_kit`, the one\nencoder the outbound adapter uses too — which is what makes \"the\npreview shows what gets sent\" true by construction (review finding\n#17).",
+            "description": "Slack Block Kit blocks: literally the `blocks` array the tenant's\nSlack would receive, so this endpoint's contract is Slack's wire\nformat rather than this gear's own. Encoded from\n`domain::ports::SlackBlock` by `infra::notify::block_kit`, the one\nencoder the outbound adapter uses too — which is what makes \"the\npreview shows what gets sent\" true by construction.",
             "items": {},
             "type": "array"
           },
@@ -2047,7 +2068,7 @@
         "description": "The universe partitioned three ways, plus the per-case counters.\n",
         "properties": {
           "case_expected": {
-            "description": "The number of test cases the universe is expected to contain, available\nwithout any run. `summarize` leaves it at `0` and\n`AnalyticsService::overview` fills it in afterwards.\n\n**Per file, the collect job's exact count wins where one exists, and\nthe static count parsed out of the test source is the fallback** —\nnever the other way, and never a whole-payload choice of one source or\nthe other: `domain::analytics::universe::expected_cases` (Task 29) mixes\nthe two per file. The static source is\n`qa_catalog_sdk::UniverseTest::static_case_count`, present on every\nuniverse entry the overview reads; its own doc records the same\nprecedence from the catalog side. Because that fallback needs no\ncollect report at all, **this field is non-zero on a deployment that\nhas never run a collect job**.",
+            "description": "The number of test cases the universe is expected to contain, available\nwithout any run. `summarize` leaves it at `0` and\n`AnalyticsService::overview` fills it in afterwards.\n\n**Per file, the collect job's exact count wins where one exists, and\nthe static count parsed out of the test source is the fallback** —\nnever the other way, and never a whole-payload choice of one source or\nthe other: `domain::analytics::universe::expected_cases` mixes\nthe two per file. The static source is\n`qa_catalog_sdk::UniverseTest::static_case_count`, present on every\nuniverse entry the overview reads; its own doc records the same\nprecedence from the catalog side. Because that fallback needs no\ncollect report at all, **this field is non-zero on a deployment that\nhas never run a collect job**.",
             "minimum": 0,
             "type": "integer"
           },
@@ -2357,7 +2378,7 @@
         "type": "object"
       },
       "PlanTestAnalyticsDto": {
-        "description": "One test's aggregated analytics, as\n`GET /qa/v1/analytics/plan/tests?plan_id=` renders it.\n\n`last_environment_id` and `last_environment` (renamed from\n`last_environment_id`/`last_platform` at ruling G-3) both ride along for\n[`AnalyticsListItemDto`]'s reason: the name is `null` for an environment\nthe caller cannot see or that no row named, and the two are indistinguishable\non the wire, exactly as `EnvironmentReader::names`' header records.",
+        "description": "One test's aggregated analytics, as\n`GET /qa/v1/analytics/plan/tests?plan_id=` renders it.\n\n`last_environment_id` and `last_environment` (renamed from\n`last_platform_id`/`last_platform`) both ride along for\n[`AnalyticsListItemDto`]'s reason: the name is `null` for an environment\nthe caller cannot see or that no row named, and the two are indistinguishable\non the wire, exactly as `EnvironmentReader::names`' header records.",
         "properties": {
           "fail_count": {
             "description": "Executions whose status is the literal string `FAILED`. See\n[`Self::pass_count`].",
@@ -2537,7 +2558,7 @@
             "type": "string"
           },
           "plugin_instance_id": {
-            "description": "Full GTS instance id of the product plugin that owns this product's\nbehaviour — the whole composed id, not the plugin's instance segment.\n\n**Always present since Task 20a.** The column is `NOT NULL`\n(`m20260903_000004`) and `From<sdk::Product>` wraps a `String`, so this\nfield is never `null` on the wire. The `Option` survives only so the\nresponse shape does not change under clients that already parse it;\nTask 22 is where the UI stops needing that.\n\nIt used to read \"`null` while the column is still nullable … such a\nproduct has no resolvable plugin\", which described a value this API can\nno longer return — on a public response field, in rustdoc (review\nfinding IMPORTANT-4).",
+            "description": "Full GTS instance id of the product plugin that owns this product's\nbehaviour — the whole composed id, not the plugin's instance segment.\n\n**Always present.** The column is `NOT NULL`\n(`m20260903_000004`, folded into `migrations::m20260812_000002_initial`\nby the docs squash) and `From<sdk::Product>` wraps a `String`, so this\nfield is never `null` on the wire. The `Option` survives only so the\nresponse shape stays stable for clients that already parse it, and\nclients may treat the value as a non-null string.",
             "type": [
               "string",
               "null"
@@ -2574,7 +2595,7 @@
         "type": "object"
       },
       "ProductPluginDto": {
-        "description": "One product plugin this deployment has registered.\n\n`credential_schema` renders the environment credential form;\n`observed_schema` describes what observing an environment of this product\ncan yield, and which of those values claim a platform role. Tasks 21-22\nrender both.\n\nNote what is **not** here: no failure class, no health vocabulary, and no\nendpoint or credential value of any kind. A plugin's schemas are\ndeclarations, and `observed_schema` cannot legally declare a secret field\nat all — the SDK rejects that at registration, so nothing secret can reach\nthis response by construction.",
+        "description": "One product plugin this deployment has registered.\n\n`credential_schema` renders the environment credential form;\n`observed_schema` describes what observing an environment of this product\ncan yield, and which of those values claim a platform role. The UI\nrender both.\n\nNote what is **not** here: no failure class, no health vocabulary, and no\nendpoint or credential value of any kind. A plugin's schemas are\ndeclarations, and `observed_schema` cannot legally declare a secret field\nat all — the SDK rejects that at registration, so nothing secret can reach\nthis response by construction.",
         "properties": {
           "credential_schema": {
             "items": {
@@ -2717,7 +2738,7 @@
             "type": "string"
           },
           "environment_id": {
-            "description": "Renamed from `platform_id` (Task 25) — see [`RunDto::environment_id`]'s\ndoc for why.",
+            "description": "Renamed from `platform_id` — see [`RunDto::environment_id`]'s\ndoc for why.",
             "format": "uuid",
             "type": "string"
           },
@@ -2755,8 +2776,8 @@
             "type": "string"
           },
           "run_kind": {
-            "description": "`plan`, `test`, or `custom_plan`.",
-            "type": "string"
+            "$ref": "#/components/schemas/RunKindDto",
+            "description": "`plan`, `test`, `custom_plan` or `collect` — see [`RunKindDto`]."
           },
           "source": {
             "$ref": "#/components/schemas/RunSourceDto",
@@ -2819,10 +2840,10 @@
         "type": "object"
       },
       "RebuildOutcomeDto": {
-        "description": "What a rebuild did.\n\n# `watermark_at` is deliberately not on the wire\n\n`ReconcileOutcome` carries it — as `watermark_advanced_to` until the\n2026-09-18 follow-ups renamed and re-specified it — and for a rebuild it is\nalways `None`, meaningfully so: not touching the watermark is the\nendpoint's contract, not a gap in it. `result_rows_written` stays off for\nthe neighbouring reason: it is a diagnostic for the ticker's log rather than\na fact about the window an operator asked for. A field that is structurally\nalways `null` invites a client to branch on it, and the first client to do\nso would be writing dead code against a promise the *other* caller of\n`ReconcileOutcome` (the reconcile ticker, which has no HTTP surface) does not\nkeep. The endpoint's description states the guarantee instead.\n\n# `caught_up` **is** on the wire now, as `complete`, and that is the change\n# the 2026-09-18 follow-up made here\n\nIt used to be excluded by the same argument as `watermark_at` — always\n`false` for a rebuild, which read one page and had no walk to finish. That\nstopped being true when the rebuild learned to page: it now means \"every run\nin `[from, to)` was reached\", which is the single most important thing this\nresponse says, and its absence is what made a truncated rebuild\nindistinguishable from a complete one. The old signal was a `WARN` in the\ngear's log, and the outage this endpoint's fix wave came out of established\nexactly what a log line nobody branches on is worth.\n\n[`Self::resume_from`] travels with it rather than leaving the operator to\nwork out a continuation: it is the `from` of the next request.\n\n# `stopped_at_run` is not on the wire either, and that one is only a scope\n# decision\n\n`ReconcileOutcome::stopped_at_run` names the run a stopped pass stopped on.\nIt exists for the log line and for the alert the reconcile ticker raises\n(Task 40 — `crate::gear`'s `report_reconcile_outcome`), which has no HTTP\nsurface at all — see\n`domain::service::reconcile`'s header on how a permanently failing run wedges\na tenant's backfill. It would be *useful* here too: an operator reading\n`stopped_at_gap: true` currently has to go to the logs to find out which run.\nAdding it is an additive key on a shipped response and nothing here objects\nto it; it is simply not this review wave's to add. Unlike `watermark_at`,\nthere is no argument that it should stay off.",
+        "description": "What a rebuild did.\n\n# `watermark_at` is deliberately not on the wire\n\n`ReconcileOutcome` carries it, and for a rebuild it is\nalways `None`, meaningfully so: not touching the watermark is the\nendpoint's contract, not a gap in it. `result_rows_written` stays off for\nthe neighbouring reason: it is a diagnostic for the ticker's log rather than\na fact about the window an operator asked for. A field that is structurally\nalways `null` invites a client to branch on it, and the first client to do\nso would be writing dead code against a promise the *other* caller of\n`ReconcileOutcome` (the reconcile ticker, which has no HTTP surface) does not\nkeep. The endpoint's description states the guarantee instead.\n\n# `caught_up` **is** on the wire, as `complete`\n\nUnlike `watermark_at`, it is not always the same value for a rebuild: the\nrebuild pages through its window, so it means \"every run\nin `[from, to)` was reached\", which is the single most important thing this\nresponse says, and without it a truncated rebuild would be\nindistinguishable from a complete one. A log line alone is not a signal a\nclient can branch on.\n\n[`Self::resume_from`] travels with it rather than leaving the operator to\nwork out a continuation: it is the `from` of the next request.\n\n# `stopped_at_run` is not on the wire either, and that one is only a scope\n# decision\n\n`ReconcileOutcome::stopped_at_run` names the run a stopped pass stopped on.\nIt exists for the log line and for the alert the reconcile ticker raises\n(`crate::gear`'s `report_reconcile_outcome`), which has no HTTP\nsurface at all — see\n`domain::service::reconcile`'s header on how a permanently failing run wedges\na tenant's backfill. It would be *useful* here too: an operator reading\n`stopped_at_gap: true` currently has to go to the logs to find out which run.\nAdding it is an additive key on a shipped response and nothing here objects\nto it; it is simply not part of this response today. Unlike `watermark_at`,\nthere is no argument that it should stay off.",
         "properties": {
           "complete": {
-            "description": "`true` when every run that finished in `[from, to)` was reached.\n\n`false` means the rebuild did **part** of the job: it spent its page\nbudget, or it stopped on a run it could not re-project. This is the field\nto branch on — a client that ignores it reads a partial replay as a\ncomplete one, which is the failure this response was reshaped to prevent.\n[`Self::resume_from`] then carries where to continue.",
+            "description": "`true` when every run that finished in `[from, to)` was reached.\n\n`false` means the rebuild did **part** of the job: it spent its page\nbudget, qa-runs stopped answering after the first page, or it stopped\non a run it could not re-project. This is the field\nto branch on — a client that ignores it reads a partial replay as a\ncomplete one, which is the failure this response was reshaped to prevent.\n[`Self::resume_from`] then carries where to continue.",
             "type": "boolean"
           },
           "replayed": {
@@ -2896,7 +2917,7 @@
             "type": "object"
           }
         ],
-        "description": "The detail read: the run, its counters, and its per-test rows.\n\nOne response rather than three endpoints because the counters are derived\nfrom the same rows the caller is about to render, and fetching them\nseparately would let a caller display totals that disagree with the list\nbeneath them.\n\n**`result` lives on the flattened [`RunDto`], not here.** Task 10 moved it\nthere so the run list carries the same field — a caller building one view\nmodel for both the list and the detail read finds `result` in the same\nplace either way. Before that move this struct had its own `result` field\nbeside `run`, which would now collide with `RunDto::result` under\n`#[serde(flatten)]`: two `\"result\"` keys entering the same flattened\nobject. `get_run` sets [`RunDto::result`] explicitly, since the detail\nhandler already fetches it as a separate read."
+        "description": "The detail read: the run, its counters, and its per-test rows.\n\nOne response rather than three endpoints because the counters are derived\nfrom the same rows the caller is about to render, and fetching them\nseparately would let a caller display totals that disagree with the list\nbeneath them.\n\n**`result` lives on the flattened [`RunDto`], not here.** It is\nthere so the run list carries the same field — a caller building one view\nmodel for both the list and the detail read finds `result` in the same\nplace either way. Before that move this struct had its own `result` field\nbeside `run`, which would now collide with `RunDto::result` under\n`#[serde(flatten)]`: two `\"result\"` keys entering the same flattened\nobject. `get_run` sets [`RunDto::result`] explicitly, since the detail\nhandler already fetches it as a separate read."
       },
       "RunDto": {
         "description": "A run as reported by the read endpoints.",
@@ -2926,7 +2947,7 @@
             "type": "string"
           },
           "environment_id": {
-            "description": "Renamed from `platform_id` (Task 25): the wire now agrees with the\nRust field. The column moved with it: `environment_id` is now the\ncolumn, the Rust field and the wire key alike. Every other `platform_id` on this\ncrate's wire (requests and responses alike) was renamed the same way\n— this is the one place it is spelled out in full.\n\n**This was a breaking API change** (Task 25): a client reading\n`platform_id` out of a response now finds it absent, replaced by\n`environment_id`. (This type is a response - a client never *sends*\none, so there is no 400 to raise here. The 400 for a stale *request*\nis on the request-side types: [`LaunchRunReq::environment_id`] and\n[`NewScheduleReq::environment_id`] both refuse a `platform_id` sent in\ntheir place explicitly - see the first one's doc, and ruling G-4.)",
+            "description": "Renamed from `platform_id`: the wire now agrees with the\nRust field. The column moved with it: `environment_id` is now the\ncolumn, the Rust field and the wire key alike. Every other `platform_id` on this\ncrate's wire (requests and responses alike) was renamed the same way\n— this is the one place it is spelled out in full.\n\n**This was a breaking API change**: a client reading\n`platform_id` out of a response now finds it absent, replaced by\n`environment_id`. (This type is a response - a client never *sends*\none, so there is no 400 to raise here. The 400 for a stale *request*\nis on the request-side types: [`LaunchRunReq::environment_id`] and\n[`NewScheduleReq::environment_id`] both refuse a `platform_id` sent in\ntheir place explicitly - see the first one's doc.)",
             "format": "uuid",
             "type": [
               "string",
@@ -2999,7 +3020,7 @@
           },
           "result": {
             "$ref": "#/components/schemas/RunResultDto",
-            "description": "The run's five outcome counters, notably `skipped`.\n\nAdded on the run list DTO by Task 10, alongside the product owner's\ndecision that a skipped test no longer fails a run\n(`domain::state_machine::derive_terminal_state`). A `Succeeded` run\nwhose `skipped` is non-zero asserted less than the word \"succeeded\"\nimplies, and the run list is exactly where that would otherwise go\nunnoticed — a caller scanning the list never reaches the per-run detail\nread that already carried this number. See `RunDetailDto`, which now\ninherits this field via its flattened `run` rather than repeating it.\n\n**Zero by construction when built from a bare `sdk::Run`, real when\nbuilt from [`RunWithResult`].** A bare `sdk::Run` carries no counters —\nthey live on the same row, but [`sdk::Run`] has no field for them — so\na freshly-started launch response reads zero, which is correct: a run\nwith no ingested results has no results yet. The run list populates\nthe real value from [`RunWithResult`]; the run detail read sets it\ndirectly from `RunResultDto::from`."
+            "description": "The run's five outcome counters, notably `skipped`.\n\nAdded on the run list DTO, alongside the product owner's\ndecision that a skipped test no longer fails a run\n(`domain::state_machine::derive_terminal_state`). A `Succeeded` run\nwhose `skipped` is non-zero asserted less than the word \"succeeded\"\nimplies, and the run list is exactly where that would otherwise go\nunnoticed — a caller scanning the list never reaches the per-run detail\nread that already carried this number. See `RunDetailDto`, which now\ninherits this field via its flattened `run` rather than repeating it.\n\n**Zero by construction when built from a bare `sdk::Run`, real when\nbuilt from [`RunWithResult`].** A bare `sdk::Run` carries no counters —\nthey live on the same row, but [`sdk::Run`] has no field for them — so\na freshly-started launch response reads zero, which is correct: a run\nwith no ingested results has no results yet. The run list populates\nthe real value from [`RunWithResult`]; the run detail read sets it\ndirectly from `RunResultDto::from`."
           },
           "schedule_id": {
             "format": "uuid",
@@ -3021,7 +3042,7 @@
           },
           "state": {
             "$ref": "#/components/schemas/RunStateDto",
-            "description": "`sdk::RunState::as_str`'s spelling - a closed set on the wire since\nTask 20, when this field stopped being a `String`."
+            "description": "`sdk::RunState::as_str`'s spelling - a closed set on the wire, typed\n`RunStateDto` rather than a `String`."
           },
           "target": {
             "$ref": "#/components/schemas/RunTargetDto"
@@ -3063,6 +3084,16 @@
           "result"
         ],
         "type": "object"
+      },
+      "RunKindDto": {
+        "description": "What a queued run is: `plan`, `test`, `custom_plan` or `collect` —\n`sdk::RunKind::as_str`'s spellings.",
+        "enum": [
+          "plan",
+          "test",
+          "custom_plan",
+          "collect"
+        ],
+        "type": "string"
       },
       "RunLogLineDto": {
         "description": "One live log line, as an SSE `data:` payload.\n\nA struct rather than a bare string so the stream can carry a gap marker or\nany later per-line metadata without a second event type: a client parsing\n`{\"line\": \"...\"}` today keeps parsing when a field is added beside it.",
@@ -3403,7 +3434,7 @@
             "type": "boolean"
           },
           "environment_id": {
-            "description": "`null` schedules a run with no target environment. Such a run is\nnever queued and never blocks anything. Renamed from `platform_id`\n(Task 25) — see [`RunDto::environment_id`]'s doc for why.",
+            "description": "`null` schedules a run with no target environment. Such a run is\nnever queued and never blocks anything. Renamed from `platform_id`\n— see [`RunDto::environment_id`]'s doc for why.",
             "format": "uuid",
             "type": [
               "string",
@@ -3722,7 +3753,7 @@
         "type": "object"
       },
       "TestRepositoryDto": {
-        "description": "A test repository as published over REST.\n\n**`credential_ref` is intentionally absent.** It names the credstore entry\nholding this repository's git credentials, and a LIST or GET caller can\nredeem a reference it has been handed. `SshKeyDto` and qa-environments'\n`PlatformDto` drop their credstore refs for the same reason. Do not add it\nback. The reference stays on the SDK model\n(`qa_catalog_sdk::TestRepository::credential_ref`), which is where the sync\npath reads it. Review finding #2.",
+        "description": "A test repository as published over REST.\n\n**`credential_ref` is intentionally absent.** It names the credstore entry\nholding this repository's git credentials, and a LIST or GET caller can\nredeem a reference it has been handed. `SshKeyDto` and qa-environments'\n`PlatformDto` drop their credstore refs for the same reason. Do not add it\nback. The reference stays on the SDK model\n(`qa_catalog_sdk::TestRepository::credential_ref`), which is where the sync\npath reads it.",
         "properties": {
           "content_root": {
             "description": "Subdirectory within the repo that contains test content (\"\" = root).",
@@ -3794,7 +3825,7 @@
         "type": "object"
       },
       "TestResultDto": {
-        "description": "One file-level test outcome, as `GET /qa/v1/test-results` returns it.\n\nEvery field of [`TestResultRecord`], in its order. The record itself already\ndrops the two columns a consumer has no business reading — `tenant_id`, which\nis the caller's own scope, and `updated_at`, which moves on a re-ingest of an\noutcome that happened once (`infra::storage::mapper::test_result_to_sdk`).\n\n**One contract field is withheld here, and it is the only one:\n`run_created_at`.** This doc said \"there is nothing further to withhold here\nand this is a straight projection\" until Task 21b added that column, so the\nclaim is corrected rather than left standing. It is the fallback half of the\ndashboard's window expression — `COALESCE(run_finished_at, run_created_at)`\n— denormalized so this gear's aggregates need no cross-gear join. On the\n*wire* it is redundant:\nqa-runs owns the run and a consumer of this collection can ask it for the\nrun's creation instant, where it cannot for a per-row aggregate on a hot path.\n[`Self::run_finished_at`] is here because the pager and the analytics windows\npublish it, not because the pair travels together. Publishing it is one\nadditive field if a consumer ever needs it.\n\n**Most of it is nullable**, and nothing here is `Option` because the wire\nlikes it that way: each nullable field is a column that is genuinely absent for\na real run. Named rather than counted — `duration`, `launch_id`, `jira_key`,\n`product_version`, `app_build`, `environment_id`, `repo_id`, `plan_path`,\n`branch` and `run_finished_at`; only `id`, `run_id`, `test_file`, `test_name`,\n`status` and `created_at` are always present. `run_finished_at` is `null` while\nthe run is still going, `repo_id`/`plan_path` are `null` for a custom-plan or\ncollect run, `app_build` is `null` when the run named no build. A client\nrendering this must handle them; `qa_insights_sdk::TestResultRecord`'s field\ndocs say what each absence means.\n\n**`logs` is not here and cannot be**, which is a gap rather than a design\nchoice: this gear's only source of outcomes is qa-runs, whose\n`RunTestResult` carries no per-test log slice. The whole argument is on\n[`TestResultRecord`], which is where it belongs — a DTO cannot expose a field\nthe contract does not have.",
+        "description": "One file-level test outcome, as `GET /qa/v1/test-results` returns it.\n\nEvery field of [`TestResultRecord`], in its order. The record itself already\ndrops the two columns a consumer has no business reading — `tenant_id`, which\nis the caller's own scope, and `updated_at`, which moves on a re-ingest of an\noutcome that happened once (`infra::storage::mapper::test_result_to_sdk`).\n\n**One contract field is withheld here, and it is the only one:\n`run_created_at`.** This doc said \"there is nothing further to withhold here\nand this is a straight projection\" until that column was added, so the\nclaim is corrected rather than left standing. It is the fallback half of the\ndashboard's window expression — `COALESCE(run_finished_at, run_created_at)`\n— denormalized so this gear's aggregates need no cross-gear join. On the\n*wire* it is redundant:\nqa-runs owns the run and a consumer of this collection can ask it for the\nrun's creation instant, where it cannot for a per-row aggregate on a hot path.\n[`Self::run_finished_at`] is here because the pager and the analytics windows\npublish it, not because the pair travels together. Publishing it is one\nadditive field if a consumer ever needs it.\n\n**Most of it is nullable**, and nothing here is `Option` because the wire\nlikes it that way: each nullable field is a column that is genuinely absent for\na real run. Named rather than counted — `duration`, `launch_id`, `jira_key`,\n`product_version`, `app_build`, `environment_id`, `repo_id`, `plan_path`,\n`branch` and `run_finished_at`; only `id`, `run_id`, `test_file`, `test_name`,\n`status` and `created_at` are always present. `run_finished_at` is `null` while\nthe run is still going, `repo_id`/`plan_path` are `null` for a custom-plan or\ncollect run, `app_build` is `null` when the run named no build. A client\nrendering this must handle them; `qa_insights_sdk::TestResultRecord`'s field\ndocs say what each absence means.\n\n**`logs` is not here and cannot be**, which is a gap rather than a design\nchoice: this gear's only source of outcomes is qa-runs, whose\n`RunTestResult` carries no per-test log slice. The whole argument is on\n[`TestResultRecord`], which is where it belongs — a DTO cannot expose a field\nthe contract does not have.",
         "properties": {
           "app_build": {
             "description": "The build under test. Not a duplicate of [`Self::product_version`]: that\none is the analytics *filter*, this one the analytics *projection*.",
@@ -3822,7 +3853,7 @@
             ]
           },
           "environment_id": {
-            "description": "Renamed from `platform_id` (Task 25): the wire now agrees with the\nRust field. The column moved with it: `environment_id` is now the\ncolumn, the Rust field and the wire key alike. Every other\n`platform_id` on this crate's wire, whatever its own source entity,\nwas renamed the same way — this is the one place it is spelled out\nin full.\n\n**This was a breaking API change** (Task 25): a client reading\n`platform_id` out of a response now finds it absent, replaced by\n`environment_id`. Every renamed field on this crate's wire is a\nresponse field - unlike `qa-runs`, nothing here is also a request\nfield, so there is no 400 to raise on this crate's side of ruling G-4.",
+            "description": "Renamed from `platform_id`: the wire now agrees with the\nRust field. The column moved with it: `environment_id` is now the\ncolumn, the Rust field and the wire key alike. Every other\n`platform_id` on this crate's wire, whatever its own source entity,\nwas renamed the same way — this is the one place it is spelled out\nin full.\n\n**This was a breaking API change**: a client reading\n`platform_id` out of a response now finds it absent, replaced by\n`environment_id`. Every renamed field on this crate's wire is a\nresponse field - unlike `qa-runs`, nothing here is also a request\nfield, so there is no 400 to raise on this crate's side.",
             "format": "uuid",
             "type": [
               "string",
@@ -3944,7 +3975,7 @@
         "type": "object"
       },
       "UpdateEnvironmentReq": {
-        "description": "REST DTO for partially updating a target environment.\n\n`serde_with` is not a workspace dependency, so — unlike\n`sdk::EnvironmentPatch`'s nested `Option<Option<_>>` fields — `product_id`\nand `description` here cannot distinguish an explicit JSON `null` (meaning\n\"clear this field\") from the key being absent: both deserialize to `None`\nand are mapped to \"leave unchanged\" (`sdk::EnvironmentPatch`'s outer `None`).\nThere is currently no REST-exposed way to clear a previously-set\n`product_id` or `description` back to empty; only SDK/local-client\ncallers using `sdk::EnvironmentPatch` directly can do that.\n\n# `default_branch` is the exception, and deliberately so\n\nIt reaches all three of `sdk::EnvironmentPatch`'s states over REST without\n`serde_with`, because this field's \"clear\" signal is **not** JSON `null` —\nit is the **empty string**. `update_environment` maps an empty or\nwhitespace-only `default_branch` to its `\"__NULL__\"` sentinel and thence to\n`NULL`, while an absent field keeps the stored value. So:\n\n| request body | meaning |\n|---|---|\n| key absent, or `null` | leave the override unchanged |\n| `\"\"` (or whitespace) | clear the override; the repository default applies |\n| `\"release-9.0\"` | pin to that branch |\n\nThe middle row works because `Some(String)` survives the `.map(Some)` below\nas `Some(Some(\"\"))`, which `EnvironmentsService::normalize_default_branch` then\nfolds to `Some(None)` — the outer `Some` carrying \"the caller mentioned the\nfield\" the whole way. This is not a workaround for the missing `serde_with`:\nthe empty-string encoding simply does not need it.\n\n# `kubeconfig` mirrors the create DTO\n\nA patch may replace the kubeconfig by naming a new reference *or* by\npasting a new document, and supplying both is a validation error. Absent\non both leaves the stored reference alone. `Debug` is hand-written for the\nsame reason as `CreateEnvironmentReq`'s.",
+        "description": "REST DTO for partially updating a target environment.\n\n`product_id` has no cleared state at all: the column is `NOT NULL` since\nTask 20b and `sdk::EnvironmentPatch::product_id` is `Option<Uuid>`, so\nabsent and `null` both mean \"keep the stored product\".\n\n`serde_with` is not a workspace dependency, so — unlike\n`sdk::EnvironmentPatch`'s nested `Option<Option<_>>` `description` —\n`description` here cannot distinguish an explicit JSON `null` (meaning\n\"clear this field\") from the key being absent: both deserialize to `None`\nand are mapped to \"leave unchanged\" (`sdk::EnvironmentPatch`'s outer `None`).\nThere is currently no REST-exposed way to clear a previously-set\n`description` back to empty; only SDK/local-client callers using\n`sdk::EnvironmentPatch` directly can do that.\n\n# `default_branch` is the exception, and deliberately so\n\nIt reaches all three of `sdk::EnvironmentPatch`'s states over REST without\n`serde_with`, because this field's \"clear\" signal is **not** JSON `null` —\nit is the **empty string**. `update_environment` maps an empty or\nwhitespace-only `default_branch` to its `\"__NULL__\"` sentinel and thence to\n`NULL`, while an absent field keeps the stored value. So:\n\n| request body | meaning |\n|---|---|\n| key absent, or `null` | leave the override unchanged |\n| `\"\"` (or whitespace) | clear the override; the repository default applies |\n| `\"release-9.0\"` | pin to that branch |\n\nThe middle row works because `Some(String)` survives the `.map(Some)` below\nas `Some(Some(\"\"))`, which `EnvironmentsService::normalize_default_branch` then\nfolds to `Some(None)` — the outer `Some` carrying \"the caller mentioned the\nfield\" the whole way. This is not a workaround for the missing `serde_with`:\nthe empty-string encoding simply does not need it.\n\n# `kubeconfig` mirrors the create DTO\n\nA patch may replace the kubeconfig by naming a new reference *or* by\npasting a new document, and supplying both is a validation error. Absent\non both leaves the stored reference alone. `Debug` is hand-written for the\nsame reason as `CreateEnvironmentReq`'s.",
         "properties": {
           "available": {
             "type": [
@@ -3956,7 +3987,7 @@
             "additionalProperties": {
               "$ref": "#/components/schemas/CredentialSubmissionDto"
             },
-            "description": "Credentials keyed by the product plugin's own field key, each either\nthe document (`{\"material\": …}`) or a credstore reference\n(`{\"reference\": …}`). This is the plugin-shaped channel; the\n`kubeconfig`/`kubeconfig_credstore_ref` pair above is the pre-plugin\nspelling of one entry of it and is still accepted so the shipped UI\nkeeps working. Supplying both spellings of the same field is a\nvalidation error.",
+            "description": "Credentials keyed by the product plugin's own field key, each either\nthe document (`{\"material\": …}`) or a credstore reference\n(`{\"reference\": …}`). This is the plugin-shaped channel; the\n`kubeconfig`/`kubeconfig_credstore_ref` pair above is the pre-plugin\nspelling of one entry of it and is still accepted for clients that\nsend it. Supplying both spellings of the same field is a validation\nerror.",
             "propertyNames": {
               "type": "string"
             },
@@ -4077,7 +4108,7 @@
         "type": "object"
       },
       "UpdateTestRepoReq": {
-        "description": "REST DTO for `PUT /qa/v1/test-repos/{id}` — full replace of the\nrepository's mutable fields (no tri-state patch semantics: an absent\n`credential_ref` *clears* the stored reference).\n\n`default_branch` is mutable. It selects the branch used when a caller\nnames none; it does not identify the repository's synced content, so\nchanging it invalidates nothing already materialized. Changing `url` or\n`content_root` clears the synced state, so content reads reject until the\nnext sync.",
+        "description": "REST DTO for `PUT /qa/v1/test-repos/{id}` — full replace of the\nrepository's mutable fields (no tri-state patch semantics: an absent\n`credential_ref` *clears* the stored reference).\n\n`default_branch` is mutable. It selects the branch used when a caller\nnames none; it does not identify the repository's synced content, so\nchanging it invalidates nothing already materialized. Changing `url` or\n`content_root` clears the synced state, so the next content read of a\nbranch syncs it from the new location first.",
         "properties": {
           "content_root": {
             "description": "Subdirectory within the repo that contains test content. Absent or\n`\"\"` = repository root.",
@@ -6034,6 +6065,24 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Page size; defaults to 200, 1 or more, capped at 500; 0 is a 400. `$top` is the same parameter, and sending both is a 400.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque token from the previous page's `next_cursor`. `$skiptoken` is the same parameter.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -6673,7 +6722,7 @@
     },
     "/qa/v1/insights/rebuild": {
       "post": {
-        "description": "Re-read every run that finished in [from, to) from qa-runs and rewrite this gear's projection of it, run by run. For a window whose results are known to be wrong or missing. Requires the gts.cf.qa.insights.test_result.v1~/rebuild grant. The window is half-open, so adjoining windows neither skip a run nor replay one, and `to` must be strictly after `from`. It does not move the reconciler's watermark, in either direction: this is a repair for a known window, not a reset. It deletes nothing it does not immediately rewrite, so rows for runs qa-runs no longer has are left standing. The window is walked in pages under a fixed budget, so a window wider than one page is replayed in full rather than truncated: check `complete` on the response, and when it is false post `resume_from` back as `from` with the same `to` until it is true.",
+        "description": "Re-read every run that finished in [from, to) from qa-runs and rewrite this gear's projection of it, run by run. For a window whose results are known to be wrong or missing. Requires the gts.cf.qa.insights.test_result.v1~/rebuild grant. The window is half-open, so adjoining windows neither skip a run nor replay one, and `to` must be strictly after `from`. It does not move the reconciler's watermark, in either direction: this is a repair for a known window, not a reset. It deletes nothing it does not immediately rewrite, so rows for runs qa-runs no longer has are left standing. The window is walked in pages under a fixed budget, so a window wider than one page is replayed in full rather than truncated: check `complete` on the response, and when it is false post `resume_from` back as `from` with the same `to` until it is true. It replays the run-completed notification too, and can therefore send Slack messages and email: a run is announced only if this deployment has never decided about it before, or if its send was attempted and failed. A run that was already sent, that finished before this deployment began notifying, or whose notification was declined at the time - the channel was off, or had no destination configured - is not announced, so enabling a channel and then rebuilding a window does not mail its history.",
         "operationId": "qa_insights.rebuild",
         "requestBody": {
           "content": {
@@ -6751,7 +6800,7 @@
     },
     "/qa/v1/jira/bugs": {
       "post": {
-        "description": "File a JIRA issue for every FAILED test of run_id, or - when test_name is given - for just that one test if it failed. A test already registered locally, or one JIRA's own search already tracks, is not re-filed: the entry for it carries created: false and the existing key. A test this call cannot file for (JIRA is not configured or disabled, the test has no plan identity in this run's projection, or the JIRA call itself failed) is silently dropped from the response rather than failing the whole request - a partial success is a 200 with fewer entries than failed tests, matching the system being replaced's own per-test error handling. 404 means run_id has no ingested results at all, which is distinct from a run with no failures (a 200 with an empty list). Requires three grants: gts.cf.qa.insights.jira_bug.v1~/create for the registry write, gts.cf.qa.insights.test_result.v1~/list to read the run's own results, and gts.cf.qa.insights.jira_config.v1~/get to read the tenant's JIRA settings. Unlike the per-test failures above, a denial on any of the three refuses the whole request with a 403 rather than being swallowed - authorization is checked once, before any test is filed.",
+        "description": "File a JIRA issue for every FAILED test of run_id, or - when test_name is given - for just that one test if it failed. A test already registered locally, or one JIRA's own search already tracks, is not re-filed: the entry for it carries created: false and the existing key. A test this call cannot file for (JIRA is not configured or disabled, the test has no plan identity in this run's projection, or the JIRA call itself failed) is dropped from the response rather than failing the whole request - a partial success is a 200 with fewer entries than failed tests, matching the system being replaced's own per-test error handling. Failed tests are tried in test_name order. The first time the gateway cannot reach JIRA, a call times out, or JIRA refuses the credential, no further test is tried (the tenant has one JIRA endpoint and one credential); JIRA refusing one issue's request does not stop the others. If no test was filed or found, the answer is a 503 naming the jira channel and its failure class (the failure that stopped the attempts, else the first refused request), not an empty 200; if one was, it is a 200 with those entries. 404 means run_id has no ingested results at all, which is distinct from a run with no failures (a 200 with an empty list). Requires three grants: gts.cf.qa.insights.jira_bug.v1~/create for the registry write, gts.cf.qa.insights.test_result.v1~/list to read the run's own results, and gts.cf.qa.insights.jira_config.v1~/get to read the tenant's JIRA settings. Unlike the per-test failures above, a denial on any of the three refuses the whole request with a 403 rather than being swallowed - authorization is checked once, before any test is filed.",
         "operationId": "qa_insights.file_jira_bugs",
         "requestBody": {
           "content": {
@@ -6827,6 +6876,16 @@
               }
             },
             "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "security": [
@@ -6932,7 +6991,7 @@
     },
     "/qa/v1/plans": {
       "get": {
-        "description": "Discover plans from the synced working copy of the given repository and branch (plans are never persisted; they are materialized on read)",
+        "description": "Discover plans from the synced working copy of the given repository and branch (plans are never persisted; they are materialized on read). A branch the remote has but that was never synced is synced on this first read, which needs the sync permission on the repository. A branch the remote does not have answers 404. A repository whose credential cannot be resolved or is rejected by the remote answers 400 with the reason, recorded in its `sync_error`; a remote that cannot be listed (including one answering HTTP 403) answers 503. For a short backoff after either failure, every read that would sync that repository gives the same answer without contacting the remote.",
         "operationId": "qa_catalog.list_plans",
         "parameters": [
           {
@@ -7017,6 +7076,16 @@
               }
             },
             "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "security": [
@@ -7473,7 +7542,7 @@
     },
     "/qa/v1/queue": {
       "get": {
-        "description": "One page of run-queue rows, newest first, all states. `queue_position` is 1-based among an environment's queued rows and is computed over the rows this request returned - so a narrow page understates it, and filtering by environment_id is the way to get a position you can rely on. `limit` defaults to 200 and is clamped to 1-500; new callers should use $top instead, which wins when both are given.",
+        "description": "One page of run-queue rows, newest first, all states. `queue_position` is 1-based among an environment's queued rows and is computed over the rows this request returned - so a narrow page understates it, and filtering by environment_id is the way to get a position you can rely on. `limit` defaults to 200, must be 1 or more and is capped at 500; `$top` is the same parameter, and sending both is a 400.",
         "operationId": "qa_runs.list_queue",
         "parameters": [
           {
@@ -7486,7 +7555,7 @@
             }
           },
           {
-            "description": "Bare page size; defaults to 200, clamped to 1-500. $top takes precedence.",
+            "description": "Page size; defaults to 200, 1 or more, capped at 500; 0 is a 400. `$top` is the same parameter, and sending both is a 400.",
             "in": "query",
             "name": "limit",
             "required": false,
@@ -7507,6 +7576,15 @@
             "description": "OData v4 orderby expression\n- id asc\n- id desc\n- run_id asc\n- run_id desc\n- environment_id asc\n- environment_id desc\n- state asc\n- state desc\n- run_kind asc\n- run_kind desc\n- source asc\n- source desc\n- exclusive asc\n- exclusive desc\n- enqueued_at asc\n- enqueued_at desc\n- dispatched_at asc\n- dispatched_at desc\n- finished_at asc\n- finished_at desc",
             "in": "query",
             "name": "$orderby",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque token from the previous page's `next_cursor`. `$skiptoken` is the same parameter.",
+            "in": "query",
+            "name": "cursor",
             "required": false,
             "schema": {
               "type": "string"
@@ -7781,6 +7859,16 @@
             },
             "description": "The run that was started"
           },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
           "401": {
             "content": {
               "application/problem+json": {
@@ -7871,6 +7959,24 @@
             "description": "OData v4 orderby expression\n- id asc\n- id desc\n- name asc\n- name desc\n- state asc\n- state desc\n- run_kind asc\n- run_kind desc\n- environment_id asc\n- environment_id desc\n- source asc\n- source desc\n- schedule_id asc\n- schedule_id desc\n- resolved_exclusive asc\n- resolved_exclusive desc\n- is_validation asc\n- is_validation desc\n- created_at asc\n- created_at desc\n- started_at asc\n- started_at desc\n- finished_at asc\n- finished_at desc",
             "in": "query",
             "name": "$orderby",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size; defaults to 200, 1 or more, capped at 500; 0 is a 400. `$top` is the same parameter, and sending both is a 400.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque token from the previous page's `next_cursor`. `$skiptoken` is the same parameter.",
+            "in": "query",
+            "name": "cursor",
             "required": false,
             "schema": {
               "type": "string"
@@ -8054,7 +8160,7 @@
         }
       },
       "post": {
-        "description": "Validate, resolve exclusivity, and either start the run immediately (200) or admit it to its environment's queue (202). A queued run starts on its own - no further call is needed. 429 means the launch was refused by a capacity setting, and the response names which one: queue_max_depth for a full per-environment queue, max_concurrent_runs for the cluster-wide cap.",
+        "description": "Validate, resolve exclusivity, and either start the run immediately (200) or admit it to its environment's queue (202). A queued run starts on its own - no further call is needed. 429 means the launch was refused by a capacity setting, and the response names which one: queue_max_depth for a full per-environment queue, max_concurrent_runs for the cluster-wide cap. 409 means a concurrent write won: another call moved the run while this one was starting it, or concurrent launches took every run name this one tried.",
         "operationId": "qa_runs.launch_run",
         "requestBody": {
           "content": {
@@ -8127,6 +8233,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "429": {
             "content": {
@@ -8240,7 +8356,7 @@
     },
     "/qa/v1/runs/{id}/cancel": {
       "post": {
-        "description": "Stop a run in any state. Idempotent: a run that has already finished, been cancelled, expired or timed out is left as it stands and still answers 204.",
+        "description": "Stop a run in any state. Idempotent: a run that has already finished, been cancelled, expired or timed out is left as it stands and still answers 204. 409 means the run changed state while this call was cancelling it; for a running run the execution has already been asked to stop, and repeating the cancel is safe.",
         "operationId": "qa_runs.cancel_run",
         "parameters": [
           {
@@ -8286,6 +8402,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "500": {
             "content": {
@@ -8389,7 +8515,7 @@
     },
     "/qa/v1/runs/{id}/rerun": {
       "post": {
-        "description": "Launch a new run with the original's target, branch, parameters and tag filter. Same two-outcome shape as a launch: 200 started, 202 queued. A run that records no branch is refused with 400 rather than re-resolved, so a re-run cannot silently execute a different branch's files.",
+        "description": "Launch a new run with the original's target, branch, parameters and tag filter. Same two-outcome shape as a launch: 200 started, 202 queued. A run that records no branch is refused with 400 rather than re-resolved, so a re-run cannot silently execute a different branch's files. 409 means a concurrent write won: another call moved the run while this one was starting it, or concurrent launches took every run name this one tried.",
         "operationId": "qa_runs.rerun_run",
         "parameters": [
           {
@@ -8462,6 +8588,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "429": {
             "content": {
@@ -9132,7 +9268,7 @@
         ]
       },
       "put": {
-        "description": "A full replace of the tenant's JIRA settings. api_token_credstore_ref is a credential-store reference, not a token, and it has two contracts. Its NAME must be letters, digits, underscores and dashes only, at most 255 characters, optionally prefixed with cred:// - slashes and colons are rejected by the credential store, so a URL-shaped value such as credstore://qa/jira/token is refused here with a 400 rather than failing later on the first JIRA call. Its CONTENTS must be the base64 encoding of email:api_token, because JIRA's REST API takes HTTP basic auth and the gateway's credential plugin prepends Basic to whatever the reference resolves to. Sending an empty api_token_credstore_ref keeps the reference already stored, so a form that does not resend it cannot blank the credential; the reference cannot be cleared through this endpoint, and turning enabled off is how a tenant stops using JIRA. A config with enabled true must name a reference. The url may carry a context path (https://host/jira, the usual shape for JIRA Data Center) and it is preserved. Every other field is taken from the body as sent. Requires the gts.cf.qa.insights.jira_config.v1~/update grant.",
+        "description": "A full replace of the tenant's JIRA settings. api_token_credstore_ref is a credential-store reference, not a token, and it has two contracts. Its NAME must be letters, digits, underscores and dashes only, at most 255 characters, with no scheme prefix (cred:// is refused) - slashes and colons are rejected by the credential store, so a URL-shaped value such as credstore://qa/jira/token is refused here with a 400 rather than failing later on the first JIRA call. Its CONTENTS must be the base64 encoding of email:api_token, because JIRA's REST API takes HTTP basic auth and the gateway's credential plugin prepends Basic to whatever the reference resolves to. Sending an empty api_token_credstore_ref keeps the reference already stored, so a form that does not resend it cannot blank the credential; the reference cannot be cleared through this endpoint, and turning enabled off is how a tenant stops using JIRA. A config with enabled true must name a reference. The url may carry a context path (https://host/jira, the usual shape for JIRA Data Center) and it is preserved. Every other field is taken from the body as sent. Requires the gts.cf.qa.insights.jira_config.v1~/update grant.",
         "operationId": "qa_insights.update_jira_settings",
         "requestBody": {
           "content": {
@@ -9343,7 +9479,7 @@
     },
     "/qa/v1/settings/notifications": {
       "get": {
-        "description": "Slack and email egress configuration, including the six per-status scheduled-run Slack templates. A tenant that has never saved this gets every field at its default (every gate off except notify_on_failure, SMTP port 587) rather than a 404. slack_webhook_credstore_ref is a credential-store reference, never a URL - possession of a Slack incoming-webhook URL is itself the authorization to post, so it is treated the same as a JIRA API token, and the PUT enforces the same syntax: letters, digits, underscores and dashes only, optionally prefixed with cred://. Requires the gts.cf.qa.insights.notification_config.v1~/get grant.",
+        "description": "Slack and email egress configuration, including the six per-status scheduled-run Slack templates. A tenant that has never saved this gets every field at its default (every gate off except notify_on_failure, SMTP port 587) rather than a 404. slack_webhook_credstore_ref is a credential-store reference, never a URL - possession of a Slack incoming-webhook URL is itself the authorization to post, so it is treated the same as a JIRA API token, and the PUT enforces the same syntax: letters, digits, underscores and dashes only, with no scheme prefix (cred:// is refused). Requires the gts.cf.qa.insights.notification_config.v1~/get grant.",
         "operationId": "qa_insights.get_notification_settings",
         "responses": {
           "200": {
@@ -9398,7 +9534,7 @@
         ]
       },
       "put": {
-        "description": "A full replace of the tenant's notification settings. slack_webhook_credstore_ref must be a credential-store reference and never a webhook URL - letters, digits, underscores and dashes only, at most 255 characters, optionally prefixed with cred://, exactly as the JIRA endpoint's api_token_credstore_ref. Slashes and colons are rejected by the credential store, so a URL-shaped value such as https://hooks.slack.com/services/T00/B00/XXX is refused here with a 400 naming that field rather than a row stored for the GET to hand back. Unlike the JIRA endpoint there is no keep-stored-value convention, so an empty slack_webhook_credstore_ref clears the reference rather than preserving it; that is a difference in how absence is treated, not a claim that the field is less sensitive. Every other field is stored exactly as sent. Requires the gts.cf.qa.insights.notification_config.v1~/update grant.",
+        "description": "A full replace of the tenant's notification settings. slack_webhook_credstore_ref must be a credential-store reference and never a webhook URL - letters, digits, underscores and dashes only, at most 255 characters, with no scheme prefix (cred:// is refused), exactly as the JIRA endpoint's api_token_credstore_ref. Slashes and colons are rejected by the credential store, so a URL-shaped value such as https://hooks.slack.com/services/T00/B00/XXX is refused here with a 400 naming that field rather than a row stored for the GET to hand back. Unlike the JIRA endpoint there is no keep-stored-value convention, so an empty slack_webhook_credstore_ref clears the reference rather than preserving it; that is a difference in how absence is treated, not a claim that the field is less sensitive. Every other field is stored exactly as sent. Requires the gts.cf.qa.insights.notification_config.v1~/update grant.",
         "operationId": "qa_insights.update_notification_settings",
         "requestBody": {
           "content": {
@@ -9625,7 +9761,7 @@
     },
     "/qa/v1/settings/notifications/test": {
       "post": {
-        "description": "Sends a real notification right now, over whichever channel(s) are enabled. With no request body, sends the settings page's generic test message using the tenant's stored settings - refused with a 400 before anything is sent if neither stored channel is both enabled and configured to send, so a test never reports success for a send that was never attempted. With a body, tests one scheduled-run Slack template against the given config override and event token (one of pending, in_progress, succeeded, failed, error, skipped) rather than the stored settings - the config override must have Slack enabled with a non-empty webhook reference, or this is likewise refused with a 400 before anything is sent. Neither shape claims a dedupe slot or writes the audit log; both are pinned by qa_insights_sdk::SLACK_NOTIFICATION_EVENTS. Unlike the automatic completion path, a send failure here is returned rather than swallowed - an operator testing a channel deserves to know it does not work, including a 501 when the channel this deployment ships has no adapter at all (D10). This endpoint's OpenAPI schema shows the body as required; posting no body at all is also accepted. Requires the gts.cf.qa.insights.notification_config.v1~/test grant.",
+        "description": "Sends a real notification right now, over whichever channel(s) are enabled. With no request body, sends the settings page's generic test message using the tenant's stored settings - refused with a 400 before anything is sent if neither stored channel is both enabled and configured to send, so a test never reports success for a send that was never attempted. With a body, tests one scheduled-run Slack template against the given config override and event token (one of pending, in_progress, succeeded, failed, error, skipped) rather than the stored settings - the config override must have Slack enabled with a non-empty webhook reference, or this is likewise refused with a 400 before anything is sent. Neither shape claims a dedupe slot - a test send is about no run - but both write one row to the notification audit log (GET /qa/v1/settings/notifications/log) for every channel they actually attempt, on success and on failure alike; a request refused before any channel is attempted writes none. The event tokens are pinned by qa_insights_sdk::SLACK_NOTIFICATION_EVENTS. Unlike the automatic completion path, a send failure here is returned rather than swallowed - an operator testing a channel deserves to know it does not work. With no body and both channels enabled, both are attempted and audited even when the first fails, and the response carries the first failure (Slack before email); the audit log holds the other. Both channels read their secret as the qa-insights system actor, as real sends do, so a secret stored with private sharing is refused with a 400 that says so. The failure statuses: a 501 when the channel has no adapter in this deployment, and a 503 when the SMTP relay or the Slack webhook refused the message, timed out or could not be reached. This endpoint's OpenAPI schema shows the body as required; posting no body at all is also accepted. Requires the gts.cf.qa.insights.notification_config.v1~/test grant.",
         "operationId": "qa_insights.test_notification",
         "requestBody": {
           "content": {
@@ -9688,6 +9824,26 @@
               }
             },
             "description": "Internal Server Error"
+          },
+          "501": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "security": [
@@ -10020,6 +10176,24 @@
             "description": "OData v4 orderby expression\n- id asc\n- id desc\n- run_id asc\n- run_id desc\n- test_file asc\n- test_file desc\n- status asc\n- status desc",
             "in": "query",
             "name": "$orderby",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size; defaults to 200, 1 or more, capped at 500; 0 is a 400. `$top` is the same parameter, and sending both is a 400.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque token from the previous page's `next_cursor`. `$skiptoken` is the same parameter.",
+            "in": "query",
+            "name": "cursor",
             "required": false,
             "schema": {
               "type": "string"
@@ -10424,7 +10598,7 @@
         ]
       },
       "put": {
-        "description": "Replace a repository's mutable fields (name, url, default_branch, content_root, credential reference). Changing `url` or `content_root` clears the synced state and the working area, so content reads report the repository as not synced until the next sync",
+        "description": "Replace a repository's mutable fields (name, url, default_branch, content_root, credential reference). Changing `url` or `content_root` clears the synced state and the working area, so the next content read of a branch syncs it from the new location first",
         "operationId": "qa_catalog.update_test_repo",
         "parameters": [
           {
@@ -10684,16 +10858,6 @@
             },
             "description": "Not Found"
           },
-          "409": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
           "500": {
             "content": {
               "application/problem+json": {
@@ -10734,6 +10898,24 @@
             "description": "OData v4 orderby expression\n- id asc\n- id desc\n- run_id asc\n- run_id desc\n- test_file asc\n- test_file desc\n- test_name asc\n- test_name desc\n- run_finished_at asc\n- run_finished_at desc",
             "in": "query",
             "name": "$orderby",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size; defaults to 200, 1 or more, capped at 500; 0 is a 400. `$top` is the same parameter, and sending both is a 400.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque token from the previous page's `next_cursor`. `$skiptoken` is the same parameter.",
+            "in": "query",
+            "name": "cursor",
             "required": false,
             "schema": {
               "type": "string"
@@ -10887,6 +11069,24 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Page size; defaults to 200, 1 or more, capped at 500; 0 is a 400. `$top` is the same parameter, and sending both is a 400.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque token from the previous page's `next_cursor`. `$skiptoken` is the same parameter.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -10998,7 +11198,7 @@
         }
       },
       "put": {
-        "description": "Insert or update a pipeline (global) or per-environment variable by natural key",
+        "description": "Insert or update a pipeline (global) or per-environment variable by natural key. Two concurrent requests for one name both succeed and the later write wins. 409 is answered only when the variable is created and deleted again while this request is running; retrying succeeds.",
         "operationId": "qa_environments.upsert_variable",
         "requestBody": {
           "content": {

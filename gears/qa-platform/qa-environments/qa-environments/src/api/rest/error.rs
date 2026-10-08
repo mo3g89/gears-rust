@@ -78,8 +78,8 @@ impl From<DomainError> for CanonicalError {
             // qa-environments' own contract, names no column at all, and
             // therefore renames with the aggregate regardless of what any
             // other gear's wire does. Measured before changing it: no
-            // consumer anywhere under `gears/` spells either form, and
-            // CONTRACT-DIFF.md documents neither.
+            // consumer anywhere under `gears/` spells either form, and no
+            // document describing the legacy contract documented either.
             DomainError::EnvironmentUnavailable { id } => LeaseResourceError::failed_precondition()
                 .with_precondition_violation(
                     "environment_availability",

@@ -111,13 +111,12 @@
 //!
 //! [`overview_to_csv`] needs five of [`AnalyticsOverview`]'s fields — the same
 //! five `section` can name — plus the platform-name map every list item's
-//! `last_environment` column reads (renamed from `last_platform` at ruling
-//! G-4, Important-2 of the Task 25 review — the JSON branch of this same
-//! endpoint already rendered `last_environment`; the CSV branch had been
-//! missed). Taking `&AnalyticsOverview` directly would
-//! make `domain::analytics` (the pure-cores layer) depend on
-//! `domain::service::analytics` (the orchestration layer built *on top of* it),
-//! which is backwards everywhere else in this phase:
+//! `last_environment` column reads (renamed from `last_platform` for
+//! Important-2 of the Task 25 review — the JSON branch of this same endpoint
+//! already rendered `last_environment`; the CSV branch had been missed). Taking
+//! `&AnalyticsOverview` directly would make `domain::analytics` (the pure-cores
+//! layer) depend on `domain::service::analytics` (the orchestration layer built
+//! *on top of* it), which is backwards everywhere else in this phase:
 //! `crate::domain::service::analytics` imports [`super::aggregates`],
 //! [`super::query`] and [`super::universe`], never the other way around. This
 //! borrowed struct keeps that direction intact and, as a side effect, makes the

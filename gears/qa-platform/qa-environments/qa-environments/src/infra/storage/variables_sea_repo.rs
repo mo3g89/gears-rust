@@ -231,10 +231,11 @@ async fn upsert_environment_var<C: DBRunner>(
             created_at: ActiveValue::Set(now),
             updated_at: ActiveValue::Set(now),
         };
-        // A concurrent insert can race us between the `find_environment_var`
-        // probe above and this insert; map that race to a domain error
-        // instead of a generic `Database` error so the REST layer can
-        // report it as `already_exists` rather than an opaque 500.
+        // A concurrent insert of this name between the probe above and this
+        // insert is a unique violation, and it is reported as
+        // `VariableNameExists`. `VariablesService::upsert` turns it into an
+        // update of the winning row, authorized as an update, so a caller
+        // never sees it for a race.
         match secure_insert::<EnvironmentVarEntity>(am, scope, runner).await {
             Ok(model) => model,
             Err(e) if e.is_unique_violation() => {
@@ -280,9 +281,11 @@ async fn upsert_pipeline_var<C: DBRunner>(
             created_at: ActiveValue::Set(now),
             updated_at: ActiveValue::Set(now),
         };
-        // See the matching comment in `upsert_environment_var`: map an
-        // insert-race unique violation to a domain error instead of a
-        // generic `Database` error.
+        // A concurrent insert of this name between the probe above and this
+        // insert is a unique violation, and it is reported as
+        // `VariableNameExists`. `VariablesService::upsert` turns it into an
+        // update of the winning row, authorized as an update, so a caller
+        // never sees it for a race.
         match secure_insert::<PipelineEntity>(am, scope, runner).await {
             Ok(model) => model,
             Err(e) if e.is_unique_violation() => {

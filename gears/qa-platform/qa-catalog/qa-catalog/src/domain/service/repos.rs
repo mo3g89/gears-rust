@@ -34,20 +34,34 @@ use toolkit_security::{AccessScope, SecurityContext};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
+use super::branch_snapshot::BranchSync;
 use super::plans::validate_rel_path;
 use super::sync_cache::SyncCache;
 use super::validation::validate_name;
-use super::{DbProvider, actions, resources};
+use super::{DbProvider, RemoteFault, actions, resources};
 use crate::domain::error::DomainError;
 use crate::domain::git_url::{RemoteKind, classify_remote};
 use crate::domain::ports::repo_sync::RepoSyncPort;
 use crate::domain::repos::{RefreshTarget, SshKeysRepository, TestReposRepository};
+use crate::domain::system_actor;
 
 /// Userinfo (`user`, `user:token`) in any `scheme://userinfo@host` URL.
 /// Used to redact engine error text before it is persisted in `sync_error`.
 #[allow(clippy::unwrap_used)] // Compile-time-known regex pattern; panic in init is intentional
 static URL_USERINFO_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]+@").unwrap());
+
+/// The second half of every "credential not accessible" reason
+/// [`ReposService::resolve_credential`] records. credstore answers a missing
+/// secret, a secret another subject owns privately and a denied read alike, so
+/// the reason cannot say which happened; it names the one an operator cannot
+/// see from the secret list.
+pub const UNREADABLE_CREDENTIAL_HINT: &str = "qa-catalog reads a repository's \
+     credential as its system actor in the tenant that owns the repository, for a sync, a read \
+     and the background branch refresh alike, never as the user who stored it, so only a \
+     secret readable by the system actor in the owning tenant is found: store it there with \
+     `tenant` sharing (a `private` secret is readable by its owner only, and one stored in \
+     another tenant is not visible at all), or `shared` from a parent tenant";
 
 /// Test repository service.
 ///
@@ -204,9 +218,10 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
     /// Changing `url` or `content_root` makes the existing working area stale
     /// (different remote, or a content root that may not exist in it). Rather
     /// than keep serving content fetched from the *old* URL, the synced state
-    /// is cleared in the same UPDATE: reads then fail closed with
-    /// [`DomainError::RepoNotSynced`] until the next
-    /// [`sync_repo`](Self::sync_repo). The on-disk repository directory (the
+    /// is cleared in the same UPDATE: no read is served from the old content,
+    /// and the next read of a branch syncs it from the new `url` first (see
+    /// `super::branch_snapshot`), or fails closed when that sync fails. The
+    /// on-disk repository directory (the
     /// shared clone plus every branch snapshot) is also removed, and the
     /// freshness cache evicted: content reads resolve snapshot directories
     /// directly — no URL check on the read path — so a stale snapshot left
@@ -274,7 +289,14 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
         // re-reads the row under this same lock, so holding it across the
         // sync-state clear + directory removal + cache eviction closes the
         // race from this side.
-        let _repo_guard = if invalidate {
+        //
+        // A credential change takes the same lock, so it cannot land between
+        // a lazy read's re-check and its write of a credential fault
+        // (`record_listing_fault`): either that fault is written first and
+        // the backoff cleared below, or the read finds the new credential and
+        // writes nothing.
+        let credential_changed = existing.credential_ref != update.credential_ref;
+        let _repo_guard = if invalidate || credential_changed {
             Some(self.sync_cache.repo_lock(id).await.lock_owned().await)
         } else {
             None
@@ -299,6 +321,13 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
                 warn!(repo_id = %id, error = %err, "Failed to clear the repository working area");
             }
             self.sync_cache.invalidate_repo(id).await;
+        }
+
+        // A different credential or remote is a different answer: end the
+        // failure backoff so the next read asks (DESIGN §3.3). A url change
+        // also invalidates the whole repository above, which ends it too.
+        if existing.url != updated.url || existing.credential_ref != updated.credential_ref {
+            self.sync_cache.clear_backoff(id).await;
         }
 
         info!("Successfully updated test repository");
@@ -349,9 +378,14 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
     /// successful call carrying the updated repository, matching the SDK
     /// contract ("returns when the sync completes or fails").
     ///
-    /// `force` skips (and evicts) the freshness cache — what the launch path
-    /// uses, so a run never reads a stale snapshot. Browse reads pass
-    /// `false` and may be served from a fresh snapshot without a fetch.
+    /// `force` skips (and evicts) the freshness cache — what the explicit
+    /// sync route and qa-runs' dispatch use, so a run never reads a stale
+    /// snapshot. A content read that finds a branch without a snapshot syncs
+    /// it through here with `false` (see `super::branch_snapshot`): a branch
+    /// synced within the TTL is not fetched again while the repository's
+    /// `sync_error` is clear, and concurrent first reads of one branch wait on
+    /// the locks below and then find it fresh. A forced sync ends the
+    /// repository's failure backoff.
     #[instrument(skip(self, ctx), fields(repo_id = %id, branch = %branch, force))]
     pub async fn sync_repo(
         &self,
@@ -367,8 +401,8 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
             .access_scope(ctx, &resources::TEST_REPO, actions::SYNC, Some(id))
             .await?;
 
-        // Ownership/existence precheck under its own GET scope — required
-        // before `replace_branches` (see that method's caller obligation).
+        // Ownership/existence precheck under its own GET scope
+        // (`replace_branches` resolves the owning tenant itself, off the row).
         // This pre-lock row serves ONLY the default-branch resolution (which
         // fixes the branch-lock identity) and the freshness fast path; the
         // row the engine syncs is re-read under the locks below.
@@ -383,7 +417,6 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
                 .await?
                 .ok_or(DomainError::NotFound { id })?
         };
-        let tenant_id = ctx.subject_tenant_id();
 
         let branch = if branch.trim().is_empty() {
             repo.default_branch.clone()
@@ -391,9 +424,18 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
             branch.trim().to_owned()
         };
 
+        // A fresh branch fetches nothing — unless the row carries a recorded
+        // `sync_error`. That column is repository-wide and every read refuses on
+        // it (`plans::require_synced`), so handing the row back as it is would
+        // refuse a reader of fresh branch X with branch Y's failure for the rest
+        // of the window (DESIGN §3.3). Re-syncing X is what clears it.
+        //
+        // A forced sync is an operator (or a launch) asking for the remote now:
+        // it ends the repository's failure backoff before it tries.
         if force {
             self.sync_cache.invalidate(id, &branch).await;
-        } else if self.sync_cache.is_fresh(id, &branch).await {
+            self.sync_cache.clear_backoff(id).await;
+        } else if repo.sync_error.is_none() && self.sync_cache.is_fresh(id, &branch).await {
             return Ok(repo);
         }
 
@@ -419,15 +461,25 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
                 .ok_or(DomainError::NotFound { id })?
         };
 
-        // Re-check under the lock: a concurrent caller may have just synced.
-        if !force && self.sync_cache.is_fresh(id, &branch).await {
+        // Re-check under the lock: a concurrent caller may have just synced
+        // (and, by succeeding, cleared the error this row would carry).
+        if !force && repo.sync_error.is_none() && self.sync_cache.is_fresh(id, &branch).await {
             return Ok(repo);
         }
+        // Read under the lock, after the row: a credential fault this sync
+        // records backs the repository off only if nothing ended the backoff
+        // since (see `SyncCache::mark_backoff_if_current`).
+        let generation = self.sync_cache.backoff_generation(id).await;
 
-        let credential = match self.resolve_credential(ctx, &repo).await? {
+        let credential = match self.resolve_credential(ctx, &sync_scope, &repo).await? {
             ResolvedCredential::Available(credential) => credential,
             ResolvedCredential::Inaccessible(message) => {
-                return self.record_sync_failure(&sync_scope, &repo, message).await;
+                let recorded = self
+                    .record_sync_failure(&sync_scope, &repo, message)
+                    .await?;
+                self.back_off_for_recorded_fault(&recorded, generation)
+                    .await;
+                return Ok(recorded);
             }
         };
 
@@ -448,19 +500,34 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
         match outcome {
             Ok(result) => {
                 self.sync_cache.mark_synced(id, &branch).await;
-                self.record_sync_success(
-                    &sync_scope,
-                    tenant_id,
-                    id,
-                    result.branches,
-                    result.head_commit,
-                )
-                .await
+                self.sync_cache.clear_backoff(id).await;
+                self.record_sync_success(&sync_scope, id, result.branches, result.head_commit)
+                    .await
             }
             Err(engine_err) => {
                 let sanitized = sanitize_sync_error(&engine_err.to_string(), credential.as_deref());
-                self.record_sync_failure(&sync_scope, &repo, sanitized)
-                    .await
+                let recorded = self
+                    .record_sync_failure(&sync_scope, &repo, sanitized)
+                    .await?;
+                // DESIGN §3.3 "Limits on talking to a remote": a credential
+                // fault, a size fault and a content sync that timed out are all
+                // recorded, and each backs the repository off for its recorded
+                // reason, so reads inside the window answer that reason (400)
+                // without contacting the remote. A timed-out sync is answered
+                // that way rather than as an outage: the timeout is on the row,
+                // and asking again inside the window would hold another
+                // `sync_timeout_seconds` for the same answer. A branch listing
+                // that times out is the outage case (`list_into_branch_cache`).
+                match engine_err {
+                    DomainError::CredentialRejected { .. }
+                    | DomainError::SyncBudgetExceeded { .. }
+                    | DomainError::RemoteTimedOut { .. } => {
+                        self.back_off_for_recorded_fault(&recorded, generation)
+                            .await;
+                    }
+                    _ => {}
+                }
+                Ok(recorded)
             }
         }
     }
@@ -524,15 +591,17 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
     /// Refresh the repository's branch cache from the remote WITHOUT a full
     /// content sync (`RepoSyncPort::list_remote_branches` — a bare ls-refs).
     ///
-    /// Used by the branch-cache refresher lifecycle task. `ctx` must be
-    /// bound to the repository's owning tenant (see
-    /// `crate::domain::system_actor::for_branch_refresh`): the rewritten
-    /// branch rows carry `ctx.subject_tenant_id()`.
+    /// Used by the branch-cache refresher lifecycle task. `ctx` authorizes
+    /// the refresh (see `crate::domain::system_actor::for_branch_refresh`);
+    /// the rewritten rows carry the repository's owning tenant whatever
+    /// `ctx`'s tenant is.
     ///
     /// Unlike [`sync_repo`](Self::sync_repo), failures are returned (for the
     /// caller to log), not recorded in `sync_error` — that column reports
     /// content-sync outcomes, and a transient ls-refs hiccup must not
-    /// clobber it.
+    /// clobber it. The lazy read uses the same listing through
+    /// `try_refresh_branches` and answers its failures by class — see
+    /// `sync_branch_for_read`.
     #[instrument(skip(self, ctx), fields(repo_id = %id))]
     pub async fn refresh_branches(
         &self,
@@ -540,62 +609,12 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
         id: Uuid,
     ) -> Result<(), DomainError> {
         debug!("Refreshing branch cache");
-
-        let sync_scope = self
-            .policy_enforcer
-            .access_scope(ctx, &resources::TEST_REPO, actions::SYNC, Some(id))
-            .await?;
-
-        // Ownership/existence precheck under its own GET scope — required
-        // before `replace_branches` (mirrors `sync_repo`).
-        let get_scope = self
-            .policy_enforcer
-            .access_scope(ctx, &resources::TEST_REPO, actions::GET, Some(id))
-            .await?;
-        let repo = {
-            let conn = self.db.conn()?;
-            self.repo
-                .get(&conn, &get_scope, id)
-                .await?
-                .ok_or(DomainError::NotFound { id })?
-        };
-
-        let credential = match self.resolve_credential(ctx, &repo).await? {
-            ResolvedCredential::Available(credential) => credential,
-            ResolvedCredential::Inaccessible(message) => {
-                return Err(DomainError::SyncFailed { message });
-            }
-        };
-
-        let branches = self
-            .sync_engine
-            .list_remote_branches(&repo.url, credential.as_deref())
-            .await
-            .map_err(|engine_err| {
-                let sanitized = sanitize_sync_error(&engine_err.to_string(), credential.as_deref());
-                DomainError::SyncFailed { message: sanitized }
-            })?;
-
-        let tenant_id = ctx.subject_tenant_id();
-        let repo_handle = Arc::clone(&self.repo);
-        // Owned clone: the `for<'a>` transaction closure cannot capture
-        // caller-lifetime references in its returned future.
-        let scope = sync_scope.clone();
-
-        // Transactional so the cache is never observed empty between the
-        // delete and the re-insert (same invariant as `record_sync_success`).
-        self.db
-            .transaction(move |tx| {
-                Box::pin(async move {
-                    repo_handle
-                        .replace_branches(tx, &scope, tenant_id, id, branches)
-                        .await
-                })
+        self.try_refresh_branches(ctx, id, Backoff::Ignore)
+            .await?
+            .listing
+            .map_err(|failure| DomainError::SyncFailed {
+                message: failure.into_message(),
             })
-            .await?;
-
-        debug!(repo_id = %id, "Branch cache refreshed");
-        Ok(())
     }
 }
 
@@ -604,6 +623,177 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
 // `'static` bound: the transaction closure's future captures `Arc<R>`, and
 // `DBProvider::transaction` requires its captures to be `'static`.
 impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposService<R, K> {
+    /// One listing of the remote's branches into the branch cache, under
+    /// `ctx`'s `SYNC` and `GET` scopes, with its failure classified rather
+    /// than raised (DESIGN §3.3 "Branch model and the first read of a
+    /// branch"). `Err` is only what is not the listing's own failure: a
+    /// refused scope, a row that is not there, a credstore fault, or a
+    /// database fault reading the row or writing the cache. With
+    /// [`Backoff::Honour`], a repository inside its failure backoff answers
+    /// from it without contacting the remote, and an unreachable remote
+    /// starts the backoff (a credential fault is backed off once recorded,
+    /// by the caller). A successful listing ends it either way.
+    async fn try_refresh_branches(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+        backoff: Backoff,
+    ) -> Result<RefreshAttempt, DomainError> {
+        let sync_scope = self
+            .policy_enforcer
+            .access_scope(ctx, &resources::TEST_REPO, actions::SYNC, Some(id))
+            .await?;
+
+        // Ownership/existence precheck under its own GET scope (mirrors
+        // `sync_repo`).
+        let get_scope = self
+            .policy_enforcer
+            .access_scope(ctx, &resources::TEST_REPO, actions::GET, Some(id))
+            .await?;
+        // Read before the row and before anything that can fail: a failure
+        // found below backs the repository off only if nothing ended the
+        // backoff since. Read after the row instead, a url change landing
+        // between the two (it ends the backoff) would let this attempt back
+        // the moved repository off with the old remote's failure.
+        let generation = self.sync_cache.backoff_generation(id).await;
+        let repo = {
+            let conn = self.db.conn()?;
+            self.repo
+                .get(&conn, &get_scope, id)
+                .await?
+                .ok_or(DomainError::NotFound { id })?
+        };
+
+        let listing = self
+            .list_into_branch_cache(ctx, &sync_scope, &repo, backoff, generation)
+            .await?;
+        Ok(RefreshAttempt {
+            sync_scope,
+            get_scope,
+            repo,
+            generation,
+            listing,
+        })
+    }
+
+    /// The body of [`Self::try_refresh_branches`] once the row is read: answer
+    /// from the backoff, or resolve the credential, list the remote and write
+    /// the branch cache. The outer `Err` is a fault before or after the
+    /// listing (credstore, database); the inner one is the classified listing
+    /// failure.
+    ///
+    /// Only the lazy read ([`Backoff::Honour`]) starts a backoff, and only an
+    /// unreachable remote's here: a credential fault is backed off by
+    /// [`Self::record_listing_fault`], once its reason is on the row. The
+    /// refresher neither waits on nor starts one; its successful listing
+    /// still ends one.
+    async fn list_into_branch_cache(
+        &self,
+        ctx: &SecurityContext,
+        sync_scope: &AccessScope,
+        repo: &TestRepository,
+        backoff: Backoff,
+        generation: u64,
+    ) -> Result<Result<(), ListingFailure>, DomainError> {
+        let id = repo.id;
+        if matches!(backoff, Backoff::Honour)
+            && let Some(answer) = self.answer_from_backoff(repo).await
+        {
+            return Ok(Err(answer));
+        }
+
+        let credential = match self.resolve_credential(ctx, sync_scope, repo).await? {
+            ResolvedCredential::Available(credential) => credential,
+            ResolvedCredential::Inaccessible(message) => {
+                return Ok(Err(ListingFailure::Configuration(message)));
+            }
+        };
+
+        let branches = match self
+            .list_remote_branches_classified(id, &repo.url, credential.as_deref())
+            .await
+        {
+            Ok(branches) => branches,
+            Err(failure) => {
+                if matches!(backoff, Backoff::Honour)
+                    && matches!(failure, ListingFailure::Unavailable(_))
+                {
+                    self.sync_cache
+                        .mark_backoff_if_current(id, RemoteFault::Unreachable, None, generation)
+                        .await;
+                }
+                return Ok(Err(failure));
+            }
+        };
+
+        let repo_handle = Arc::clone(&self.repo);
+        // Owned clone: the `for<'a>` transaction closure cannot capture
+        // caller-lifetime references in its returned future.
+        let scope = sync_scope.clone();
+
+        // Transactional so the cache is never observed half-written (same
+        // invariant as `record_sync_success`).
+        self.db
+            .transaction(move |tx| {
+                Box::pin(
+                    async move { repo_handle.replace_branches(tx, &scope, id, branches).await },
+                )
+            })
+            .await?;
+
+        debug!(repo_id = %id, "Branch cache refreshed");
+        Ok(Ok(()))
+    }
+
+    /// What a repository inside its failure backoff answers, without the
+    /// remote being contacted; `None` when the remote is to be asked.
+    async fn answer_from_backoff(&self, repo: &TestRepository) -> Option<ListingFailure> {
+        let id = repo.id;
+        match self.sync_cache.backoff(id).await {
+            Some(RemoteFault::Unreachable) => {
+                debug!(repo_id = %id, "Remote failed to list within the backoff window; not asking it again");
+                Some(ListingFailure::Unavailable(format!(
+                    "the remote of repository {id} could not be listed a moment ago; not asked again until the backoff ends"
+                )))
+            }
+            // Only while the row still carries the very reason this backoff
+            // recorded: the column is repository-wide, and another branch's
+            // failure landing on it since must not be answered as this one.
+            Some(RemoteFault::Configuration) => {
+                let recorded = self.sync_cache.recorded_reason(id).await?;
+                (repo.sync_error.as_deref() == Some(recorded.as_str())).then(|| {
+                    debug!(repo_id = %id, "Recorded fault within the backoff window; answering the recorded reason");
+                    ListingFailure::Recorded(recorded)
+                })
+            }
+            None => None,
+        }
+    }
+
+    /// List the remote's branches, classifying a failure; a successful
+    /// listing ends the backoff. The failure message is sanitized.
+    async fn list_remote_branches_classified(
+        &self,
+        id: Uuid,
+        url: &str,
+        credential: Option<&str>,
+    ) -> Result<Vec<String>, ListingFailure> {
+        match self.sync_engine.list_remote_branches(url, credential).await {
+            Ok(branches) => {
+                self.sync_cache.clear_backoff(id).await;
+                Ok(branches)
+            }
+            Err(engine_err) => {
+                let sanitized = sanitize_sync_error(&engine_err.to_string(), credential);
+                if matches!(engine_err, DomainError::CredentialRejected { .. }) {
+                    Err(ListingFailure::Configuration(sanitized))
+                } else {
+                    Err(ListingFailure::Unavailable(sanitized))
+                }
+            }
+        }
+    }
+
     /// Resolve the repository's credential material from credstore. The
     /// material is returned to the caller for the engine call only — it is
     /// never logged and never persisted.
@@ -625,9 +815,19 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
     ///
     /// An SSH remote with no `credential_ref` resolves to `None` and is
     /// attempted unauthenticated: public repositories over SSH exist.
+    ///
+    /// # Who reads the secret
+    ///
+    /// Read as the system actor ([`system_actor::for_credential_read`]),
+    /// bound to the repository's owning tenant read off its row through
+    /// `scope`; the caller's `ctx` authorizes, it does not read. That is the
+    /// identity and the tenant the background branch refresher reads as, so
+    /// a sync or a read cannot succeed on a secret the refresher cannot read.
+    /// `ctx` still resolves an ssh remote's key row.
     async fn resolve_credential(
         &self,
         ctx: &SecurityContext,
+        scope: &AccessScope,
         repo: &TestRepository,
     ) -> Result<ResolvedCredential, DomainError> {
         let Some(raw_ref) = &repo.credential_ref else {
@@ -651,7 +851,20 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
             message: e.to_string(),
         })?;
 
-        match self.credstore.get(ctx, &key).await {
+        // Read as the system actor every other path reads as (see
+        // `system_actor::for_credential_read`), bound to the tenant that owns
+        // the repository — the tenant the refresher binds to — not the
+        // caller's. `ctx` still authorized the sync, and still resolves an
+        // ssh remote's key row above.
+        let owner = {
+            let conn = self.db.conn()?;
+            self.repo
+                .owner_tenant(&conn, scope, repo.id)
+                .await?
+                .ok_or(DomainError::NotFound { id: repo.id })?
+        };
+        let reader = system_actor::for_credential_read(owner);
+        match self.credstore.get(&reader, &key).await {
             Ok(Some(secret)) => {
                 let material =
                     String::from_utf8(secret.value.as_bytes().to_vec()).map_err(|_| {
@@ -659,8 +872,10 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
                     })?;
                 Ok(ResolvedCredential::Available(Some(material)))
             }
-            // The single 404 surface: missing or inaccessible. Recorded as a
-            // sync failure (the ref name is repo-row metadata, not a secret).
+            // The single not-found surface: missing, private to someone else,
+            // or denied to the actor. All three are a fact about the
+            // repository's configuration, recorded as a sync failure with the
+            // reason (the ref name is repo-row metadata, not a secret).
             // Names the reference that was actually queried in credstore
             // (`credstore_ref`): for an ssh remote that is the key row's
             // `credstore_ref`, not the caller's `credential_ref` (a
@@ -668,17 +883,19 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
             // the id->credstore_ref hop being missing when it had, in fact,
             // already succeeded. For http(s), `raw_ref == credstore_ref`, so
             // only one reference is printed.
-            Ok(None) => Ok(ResolvedCredential::Inaccessible(
-                if raw_ref == &credstore_ref {
+            Ok(None) | Err(CredStoreError::NotFound | CredStoreError::AccessDenied) => {
+                let named = if raw_ref == &credstore_ref {
                     format!("credential '{credstore_ref}' is not accessible in credstore")
                 } else {
                     format!(
                         "credential '{raw_ref}' (credstore ref '{credstore_ref}') is not \
                          accessible in credstore"
                     )
-                },
-            )),
-            Err(CredStoreError::AccessDenied) => Err(DomainError::Forbidden),
+                };
+                Ok(ResolvedCredential::Inaccessible(format!(
+                    "{named}: {UNREADABLE_CREDENTIAL_HINT}"
+                )))
+            }
             Err(e) => Err(DomainError::CredStore(e.to_string())),
         }
     }
@@ -722,12 +939,11 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
     }
 
     /// Persist a successful sync: replace the branch cache and clear the
-    /// sync error, atomically — the cache must never be observed empty
-    /// between the delete and the re-insert.
+    /// sync error, atomically — the cache must never be observed
+    /// half-written.
     async fn record_sync_success(
         &self,
         scope: &AccessScope,
-        tenant_id: Uuid,
         id: Uuid,
         branches: Vec<String>,
         head_commit: String,
@@ -742,8 +958,7 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
             .db
             .transaction(move |tx| {
                 Box::pin(async move {
-                    repo.replace_branches(tx, &scope, tenant_id, id, branches)
-                        .await?;
+                    repo.replace_branches(tx, &scope, id, branches).await?;
                     repo.update_sync_state(tx, &scope, id, Some(now), Some(head_commit), None)
                         .await?
                         .ok_or(DomainError::NotFound { id })
@@ -785,6 +1000,67 @@ impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> ReposServ
             .await?
             .ok_or(DomainError::NotFound { id: repo.id })
     }
+
+    /// Record a configuration fault the lazy read found while listing the
+    /// remote, as an explicit sync records it (DESIGN §3.3 "Branch model and
+    /// the first read of a branch"): the sanitized reason in `sync_error`, the
+    /// last good revision kept. Under the repo-tier lock and against the row
+    /// re-read under it, for the reason `sync_repo` re-reads: a sync finishing
+    /// between the listing and this write must not have its `head_commit`
+    /// replaced with the older one.
+    ///
+    /// The fault belongs to the row the listing ran against (`listed`). If
+    /// the row under the lock has another `url` or `credential_ref` (an
+    /// operator fixed it meanwhile; `update_repo` takes this lock for that)
+    /// or another `last_synced_at` (a sync succeeded meanwhile), the fault is
+    /// stale: the current row is returned unwritten and nothing is backed
+    /// off. Otherwise the reason is written and the repository backed off for
+    /// it.
+    async fn record_listing_fault(
+        &self,
+        attempt: &RefreshAttempt,
+        reason: String,
+    ) -> Result<TestRepository, DomainError> {
+        let listed = &attempt.repo;
+        let id = listed.id;
+        let repo_lock = self.sync_cache.repo_lock(id).await;
+        let _repo_guard = repo_lock.lock().await;
+        let current = {
+            let conn = self.db.conn()?;
+            self.repo
+                .get(&conn, &attempt.get_scope, id)
+                .await?
+                .ok_or(DomainError::NotFound { id })?
+        };
+        if current.url != listed.url
+            || current.credential_ref != listed.credential_ref
+            || current.last_synced_at != listed.last_synced_at
+        {
+            debug!(repo_id = %id, "Repository changed while it was listed; not recording the credential fault");
+            return Ok(current);
+        }
+        let recorded = self
+            .record_sync_failure(&attempt.sync_scope, &current, reason)
+            .await?;
+        self.back_off_for_recorded_fault(&recorded, attempt.generation)
+            .await;
+        Ok(recorded)
+    }
+
+    /// Back `recorded`'s repository off for the configuration-class fault just
+    /// written to its `sync_error` (a credential fault, a size fault, or a
+    /// content sync that timed out), remembering that text, unless the backoff
+    /// was ended since `generation` was read.
+    async fn back_off_for_recorded_fault(&self, recorded: &TestRepository, generation: u64) {
+        self.sync_cache
+            .mark_backoff_if_current(
+                recorded.id,
+                RemoteFault::Configuration,
+                recorded.sync_error.clone(),
+                generation,
+            )
+            .await;
+    }
 }
 
 enum ResolvedCredential {
@@ -793,6 +1069,53 @@ enum ResolvedCredential {
     /// The configured reference cannot be resolved; the message is safe to
     /// persist (contains the reference name only, never material).
     Inaccessible(String),
+}
+
+/// Why the remote's branch list could not be read — the split a lazy read
+/// answers on (DESIGN §3.3 "Branch model and the first read of a branch").
+/// Every message is sanitized and safe to persist.
+enum ListingFailure {
+    /// An operator has to fix it: the credential cannot be resolved, or the
+    /// remote refused it (or demanded one none is configured).
+    Configuration(String),
+    /// A configuration fault inside its backoff window, already recorded in
+    /// `sync_error` (the message is that recorded reason): answered again
+    /// without contacting the remote and without writing it again.
+    Recorded(String),
+    /// Anything else: the remote is unreachable, timed out or failed, or it
+    /// failed within the backoff window and was not asked again.
+    Unavailable(String),
+}
+
+impl ListingFailure {
+    fn into_message(self) -> String {
+        match self {
+            Self::Configuration(message) | Self::Recorded(message) | Self::Unavailable(message) => {
+                message
+            }
+        }
+    }
+}
+
+/// Whether a listing attempt honours the per-repository failure backoff.
+/// Only the lazy read does; the refresher runs on its own interval.
+#[derive(Clone, Copy)]
+enum Backoff {
+    Honour,
+    Ignore,
+}
+
+/// What one listing attempt found, with the scopes it was authorized under
+/// and the row it read, so a caller that records or answers the failure does
+/// not authorize or read twice.
+struct RefreshAttempt {
+    sync_scope: AccessScope,
+    get_scope: AccessScope,
+    repo: TestRepository,
+    /// The repository's backoff generation before the listing: a failure it
+    /// found backs the repository off only if nothing ended the backoff since.
+    generation: u64,
+    listing: Result<(), ListingFailure>,
 }
 
 /// Validate a repository URL against the scheme policy (ADR-0005, amended
@@ -843,7 +1166,7 @@ fn validate_repo_url(url: &str) -> Result<(), DomainError> {
 ///   rather than in userinfo, unless they equal the resolved material.
 ///
 /// Both require the git engine to re-encode or relocate a secret into its
-/// error text; the gix adapter (Task 9) is not known to do either.
+/// error text; the gix adapter is not known to do either.
 fn sanitize_sync_error(message: &str, credential: Option<&str>) -> String {
     let mut sanitized = URL_USERINFO_RE
         .replace_all(message, "${scheme}***@")
@@ -854,4 +1177,81 @@ fn sanitize_sync_error(message: &str, credential: Option<&str>) -> String {
         sanitized = sanitized.replace(material, "***");
     }
     sanitized
+}
+
+/// The lazy half of a branch-content read (see `super::branch_snapshot`).
+///
+/// Everything a read needs to sync a branch it cannot serve, and nothing an
+/// explicit sync does not already do: the existence check refreshes the
+/// branch cache through [`ReposService::refresh_branches`] and reads it back
+/// through [`ReposService::list_branches`]; the sync is
+/// [`ReposService::sync_repo`] without `force`. All of it runs under the
+/// reader's `ctx`, so it is authorized exactly as those calls are — `SYNC` on
+/// the repository — and a reader without that grant gets their refusal.
+#[async_trait::async_trait]
+impl<R: TestReposRepository + 'static, K: SshKeysRepository + 'static> BranchSync
+    for ReposService<R, K>
+{
+    #[instrument(skip(self, ctx, repo), fields(repo_id = %repo.id, branch = %branch))]
+    async fn sync_branch_for_read(
+        &self,
+        ctx: &SecurityContext,
+        repo: &TestRepository,
+        branch: &str,
+    ) -> Result<TestRepository, DomainError> {
+        info!("Branch cannot be served from a snapshot; syncing it for a read");
+        let repo_id = repo.id;
+        // The name `sync_repo` and the snapshot layout use (both trim): the
+        // membership check below must compare that one, or `" main"` reads as a
+        // branch the remote lacks (DESIGN §3.3).
+        let branch = branch.trim();
+
+        // Always confirmed on the remote, never on the cached list alone: the
+        // cache lags the remote both ways (a branch deleted there stays cached
+        // until the next refresh), a snapshot on disk outlives its branch, and
+        // a row that never synced, or whose `url` change cleared its synced
+        // state (`update_repo`), may carry another remote's list. Syncing a
+        // branch the remote does not have records a repository-wide
+        // `sync_error` — the failure this check is here to prevent. This path
+        // only runs for a branch with no snapshot or while `sync_error` is
+        // already set, so the extra listing is confined to those reads, and a
+        // repository whose remote or credential just failed is not asked again
+        // within `remote_failure_backoff_seconds`.
+        //
+        // DESIGN §3.3 "Branch model and the first read of a branch": a
+        // configuration fault is recorded and answered as that recorded failure
+        // (the reader's `require_synced` makes it 400), exactly as an explicit
+        // sync records it; anything else is 503 and records nothing. Both back
+        // the repository off, so neither a down remote nor one refusing the
+        // credential is asked by every read.
+        let mut attempt = self
+            .try_refresh_branches(ctx, repo_id, Backoff::Honour)
+            .await?;
+        match std::mem::replace(&mut attempt.listing, Ok(())) {
+            Ok(()) => {}
+            Err(ListingFailure::Configuration(reason)) => {
+                return self.record_listing_fault(&attempt, reason).await;
+            }
+            Err(ListingFailure::Recorded(_)) => return Ok(attempt.repo),
+            Err(ListingFailure::Unavailable(message)) => {
+                return Err(DomainError::SyncFailed { message });
+            }
+        }
+        let on_remote = self
+            .list_branches(ctx, repo_id)
+            .await?
+            .iter()
+            .any(|listed| listed == branch);
+        if !on_remote {
+            debug!("Branch is not on the remote; not syncing it");
+            return Err(DomainError::BranchNotFound {
+                repo_id,
+                branch: branch.to_owned(),
+            });
+        }
+
+        // Not forced: the freshness cache and the repo-then-branch locks
+        // apply, so concurrent first reads of one branch fetch it once.
+        self.sync_repo(ctx, repo_id, branch, false).await
+    }
 }

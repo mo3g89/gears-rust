@@ -1,5 +1,5 @@
 /*
- * The only new page in this task. Reached in two ways:
+ * The login page. Reached in two ways:
  *   - as the `/login` route, which is where RP-initiated logout returns to; and
  *   - rendered in place by `RequireAuth` when a session cannot be used and
  *     bouncing back to the IdP would loop.

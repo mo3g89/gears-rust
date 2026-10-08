@@ -58,7 +58,7 @@ export function CreateEnvironmentDialog() {
       return;
     }
     if (!productId) {
-      // Required since Task 20b: the product is how the plugin resolves, and
+      // Required: the product is how the plugin resolves, and
       // without one the gear can neither observe this environment nor dispatch
       // against it. The 400 says the same thing; this says it sooner.
       toast.error('A product is required');
@@ -144,10 +144,9 @@ export function CreateEnvironmentDialog() {
                 Required, and the placeholder says so rather than offering a
                 "No product" option: a product selects the plugin whose
                 `credential_schema()` generates the credential fields below,
-                the submit handler refuses without one, and Task 20b made
-                `qa_environments.product_id` `NOT NULL`. The rendered copy
-                stays operator-facing -- this rationale is not for them
-                (re-review, N-3).
+                the submit handler refuses without one, and `qa_environments.product_id` is
+                `NOT NULL`. The rendered copy
+                stays operator-facing -- this rationale is not for them.
               */}
               <p className="text-xs text-muted-foreground">
                 The product this environment belongs to. Required — it determines

@@ -67,6 +67,9 @@ pub trait VariablesRepository: Send + Sync {
     /// Insert or update a variable. `var.environment_id == None` targets the
     /// pipeline (global) table keyed by `(tenant_id, name)`; `Some(_)` targets
     /// the per-environment table keyed by `(environment_id, name)`.
+    ///
+    /// `VariableNameExists` when a concurrent writer inserted the same natural
+    /// key first; see `VariablesService::upsert` for how it is resolved.
     async fn upsert<C: DBRunner>(
         &self,
         runner: &C,

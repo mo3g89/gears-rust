@@ -5,7 +5,7 @@
 //!
 //! Stated up front because the plan lists these files under Task 38, which
 //! would have left Task 32 unable to register the routes its own text mandates;
-//! controller ruling R69 moves the module here. The two extensions are known and
+//! so the module moved here. The two extensions are known and
 //! neither should surprise a reader:
 //!
 //! * **Task 35** adds `GET/PUT /qa/v1/settings/jira-poller`, over
@@ -61,7 +61,7 @@ use crate::domain::service::jira::JiraConfigInput;
 use crate::domain::service::notify::TestSend;
 use crate::gear::ConcreteAppServices;
 
-// ==================== JIRA (Task 32) ====================
+// ==================== JIRA ====================
 
 /// `GET /qa/v1/settings/jira` — the tenant's JIRA settings.
 ///
@@ -110,7 +110,7 @@ pub async fn update_jira_settings(
     Ok(Json(JiraSettingsDto::from(stored)))
 }
 
-// ==================== JIRA poller (Task 35) ====================
+// ==================== JIRA poller ====================
 
 /// `GET /qa/v1/settings/jira-poller` — the tenant's poller cadence and
 /// auto-rerun switch.
@@ -148,7 +148,7 @@ pub async fn update_jira_poller_settings(
     Ok(Json(JiraPollerConfigDto::from(stored)))
 }
 
-// ==================== Notifications (Task 38) ====================
+// ==================== Notifications ====================
 
 /// `GET /qa/v1/settings/notifications` — the tenant's notification settings.
 ///

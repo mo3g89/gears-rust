@@ -1,9 +1,10 @@
 //! The two flat result collections, as domain operations.
 //!
-//! `GET /qa/v1/test-results` and `GET /qa/v1/test-case-results`. Per D7, `OData`
-//! applies to these two tables and to nothing else in this gear — they are what
-//! `cpt-cf-qa-nfr-scale`'s 5M-row target is about, and every other read is either
-//! bounded by a run or is an analytics reduction with its own shape.
+//! `GET /qa/v1/test-results` and `GET /qa/v1/test-case-results`. `OData` applies
+//! to these two tables and to nothing else in this gear (`api::rest`'s header) —
+//! they are what `cpt-cf-qa-nfr-scale`'s 5M-row target is about, and every other
+//! read is either bounded by a run or is an analytics reduction with its own
+//! shape.
 //!
 //! # Two methods, three lines each, and the reason they exist at all
 //!

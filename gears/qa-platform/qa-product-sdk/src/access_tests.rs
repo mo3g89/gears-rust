@@ -1,7 +1,8 @@
 use super::*;
 
-/// **D8** expressed as a test: the platform's transport-critical floor is
-/// never replaced by a plugin's own reservations, only added to.
+/// The reserved-name floor expressed as a test: the platform's
+/// transport-critical floor is never replaced by a plugin's own reservations,
+/// only added to.
 #[test]
 fn run_var_contract_reserved_is_a_set_not_a_replacement() {
     let contract = RunVarContract {

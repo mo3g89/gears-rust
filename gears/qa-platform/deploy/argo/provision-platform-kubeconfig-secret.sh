@@ -2,33 +2,34 @@
 # Materialise the Kubernetes `Secret` a workflow pod mounts as its kubeconfig,
 # for one qa-environments platform.
 #
-# WHY THIS IS NEEDED AT ALL. `POST /qa/v1/environments` REQUIRES a kubeconfig --
-# `kubeconfig_credstore_ref` must not be empty (measured: a body with only
-# `name` is a 400 naming that field) -- so EVERY run carries a
-# `KubeconfigMount`, and the Argo adapter turns it into a secret volume that is
-# deliberately NOT optional: "a kubeconfig that does not resolve must fail the
-# execution rather than silently target nothing"
-# (`run_executor.rs:67-70`). A pod whose kubeconfig Secret does not exist sits
-# `Pending` forever with `FailedMount`, and the run never starts.
+# WHY THE SECRET IS NEEDED AT ALL. Every environment holds at least one
+# credential (`POST /qa/v1/environments` refuses a create whose product plugin's
+# required secret is missing), and a run mounts it from a Kubernetes `Secret`
+# the Argo adapter deliberately does NOT make optional: "a kubeconfig that does
+# not resolve must fail the execution rather than silently target nothing"
+# (`run_executor.rs:67-70`). A pod whose Secret does not exist sits `Pending`
+# forever with `FailedMount`, and the run never starts.
 #
-# WHY IT IS A SCRIPT AND NOT SOMETHING A GEAR DOES -- decision D4, still open,
-# and this script does not close it. The scoping document's two options were
-# (A) somebody outside qa-runs maintains a Secret per platform, keeping
-# `RunSpec`'s no-material property end to end, and (B) the adapter resolves the
-# reference from credstore, which makes "qa-runs never reads a secret's
-# contents" false. The adapter implements (A)'s adapter half. THIS SCRIPT IS
-# (A)'s OTHER HALF DONE BY HAND, once, by an operator -- not the automatic
-# per-platform reconciliation (A) eventually needs, which belongs in
-# qa-environments and would give that gear a Kubernetes dependency of its own.
-# Until that decision is taken, a platform created through the API needs a
-# human to run this before its first run.
+# WHO WRITES IT NOW: qa-environments. Its runner-`Secret` writer
+# (`KubeRunnerSecretWriter`, behind the `runner-secret` cargo feature that the
+# shipped image builds with) writes each stored credential's Secret into the
+# Argo cluster on every create, on every update that replaces a credential,
+# and again on every observation cycle as a self-heal, so an environment
+# created through the API needs no operator step before its first run.
+# ADR-0001's "Amendments" section records that writer. `qa-runs` itself still
+# materialises no Secret, so the run spec keeps its no-material property.
 #
-# IT DOES NOT READ CREDSTORE, and it cannot: the only backend is
-# static-credstore-plugin, whose store is `HashMap`s behind an `RwLock`, and
-# `POST /qa/v1/environments` with a raw `kubeconfig` writes there and never returns
-# the document. So the kubeconfig comes from a FILE the operator already has --
-# which is also why the reference, not the material, is what the platform row
-# carries.
+# WHAT THIS SCRIPT IS FOR, THEN: the operator's manual fallback -- a build
+# without `runner-secret`, or a Secret that has to be written by hand while
+# the gear cannot (for example, its Argo kubeconfig is not configured). It
+# derives the same name the writer and `qa-runs`' executor do
+# (`deploy/helm/tests/check_secret_name_parity.sh` runs this script against
+# the Rust copies of the rule).
+#
+# IT DOES NOT READ CREDSTORE: the kubeconfig comes from a FILE the operator
+# already has. The gear's writer is what reads credstore, as its system actor
+# in the environment's owning tenant; this script never sees a credstore
+# secret, only the reference that names one.
 #
 # Usage:
 #   provision-platform-kubeconfig-secret.sh <tenant-id> <credstore-ref> [kubeconfig-file]
@@ -41,9 +42,11 @@
 #                      and not a truncated concatenation. Get the tenant
 #                      wrong and the script still succeeds, but at a name
 #                      `qa-runs` never asks the kubelet to resolve.
-#   <credstore-ref>    The platform's `kubeconfig_credstore_ref`, verbatim as it
-#                      was given to POST /qa/v1/environments. The Secret NAME is
-#                      derived from it, so it has to match exactly.
+#   <credstore-ref>    The credential's credstore reference, verbatim as the
+#                      environment stores it: the reference submitted under
+#                      `credentials`, or the one qa-environments minted for a
+#                      pasted secret. The Secret NAME is derived from it, so it
+#                      has to match exactly.
 #   [kubeconfig-file]  Default /etc/rancher/k3s/k3s.yaml.
 #
 #                      A LOOPBACK `server:` IS REWRITTEN, and only a loopback
@@ -80,7 +83,7 @@ die() { echo "provision-platform-kubeconfig-secret: $*" >&2; exit 1; }
 UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 [[ -n "$TENANT_ID" ]] || die "no tenant id given. Usage: $0 <tenant-id> <credstore-ref> [kubeconfig-file]. The tenant is folded into the Secret name ahead of the reference so two tenants registering the same reference text do not collide."
 [[ "$TENANT_ID" =~ $UUID_RE ]] || die "tenant id '$TENANT_ID' is not a UUID; a Secret name derived from a malformed tenant is a Secret name qa-runs will never independently reconstruct"
-[[ -n "$REF" ]] || die "no credstore reference given. Usage: $0 <tenant-id> <credstore-ref> [kubeconfig-file]. The reference is the platform's kubeconfig_credstore_ref as POSTed; the Secret name is derived from it, so a different spelling produces a Secret the pod will not find."
+[[ -n "$REF" ]] || die "no credstore reference given. Usage: $0 <tenant-id> <credstore-ref> [kubeconfig-file]. The reference is the credential's credstore reference exactly as the environment stores it (the reference submitted under credentials, or the one qa-environments minted for a pasted secret); the Secret name is derived from it, so a different spelling produces a Secret the pod will not find."
 [[ -r "$KUBECONFIG_FILE" ]] || die "kubeconfig '$KUBECONFIG_FILE' is not readable"
 command -v kubectl >/dev/null 2>&1 || die "kubectl not found"
 

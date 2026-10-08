@@ -64,15 +64,15 @@
 //!
 //! [`EnvironmentReader::default_branch`] is the per-environment branch override
 //! the auto-rerun resolves **once** and reuses for both the plan lookup and the
-//! launch — `domain::service::jira_poller`'s module doc carries the full
-//! argument for why resolving it twice, or resolving the lookup against a
-//! repository default instead, silently drops a rerun. It is a **single**-id
-//! read rather than a batch, unlike [`EnvironmentReader::names`]: the poller resolves one
+//! launch — `domain::service::jira_poller`'s module doc carries the full argument
+//! for why resolving it twice, or resolving the lookup against a repository
+//! default instead, silently drops a rerun. It is a **single**-id read rather
+//! than a batch, unlike [`EnvironmentReader::names`]: the poller resolves one
 //! bug's environment at a time, so there is no window of distinct ids to
-//! de-duplicate the way an analytics group chart's rows have. Controller
-//! ruling R73: this port grows only for a read a test in this crate
-//! exercises, and `the_branch_is_resolved_once_and_reused_for_lookup_and_launch`
-//! is that test.
+//! de-duplicate the way an analytics group chart's rows have. A port grows only
+//! in the task that consumes it (`runs_reader`'s header): this port grows only
+//! for a read a test in this crate exercises, and
+//! `the_branch_is_resolved_once_and_reused_for_lookup_and_launch` is that test.
 
 use std::collections::HashMap;
 

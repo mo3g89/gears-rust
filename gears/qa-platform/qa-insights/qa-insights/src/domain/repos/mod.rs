@@ -101,5 +101,5 @@ pub use results_repo::{
     FileStatusCount, FlakyGroup, NewTestCaseResult, NewTestResult, PlanExecRow, ResultsRepository,
     RunStatusCount, StatusRowCount,
 };
-pub use saved_views_repo::{SavedViewKey, SavedViewsRepository};
-pub use watermark_repo::{WatermarkKind, WatermarkRepository, Watermarks};
+pub use saved_views_repo::SavedViewsRepository;
+pub use watermark_repo::{SweepCursor, WatermarkKind, WatermarkRepository, Watermarks};

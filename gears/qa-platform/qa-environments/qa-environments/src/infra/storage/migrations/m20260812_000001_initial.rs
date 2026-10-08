@@ -11,9 +11,10 @@
 //! The word "platform" names a *product* — a product may be an `IaaS`, a
 //! `PaaS`, an OS or an appliance — not the thing tested against. The
 //! aggregate is therefore `Environment` and its tables are `qa_environments`,
-//! `qa_environment_variables` and `qa_environment_leases`.
+//! `qa_environment_variables` and `qa_environment_leases`, beside
+//! `qa_pipeline_variables`, which belongs to no environment.
 //!
-//! The foreign-key column on both tables is `environment_id`, matching the
+//! The foreign-key column on the variables and leases tables is `environment_id`, matching the
 //! Rust field name exactly; no `#[sea_orm(column_name)]` pin exists or is
 //! needed on either entity.
 //!

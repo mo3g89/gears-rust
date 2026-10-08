@@ -348,11 +348,13 @@ pub struct Product {
     /// `gts.cf.toolkit.plugins.plugin.v1~cf.core.qa_product.plugin.v1~cf.core._.vhp_product.v1`.
     ///
     /// **A plain `String` since Task 20**, which completed the expand/contract
-    /// pair: `m20260903_000004_plugin_instance_id_not_null` (folded into `migrations::m20260812_000002_initial` by the docs squash) tightened the
+    /// pair: `m20260903_000004_plugin_instance_id_not_null` (folded into
+    /// `migrations::m20260812_000002_initial` by the docs squash) tightened the
     /// column, so "this product names no plugin" is no longer a state the type
     /// can hold. It was a misconfiguration rather than a mode — nothing about
-    /// such a product could be observed or dispatched — and **D6** says every
-    /// product names a plugin with no fallback path.
+    /// such a product could be observed or dispatched — and every product names
+    /// a plugin with no fallback path (`qa_products.plugin_instance_id` is NOT
+    /// NULL, DESIGN §3.8, "qa-catalog schema").
     pub plugin_instance_id: String,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
@@ -365,7 +367,7 @@ pub struct Product {
 /// positional arguments, three of them adjacent `String`s, so transposing
 /// `name`, `key` and `description` at a call site compiled silently. Adding
 /// `plugin_instance_id` as a sixth would have made that materially worse, so
-/// the recorded follow-up (`DECOMPOSITION.md`) is taken here instead. The
+/// the request-struct form is taken here instead. The
 /// shape now matches [`NewTestRepository`] and [`NewCustomPlan`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewProduct {
@@ -378,7 +380,7 @@ pub struct NewProduct {
     /// Full GTS instance id of the owning product plugin — see
     /// [`Product::plugin_instance_id`] for what the value is.
     ///
-    /// **Required since Task 20** (**D6**), and required *structurally*: this
+    /// **Required since Task 20**, and required *structurally*: this
     /// was `Option<String>` with `create_product` refusing `None`, which is a
     /// rule a caller had to be told rather than a shape it could not express.
     /// The shipped UI could not send the field at all, so every product it
@@ -387,7 +389,7 @@ pub struct NewProduct {
     ///
     /// [`ProductUpdate::plugin_instance_id`] stays optional, and that
     /// asymmetry is deliberate: there, `None` means "leave the stored binding
-    /// alone" (ruling D-18), which is a real third state a create does not
+    /// alone", which is a real third state a create does not
     /// have.
     pub plugin_instance_id: String,
 }
@@ -424,9 +426,9 @@ pub struct ProductUpdate {
     /// plugin, and recovery meant re-entering an id nothing displays.
     ///
     /// Nothing is lost by refusing to unbind here, because unbinding is not a
-    /// state this platform wants: spec decision **D6** is "every product names
-    /// a plugin, there is no fallback path", and the contract migration makes
-    /// the column `NOT NULL`. A rebind is an ordinary `Some`.
+    /// state this platform wants: `qa_products.plugin_instance_id` is NOT NULL
+    /// (DESIGN §3.8, "qa-catalog schema"), so every product names a plugin
+    /// with no fallback path. A rebind is an ordinary `Some`.
     pub plugin_instance_id: Option<String>,
 }
 
@@ -494,14 +496,16 @@ pub struct BundleRequest {
 /// dominant idiom (`create_bundle(ctx, req: BundleRequest)`), it names the
 /// bare `true` that `sync_repo(ctx, id, branch, true)` leaves opaque at a
 /// call site, and a third sync knob can be added without a breaking
-/// signature change. DECOMPOSITION 2.2 sanctions either shape.
+/// signature change. Either shape satisfied the contract; this one is chosen
+/// for the reasons above.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SyncRequest {
     /// Branch to materialize. `None` uses the repository's `default_branch`.
     pub branch: Option<String>,
     /// Skip (and evict) the freshness TTL entry. The launch path always sets
     /// this, dropping the recency marker before syncing so a cached checkout
-    /// cannot be returned.
+    /// cannot be returned. Without it, a recorded sync error still makes the
+    /// sync fetch.
     pub force: bool,
 }
 
@@ -510,7 +514,7 @@ pub struct SyncRequest {
 /// A **projection for qa-insights**, not a catalog concept. It exists because
 /// analytics needs each file's `component` / `tags` / `quality_vectors` and an
 /// expected case count, and the gear split
-/// ([ADR-0004](../../docs/ADR/0004-cpt-cf-qa-adr-four-gear-decomposition.md))
+/// ([ADR-0004](../../../docs/ADR/0004-cpt-cf-qa-adr-four-gear-decomposition.md))
 /// puts the repository content on this side of the boundary. qa-insights has no
 /// checkout of its own, so everything it needs per file has to ride across on
 /// this row.

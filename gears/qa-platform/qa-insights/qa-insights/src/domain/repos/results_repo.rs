@@ -201,12 +201,12 @@ pub struct StatusRowCount {
 ///
 /// [`Self::total`] is legacy's *sixth* classification — the
 /// `PASSED`+`FAILED`+`ERROR` denominator at `dashboard.rs:388`, which
-/// `crate::domain::service::ingest`' R5 table indexes — so it excludes a
-/// `SKIPPED`, `PENDING`, `XFAIL` or unrecognised row from the group entirely.
-/// Because that set is exactly the union of the two counted sets, `total` is
-/// arithmetically `passed + failed`; it is carried and selected separately
-/// anyway, because it is a **rendered number** and legacy selects it separately
-/// (`:388`) rather than deriving it.
+/// `crate::domain::service::ingest`'s status-classification table indexes — so it
+/// excludes a `SKIPPED`, `PENDING`, `XFAIL` or unrecognised row from the group
+/// entirely. Because that set is exactly the union of the two counted sets,
+/// `total` is arithmetically `passed + failed`; it is carried and selected
+/// separately anyway, because it is a **rendered number** and legacy selects it
+/// separately (`:388`) rather than deriving it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlakyGroup {
     /// The runner's test name, verbatim — legacy's `tr.test_name`.
@@ -239,9 +239,9 @@ pub struct FlakyGroup {
 /// # It is not [`FlakyGroup`], and the difference is the grain
 ///
 /// Both are legacy's **sixth** classification
-/// ([`crate::domain::service::ingest`]'s R5 table, row six) over the same
-/// seven-day effective window, and they group differently and answer different
-/// questions:
+/// ([`crate::domain::service::ingest`]'s status-classification table, row six)
+/// over the same seven-day effective window, and they group differently and
+/// answer different questions:
 ///
 /// | | grain | `HAVING` | `LIMIT` |
 /// |---|---|---|---|
@@ -396,6 +396,11 @@ pub trait ResultsRepository: Send + Sync {
     /// in one transaction: a partial replacement leaves a run whose file-level
     /// and case-level counts disagree.
     ///
+    /// Serialized per run: the implementation upserts the run's
+    /// `qa_run_projection_locks` row first, so two callers replacing one run's
+    /// rows in overlapping transactions run one after the other, and the later
+    /// batch is what remains.
+    ///
     /// **Re-ingest is routine, not exceptional.** `qa_ingest_watermarks` exists
     /// because the event broker has no durable backend, so Task 15's reconcile
     /// poller replays a window of finished runs on every pass. A non-idempotent
@@ -486,14 +491,15 @@ pub trait ResultsRepository: Send + Sync {
     ///
     /// Task 33's own read, added for the bug-filing path: [`Self::list_by_run`]
     /// answers the *file*-level question ("which tests failed"), and neither it
-    /// nor [`Self::case_rows_for_runs`] carries the per-case failure text —
-    /// that trait method's own doc names its query verbatim, `SELECT
-    /// rr.workflow_name, tcr.test_file, tcr.status, tcr.ticket` (no `reason`),
-    /// because its only consumer is the overview's per-case roll-up, which
-    /// never renders one. `domain::service::jira::JiraService::file_bugs`
+    /// nor [`Self::case_rows_for_runs`] carries the per-case failure text — that
+    /// trait method's own doc names its query verbatim,
+    /// `SELECT rr.workflow_name, tcr.test_file, tcr.status, tcr.ticket` (no
+    /// `reason`), because its only consumer is the overview's per-case roll-up,
+    /// which never renders one. `domain::service::jira::JiraService::file_bugs`
     /// concatenates the `reason` of every `FAILED` case sharing a failing file's
-    /// `(run_id, test_file)` into the JIRA issue body — this task's R84
-    /// decision, since `qa_test_results` carries no `reason` column of its own
+    /// `(run_id, test_file)` into the JIRA issue body (that module's header, "The
+    /// issue body's detail text"), since `qa_test_results` carries no `reason`
+    /// column of its own
     /// (`infra::storage::entity::test_case_result::Model::reason`'s doc).
     ///
     /// Same shape as [`Self::list_by_run`] — one run, no window, no reduction —
@@ -680,7 +686,7 @@ pub trait ResultsRepository: Send + Sync {
     /// the read [`UniverseFilter::since`]'s header argues against. `since` is
     /// the caller's; [`crate::domain::service::analytics::universe_window_start`]
     /// supplies the same 90-day default the build-tests drill-down already
-    /// inherits under ruling R22, for the identical reason.
+    /// inherits, for the identical reason.
     ///
     /// **The predicate has to be the `kpi_window` decomposition, not a bound on
     /// the `COALESCE` expression.** `qa_test_results` has no index on
@@ -697,20 +703,20 @@ pub trait ResultsRepository: Send + Sync {
     ///
     /// # Ordering is the gear's own convention, not legacy's per-statement one
     ///
-    /// Legacy orders each of the three by a **bare** `r.finished_at DESC NULLS
-    /// LAST` (`:2442`, `:2540`; `api_plan_builds` has no time ordering at all).
-    /// This reads `COALESCE(run_finished_at, run_created_at) DESC`, the
-    /// convention [`Self::list_for_universe`] and controller Ruling C
-    /// established for every analytics read in this gear, tie-broken
-    /// `created_at DESC, ingest_ordinal DESC, id DESC` for the same reason that
-    /// method's doc gives. The two disagree only for a run still in progress
-    /// (no `run_finished_at`): legacy's bare column sorts it as the *oldest*
-    /// row regardless of how recently it started, where the coalesced instant
-    /// sorts it near its own creation time — legacy's re-projection-on-every-event
-    /// design is exactly what Ruling C's fallback was chosen to answer, and an
-    /// in-progress run's plan-tests row is the same case, not a different one.
-    /// A deliberate divergence, not an oversight, and consistent with every
-    /// other read this trait exposes.
+    /// Legacy orders each of the three by a **bare**
+    /// `r.finished_at DESC NULLS LAST` (`:2442`, `:2540`; `api_plan_builds` has
+    /// no time ordering at all). This reads
+    /// `COALESCE(run_finished_at, run_created_at) DESC`, the convention
+    /// [`Self::list_for_universe`] established for every analytics read in this
+    /// gear, tie-broken `created_at DESC, ingest_ordinal DESC, id DESC` for the
+    /// same reason that method's doc gives. The two disagree only for a run still
+    /// in progress (no `run_finished_at`): legacy's bare column sorts it as the
+    /// *oldest* row regardless of how recently it started, where the coalesced
+    /// instant sorts it near its own creation time — legacy's
+    /// re-projection-on-every-event design is exactly what the run's-instant
+    /// fallback was chosen to answer, and an in-progress run's plan-tests row is
+    /// the same case, not a different one. A deliberate divergence, not an
+    /// oversight, and consistent with every other read this trait exposes.
     ///
     /// # Errors
     ///
@@ -760,7 +766,7 @@ pub trait ResultsRepository: Send + Sync {
     /// this process instead of the plan's entire row history, which is the
     /// defect fix round 1 found and this method exists to close.
     ///
-    /// # `tenant_id` is a parameter — controller ruling R86
+    /// # `tenant_id` is a parameter — the explicit-`tenant_id` rule
     ///
     /// This is a `.one()` read over a scope compiled against
     /// `OWNER_TENANT_ID`, which may legitimately span several tenants
@@ -807,12 +813,13 @@ pub trait ResultsRepository: Send + Sync {
     ///
     /// `GET /qa/v1/test-results`. The caller's `$filter`, `$orderby`, `$top` and
     /// cursor arrive in `query`; the allow-list of fields any of them may name is
-    /// `infra::storage::odata::TestResultsField`, and that module's header carries
-    /// the index reasoning behind it. **Per D7, `OData` belongs here and to
-    /// [`Self::list_case_page`] and nowhere else in this gear**: these are the two
-    /// tables `cpt-cf-qa-nfr-scale` targets 5M rows on, and every other read this
-    /// trait offers is either bounded by a run or is an analytics reduction with
-    /// its own shape.
+    /// `infra::storage::odata::TestResultsField`, and that module's header
+    /// carries the index reasoning behind it. **`OData` applies only to the two
+    /// flat result collections — here and [`Self::list_case_page`] — and nowhere
+    /// else in this gear** (`api::rest`'s header): these are the two tables
+    /// `cpt-cf-qa-nfr-scale` targets 5M rows on, and every other read this trait
+    /// offers is either bounded by a run or is an analytics reduction with its
+    /// own shape.
     ///
     /// # The `$filter` cannot widen what this returns
     ///
@@ -962,7 +969,7 @@ pub trait ResultsRepository: Send + Sync {
     /// That guard is explicit rather than left to `IN ()`, which is a syntax
     /// error on some dialects and a match-nothing on others.
     ///
-    /// **Measured 2026-08-21 (Task 23b): `SeaQuery` is not one of those dialects.**
+    /// **Measured 2026-08-21: `SeaQuery` is not one of those dialects.**
     /// It renders an empty `is_in` as the constant `1 = 2`
     /// (`sea-query-0.32.7/src/backend/query_builder.rs:386`), so on this dependency
     /// version the guard cannot be reached by an `IN ()` at all and removing it is
@@ -1372,7 +1379,7 @@ pub trait ResultsRepository: Send + Sync {
     /// `repo_id` joined the grain in a fix-round-2 correction — see
     /// [`FileStatusCount`]'s own doc for why.
     ///
-    /// # Ruling R5's **sixth** classification, and not a seventh
+    /// # The status-classification table's **sixth** row, and not a seventh
     ///
     /// `COUNT(*) FILTER (WHERE tr.status = 'PASSED')`,
     /// `... IN ('FAILED','ERROR')`, denominator `... IN ('PASSED','FAILED',
@@ -1484,9 +1491,8 @@ pub trait ResultsRepository: Send + Sync {
     /// grows strictly faster than the queue and never drains, so an unbounded
     /// inter-gear call would materialize every run ever executed"*
     /// (`qa-runs-sdk/src/client.rs:42-46`) — so a total taken from that listing
-    /// would silently be `min(total, limit)`. The plan's own mapping row for the
-    /// dashboard says the run counts are read *locally*
-    /// (`plans/2026-08-18-qa-insights-gear.md:330`), and this is the local
+    /// would silently be `min(total, limit)`. The design reads the dashboard's
+    /// run counts *locally*, and this is the local
     /// quantity that is exact: runs whose results are ingested. A run whose
     /// results have not landed yet is missing, which
     /// `cpt-cf-qa-principle-async-insights` makes a normal transient state.
@@ -1531,19 +1537,19 @@ pub trait ResultsRepository: Send + Sync {
     /// This method itself takes `scope` as given and executes it, the same as
     /// every other method in this trait — it does not know or care whether its
     /// caller compiled `scope` from the PEP. Its actual caller,
-    /// [`TenantDirectory`](crate::domain::service::tenants::TenantDirectory),
-    /// no longer asks the PEP for this read at all: it passes
+    /// [`TenantDirectory`](crate::domain::service::tenants::TenantDirectory), no
+    /// longer asks the PEP for this read at all: it passes
     /// `domain::elevated::enumeration_scope`'s `AccessScope::allow_all()`
     /// directly, at the one call site in this crate's production code sanctioned
-    /// to do so — see that module's doc for why. This trait method's own
-    /// contract is unchanged by that: pass it a tenant-restricted
-    /// `AccessScope::for_tenants` (as
-    /// `results_sea_repo`'s `the_tenant_enumeration_is_distinct_and_scoped` does,
-    /// directly, without going through `TenantDirectory` at all) and it answers
-    /// with whatever that narrower scope permits. R86 does not apply:
-    /// this is not a `.one()`, there is no single row whose tenancy could be
-    /// mistaken, and a `tenant_id` equality predicate would make the method
-    /// answer its own question.
+    /// to do so — see that module's doc for why. This trait method's own contract
+    /// is unchanged by that: pass it a tenant-restricted
+    /// `AccessScope::for_tenants` (as `results_sea_repo`'s
+    /// `the_tenant_enumeration_is_distinct_and_scoped` does, directly, without
+    /// going through `TenantDirectory` at all) and it answers with whatever that
+    /// narrower scope permits. The explicit-`tenant_id` rule does not apply: this
+    /// is not a `.one()`, there is no single row whose tenancy could be mistaken,
+    /// and a `tenant_id` equality predicate would make the method answer its own
+    /// question.
     ///
     /// # What it costs, and what it therefore is not
     ///

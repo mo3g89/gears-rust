@@ -38,9 +38,9 @@
 //!    "qa-runs never reads a secret's contents" (`run_executor.rs:85-86`)
 //!    literally true of this code. It also means **a run with a platform will
 //!    not start until somebody creates that Secret**: the volume is required,
-//!    so the pod stays `Pending`. Who does that (qa-environments, per the
-//!    scoping document's design A) is open decision D4 and is not this
-//!    adapter's to take, because taking the other option — resolving credstore
+//!    so the pod stays `Pending`. Who does that is qa-environments'
+//!    runner-`Secret` writer (decision D4, ADR-0001), not this
+//!    adapter, because taking the other option — resolving credstore
 //!    material here — would falsify the port's central claim.
 //! 2. **It does not solve bundle download authentication.**
 //!    `GET /qa/v1/test-bundles/{id}` is `.authenticated()`
@@ -61,7 +61,7 @@
 //!    Kubernetes `Secret`, and the workflow given a `secretKeyRef` to it — a
 //!    reference the adapter derives and never resolves, the same shape as every
 //!    other secret here. That needs a realm client created, which is a human's
-//!    decision (D5), so it is recorded and not guessed at.
+//!    decision, so it is recorded and not guessed at.
 //! 3. **Per-test log slices are not carried**, because `TestObservation` has no
 //!    field for them and the port is frozen. The UI's "Per-test logs are not
 //!    available in this deployment" notice stays true. See [`markers`].

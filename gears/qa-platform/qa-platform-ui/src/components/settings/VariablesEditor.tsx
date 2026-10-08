@@ -9,7 +9,7 @@ import { UnavailableNotice } from '@/components/ui/unavailable';
 
 /**
  * No `secure` flag: this deployment has no secured-variable concept, so the editor
- * does not offer one. See `REMOVED-SURFACES.md` (Task 8a, C10) — a variable is
+ * does not offer one. A variable is
  * stored and returned in cleartext, and the padlock/masking that used to sit here
  * claimed a protection the backend never applied.
  */

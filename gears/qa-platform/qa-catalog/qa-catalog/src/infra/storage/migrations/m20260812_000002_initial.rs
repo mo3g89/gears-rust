@@ -8,7 +8,7 @@
 //! used by qa-environments' `qa_environment_leases` (renamed from
 //! `qa_platform_leases`). Column, index, and FK order
 //! is kept identical across `POSTGRES_UP` and `SQLITE_UP`,
-//! because a three-way eyeball diff is the only thing that catches a
+//! because an eyeball diff is the only thing that catches a
 //! forgotten dialect — tests exercise `SQLite` only.
 //!
 //! ## Products are created before repositories
@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS qa_products (
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
     -- The product plugin that owns this product's behaviour. Every product
-    -- names one and there is no fallback path (decision D6), so this is
+    -- names one and there is no fallback path, so this is
     -- NOT NULL from the start rather than nullable-then-tightened.
     plugin_instance_id VARCHAR(512) NOT NULL
 );

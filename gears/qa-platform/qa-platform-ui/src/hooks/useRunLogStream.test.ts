@@ -165,7 +165,7 @@ describe('useRunLogStream', () => {
     );
   });
 
-  // Finding 6 (review round 1): the null-transition used to leave a stale
+  // The null-transition used to leave a stale
   // `isConnected: true` behind, because the early-return guard skipped the reset. Assert
   // the state, not just that the underlying `EventSource` closed.
   it('closes the stream and reports itself disconnected when the run id goes away', async () => {
@@ -221,7 +221,7 @@ describe('useRunLogStream', () => {
       });
     }
 
-    // Finding 7 (review round 1): an exact count, not just an upper bound — pins both
+    // An exact count, not just an upper bound — pins both
     // edges (it retried at all, and it stopped) rather than only the "not more than"
     // edge, which a hook that never retried at all would also satisfy.
     expect(FakeEventSource.instances.length).toBe(1 + MAX_UNSTABLE_RETRIES);
@@ -234,7 +234,7 @@ describe('useRunLogStream', () => {
     expect(FakeEventSource.instances.length).toBe(1 + MAX_UNSTABLE_RETRIES);
   });
 
-  // Finding 4 (review round 1): the give-up test above fires `onerror` without ever
+  // The give-up test above fires `onerror` without ever
   // firing `onopen`, but the actual empty-stream shape is "`onopen` fires, then `onerror`
   // fires almost immediately" (headers arrive with 200 before the zero-byte body ends the
   // response). An implementation that reset the instant-failure budget merely because
@@ -296,14 +296,14 @@ describe('useRunLogStream', () => {
     expect(FakeEventSource.instances[1]).not.toBe(first);
   });
 
-  // Finding 2 (review round 1): a stable-then-dropped connection used to reset the
+  // A stable-then-dropped connection used to reset the
   // failure budget *and* reconnect at zero delay, so a connection that is always just
   // barely stable before dropping (an ordinary front-proxy idle timeout — 10-60s is
   // common) would hammer the gear's subscriber slots forever. Proves the reconnect is
   // paced (no new `EventSource` appears immediately after the error, only after the
   // delay) across many stable-drop cycles in a row.
   //
-  // Review round 2, finding B: this used to also assert a `MAX_TOTAL_ATTEMPTS` ceiling
+  // This used to also assert a `MAX_TOTAL_ATTEMPTS` ceiling
   // fired at a fixed count. That ceiling's own justifying comment did the arithmetic
   // wrong (100 against an "8h at 60s" example that is actually 480), and this test's own
   // purely-stable cycles proved the ceiling firing squarely inside the case the comment
@@ -348,7 +348,7 @@ describe('useRunLogStream', () => {
     expect(FakeEventSource.instances.length).toBe(CYCLES + 1);
   }, 20_000);
 
-  // Finding 3 (review round 1): the gear's own subscription "only ever carries lines
+  // The gear's own subscription "only ever carries lines
   // published after it was created" (`broadcast.rs:286`), so a reconnect leaves a gap the
   // new subscription cannot see. Left unmarked, that gap lands invisibly in the middle of
   // the rendered log — exactly what `broadcast.rs:117-119` says its own `gap_marker`
@@ -393,7 +393,7 @@ describe('useRunLogStream', () => {
     expect(result.current.messages).toEqual(['during-first-connection', RECONNECT_GAP_MARKER]);
   });
 
-  // Review round 2, finding A: the marker used to fire on *any* reconnect after the
+  // The marker used to fire on *any* reconnect after the
   // first open, keyed on "has this hook ever connected before" rather than on whether
   // the connection being replaced was actually stable. That fires on every instant-retry
   // attempt too — three or four false gap markers in a row for a finished run's empty
@@ -442,9 +442,9 @@ describe('useRunLogStream', () => {
     expect(FakeEventSource.last!.url).toContain(`/qa/v1/runs/${RUN_ID}/logs`);
   });
 
-  // Finding 5 (review round 1): the resolve `.catch()` used to swallow every rejection —
+  // The resolve `.catch()` used to swallow every rejection —
   // including a transient failure on the id lookup itself, not just a genuine "no such
-  // run" — permanently yielding no stream and (per finding 1) a permanent spinner. Only
+  // run" — permanently yielding no stream and a permanent spinner. Only
   // the genuine not-found case should be terminal; everything else should retry.
   it('retries resolving the run id after a transient failure, rather than giving up like a genuine "no such run"', async () => {
     vi.useFakeTimers();

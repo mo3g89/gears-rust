@@ -141,6 +141,16 @@ const TRUNCATION_SUFFIX: &str = " bytes dropped; see the archived log]";
 /// digit count — computed rather than written as a literal `20`, so a build
 /// for a pointer width other than 64 bits gets its own correct bound instead
 /// of silently inheriting this one.
+#[cfg_attr(
+    not(feature = "argo"),
+    allow(
+        dead_code,
+        reason = "the write-side half of this module is reached only from \
+                  `infra::executor::argo::watch::handle_line` and from this module's own \
+                  tests; with `domain` pub(crate) a default (non-argo) build has no \
+                  production reader for it"
+    )
+)]
 const MAX_USIZE_DIGITS: usize = usize::MAX.ilog10() as usize + 1;
 
 /// Upper bound on the total length [`sanitize_line`] appends when it
@@ -157,6 +167,16 @@ const MAX_USIZE_DIGITS: usize = usize::MAX.ilog10() as usize + 1;
 /// typical over-long line would produce. A test that wants a real ceiling on
 /// the emitted length needs this, not the smaller number that happens to
 /// hold for every case anyone has tried.
+#[cfg_attr(
+    not(feature = "argo"),
+    allow(
+        dead_code,
+        reason = "the write-side half of this module is reached only from \
+                  `infra::executor::argo::watch::handle_line` and from this module's own \
+                  tests; with `domain` pub(crate) a default (non-argo) build has no \
+                  production reader for it"
+    )
+)]
 pub const TRUNCATION_MARKER_MAX: usize =
     TRUNCATION_PREFIX.len() + MAX_USIZE_DIGITS + TRUNCATION_SUFFIX.len();
 
@@ -245,6 +265,16 @@ pub const ASSUMED_ARCHIVE_PREFIX_BYTES: usize = 256;
 /// purpose behind it. Reserving a fixed [`ASSUMED_ARCHIVE_PREFIX_BYTES`]
 /// instead keeps the truncation point a function of the line and the cap
 /// alone, matching every other truncation decision in this module.
+#[cfg_attr(
+    not(feature = "argo"),
+    allow(
+        dead_code,
+        reason = "the write-side half of this module is reached only from \
+                  `infra::executor::argo::watch::handle_line` and from this module's own \
+                  tests; with `domain` pub(crate) a default (non-argo) build has no \
+                  production reader for it"
+    )
+)]
 pub const WRITE_SIDE_MAX_LINE_BYTES: usize =
     MAX_LINE_BYTES - ASSUMED_ARCHIVE_PREFIX_BYTES - TRUNCATION_MARKER_MAX;
 
@@ -300,6 +330,16 @@ pub fn sanitize_line(line: &str) -> String {
 /// function ([`truncate`]) parametrized by the cap, not a second copy of
 /// the rule.
 #[must_use]
+#[cfg_attr(
+    not(feature = "argo"),
+    allow(
+        dead_code,
+        reason = "the write-side half of this module is reached only from \
+                  `infra::executor::argo::watch::handle_line` and from this module's own \
+                  tests; with `domain` pub(crate) a default (non-argo) build has no \
+                  production reader for it"
+    )
+)]
 pub fn sanitize_line_for_archive(line: &str) -> String {
     truncate(flatten(line), WRITE_SIDE_MAX_LINE_BYTES)
 }
@@ -369,6 +409,16 @@ fn truncate(flattened: String, cap: usize) -> String {
 /// this replaces and why the count-based mechanism could not simply be kept
 /// alongside it.
 #[must_use]
+#[cfg_attr(
+    not(feature = "argo"),
+    allow(
+        dead_code,
+        reason = "the write-side half of this module is reached only from \
+                  `infra::executor::argo::watch::handle_line` and from this module's own \
+                  tests; with `domain` pub(crate) a default (non-argo) build has no \
+                  production reader for it"
+    )
+)]
 pub fn split_kubelet_timestamp(raw: &str) -> Option<(time::OffsetDateTime, &str)> {
     let (ts, rest) = raw.split_once(' ')?;
     let when =

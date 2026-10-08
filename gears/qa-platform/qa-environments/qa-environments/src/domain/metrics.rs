@@ -232,14 +232,14 @@ pub const QA_ENVIRONMENTS_OBSERVATION_DURATION: &str =
 ///
 /// # The population is "a plugin was actually reached"
 ///
-/// Deliberately narrower than [`QA_ENVIRONMENTS_OBSERVATION`]. Four things can
-/// end an environment's observation before any plugin is called — the
-/// environment names no product, the product names no resolvable plugin, no
-/// resolver is registered at all, or a credential could not be read back out of
-/// credstore — and `observe_through_plugin` returns a recorded failure for each
-/// of them without a round trip. None of those emit here, and that is what
-/// makes this family a denominator: **its total is the number of times this
-/// deployment actually talked to a plugin.**
+/// Deliberately narrower than [`QA_ENVIRONMENTS_OBSERVATION`]. Three things can
+/// end an environment's observation before any plugin is called — the product
+/// names no resolvable plugin, no resolver is registered at all, or a
+/// credential could not be read back out of credstore (an environment naming no
+/// product is unrepresentable since Task 20b) — and `observe_through_plugin`
+/// returns a recorded failure for each of them without a round trip. None of
+/// those emit here, and that is what makes this family a denominator: **its
+/// total is the number of times this deployment actually talked to a plugin.**
 ///
 /// A rising gap between this family's total and
 /// [`QA_ENVIRONMENTS_OBSERVATION`]'s is therefore itself a signal — it means

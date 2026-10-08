@@ -10,7 +10,7 @@
  * into an unbounded request storm. That is not hypothetical on this
  * deployment: an unauthenticated tab left on `/runs` was measured issuing 20
  * `/qa/v1` requests in 25s (34 once the stack had been seeded), all 401,
- * with no end condition (see the task report).
+ * with no end condition.
  *
  * No DOM here on purpose: `vitest.config.ts` runs in the `node` environment,
  * and `tokenState.ts` is kept free of `window` so it stays that way.

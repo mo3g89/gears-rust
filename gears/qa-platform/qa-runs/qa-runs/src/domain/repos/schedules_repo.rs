@@ -244,51 +244,6 @@ pub trait SchedulesRepository: Send + Sync {
         id: Uuid,
     ) -> Result<Option<Schedule>, DomainError>;
 
-    /// Scoped read by name, the tenant-unique key.
-    ///
-    /// Exists because a schedule's stable identity to an operator is its name:
-    /// the REST layer's create path has to answer "does this tenant already
-    /// have one called `nightly`?" without relying on a unique-violation error,
-    /// and a caller that only knows the name would otherwise have to list.
-    ///
-    /// **Not an existence oracle**, because the read is scoped: a name another
-    /// tenant owns reads as `None`, exactly as [`Self::get`] on a foreign id
-    /// does.
-    ///
-    /// # Only meaningful under a single-tenant scope
-    ///
-    /// **`name` is unique per tenant, not globally**, and this method returns
-    /// *one* row. Under a scope admitting more than one tenant — the shape
-    /// `domain::system_actor::for_schedule_tick`'s nil-tenant enumeration
-    /// compiles to — several rows can match and **the one returned is
-    /// arbitrary**: the query has no tie-break, so the answer is whatever the
-    /// database's plan yields, and it may differ between dialects and between
-    /// calls. Nothing prevents that; it is a constraint on the caller.
-    ///
-    /// So, stated as what this does *not* guarantee: it does not guarantee the
-    /// returned schedule belongs to any particular tenant, and it does not
-    /// guarantee `None` means no tenant in scope owns the name. Both hold only
-    /// when the scope admits exactly one tenant, which is what the name-lookup
-    /// callers — a REST create checking its own tenant's names — always pass.
-    ///
-    /// Left as a documented constraint rather than a runtime check, deliberately:
-    /// a check would need to know how many tenants a compiled `AccessScope`
-    /// admits, which is the PEP's business and not this layer's, and it would
-    /// turn a caller's mistake into a repository error at the wrong altitude.
-    /// The enumeration path does not use this method at all —
-    /// [`Self::list_enabled`] is what a cross-tenant reader calls, and it returns
-    /// every row with its tenant.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::get`].
-    async fn get_by_name<C: DBRunner>(
-        &self,
-        runner: &C,
-        scope: &AccessScope,
-        name: &str,
-    ) -> Result<Option<Schedule>, DomainError>;
-
     /// Every schedule in scope, by name.
     ///
     /// **Uncapped**, like `RunsRepository::list` and for the same reason: there
@@ -625,7 +580,7 @@ pub trait SchedulesRepository: Send + Sync {
     /// The implementation reports `rows_affected == 1`, and **`MySQL` counts
     /// *changed* rows where Postgres and `SQLite` count *matched* ones**. So a
     /// call that writes `(None, None)` against a row already holding NULLs
-    /// changes nothing, and the three dialects disagree: `true` on Postgres and
+    /// changes nothing, and the dialects disagree: `true` on Postgres and
     /// `SQLite`, `false` on `MySQL`, for a row that exists and is in scope. This
     /// table has no `updated_at` to force a change and mask the difference —
     /// that absence is deliberate for other reasons (see this module's header),

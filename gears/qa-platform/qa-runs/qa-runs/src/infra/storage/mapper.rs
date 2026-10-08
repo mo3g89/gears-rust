@@ -70,7 +70,7 @@ fn corrupt(what: &'static str, id: Uuid, value: impl std::fmt::Display) -> Domai
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] on any value the SDK does not spell.
-pub(crate) fn run_state_from_str(raw: &str, row_id: Uuid) -> Result<RunState, DomainError> {
+pub fn run_state_from_str(raw: &str, row_id: Uuid) -> Result<RunState, DomainError> {
     match raw {
         "created" => Ok(RunState::Created),
         "queued" => Ok(RunState::Queued),
@@ -94,7 +94,7 @@ pub(crate) fn run_state_from_str(raw: &str, row_id: Uuid) -> Result<RunState, Do
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] on any value outside the seven.
-pub(crate) fn queue_state_from_str(raw: &str, row_id: Uuid) -> Result<QueueState, DomainError> {
+pub fn queue_state_from_str(raw: &str, row_id: Uuid) -> Result<QueueState, DomainError> {
     match raw {
         "queued" => Ok(QueueState::Queued),
         "dispatching" => Ok(QueueState::Dispatching),
@@ -121,7 +121,7 @@ pub(crate) fn queue_state_from_str(raw: &str, row_id: Uuid) -> Result<QueueState
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] on any value outside the four kinds.
-pub(crate) fn run_kind_from_str(
+pub fn run_kind_from_str(
     raw: &str,
     what: &'static str,
     row_id: Uuid,
@@ -149,7 +149,7 @@ pub(crate) fn run_kind_from_str(
 /// legacy is parsing an annotation a human may have written by hand, while
 /// this is reading a column only this gear writes, so a third spelling here
 /// can only mean corruption.
-pub(crate) fn run_source_from_str(
+pub fn run_source_from_str(
     raw: &str,
     what: &'static str,
     row_id: Uuid,
@@ -169,7 +169,7 @@ pub(crate) fn run_source_from_str(
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] on any value outside the four tiers.
-pub(crate) fn exclusive_tier_from_str(
+pub fn exclusive_tier_from_str(
     raw: &str,
     row_id: Uuid,
 ) -> Result<ExclusiveTier, DomainError> {
@@ -195,7 +195,7 @@ pub(crate) fn exclusive_tier_from_str(
 ///
 /// A `&'static str` rather than a `String`: the three values are the whole
 /// vocabulary, and returning owned text would invite a caller to build a fourth.
-pub(crate) const fn exclusive_choice_to_column(choice: Option<bool>) -> &'static str {
+pub const fn exclusive_choice_to_column(choice: Option<bool>) -> &'static str {
     match choice {
         Some(true) => "true",
         Some(false) => "false",
@@ -217,7 +217,7 @@ pub(crate) const fn exclusive_choice_to_column(choice: Option<bool>) -> &'static
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] on any value outside the three.
-pub(crate) fn exclusive_choice_from_str(
+pub fn exclusive_choice_from_str(
     raw: &str,
     row_id: Uuid,
 ) -> Result<Option<bool>, DomainError> {
@@ -242,19 +242,20 @@ pub(crate) fn exclusive_choice_from_str(
 /// silently. Same remedy the source system reaches for against the same hazard
 /// (`manager/src/services/run_queue.rs:682-693`, `OccupancySources`).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TargetColumns {
+pub struct TargetColumns {
     pub repo_id: Option<Uuid>,
     pub path: Option<String>,
     pub test_file: Option<String>,
     pub custom_plan_id: Option<Uuid>,
     /// Set for a `collect` target and `None` for every other kind. A distinct
-    /// column rather than a reuse of `path` — `m20260818_000006_collect_target`
-    /// argues why.
+    /// column rather than a reuse of `path`, as `m20260818_000006_collect_target`
+    /// (folded into `migrations::m20260813_000003_initial` by the docs squash)
+    /// introduced it; the initial migration declares it without the argument.
     pub collect_url: Option<String>,
 }
 
 /// Encode a target into the four flattened columns.
-pub(crate) fn target_to_columns(target: &RunTarget) -> TargetColumns {
+pub fn target_to_columns(target: &RunTarget) -> TargetColumns {
     match target {
         RunTarget::Plan { repo_id, path } => TargetColumns {
             repo_id: Some(*repo_id),
@@ -320,7 +321,7 @@ pub(crate) fn target_to_columns(target: &RunTarget) -> TargetColumns {
 /// the wrong failure: the row is not corrupt, the decoder is incomplete. Audited
 /// by hand when the collect kind landed, and named here so the next addition is
 /// not audited by accident.
-pub(crate) fn target_from_columns(
+pub fn target_from_columns(
     run_kind: RunKind,
     columns: TargetColumns,
     row_id: Uuid,
@@ -371,7 +372,7 @@ pub(crate) fn target_from_columns(
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] if the stored value is not `T`.
-pub(crate) fn json_from_column<T: serde::de::DeserializeOwned>(
+pub fn json_from_column<T: serde::de::DeserializeOwned>(
     what: &'static str,
     value: &Json,
     row_id: Uuid,
@@ -404,7 +405,7 @@ struct StoredParameter {
 /// string pairs cannot happen — it is surfaced rather than unwrapped because
 /// an infallible-looking `expect` in a write path is a worse trade than one
 /// unreachable error arm.
-pub(crate) fn parameters_to_column(parameters: &[RunParameter]) -> Result<Json, DomainError> {
+pub fn parameters_to_column(parameters: &[RunParameter]) -> Result<Json, DomainError> {
     let stored: Vec<StoredParameter> = parameters
         .iter()
         .map(|p| StoredParameter {
@@ -439,7 +440,7 @@ pub(crate) fn parameters_to_column(parameters: &[RunParameter]) -> Result<Json, 
 ///
 /// [`DomainError::CorruptState`] if the column is not an array of
 /// `{name, value}` objects.
-pub(crate) fn parameters_from_column(
+pub fn parameters_from_column(
     what: &'static str,
     value: &Json,
     row_id: Uuid,
@@ -470,7 +471,7 @@ pub(crate) fn parameters_from_column(
 /// # Errors
 ///
 /// [`DomainError::Internal`] if serialization fails.
-pub(crate) fn json_to_column<T: Serialize>(what: &str, value: &T) -> Result<Json, DomainError> {
+pub fn json_to_column<T: Serialize>(what: &str, value: &T) -> Result<Json, DomainError> {
     serde_json::to_value(value)
         .map_err(|error| DomainError::Internal(format!("failed to encode {what}: {error}")))
 }
@@ -479,7 +480,7 @@ pub(crate) fn json_to_column<T: Serialize>(what: &str, value: &T) -> Result<Json
 ///
 /// `VARCHAR(16)`: eight known values, longest `SKIPPED`/`PENDING`/`RUNNING` at
 /// 7. See [`normalize_test_status`] for why the number is repeated here.
-pub(crate) const MAX_TEST_STATUS_LEN: usize = 16;
+pub const MAX_TEST_STATUS_LEN: usize = 16;
 
 /// Make a runner-supplied status fit the column, so the column can never
 /// reject it.
@@ -527,7 +528,7 @@ pub(crate) const MAX_TEST_STATUS_LEN: usize = 16;
 ///
 /// Truncation is by `char`, not by byte: the column is measured in characters
 /// and slicing a byte index would panic mid-codepoint.
-pub(crate) fn normalize_test_status(status: String) -> String {
+pub fn normalize_test_status(status: String) -> String {
     if status.chars().count() <= MAX_TEST_STATUS_LEN {
         return status;
     }
@@ -555,7 +556,7 @@ pub(crate) fn normalize_test_status(status: String) -> String {
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] if `value` is negative.
-pub(crate) fn usize_from_db(
+pub fn usize_from_db(
     value: i32,
     what: &'static str,
     row_id: Uuid,
@@ -575,7 +576,7 @@ pub(crate) fn usize_from_db(
 /// # Errors
 ///
 /// [`DomainError::Validation`] if the value does not fit an `i32`.
-pub(crate) fn db_i32_from_i64(value: i64, field: &str) -> Result<i32, DomainError> {
+pub fn db_i32_from_i64(value: i64, field: &str) -> Result<i32, DomainError> {
     i32::try_from(value).map_err(|_| DomainError::Validation {
         field: field.to_owned(),
         message: format!("must be within {}..={}", i32::MIN, i32::MAX),
@@ -588,7 +589,7 @@ pub(crate) fn db_i32_from_i64(value: i64, field: &str) -> Result<i32, DomainErro
 ///
 /// [`DomainError::CorruptState`] if any enum, JSON or target column does not
 /// decode — see this module's header.
-pub(crate) fn run_to_sdk(m: run::Model) -> Result<Run, DomainError> {
+pub fn run_to_sdk(m: run::Model) -> Result<Run, DomainError> {
     let id = m.id;
     let run_kind = run_kind_from_str(&m.run_kind, "run.run_kind", id)?;
     let target = target_from_columns(
@@ -637,7 +638,7 @@ pub(crate) fn run_to_sdk(m: run::Model) -> Result<Run, DomainError> {
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] if any counter is negative.
-pub(crate) fn run_result_from_row(m: &run::Model) -> Result<RunResult, DomainError> {
+pub fn run_result_from_row(m: &run::Model) -> Result<RunResult, DomainError> {
     let id = m.id;
     Ok(RunResult {
         passed: usize_from_db(m.passed, "run.passed", id)?,
@@ -656,7 +657,7 @@ pub(crate) fn run_result_from_row(m: &run::Model) -> Result<RunResult, DomainErr
 /// One row, one decode, two views of it — not a second query. `result` is
 /// read before `run` consumes the model by value, which is the only ordering
 /// constraint; nothing else about the two conversions interacts.
-pub(crate) fn run_with_result_from_row(m: run::Model) -> Result<RunWithResult, DomainError> {
+pub fn run_with_result_from_row(m: run::Model) -> Result<RunWithResult, DomainError> {
     let result = run_result_from_row(&m)?;
     let run = run_to_sdk(m)?;
     Ok(RunWithResult { run, result })
@@ -676,7 +677,7 @@ pub(crate) fn run_with_result_from_row(m: run::Model) -> Result<RunWithResult, D
 /// `exclusive_choice` or any JSON column does not decode — the JSON columns
 /// being `include_tags`, `exclude_tags`, `parameters` and, since
 /// `m20260818_000007_schedule_notifications` (folded into `migrations::m20260813_000003_initial` by the docs squash), `slack_notification_events`.
-pub(crate) fn schedule_to_sdk(m: schedule::Model) -> Result<Schedule, DomainError> {
+pub fn schedule_to_sdk(m: schedule::Model) -> Result<Schedule, DomainError> {
     let id = m.id;
     let run_kind = run_kind_from_str(&m.run_kind, "schedule.run_kind", id)?;
     let target = target_from_columns(
@@ -736,7 +737,7 @@ pub(crate) fn schedule_to_sdk(m: schedule::Model) -> Result<Schedule, DomainErro
 /// Infallible: `qa_schedule_ticks`' own entity doc says why - "nothing here
 /// decodes; every column is a scalar or an opaque string" - so there is no
 /// `CorruptState` this mapper can produce, matching `test_result_to_row`.
-pub(crate) fn tick_to_sdk(m: schedule_tick::Model) -> ScheduleTickRow {
+pub fn tick_to_sdk(m: schedule_tick::Model) -> ScheduleTickRow {
     ScheduleTickRow {
         id: m.id,
         schedule_id: m.schedule_id,
@@ -754,7 +755,7 @@ pub(crate) fn tick_to_sdk(m: schedule_tick::Model) -> ScheduleTickRow {
 ///
 /// [`DomainError::CorruptState`] if `state`, `run_kind` or `source` does not
 /// decode.
-pub(crate) fn queue_row_to_record(m: run_queue::Model) -> Result<QueueRowRecord, DomainError> {
+pub fn queue_row_to_record(m: run_queue::Model) -> Result<QueueRowRecord, DomainError> {
     let id = m.id;
     Ok(QueueRowRecord {
         id,
@@ -777,7 +778,7 @@ pub(crate) fn queue_row_to_record(m: run_queue::Model) -> Result<QueueRowRecord,
 /// Infallible: `status` crosses as a `String` on purpose — see this module's
 /// header. There is nothing on this row that can fail to decode, which is
 /// exactly the property the open-set rule buys.
-pub(crate) fn test_result_to_row(m: run_test_result::Model) -> TestResultRow {
+pub fn test_result_to_row(m: run_test_result::Model) -> TestResultRow {
     TestResultRow {
         id: m.id,
         run_id: m.run_id,

@@ -117,10 +117,10 @@ spec:
       annotations:
 {{/* THE CONFIG CHECKSUMS, and the defect they close.
 
-     A ConfigMap is not part of a Deployment's pod template, so changing one
-     changes nothing Kubernetes can see: `helm upgrade` writes the new
-     ConfigMap, reports success, and the running pod keeps serving the OLD
-     values out of memory until something unrelated restarts it. MEASURED on
+     A ConfigMap or a Secret is not part of a Deployment's pod template, so
+     changing one changes nothing Kubernetes can see: `helm upgrade` writes
+     the new object, reports success, and the running pod keeps serving the
+     OLD values out of memory until something unrelated restarts it. MEASURED on
      the dev stand 2026-09-21: `helm upgrade --reuse-values --set
      bundleDownloadSigningSecret=...` produced revision 29 with the new value
      in `qa-platform-gears-config`, and the gears pod was still 38 minutes old
@@ -132,9 +132,9 @@ spec:
 
      Hashing the rendered template into a pod annotation is what makes the
      change visible: the annotation is part of the pod template, so a changed
-     ConfigMap is a changed PodSpec and Kubernetes rolls the Deployment
-     itself. `include` re-renders the template with this same root context, so
-     the hash is over exactly what the ConfigMap object will contain.
+     ConfigMap or Secret is a changed PodSpec and Kubernetes rolls the
+     Deployment itself. `include` re-renders the template with this same root
+     context, so the hash is over exactly what the object will contain.
 
      WHAT IT COSTS, said here so nobody is surprised by it. This Deployment is
      `strategy: Recreate` (see the comment on it above), so a config-triggered
@@ -144,7 +144,7 @@ spec:
      does not apply and nothing says so", which is how this defect was found.
 
      THE RENDERED TEMPLATE MUST BE DETERMINISTIC FOR THIS TO BE USEFUL, and
-     that is why `gears-config-configmap.yaml`'s two signing secrets are
+     that is why `gears-config-secret.yaml`'s two signing secrets are
      `required` rather than defaulting to `randAlphaNum 32`. With a per-render
      random in there, this hash would differ on every render, and every `helm
      upgrade` -- including one that changes nothing -- would roll the pod and
@@ -158,7 +158,7 @@ spec:
      not knowable at render time. The gears mount only `ca.crt` from it and
      read it at start-up; rotating it is that Job's business, not this
      annotation's. */}}
-        checksum/gears-config: {{ include (print $.Template.BasePath "/gears-config-configmap.yaml") . | sha256sum }}
+        checksum/gears-config: {{ include (print $.Template.BasePath "/gears-config-secret.yaml") . | sha256sum }}
         checksum/gears-argo-config: {{ include (print $.Template.BasePath "/gears-argo-configmaps.yaml") . | sha256sum }}
         checksum/postgres-secret: {{ include (print $.Template.BasePath "/postgres-secret.yaml") . | sha256sum }}
 {{/* The annotation-based scrape convention, and the only reason it is
@@ -187,7 +187,7 @@ spec:
         runAsGroup: 1000
         runAsNonRoot: true
 {{/* Gated on BOTH enabled AND a non-empty uiServiceClusterIP, not `required`
-     on the latter alone. deploy-k8s.sh's two-pass install (Task 11) depends
+     on the latter alone. deploy-k8s.sh's two-pass install depends
      on this rendering with NO hostAliases block when uiServiceClusterIP is
      still "" -- pass 1 has to succeed and create the qa-platform-ui Service
      before anything can read its ClusterIP, and pass 2 supplies it. A
@@ -246,7 +246,7 @@ spec:
             - name: QA_ENVIRONMENTS_ARGO_CONFIG
               value: /etc/qa-platform/qa-environments-argo.yaml
             - name: RUST_LOG
-              value: {{ .Values.gears.logLevel | quote }}
+              value: {{ include "qa-platform.rustLog" . | quote }}
           volumeMounts:
             - name: config
               mountPath: /etc/cf-gears
@@ -258,6 +258,19 @@ spec:
             - name: argo-qa-environments
               mountPath: /etc/qa-platform/qa-environments-argo.yaml
               subPath: qa-environments-argo.yaml
+              readOnly: true
+            # qa-environments' argo.kubeconfig_path (gears-argo-configmaps.yaml):
+            # the D4 writer's kubeconfig, naming the two files mounted below.
+            - name: argo-qa-environments
+              mountPath: /etc/qa-platform/secret-writer-kubeconfig.yaml
+              subPath: secret-writer-kubeconfig.yaml
+              readOnly: true
+            # qa-platform-secret-writer's token and CA (finding #94). A
+            # directory mount, not subPath, so the kubelet refreshes the files
+            # if the Secret changes. Only the D4 writer is configured to read
+            # them; qa-runs stays on this pod's own projected token.
+            - name: secret-writer-token
+              mountPath: /var/run/secrets/qa-platform/secret-writer
               readOnly: true
             - name: data
               mountPath: /var/lib/cf-gears/data
@@ -285,15 +298,38 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 30
       volumes:
+        # A `secret:` volume, not a `configMap:` one: qa-platform-gears-config
+        # is a Secret (gears-config-secret.yaml), because its body carries
+        # both HMAC roots. It projects the same single file at the same path,
+        # so entrypoint.sh and GEARS_CONFIG_FILE are unaffected.
         - name: config
-          configMap:
-            name: qa-platform-gears-config
+          secret:
+            secretName: qa-platform-gears-config
         - name: argo-qa-runs
           configMap:
             name: qa-platform-gears-argo-qa-runs
         - name: argo-qa-environments
           configMap:
             name: qa-platform-gears-argo-qa-environments
+        # secret-writer-serviceaccount.yaml's token Secret, populated by the
+        # token controller. `token` and `ca.crt` only -- `namespace` is not
+        # read by anything.
+        #
+        # `optional: true`: with strategy Recreate, a non-optional volume
+        # whose Secret was deleted (the documented way to revoke this token,
+        # UPGRADING.md) would hold EVERY gear in ContainerCreating on the next
+        # restart. Optional, the pod starts and only the D4 writer fails, with
+        # a named "failed to build config from argo kubeconfig" error, until
+        # the Secret exists again.
+        - name: secret-writer-token
+          secret:
+            secretName: qa-platform-secret-writer-token
+            optional: true
+            items:
+              - key: token
+                path: token
+              - key: ca.crt
+                path: ca.crt
         - name: data
           persistentVolumeClaim:
             claimName: qa-platform-gears-data

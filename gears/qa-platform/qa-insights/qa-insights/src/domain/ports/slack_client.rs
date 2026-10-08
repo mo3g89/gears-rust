@@ -1,6 +1,6 @@
-//! The outbound Slack port — Task 38 fixes the shape (R102); Task 39 builds
+//! The outbound Slack port — Task 38 fixes the shape; Task 39 builds
 //! the oagw-backed adapter, [`SlackClient::REQUEST_TIMEOUT`]'s consumer, and
-//! its fix round 1 (ruling R108) adds the [`toolkit_security::SecurityContext`]
+//! its fix round 1 adds the [`toolkit_security::SecurityContext`]
 //! parameter Task 38's shape omitted — see "One method, and `ctx` is not
 //! optional" below.
 //!
@@ -17,9 +17,14 @@
 //! that happens to be secret, possession of it *is* the authorization to
 //! post, so it gets the same credstore treatment
 //! (`qa_insights_sdk::NotificationConfig::slack_webhook_credstore_ref`'s own
-//! doc). Resolving the reference to a live URL is the adapter's job, over
-//! oagw, exactly as [`crate::domain::ports::jira_client::JiraClient`]'s
-//! adapter resolves `api_token_credstore_ref`.
+//! doc). Resolving the reference to a live URL is the adapter's job — but
+//! **not** the way [`crate::domain::ports::jira_client::JiraClient`]'s adapter
+//! handles `api_token_credstore_ref`, where oagw resolves the secret and
+//! injects it as a header. A webhook's credential is its URL *path*, which no
+//! oagw auth plugin can set, so `infra::notify::slack_oagw` resolves the
+//! secret through credstore itself, validates it is a
+//! `https://hooks.slack.com/services/…` URL, and proxies that path through a
+//! per-tenant oagw upstream (that module's header, "Delivery").
 //!
 //! # `REQUEST_TIMEOUT` is declared on the trait, not only on Task 39's adapter
 //!
@@ -37,26 +42,26 @@
 //! (`SlackOagwClient::REQUEST_TIMEOUT == Duration::from_secs(10)`) has
 //! somewhere to point from.
 //!
-//! # One method, and `ctx` is not optional — ruling R108
+//! # One method, and `ctx` is not optional
 //!
-//! `send(&self, ctx: &SecurityContext, message: &SlackMessage) ->
-//! Result<SendOutcome, DomainError>`. Task 39's first draft shipped this
-//! without a [`toolkit_security::SecurityContext`] parameter, reasoning (by
-//! analogy with [`crate::domain::ports::jira_client::JiraClient`]'s three
-//! methods) that [`SlackMessage::webhook_credstore_ref`] already carries
-//! everything the adapter needs. That reasoning was wrong in a way JIRA's
-//! port never was: `oagw::ServiceGatewayClientV1::proxy_request` — the one
-//! way any adapter over `oagw` can send anything — **requires** a
-//! `SecurityContext` argument, because oagw's own per-tenant upstream
-//! resolution rides on it. Without this parameter, Task 39's first adapter
-//! could only proxy as `SecurityContext::anonymous()`, a fixed nil-tenant
-//! identity, even though its only two callers
+//! `send(&self, ctx: &SecurityContext, message: &SlackMessage) -> Result<SendOutcome, DomainError>`.
+//! Task 39's first draft shipped this without a
+//! [`toolkit_security::SecurityContext`] parameter, reasoning (by analogy with
+//! [`crate::domain::ports::jira_client::JiraClient`]'s three methods) that
+//! [`SlackMessage::webhook_credstore_ref`] already carries everything the
+//! adapter needs. That reasoning was wrong in a way JIRA's port never was:
+//! `oagw::ServiceGatewayClientV1::proxy_request` — the one way any adapter over
+//! `oagw` can send anything — **requires** a `SecurityContext` argument,
+//! because oagw's own per-tenant upstream resolution rides on it. Without this
+//! parameter, Task 39's first adapter could only proxy as
+//! `SecurityContext::anonymous()`, a fixed nil-tenant identity, even though its
+//! only two callers
 //! ([`crate::domain::service::notify::NotifyService::send_test`] and
 //! `send_run_completed_channel`) already hold the real sending tenant's `ctx`
 //! at the exact point they build a [`SlackMessage`] — the context was not
-//! missing from this gear, it was being dropped at this port's boundary. R108
-//! closes that: the parameter exists so an oagw-backed adapter authenticates
-//! as the tenant that is actually sending, not as nobody. Both call sites now
+//! missing from this gear, it was being dropped at this port's boundary. The
+//! parameter closes that: it exists so an oagw-backed adapter authenticates as
+//! the tenant that is actually sending, not as nobody. Both call sites now
 //! forward the `ctx` they already have; neither had to acquire one it lacked.
 
 use async_trait::async_trait;
@@ -140,12 +145,18 @@ pub enum SlackBlock {
     },
 }
 
-/// The outbound Slack egress, behind `infra::slack::SlackOagwClient` in
-/// production (Task 39).
+/// The outbound Slack egress, behind `infra::notify::SlackOagwClient` in
+/// production.
 ///
 /// # Errors
 ///
-/// [`DomainError::Internal`] for a transport or gateway failure. Never
+/// [`DomainError::Validation`] naming `slack_webhook_credstore_ref` when the
+/// reference does not resolve, or resolves to something that is not a Slack
+/// incoming-webhook URL — raised before anything is dialled.
+/// [`DomainError::UpstreamEgress`] with `channel = "slack"` for a gateway
+/// failure, a timeout or a non-2xx answer; its text never carries the webhook
+/// path (the credential). [`DomainError::Internal`] for a credential-store
+/// failure. Never
 /// [`DomainError::UnsupportedEgress`] — unlike
 /// [`crate::domain::ports::mail_client::MailClient`], every deployment of
 /// this gear ships a Slack adapter (Task 39's), so there is no "no adapter"
@@ -158,6 +169,8 @@ pub trait SlackClient: Send + Sync {
     /// identity, forwarded to `oagw::ServiceGatewayClientV1::proxy_request` by
     /// the production adapter — see this module's header, "One method, and
     /// `ctx` is not optional", for why it is required rather than optional.
+    /// Both of `NotifyService`'s call sites pass the qa-insights system actor
+    /// bound to that tenant, so an adapter resolves secrets as real sends do.
     /// `Ok(SendOutcome::Sent)` on success.
     async fn send(
         &self,

@@ -1,24 +1,27 @@
 // @vitest-environment jsdom
 //
-// Task 11: the environment detail page renders what qa-environments actually observed
-// about an environment's cluster -- `observed_version`, `observed_build`, `vhp_base_url`,
-// `observed_namespace`, `version_detect_error` and `version_detected_at` -- instead of
-// the three "wrongs" it shipped with:
+// The environment detail page renders what qa-environments actually observed
+// about an environment -- `observed_version`, `observed_build`, `version_detect_error`,
+// `version_detected_at`, and the product's own `observed_attrs` (where the namespace and
+// the base URL live since the gear dropped `vhp_base_url` and `observed_namespace`) --
+// instead of the three "wrongs" it shipped with:
 //
 //   1. `UnavailableNotice` claiming nothing was ever observed (fixed for the fields that
 //      now ARE observed). The cluster-health banner this note originally described --
 //      node/worker/control-plane readiness, status, per-node table -- was accurate when
-//      written (those fields had no source anywhere in the gears); Task 6 gave
-//      qa-environments a real cluster-health reading and replaced that banner with
-//      `ClusterHealthCard.tsx`. Nothing below asserts on cluster health -- these tests
-//      are unaffected by that change, and are not where `ClusterHealthCard` is covered.
+//      written (those fields had no source anywhere in the gears); qa-environments
+//      later gained a real health reading and the banner was replaced. Nothing below
+//      asserts on cluster health.
 //   2. `platform.namespace || 'vhp-platform (default)'` against a DTO field
 //      (`PlatformDto`) that never had a `namespace` at all, so the page always rendered a
-//      fabricated default as if it were observed fact. It is now bound to
-//      `observed_namespace`, and shows `-` (this page's convention for "nothing", used
-//      throughout the same card for `build`/`vhp_base_url`) rather than a fiction when
-//      `observed_namespace` is null.
-//   3. "VHP Base URL" had no field behind it. It now reads `vhp_base_url`.
+//      fabricated default as if it were observed fact. The fix bound it to the observed
+//      namespace (then the `observed_namespace` column; since the gear dropped it, the
+//      `namespace` attribute of `observed_attrs`, rendered through the product's
+//      descriptors) and shows `-` (this page's convention for "nothing", used throughout
+//      the same card) rather than a fiction when nothing was observed.
+//   3. "VHP Base URL" had no field behind it. The fix read `vhp_base_url`; since the gear
+//      dropped that column it reads the `baseDomain` attribute of `observed_attrs`, the
+//      same way.
 //
 // This suite renders the actual page against a mocked API client -- exactly the pattern
 // `RunDetailPage.test.ts` established for the same class of bug (a UI marker that
@@ -77,7 +80,7 @@ function environmentDto(overrides: Record<string, unknown> = {}) {
     default_branch: null,
     product_id: PRODUCT_ID,
     // The plugin-shaped map, keyed by what VHP's `observed_schema()` declares.
-    // `vhp_base_url`/`observed_namespace` were dropped by Task 19; the page
+    // `vhp_base_url`/`observed_namespace` were dropped by the gear; the page
     // renders these through the product's descriptors instead.
     observed_attrs: { baseDomain: 'https://sv.jele.io', namespace: 'virtuozzo' },
     health_state: 'ok',
@@ -93,7 +96,7 @@ function environmentDto(overrides: Record<string, unknown> = {}) {
 function mockApiFor(dto: unknown) {
   mockedApiGet.mockImplementation(async (path: string) => {
     if (path === '/environments') {
-      // `GET /qa/v1/environments` is a page since review finding #55.
+      // `GET /qa/v1/environments` is a page.
       return { items: [dto], page_info: { limit: 200, next_cursor: null, prev_cursor: null } } as never;
     }
     if (path.startsWith(`/environments/${ENVIRONMENT_ID}`)) {
@@ -165,7 +168,7 @@ function renderPage() {
 }
 
 /**
- * I-2: nothing pinned the `/platforms/:name` redirect or that it carries the `:name`
+ * Nothing pinned the `/platforms/:name` redirect or that it carries the `:name`
  * segment through. This mounts the SAME real page behind the SAME real redirect
  * component App.tsx registers (`RedirectToEnvironmentDetail`, imported from `../App`,
  * not reimplemented here), entering at the OLD bookmarked path. If the redirect ever
@@ -226,7 +229,7 @@ describe('EnvironmentDetailPage — observed environment fields', () => {
 
   /* The brief asked for this and the page does render it
    * (`EnvironmentDetailPage.tsx`'s "Last Detected" row), but nothing asserted it
-   * until the 2026-08-28 final review's triage said so. The row is CONDITIONAL
+   * until a review said so. The row is CONDITIONAL
    * on `version_detected_at || version_detect_error`, so "the timestamp
    * arrives and the row does not appear" is a real, silent failure mode; the
    * label assertion is what catches it, and the second half pins that the row
@@ -245,7 +248,6 @@ describe('EnvironmentDetailPage — observed environment fields', () => {
     mockApiFor(
       environmentDto({
         observed_version: null,
-        observed_namespace: null,
         version_detect_error: 'namespaces "virtuozzo" not found',
       })
     );
@@ -295,7 +297,7 @@ describe('EnvironmentDetailPage — observed environment fields', () => {
   });
 });
 
-describe('EnvironmentDetailPage — reached via the retired /platforms/:name redirect (I-2)', () => {
+describe('EnvironmentDetailPage — reached via the retired /platforms/:name redirect', () => {
   it('still renders this environment when entered at its old bookmarked URL', async () => {
     mockApiFor(environmentDto());
     renderPageViaOldPlatformsRoute();

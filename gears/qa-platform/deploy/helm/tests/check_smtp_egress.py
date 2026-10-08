@@ -22,7 +22,7 @@ path. There is no NetworkPolicy behind it, deliberately:
 ADR-0011 (`docs/ADR/0011-cpt-cf-qa-adr-smtp-egress.md`) carries that decision.
 The consequence is that this value, travelling intact from `values.yaml` to the
 gears' config file, IS the rule -- so it gets the same treatment every other
-load-bearing transform in `gears-config-configmap.yaml` gets.
+load-bearing transform in `gears-config-secret.yaml` gets.
 
 # The three states, and why all three are checked
 
@@ -34,7 +34,7 @@ load-bearing transform in `gears-config-configmap.yaml` gets.
      gears' `Vec<String>` will parse. `deny_unknown_fields` is on that config
      struct and the transform is a STRING REPLACEMENT, so a replacement landing
      at the wrong indentation produces a file that still renders and no longer
-     loads. Parsing the ConfigMap body as YAML is what catches that.
+     loads. Parsing the rendered body as YAML is what catches that.
   3. GUARDED -- the transform's own `fail` fires when its sentinel string
      disappears from the committed config. Without it, someone renaming the key
      in `files/qa-platform-stack.yaml` gets a chart that renders cleanly,
@@ -60,9 +60,11 @@ import yaml
 
 CHART = pathlib.Path(__file__).resolve().parent.parent / "qa-platform"
 ORIGIN = "https://example-smtp-test.invalid"
-CONFIGMAP = "qa-platform-gears-config"
+# A Secret since 2026-09-29, not a ConfigMap: it carries both HMAC roots.
+# See gears-config-secret.yaml and check_signing_secret_placement.py.
+CONFIG_OBJECT = "qa-platform-gears-config"
 CONFIG_KEY = "qa-platform-stack.yaml"
-# The committed default, and the string gears-config-configmap.yaml's seventh
+# The committed default, and the string gears-config-secret.yaml's seventh
 # transform replaces. Restated here rather than parsed out of the template: this
 # file and that one are the two halves whose agreement is the thing being
 # checked, so deriving one from the other would make the check vacuous.
@@ -76,9 +78,15 @@ def render(chart=CHART, *extra):
         ["helm", "template", "qa-platform", str(chart),
          "--namespace", "qa-platform", "--set", f"publicOrigin={ORIGIN}",
          "--set", "keycloak.adminPassword=guard-fixture-not-a-real-password",
+         # argo.workflowClientSecret is `required` too (2026-09-29): it is the
+         # qa-platform-workflow client's confidential secret and the chart
+         # refuses the committed dev literal outside devMode. Any other value
+         # renders; check_realm_secrecy.py owns both of those assertions.
+         "--set", "argo.workflowClientSecret=guard-fixture-not-a-real-workflow-secret",  # nosec: test fixture only
+         "--set", "postgres.password=guard-fixture-not-a-real-db-password",  # nosec: test fixture only
          # Both signing secrets have no default either (2026-09-21): the
          # per-render `randAlphaNum` fallback became a pod roll on every
-         # upgrade once the gears Deployment started hashing the ConfigMap.
+         # upgrade once the gears Deployment started hashing that object.
          "--set", "bundleDownloadSigningSecret=guard-fixture-not-a-real-bundle-key",
          "--set", "collectReportSigningSecret=guard-fixture-not-a-real-collect-key",
          *extra],
@@ -90,13 +98,13 @@ def render(chart=CHART, *extra):
 
 def gears_config(docs):
     """The gears' config file, parsed as the gears will parse it."""
-    cm = [d for d in docs
-          if d.get("kind") == "ConfigMap" and d["metadata"]["name"] == CONFIGMAP]
-    if not cm:
-        return None, f"no ConfigMap named {CONFIGMAP} was rendered"
-    body = cm[0].get("data", {}).get(CONFIG_KEY)
+    objs = [d for d in docs
+            if d.get("kind") == "Secret" and d["metadata"]["name"] == CONFIG_OBJECT]
+    if not objs:
+        return None, f"no Secret named {CONFIG_OBJECT} was rendered"
+    body = objs[0].get("stringData", {}).get(CONFIG_KEY)
     if body is None:
-        return None, f"{CONFIGMAP} has no {CONFIG_KEY} key"
+        return None, f"{CONFIG_OBJECT} has no {CONFIG_KEY} key"
     try:
         parsed = yaml.safe_load(body)
     except yaml.YAMLError as exc:
@@ -185,7 +193,7 @@ def check_transform_fails_without_its_sentinel():
         if code == 0:
             return False, (
                 "FAIL: the chart rendered with qa-insights' SMTP allow-list key "
-                "renamed. gears-config-configmap.yaml's seventh transform must "
+                "renamed. gears-config-secret.yaml's seventh transform must "
                 "`fail` instead, or an operator's qaInsights.smtpAllowedHosts is "
                 "discarded with helm reporting success"
             )

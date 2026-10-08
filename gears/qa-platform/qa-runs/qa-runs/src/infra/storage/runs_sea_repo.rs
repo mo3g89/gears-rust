@@ -54,7 +54,8 @@ fn by_id(id: Uuid) -> Condition {
 ///
 /// `tests::no_list_query_reaches_the_log_table` renders each of them and
 /// asserts the SQL does not mention `qa_run_logs` — legacy's OOM, made
-/// unrepeatable (D-RLP-7). That guard is only worth anything if it renders
+/// unrepeatable by the rule that no list query reaches the log table. That
+/// guard is only worth anything if it renders
 /// **the same builder** the production path runs: a hand-copied lookalike in
 /// the test module would keep passing while a join arrived in the real query.
 /// So the extraction is the mechanism, not tidiness.
@@ -221,7 +222,10 @@ fn sweep_limit(requested: u32) -> u64 {
 /// 2026-08-28), so a stray delta on `failed` changes a run's verdict.
 ///
 /// `CASE` rather than `GREATEST`: `SQLite` spells that one `MAX`, and this
-/// expression is built once for all three dialects.
+/// expression is built once for every backend `sea_query` renders — the two
+/// this gear declares a migration blob for (`POSTGRES_UP`, `SQLITE_UP`) and
+/// the `MySQL` one it does not. Writing `GREATEST` would have been correct on
+/// the dialect this gear deploys and wrong on the other one it ships.
 ///
 /// Clamping rather than rejecting, deliberately. Rejecting needs the current
 /// value, and reading it first is precisely the read-modify-write this method
@@ -2191,7 +2195,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The reconciler sweep (Task 4)
+    // The reconciler sweep
     // -----------------------------------------------------------------------
 
     /// Drive a freshly created run to a terminal state that finished at `at`.
@@ -2716,8 +2720,8 @@ mod tests {
             },
             // A collect target has a repository, no plan path, and a URL. The
             // insert reads that URL out of `target_to_columns`' fifth field,
-            // which no compile error would have demanded — see
-            // `m20260818_000006_collect_target`.
+            // which no compile error would have demanded (the column came from
+            // `m20260818_000006_collect_target` (folded into `migrations::m20260813_000003_initial` by the docs squash)).
             RunTarget::Collect {
                 repo_id: Uuid::from_u128(0x22),
                 collect_url: "https://insights.example/qa/v1/collect/r/main".to_owned(),

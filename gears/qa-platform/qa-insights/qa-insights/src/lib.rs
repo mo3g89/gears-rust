@@ -53,69 +53,99 @@
 //! ever registered the broker client above.
 //!
 //! **Every `// wired in Task N` gap `gear.rs` carried from Task 9 is closed.**
-//! Three things are shipped-and-unconsumed by deliberate, recorded decision
-//! rather than by oversight, and each is a release-gate item with its own
-//! home: the Slack egress is bound but undeliverable (R107 —
-//! `infra::notify::slack_oagw`'s "Finding B"), the skip list is servable and
-//! unserved (R74 — `domain::local_client`), and nothing yet routes a
-//! `run.canceled` / `run.queue_expired` / `schedule.fired` event into
-//! `notify::NotifyService::notify_run_completed` now that the transactional
-//! broker consumer that would have owned that routing was deleted as dead
-//! code (`domain::service::mod`'s header, "Still to come, at the end of
-//! Phase C").
+//! One thing is shipped and unconsumed on purpose: the skip list is servable
+//! and unserved (`domain::jira`'s header, "No caller exists yet"). This list
+//! used to name a second, the Slack egress, bound but undeliverable, which
+//! the third review pass closed: `infra::notify::slack_oagw` now resolves the
+//! tenant's webhook through credstore and delivers it over oagw.
+//!
+//! **This list said three, and the third was the run-completed notification.**
+//! `notify::NotifyService::notify_run_completed` now has a production caller:
+//! `domain::service::reconcile::ReconcileService::reproject` calls it once a
+//! run's projection has committed, which is the only terminal transition this
+//! gear observes. The claim table is seeded at upgrade time
+//! (`infra::storage::migrations::m20260929_000003_seed_run_completed_notification_claims`)
+//! so the first rebuild after the deploy does not mail a deployment's whole
+//! history. What is *still* unconsumed is narrower and is recorded where it
+//! belongs rather than here: nothing sources a `run.queue_expired` or
+//! `schedule.fired` event, so `domain::notify::routing`'s other three arms
+//! have no caller — `domain::service::mod`'s header, "`notify_run_completed`
+//! has a producer; the three *other* alerts still do not".
 
 pub mod api;
 pub mod config;
-pub mod domain;
+pub(crate) mod domain;
 pub mod gear;
 /// The GTS permission catalog (`AuthzPermissionV1` instances) — review
 /// finding #1.
 pub mod gts;
-pub mod infra;
+pub(crate) mod infra;
 
 pub use gear::QaInsights;
 
-// === `domain` and `infra` stay `pub` here — review finding #38, measured ===
+/// Needed by `tests/ingest_idempotence.rs`, which asserts this gear's own
+/// migration set is what the in-memory database under test was built from.
+pub use infra::storage::migrations::Migrator;
+
+// === `domain` and `infra` are crate-internal — review finding #38 ===
 //
-// Finding #38 asks for `pub(crate) mod domain` / `pub(crate) mod infra` in all
-// four gears, so SeaORM entities and repository traits stop being part of the
-// crate's public API. It landed that way in `qa-catalog` and
-// `qa-environments`. **It does not land here as a visibility-only change**,
-// which is what the finding is scoped to.
+// Both used to be `pub mod`, which made every SeaORM entity, every repository
+// trait and every service struct part of this crate's public API: a consumer
+// could name `qa_insights::infra::storage::entity::*` and pin itself to this
+// gear's schema. Only `gear` (and the SDK) is the contract. The precedent for
+// the shape is `gears/system/oagw/oagw/src/lib.rs:16-17`; `qa-catalog` and
+// `qa-environments` landed it first.
 //
-// Measured rather than guessed: the change was made, the compiler run, and
-// then reverted. With both modules `pub(crate)`, this crate reports 46 groups
-// of newly-dead code — items nothing outside its own `#[cfg(test)]` modules
-// reaches, which `pub mod` was keeping the compiler quiet about.
+// The `pub use` above is the one exception the compiler named — an item the
+// integration-test crate in `tests/` genuinely needs. That test compiles as a
+// separate crate, so `pub(crate)` would otherwise break it, and an integration
+// test is a real consumer rather than a visibility inconvenience.
 //
-// The bulk of it is the notification subsystem — `domain::notify::routing`,
-// `domain::notify::render`'s run-completed half, and the
-// `NotifyService::notify_run_completed` path they serve — which this module's
-// own header above already records as built, tested and *unwired*: no event
-// source routes into it yet.
+// **It did not land here as a visibility-only change.** An earlier version of
+// this comment recorded 46 newly-dead groups and said the bulk of them were
+// the notification subsystem, "built, tested and *unwired*". That measurement
+// is superseded: the run-completed producer landed
+// (`domain::service::reconcile::ReconcileService::reproject` calls
+// `NotifyService::notify_run_completed`), and re-measuring afterwards reports
+// **20 groups**, not 46 — routing's and render's run-completed halves are
+// reached from production now. Each of the 20 was adjudicated rather than
+// allowed:
 //
-// None of that is a visibility question. Each item is a decision — delete it
-// and the tests that cover it, or wire the feature.
-//
-// **Two ways of not making that decision were weighed and rejected.** The
-// blunt one is an `#[allow(dead_code)]` over a whole subsystem: it trades a
-// real signal for a green build, and it goes on hiding the next dead thing to
-// land there. The sharp one is per-item `#[expect(dead_code, reason = "…")]`,
-// which is already how this repo records a deliberately-unused item
-// (`infra::storage::entity::mod`, `api::rest::dto`) and which keeps the
-// signal, because `expect` starts warning the moment the item stops being
-// dead. It was rejected here for one reason only: it is not a way to *defer*
-// the decision. A `reason` written on each of these items records an
-// adjudication nobody has made, and reads to the next reader as though one
-// had. Where the follow-up's answer turns out to be "keep, deliberately
-// unused", `#[expect(dead_code, reason = "…")]` is exactly what should land —
-// it is that task's likely output, not a substitute for doing it.
-//
-// Making the modules private also turns every `pub(crate)` item inside them
-// into a `clippy::redundant_pub_crate` error (83 sites here), which is denied
-// repo-wide; that part is mechanical, the dead code is not.
-//
-// Left as its own task, with the count above as the size estimate.
+// * **Seven deleted, with their tests.** `JiraClient::get_issue` (a port
+//   method whose own doc said it existed "so a later consumer does not have to
+//   reopen the adapter" — the adapter's private `fetch_issue` still makes the
+//   call, and `check_status` is still its projection);
+//   `SavedViewsRepository::find_by_natural_key` and its `SavedViewKey`, a
+//   probe `domain::service::saved_views` argues at length must *not* be used
+//   because it opens a TOCTOU window the repository's unique-violation
+//   mapping does not have; `domain::service::ingest`'s `classify_all` and
+//   `ResultCounts`, whose forecast first caller reused `classify` instead;
+//   `infra::leader::ClaimRowElector::holder`; and the `FakeRuns` page-cap knob
+//   in `domain::service::test_support` that no test ever turned.
+// * **Seven kept with a per-item `#[allow(dead_code, reason = …)]`, on
+//   settled grounds.** `domain::metrics`' `COUNTERS` and `DURATIONS` and the
+//   four `domain::ports::metrics` `ALL` catalogs are declared sets that are
+//   their own oracles — `qa-catalog` and `qa-environments` keep theirs the
+//   same way — and `domain::jira::registry::render_skip_list` is the frozen
+//   `SKIP_TESTS_WITH_BUGS` wire format whose missing caller `domain::jira`'s
+//   header states.
+// * **Four escalated; all four have since been deleted on the owner's
+//   ruling.** `domain::notify::routing`'s `Queued`, `QueueExpired` and
+//   `ScheduledRun` arms, `Event::scheduled_run` and the two
+//   `NotificationKind` values they key are **gone**, with the four tests that
+//   existed only to cover them: nothing sources a `run.queue_expired` or a
+//   `schedule.fired` event, the transactional broker consumer that would have
+//   was itself deleted as dead code, and a suite that keeps passing over
+//   deleted-adjacent code reports coverage of a decision nothing makes.
+//   Re-wiring them is a cross-gear feature with a producer, and
+//   `domain::notify::routing`'s header holds the legacy citations that work
+//   would start from. The fourth, `WatermarkKind::SweptAt`, went with
+//   `Watermarks::last_swept_at` and its column: the stale-in-progress sweep it
+//   was to record never existed, and `m20260929_000005` drops the column.
+// * **One marked `#[cfg(test)]`** — `StatusCategory::as_str`, read only where
+//   a test asserts what an instance answered.
+// * **One was an unused facade re-export** in `domain::ports`, narrowed to
+//   what is named rather than allowed.
 
 /// **No `domain` module imports the `api` layer.** `api` is a transport over
 /// `domain`, and the dependency may not run the other way. A structural guard
@@ -125,3 +155,17 @@ pub use gear::QaInsights;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "no_api_in_domain_tests.rs"]
 mod no_api_in_domain_tests;
+
+/// Source-level invariants no compiler or lint states, such as a debug assertion
+/// whose `?`, `.await` or `&mut` vanishes in release builds.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod source_hygiene_tests;
+
+/// Every migration name this gear's comments cite is live, or says it was
+/// folded away. One implementation shared with the other qa gears, kept in
+/// `qa-runs` where it started; see its header.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "../../../qa-runs/qa-runs/src/migration_citations_tests.rs"]
+mod migration_citations_tests;

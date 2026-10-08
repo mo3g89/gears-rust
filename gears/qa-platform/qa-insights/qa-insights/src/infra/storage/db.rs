@@ -72,10 +72,10 @@ use crate::domain::error::DomainError;
 /// configurable one here — which is the opposite of the convention the plan
 /// states, and it would make the number the endpoint description quotes
 /// deployment-dependent. That knob's own doc calls it *"max rows any analytics
-/// query returns before paging"*, and the analytics reads (Tasks 24-27) are
+/// query returns before paging"*, and the analytics reads are
 /// non-`OData` aggregate endpoints with no `LimitCfg` anywhere near them; it is
 /// re-forecast to them in `config.rs` rather than consumed here.
-pub(crate) const PAGE_LIMITS: LimitCfg = LimitCfg {
+pub const PAGE_LIMITS: LimitCfg = LimitCfg {
     default: 200,
     max: 500,
 };
@@ -125,7 +125,7 @@ pub(crate) const PAGE_LIMITS: LimitCfg = LimitCfg {
 /// `odata_err` and `odata_field_of`), *including* the `$top` sentence — so this is
 /// a convention question rather than a regression here, and that gear still
 /// carries the same text.
-pub(crate) fn odata_err(error: &ODataError) -> DomainError {
+pub fn odata_err(error: &ODataError) -> DomainError {
     match error {
         ODataError::InvalidFilter(_)
         | ODataError::InvalidOrderByField(_)
@@ -192,7 +192,7 @@ fn odata_field_of(error: &ODataError) -> &'static str {
 /// gear crosses — review finding #25 is about `From<toolkit_db::DbError>`, but
 /// fixing only that would have left this helper flattening `sea_orm::DbErr`
 /// (SQLSTATE and constraint name included) to a bare message.
-pub(crate) fn db_err(e: impl std::error::Error + Send + Sync + 'static) -> DomainError {
+pub fn db_err(e: impl std::error::Error + Send + Sync + 'static) -> DomainError {
     DomainError::Database {
         message: e.to_string(),
         source: Some(Box::new(e)),

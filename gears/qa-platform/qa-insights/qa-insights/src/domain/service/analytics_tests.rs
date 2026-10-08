@@ -202,13 +202,13 @@ fn the_platform_ids_are_the_distinct_ones_of_both_rendered_sections() {
 /// query back and are not computed. Shipping seven of the eight looks complete
 /// in a screenshot and is not.
 ///
-/// The grouped assertion is controller ruling **R17**'s: the plan's own line was
+/// The grouped assertion replaces the plan's own line, which was
 /// `assert_eq!(response.grouped.component.len(), response.grouped.component.len())`,
 /// which compares a value to itself and cannot fail. It is replaced by the
 /// invariant the pipeline order is easy to get backwards about — the three group
-/// keys are populated and the component bars sum to the **unfiltered** universe's
-/// size, which they do because `build_grouped_summaries` puts every universe file
-/// in exactly one component bucket.
+/// keys are populated and the component bars sum to the **unfiltered**
+/// universe's size, which they do because `build_grouped_summaries` puts every
+/// universe file in exactly one component bucket.
 #[tokio::test]
 async fn the_overview_returns_all_eight_sections() {
     let f = fixture_with_seeded_results().await;

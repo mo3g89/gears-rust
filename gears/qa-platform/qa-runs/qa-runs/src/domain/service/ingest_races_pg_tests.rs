@@ -669,10 +669,10 @@ async fn the_completions_counter_repair_survives_a_producer_committing_beside_it
 // The archived log, against real Postgres
 // ---------------------------------------------------------------------------
 //
-// **Why these live in this file.** Design §6 puts items 3, 5, 7, 8 and 10 on
-// the Postgres tier, and none of them landed there: every archive test on the
-// branch ran either against `SQLite` (`infra::storage::run_logs_sea_repo`) or
-// against an in-memory double (`infra::logs::archive`,
+// **Why these live in this file.** Several of the archive's properties belong
+// on the Postgres tier, and none of them landed there: every archive test on
+// the branch ran either against `SQLite` (`infra::storage::run_logs_sea_repo`)
+// or against an in-memory double (`infra::logs::archive`,
 // `domain::service::ingest_tests`). This fixture is the **only** place the
 // production shape exists — a real `RunLogArchive` over the real
 // `OrmRunsRepository` over a real database — and it asserted nothing about
@@ -707,9 +707,9 @@ async fn the_completions_counter_repair_survives_a_producer_committing_beside_it
 /// and this is the only place it is checked against a real row rather than
 /// against a double's `String`.
 ///
-/// The second `flush` covers design §6 item 3 on this tier: a drained buffer
-/// must not be re-appended, so a doubled flush leaves the row once with each
-/// line once.
+/// The second `flush` covers the drained-buffer property on this tier: a
+/// drained buffer must not be re-appended, so a doubled flush leaves the row
+/// once with each line once.
 ///
 /// **Break-tested**, both assertions, against the container:
 /// * `record`'s `entry.lines += 1` changed to `+= 2` — the `lines` equality
@@ -762,7 +762,7 @@ async fn an_ingested_log_round_trips_through_qa_run_logs() {
          the cheap count gets a different answer from one reading the log",
     );
 
-    // Design 6.3 on this tier: a second flush with nothing recorded between
+    // On this tier: a second flush with nothing recorded between
     // must not re-append the drained text.
     f.archive.flush(f.run_id).await.expect("a no-op flush");
     let reread = f
@@ -778,8 +778,8 @@ async fn an_ingested_log_round_trips_through_qa_run_logs() {
     assert_eq!(reread.lines, stored.lines);
 }
 
-/// **Tenant isolation on `qa_run_logs`, against Postgres** — design §6 item 8,
-/// and the finding the whole-branch review raised as I-1.
+/// **Tenant isolation on `qa_run_logs`, against Postgres** — the finding the
+/// whole-branch review raised as I-1.
 ///
 /// Before the composite foreign key, a foreign tenant could create a run's log
 /// row on its **first** append and poison it permanently: the scoped `UPDATE`

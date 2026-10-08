@@ -96,7 +96,7 @@ export function ProductDetailPage() {
     tests_folder: '',
   });
   // Git only: an archive upload has no endpoint in this deployment, so the
-  // form no longer offers one (REMOVED-SURFACES.md, Task 8a C4).
+  // form no longer offers one.
   const [repoForm, setRepoForm] = useState({
     name: '',
     url: '',
@@ -202,7 +202,7 @@ export function ProductDetailPage() {
     // past the page's own loading/error early returns) but not visible to
     // the type checker from inside this closure. The toast makes that claim
     // self-checking: if it ever is reachable, Save stops being a silent
-    // no-op (m-5).
+    // no-op.
     if (!product) {
       toast.error('Product data is not loaded yet');
       return;
@@ -220,14 +220,13 @@ export function ProductDetailPage() {
           key: productForm.key.trim().toUpperCase(),
           description: productForm.description.trim(),
           tests_folder: productForm.tests_folder.trim(),
-          // This dialog has no plugin picker (that's ProductsPage's job, Task
-          // 23) -- it re-sends the product's own current binding untouched,
-          // which is Step 3's "edit preserves it" applied to a form that never
+          // This dialog has no plugin picker (that's ProductsPage's job) -- it re-sends the product's own current binding untouched,
+          // which is the "an edit preserves it" rule applied to a form that never
           // displays the field at all. `product` is this page's own fetch, so
           // it is never stale relative to the id being edited.
           plugin_instance_id: product.plugin_instance_id ?? '',
         },
-        // The product's own stored binding, so `productReqFromForm` (G-2) omits the
+        // The product's own stored binding, so `productReqFromForm` omits the
         // key rather than resending it: this dialog never changes it, so every save
         // through here must be a no-op on the binding, never a rebind attempt that
         // the live per-process plugin registry could refuse.

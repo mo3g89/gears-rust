@@ -197,4 +197,121 @@ mod tests {
         let expected = r#"{"a":{"c":0,"d":[3,1,2]},"b":1}"#;
         assert_eq!(serde_json::to_string(&sorted(input)).unwrap(), expected);
     }
+
+    /// **Every `OData` list operation declares the paging parameters it accepts.**
+    ///
+    /// The toolkit's `OData` extractor binds `limit` (alias `$top`) and `cursor`
+    /// (alias `$skiptoken`) on every route it serves (`ODataParams` in
+    /// `libs/toolkit/src/api/odata.rs`), but `with_odata_filter`/`with_odata_orderby`
+    /// declare only `$filter` and `$orderby`. A route that declares `$filter` and
+    /// not these two is pageable on the wire and undocumented in the contract,
+    /// so the UI's generated types never learn the parameters exist.
+    #[test]
+    fn every_odata_list_operation_declares_limit_and_cursor() {
+        let doc = document().expect("the document must build");
+        let mut lists = 0;
+        let mut missing = Vec::new();
+        for (path, item) in doc["paths"].as_object().expect("paths is an object") {
+            for (method, op) in item.as_object().expect("a path item is an object") {
+                let names: Vec<&str> = op["parameters"]
+                    .as_array()
+                    .map(|ps| ps.iter().filter_map(|p| p["name"].as_str()).collect())
+                    .unwrap_or_default();
+                if !names.contains(&"$filter") {
+                    continue;
+                }
+                lists += 1;
+                for wanted in ["limit", "cursor"] {
+                    if !names.contains(&wanted) {
+                        missing.push(format!("{method} {path}: no `{wanted}`"));
+                    }
+                }
+            }
+        }
+        assert!(
+            lists >= 6,
+            "found only {lists} OData list operations; the walk is broken"
+        );
+        assert!(
+            missing.is_empty(),
+            "undeclared paging parameters:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    /// **DESIGN.md's endpoint tables name exactly the registered operations.**
+    ///
+    /// Every ``| METHODS | `/qa/v1/…` | … |`` row is read as one documented
+    /// operation per method, and the set must equal the `(method, path)` pairs
+    /// the four gears register. A grep for "does the path appear" passes on a row
+    /// whose method is wrong, which is how `GET /qa/v1/jira/bugs` (a POST) and a
+    /// run of `PATCH` rows over `PUT` routes survived every earlier pass.
+    #[test]
+    fn design_endpoint_tables_name_exactly_the_registered_operations() {
+        use std::collections::BTreeSet;
+
+        const METHODS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+        let doc = document().expect("the document must build");
+        let mut registered = BTreeSet::new();
+        for (path, item) in doc["paths"].as_object().expect("paths is an object") {
+            for method in item.as_object().expect("a path item is an object").keys() {
+                let upper = method.to_ascii_uppercase();
+                if METHODS.contains(&upper.as_str()) {
+                    registered.insert((upper, path.clone()));
+                }
+            }
+        }
+
+        let design_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/DESIGN.md");
+        let design = std::fs::read_to_string(&design_path).expect("DESIGN.md is readable");
+        let mut documented = BTreeSet::new();
+        let mut unparsed = Vec::new();
+        for line in design.lines() {
+            let cells: Vec<&str> = line
+                .trim()
+                .trim_matches('|')
+                .split('|')
+                .map(str::trim)
+                .collect();
+            let [methods, path, ..] = cells.as_slice() else {
+                continue;
+            };
+            let Some(path) = path.strip_prefix('`').and_then(|p| p.strip_suffix('`')) else {
+                continue;
+            };
+            if !path.starts_with("/qa/v1/") {
+                continue;
+            }
+            let methods: Vec<&str> = methods.split(',').map(str::trim).collect();
+            // A row naming a `/qa/v1/` path is an endpoint row; one whose method
+            // cell does not parse (`Get`, `PUT/PATCH`, a stray word) is a typo
+            // the comparison below would otherwise skip without a word.
+            if !methods.iter().all(|m| METHODS.contains(m)) {
+                unparsed.push(line.trim().to_owned());
+                continue;
+            }
+            for method in methods {
+                documented.insert((method.to_owned(), path.to_owned()));
+            }
+        }
+
+        assert!(
+            unparsed.is_empty(),
+            "DESIGN.md endpoint rows whose method cell is not a comma-separated list of {METHODS:?}:\n{}",
+            unparsed.join("\n")
+        );
+        assert!(
+            documented.len() >= 60,
+            "parsed only {} documented operations out of DESIGN.md; the table shape or this parser changed",
+            documented.len()
+        );
+        let phantom: Vec<_> = documented.difference(&registered).collect();
+        let undocumented: Vec<_> = registered.difference(&documented).collect();
+        assert!(
+            phantom.is_empty() && undocumented.is_empty(),
+            "DESIGN.md endpoint tables disagree with the registered operations.\n\
+             In DESIGN, not registered: {phantom:?}\nRegistered, not in DESIGN: {undocumented:?}"
+        );
+    }
 }

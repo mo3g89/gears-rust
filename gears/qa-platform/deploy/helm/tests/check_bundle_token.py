@@ -35,7 +35,7 @@ rendered Argo workflow). Each covers a surface the others cannot see.
 # And the secret that replaced it must not ship as its committed literal
 
 `bundle_download_signing_secret` is the whole access control on an anonymously
-reachable route. `gears-config-configmap.yaml` rewrites the committed dev value
+reachable route. `gears-config-secret.yaml` rewrites the committed dev value
 and `fail`s the render if it stops appearing in the config file -- but nothing
 asserted the OUTPUT. This does, which is the half that matters to a cluster.
 """
@@ -57,7 +57,8 @@ BANNED_IN_RENDER = [
     "TEST_BUNDLE_TOKEN_URL",
     "TEST_BUNDLE_CLIENT_ID",
     "TEST_BUNDLE_CLIENT_SECRET",
-    # The Secret `workflow-oidc-secret.yaml` created in Argo's namespace.
+    # The name of the Secret the deleted `workflow-oidc-secret.yaml` template
+    # created in Argo's namespace; it must not come back.
     "qa-platform-workflow-oidc",
 ]
 
@@ -74,7 +75,7 @@ BANNED_VALUES = [
     "createWorkflowSecret",
 ]
 
-# The committed dev literal `gears-config-configmap.yaml` must rewrite. Kept in
+# The committed dev literal `gears-config-secret.yaml` must rewrite. Kept in
 # sync with `config/qa-platform-stack.yaml` by that template's own `fail` guard.
 DEV_SIGNING_LITERAL = "dev-bundle-download-signing-secret"
 
@@ -85,12 +86,18 @@ def render():
         [
             "helm", "template", "guard", str(CHART),
             "--set", "publicOrigin=https://guard.example",
-            # keycloak.adminPassword has no default (WS3 Task 3) -- any value
+            # keycloak.adminPassword has no default -- any value
             # renders; this one is obviously not a real credential.
             "--set", "keycloak.adminPassword=guard-fixture-not-a-real-password",
+            # argo.workflowClientSecret is `required` too (2026-09-29): it is the
+            # qa-platform-workflow client's confidential secret and the chart
+            # refuses the committed dev literal outside devMode. Any other value
+            # renders; check_realm_secrecy.py owns both of those assertions.
+            "--set", "argo.workflowClientSecret=guard-fixture-not-a-real-workflow-secret",  # nosec: test fixture only
+            "--set", "postgres.password=guard-fixture-not-a-real-db-password",  # nosec: test fixture only
             # Both signing secrets have no default either (2026-09-21): the
             # per-render `randAlphaNum` fallback became a pod roll on every
-            # upgrade once the gears Deployment started hashing the ConfigMap.
+            # upgrade once the gears Deployment started hashing that object.
             "--set", "bundleDownloadSigningSecret=guard-fixture-not-a-real-bundle-key",
             "--set", "collectReportSigningSecret=guard-fixture-not-a-real-collect-key",
         ],
@@ -279,7 +286,7 @@ def check_the_url_is_never_logged_whole(failures):
 def check_signing_secret_is_rewritten(failures):
     """The committed dev literal must never reach a rendered cluster.
 
-    `gears-config-configmap.yaml` fails the render if the literal stops
+    `gears-config-secret.yaml` fails the render if the literal stops
     appearing in the SOURCE config; this asserts the other half -- that it does
     not appear in the OUTPUT."""
     out, _, rc = render()
@@ -291,7 +298,7 @@ def check_signing_secret_is_rewritten(failures):
             f"FAIL: the committed dev literal {DEV_SIGNING_LITERAL!r} appears "
             "in the rendered chart. It is the only access control on an "
             "anonymously reachable route: anyone who knew it could forge a tag "
-            "for any bundle. gears-config-configmap.yaml's fourth transform is "
+            "for any bundle. gears-config-secret.yaml's fourth transform is "
             "what must rewrite it.")
         return
 

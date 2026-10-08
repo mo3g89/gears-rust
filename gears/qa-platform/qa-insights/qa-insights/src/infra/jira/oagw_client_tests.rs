@@ -13,13 +13,15 @@
 
 use std::sync::Mutex;
 
+use futures_util::StreamExt as _;
+
 use qa_insights_sdk::JiraConfig;
 use toolkit::api::canonical_prelude::*;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use super::{OagwJiraClient, egress_for, normalize_base_path, summary_for, truncate_logs};
-use crate::domain::error::DomainError;
+use crate::domain::error::{DomainError, EgressFailure};
 use crate::domain::ports::jira_client::{JiraClient, NewIssue};
 use crate::domain::service::test_support::ctx;
 
@@ -27,7 +29,7 @@ use crate::domain::service::test_support::ctx;
 struct TestUpstreamScope;
 
 const TENANT: Uuid = Uuid::from_u128(0x0A);
-const TOKEN_REF: &str = "cred://qa-jira-api-token";
+const TOKEN_REF: &str = "qa-jira-api-token";
 
 /// A config pointing at `jira.example.com`, enabled.
 fn config() -> JiraConfig {
@@ -79,6 +81,11 @@ struct Scripted {
 /// `AlreadyExists` instead. Every proxied request is recorded; the response is
 /// picked by whether the request URI contains `/search` or not, which is the only
 /// distinction the three calls need.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a test double's independent switches, one per misbehaviour a test scripts; \
+              each is set by exactly one fixture and none implies another"
+)]
 struct FakeGateway {
     create_calls: Mutex<Vec<oagw_sdk::CreateUpstreamRequest>>,
     route_calls: Mutex<Vec<oagw_sdk::CreateRouteRequest>>,
@@ -96,6 +103,45 @@ struct FakeGateway {
     /// mirrored here for
     /// [`the_bound_is_actually_applied_to_a_hanging_gateway`].
     hang: bool,
+    /// When set, [`FakeGateway::create_upstream`] never resolves — a gateway
+    /// that hangs while this adapter provisions, before any JIRA request.
+    hang_provisioning: bool,
+    /// When set, the response BODY is this stream instead of `Scripted::body`:
+    /// headers arrive at once, the body is what misbehaves.
+    body_mode: BodyMode,
+    /// When set, the response carries oagw's `ErrorSource::Gateway` marker: the
+    /// gateway generated it itself because it could not reach JIRA.
+    gateway_generated: bool,
+    /// When set, [`FakeGateway::proxy_request`] fails with this error.
+    proxy_error: Option<fn() -> CanonicalError>,
+    /// When set, only the dedupe **search** misbehaves this way, after it is
+    /// recorded in [`FakeGateway::requests`]; every other call answers as
+    /// scripted. What lets a test count the creates a failed search led to.
+    search_fault: Option<SearchFault>,
+}
+
+/// How the dedupe search alone fails, for [`FakeGateway::search_fault`].
+#[derive(Clone, Copy)]
+enum SearchFault {
+    /// The gateway's call fails with this error.
+    Error(fn() -> CanonicalError),
+    /// The gateway never answers.
+    Hang,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BodyMode {
+    Scripted,
+    /// One small chunk, then a stream that never yields again.
+    NeverFinishes,
+    /// 96 chunks of 64 KiB — 6 MiB, comfortably past the 2 MiB cap, and
+    /// **finite on purpose**. An unbounded fixture's failure mode is not a red
+    /// test but allocation until the machine dies: an earlier infinite version
+    /// of this stream, run once against a deliberately disabled cap, was
+    /// OOM-killed at 56 GiB and took the session's IDE down with it. A fixture
+    /// must stay bounded so that breaking the thing it tests fails an
+    /// assertion instead of exhausting RAM.
+    OverCap,
 }
 
 /// How [`FakeGateway::create_route`] answers.
@@ -121,6 +167,11 @@ impl FakeGateway {
             search_response: search,
             other_response: other,
             hang: false,
+            hang_provisioning: false,
+            body_mode: BodyMode::Scripted,
+            gateway_generated: false,
+            proxy_error: None,
+            search_fault: None,
         }
     }
 
@@ -193,6 +244,9 @@ impl oagw_sdk::api::ServiceGatewayClientV1 for FakeGateway {
         _: SecurityContext,
         req: oagw_sdk::CreateUpstreamRequest,
     ) -> Result<oagw_sdk::Upstream, CanonicalError> {
+        if self.hang_provisioning {
+            return std::future::pending().await;
+        }
         let alias = req.alias().unwrap_or_default().to_owned();
         self.create_calls.lock().unwrap().push(req);
         if self.upstream_already_exists {
@@ -244,6 +298,9 @@ impl oagw_sdk::api::ServiceGatewayClientV1 for FakeGateway {
         if self.hang {
             return std::future::pending().await;
         }
+        if let Some(error) = self.proxy_error {
+            return Err(error());
+        }
 
         let method = req.method().to_string();
         let uri = req.uri().to_string();
@@ -266,17 +323,42 @@ impl oagw_sdk::api::ServiceGatewayClientV1 for FakeGateway {
         } else {
             self.other_response.clone()
         };
+        let is_search = uri.contains("/search");
         self.proxied.lock().unwrap().push(Proxied {
             method,
             uri,
             header_names,
             body,
         });
+        if is_search {
+            match self.search_fault {
+                Some(SearchFault::Error(error)) => return Err(error()),
+                Some(SearchFault::Hang) => return std::future::pending().await,
+                None => {}
+            }
+        }
 
-        Ok(http::Response::builder()
+        let body = match self.body_mode {
+            BodyMode::Scripted => oagw_sdk::Body::from(scripted.body),
+            BodyMode::NeverFinishes => oagw_sdk::Body::Stream(Box::pin(
+                futures_util::stream::once(async { Ok(bytes::Bytes::from_static(b"{\"fi")) })
+                    .chain(futures_util::stream::pending()),
+            )),
+            BodyMode::OverCap => oagw_sdk::Body::Stream(Box::pin(
+                futures_util::stream::repeat_with(|| Ok(bytes::Bytes::from(vec![b' '; 64 * 1024])))
+                    .take(96),
+            )),
+        };
+        let mut response = http::Response::builder()
             .status(scripted.status)
-            .body(oagw_sdk::Body::from(scripted.body))
-            .expect("the fake response builds"))
+            .body(body)
+            .expect("the fake response builds");
+        if self.gateway_generated {
+            response
+                .extensions_mut()
+                .insert(oagw_sdk::api::ErrorSource::Gateway);
+        }
+        Ok(response)
     }
 
     async fn get_upstream(
@@ -609,16 +691,137 @@ async fn the_bound_is_actually_applied_to_a_hanging_gateway() {
     );
 
     let started = std::time::Instant::now();
-    let result = client.get_issue(&ctx(TENANT), &config(), "VHP-1").await;
+    let result = client.fetch_issue(&ctx(TENANT), &config(), "VHP-1").await;
     let elapsed = started.elapsed();
 
     assert!(
-        result.is_err(),
-        "a hanging gateway must not be reported as a successful fetch"
+        matches!(
+            &result,
+            Err(DomainError::UpstreamEgress {
+                failure: EgressFailure::Timeout,
+                ..
+            })
+        ),
+        "a hanging gateway must be a Timeout, not a successful fetch: {result:?}"
     );
     assert!(
         elapsed < std::time::Duration::from_secs(1),
         "the call must return promptly once its own bound elapses, took {elapsed:?}"
+    );
+}
+
+/// The body read is inside the bound too: the gateway answers with headers at
+/// once, then the body starts and never finishes. Before the read moved inside
+/// the timeout this hung forever.
+#[tokio::test]
+async fn the_bound_covers_a_response_body_that_never_finishes() {
+    let mut gateway = FakeGateway::answering("");
+    gateway.body_mode = BodyMode::NeverFinishes;
+    let client = OagwJiraClient::with_timeout(
+        std::sync::Arc::new(gateway),
+        std::time::Duration::from_millis(50),
+    );
+
+    let started = std::time::Instant::now();
+    let error = client
+        .fetch_issue(&ctx(TENANT), &config(), "VHP-1")
+        .await
+        .expect_err("a body that never finishes must not be a successful fetch");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(
+            &error,
+            DomainError::UpstreamEgress {
+                failure: EgressFailure::Timeout,
+                ..
+            }
+        ),
+        "the failure must be the timeout, got: {error:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "took {elapsed:?}"
+    );
+}
+
+/// **Provisioning is inside the bound too.** A gateway that hangs on
+/// `create_upstream` used to stall `fetch_issue` — and with it the
+/// leader-claimed poller tick — forever, because `ensure_upstream` ran before
+/// `send`'s timeout began.
+#[tokio::test]
+async fn the_bound_covers_a_gateway_that_hangs_while_provisioning() {
+    let mut gateway = FakeGateway::answering(RESOLVED_ISSUE);
+    gateway.hang_provisioning = true;
+    let gateway = std::sync::Arc::new(gateway);
+    let client = OagwJiraClient::with_timeout(
+        std::sync::Arc::clone(&gateway)
+            as std::sync::Arc<dyn oagw_sdk::api::ServiceGatewayClientV1>,
+        std::time::Duration::from_millis(20),
+    );
+
+    for attempt in ["fetch", "create"] {
+        let started = std::time::Instant::now();
+        let error = match attempt {
+            "fetch" => client
+                .fetch_issue(&ctx(TENANT), &config(), "VHP-1")
+                .await
+                .map(|_| ())
+                .expect_err("a hanging provisioning step must not succeed"),
+            _ => client
+                .create_or_find_issue(&ctx(TENANT), &config(), issue())
+                .await
+                .map(|_| ())
+                .expect_err("a hanging provisioning step must not succeed"),
+        };
+        assert!(
+            error.to_string().contains("provision"),
+            "{attempt}: {error}"
+        );
+        assert!(
+            matches!(
+                &error,
+                DomainError::UpstreamEgress {
+                    failure: EgressFailure::Timeout,
+                    ..
+                }
+            ),
+            "{attempt}: {error:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{attempt} took {:?}",
+            started.elapsed()
+        );
+    }
+    assert!(gateway.requests().is_empty(), "nothing was proxied");
+}
+
+/// A 6 MiB body is refused by the size cap, not by the clock: the timeout here
+/// is a full minute, so only the cap can end the read promptly. The body is
+/// finite by design — see [`BodyMode::OverCap`].
+#[tokio::test]
+async fn a_response_body_past_the_size_cap_is_refused() {
+    let mut gateway = FakeGateway::answering("");
+    gateway.body_mode = BodyMode::OverCap;
+    let client = OagwJiraClient::with_timeout(
+        std::sync::Arc::new(gateway),
+        std::time::Duration::from_mins(1),
+    );
+
+    let started = std::time::Instant::now();
+    let error = client
+        .fetch_issue(&ctx(TENANT), &config(), "VHP-1")
+        .await
+        .expect_err("an over-cap body must be an error");
+
+    assert!(
+        error.to_string().contains("exceeded"),
+        "the failure must be the size cap, got: {error}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the cap, not the 60s timeout, must have ended the read"
     );
 }
 
@@ -628,8 +831,8 @@ async fn the_bound_is_actually_applied_to_a_hanging_gateway() {
 
 /// **The upstream carries the credstore *reference*, never material.**
 ///
-/// `qa_jira_config.api_token_credstore_ref` is a reference by construction
-/// (Task 10), and this is the assertion that it reaches oagw as one: the apikey
+/// `qa_jira_config.api_token_credstore_ref` is a reference by construction,
+/// and this is the assertion that it reaches oagw as one: the apikey
 /// auth plugin's `secret_ref` is resolved by oagw against credstore
 /// (`gears/system/oagw/oagw/src/infra/plugin/apikey_auth.rs:49-54`), so the
 /// material never enters this process. `Basic ` is the prefix because JIRA's
@@ -710,11 +913,11 @@ async fn the_upstream_is_provisioned_once_and_then_cached() {
 /// **An upstream another replica already provisioned is reused *and its route is
 /// ensured*.**
 ///
-/// Fix round 1, finding 2, and controller ruling R81. This test previously
-/// pinned the opposite — that the reuse path registers no route — which is what
-/// made a restart after a failed route registration permanently fatal: the
-/// upstream existed, `create_upstream` answered `AlreadyExists`, and nothing ever
-/// created the route a proxy call requires
+/// Fix round 1, finding 2. This test previously pinned the opposite — that the
+/// reuse path registers no route — which is what made a restart after a failed
+/// route registration permanently fatal: the upstream existed, `create_upstream`
+/// answered `AlreadyExists`, and nothing ever created the route a proxy call
+/// requires
 /// (`gears/system/oagw/oagw/src/domain/services/management/mod.rs:443-451`).
 ///
 /// # What makes this test able to fail
@@ -778,7 +981,10 @@ async fn a_failed_route_registration_is_an_error_and_is_not_cached() {
         .check_status(&ctx, &config(), "VHP-319")
         .await
         .expect_err("a route this gear could not register is not a usable egress");
-    assert!(matches!(err, DomainError::Internal(_)), "{err:?}");
+    assert!(
+        matches!(&err, DomainError::UpstreamEgress { channel, failure: EgressFailure::Unreachable, .. } if channel == "jira"),
+        "{err:?}"
+    );
     assert!(
         gateway.requests().is_empty(),
         "nothing should have been proxied through a route that does not exist",
@@ -1050,7 +1256,7 @@ async fn a_missing_status_category_is_unknown_and_not_resolved() {
     let client = OagwJiraClient::new(gateway);
 
     let found = client
-        .get_issue(&ctx(TENANT), &config(), "VHP-1")
+        .fetch_issue(&ctx(TENANT), &config(), "VHP-1")
         .await
         .unwrap();
 
@@ -1082,7 +1288,307 @@ async fn a_refused_issue_read_is_an_error() {
         .check_status(&ctx(TENANT), &config(), "VHP-999")
         .await
         .expect_err("a 404 from JIRA is a failure");
-    assert!(matches!(err, DomainError::Internal(_)), "{err:?}");
+    assert!(
+        matches!(&err, DomainError::UpstreamEgress { channel, failure: EgressFailure::Rejected, .. } if channel == "jira"),
+        "{err:?}"
+    );
+}
+
+/// JIRA's 401 and 403 mean the secret behind `api_token_credstore_ref` was
+/// refused; that is `Authentication`, not an outage, so an operator reading the
+/// log or the poller's metric knows to fix the credential rather than wait.
+#[tokio::test]
+async fn a_jira_credential_refusal_is_authentication_not_an_outage() {
+    for status in [401, 403] {
+        let gateway = std::sync::Arc::new(FakeGateway::new(
+            Scripted {
+                status: 200,
+                body: r#"{"issues":[]}"#.to_owned(),
+            },
+            Scripted {
+                status,
+                body: r#"{"errorMessages":["no"]}"#.to_owned(),
+            },
+        ));
+        let err = OagwJiraClient::new(gateway)
+            .check_status(&ctx(TENANT), &config(), "VHP-1")
+            .await
+            .expect_err("a refused credential is a failure");
+        match &err {
+            DomainError::UpstreamEgress {
+                channel,
+                endpoint,
+                failure,
+                detail,
+            } => {
+                assert_eq!(channel, "jira");
+                assert_eq!(endpoint, "jira.example.com");
+                assert_eq!(*failure, EgressFailure::Authentication, "{status}");
+                assert!(
+                    !detail.contains("no"),
+                    "JIRA's body is never quoted: {detail}"
+                );
+            }
+            other => panic!("expected UpstreamEgress, got {other:?}"),
+        }
+    }
+}
+
+/// A dedupe search JIRA answers `401`/`403` is a refused credential: the
+/// create would be refused with the same credential, so it is not attempted
+/// and the search's `Authentication` failure is returned.
+#[tokio::test]
+async fn a_search_refusing_the_credential_is_authentication_and_creates_nothing() {
+    let gateway = std::sync::Arc::new(FakeGateway::new(
+        Scripted {
+            status: 401,
+            body: String::new(),
+        },
+        Scripted {
+            status: 201,
+            body: r#"{"key":"VHP-1"}"#.to_owned(),
+        },
+    ));
+    let err = OagwJiraClient::new(gateway.clone())
+        .create_or_find_issue(&ctx(TENANT), &config(), issue())
+        .await
+        .expect_err("a refused credential is a failure");
+    assert!(
+        matches!(
+            &err,
+            DomainError::UpstreamEgress {
+                failure: EgressFailure::Authentication,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_creates(&gateway, 0);
+}
+
+/// The create path classifies a refusal the same way when the search found
+/// nothing.
+#[tokio::test]
+async fn a_refused_create_is_authentication() {
+    let gateway = std::sync::Arc::new(FakeGateway::new(
+        Scripted {
+            status: 200,
+            body: r#"{"issues":[]}"#.to_owned(),
+        },
+        Scripted {
+            status: 401,
+            body: String::new(),
+        },
+    ));
+    let err = OagwJiraClient::new(gateway.clone())
+        .create_or_find_issue(&ctx(TENANT), &config(), issue())
+        .await
+        .expect_err("a refused credential is a failure");
+    assert!(
+        matches!(
+            &err,
+            DomainError::UpstreamEgress {
+                failure: EgressFailure::Authentication,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_creates(&gateway, 1);
+}
+
+/// How many create (`POST …/issue`) calls reached the gateway.
+fn assert_creates(gateway: &FakeGateway, expected: usize) {
+    let creates = gateway
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.uri.ends_with("/issue"))
+        .count();
+    assert_eq!(
+        creates,
+        expected,
+        "create calls; requests: {:?}",
+        gateway
+            .requests()
+            .iter()
+            .map(|r| format!("{} {}", r.method, r.uri))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A dedupe search the gateway could not deliver (it answered for an
+/// unreachable JIRA, or its call failed) is an outage: the create would meet
+/// the same outage, so it is not attempted and one attempt costs one call's
+/// bound, not two.
+#[tokio::test]
+async fn an_unreachable_search_returns_unreachable_and_creates_nothing() {
+    // The gateway answered for JIRA.
+    let mut answered = FakeGateway::new(
+        Scripted {
+            status: 503,
+            body: String::new(),
+        },
+        Scripted {
+            status: 201,
+            body: r#"{"key":"VHP-1"}"#.to_owned(),
+        },
+    );
+    answered.gateway_generated = true;
+    // The gateway's call itself failed.
+    let mut failed = FakeGateway::answering(r#"{"key":"VHP-1"}"#);
+    failed.search_fault = Some(SearchFault::Error(|| {
+        CanonicalError::service_unavailable()
+            .with_detail("dns")
+            .create()
+    }));
+    for gateway in [answered, failed] {
+        let gateway = std::sync::Arc::new(gateway);
+        let err = OagwJiraClient::new(gateway.clone())
+            .create_or_find_issue(&ctx(TENANT), &config(), issue())
+            .await
+            .expect_err("an unreachable JIRA is a failure");
+        assert!(
+            matches!(
+                &err,
+                DomainError::UpstreamEgress {
+                    failure: EgressFailure::Unreachable,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_creates(&gateway, 0);
+    }
+}
+
+/// A dedupe search that times out is an outage too: no create.
+#[tokio::test]
+async fn a_timed_out_search_returns_timeout_and_creates_nothing() {
+    let mut gateway = FakeGateway::answering(r#"{"key":"VHP-1"}"#);
+    gateway.search_fault = Some(SearchFault::Hang);
+    let gateway = std::sync::Arc::new(gateway);
+    let err = OagwJiraClient::with_timeout(gateway.clone(), std::time::Duration::from_millis(20))
+        .create_or_find_issue(&ctx(TENANT), &config(), issue())
+        .await
+        .expect_err("a hanging search is a failure");
+    assert!(
+        matches!(
+            &err,
+            DomainError::UpstreamEgress {
+                failure: EgressFailure::Timeout,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_creates(&gateway, 0);
+}
+
+/// A response the gateway generated itself (it could not reach JIRA) is
+/// `Unreachable` whatever its status: JIRA never answered. That includes a
+/// gateway-generated `401`/`403`, which must NOT be read as JIRA refusing the
+/// credential.
+#[tokio::test]
+async fn a_gateway_generated_answer_is_unreachable() {
+    for status in [502, 401, 403] {
+        let mut gateway = FakeGateway::new(
+            Scripted {
+                status: 200,
+                body: r#"{"issues":[]}"#.to_owned(),
+            },
+            Scripted {
+                status,
+                body: String::new(),
+            },
+        );
+        gateway.gateway_generated = true;
+        let err = OagwJiraClient::new(std::sync::Arc::new(gateway))
+            .check_status(&ctx(TENANT), &config(), "VHP-1")
+            .await
+            .expect_err("an unreachable JIRA is a failure");
+        assert!(
+            matches!(
+                &err,
+                DomainError::UpstreamEgress {
+                    failure: EgressFailure::Unreachable,
+                    ..
+                }
+            ),
+            "{status}: {err:?}"
+        );
+    }
+}
+
+/// A create the gateway answered for an unreachable JIRA must not say JIRA
+/// refused anything: the detail names the operation, and the class (rendered
+/// by `UpstreamEgress`'s `Display`) says what went wrong.
+#[tokio::test]
+async fn an_unreachable_create_does_not_say_jira_refused_it() {
+    let mut gateway = FakeGateway::new(
+        Scripted {
+            status: 200,
+            body: r#"{"issues":[]}"#.to_owned(),
+        },
+        Scripted {
+            status: 503,
+            body: String::new(),
+        },
+    );
+    gateway.gateway_generated = true;
+    let err = OagwJiraClient::new(std::sync::Arc::new(gateway))
+        .create_or_find_issue(&ctx(TENANT), &config(), issue())
+        .await
+        .expect_err("an unreachable JIRA is a failure");
+    match &err {
+        DomainError::UpstreamEgress {
+            failure: EgressFailure::Unreachable,
+            detail,
+            ..
+        } => {
+            assert!(!detail.contains("refused"), "{detail}");
+            assert!(detail.starts_with("creating the issue:"), "{detail}");
+        }
+        other => panic!("expected an unreachable UpstreamEgress, got {other:?}"),
+    }
+    let rendered = err.to_string();
+    assert!(rendered.contains("could not be reached"), "{rendered}");
+    assert!(!rendered.contains("refused"), "{rendered}");
+}
+
+/// The gateway refusing the caller itself (`Unauthenticated`,
+/// `PermissionDenied` as a call error) is not JIRA refusing the credential.
+#[tokio::test]
+async fn a_gateway_refusing_the_caller_is_unreachable_not_authentication() {
+    let errors: [fn() -> CanonicalError; 2] = [
+        || {
+            CanonicalError::unauthenticated()
+                .with_reason("TOKEN_EXPIRED")
+                .create()
+        },
+        || {
+            TestUpstreamScope::permission_denied()
+                .with_reason("ACCESS_DENIED")
+                .create()
+        },
+    ];
+    for error in errors {
+        let mut gateway = FakeGateway::answering(RESOLVED_ISSUE);
+        gateway.proxy_error = Some(error);
+        let err = OagwJiraClient::new(std::sync::Arc::new(gateway))
+            .check_status(&ctx(TENANT), &config(), "VHP-1")
+            .await
+            .expect_err("a gateway that refuses the call is a failure");
+        assert!(
+            matches!(
+                &err,
+                DomainError::UpstreamEgress {
+                    failure: EgressFailure::Unreachable,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
 }
 
 /// **Search first, then create** — the order legacy fixes (`jira.rs:70-108`
@@ -1169,26 +1675,30 @@ async fn a_search_hit_is_reused_and_nothing_is_created() {
 /// because a search was refused is not.
 #[tokio::test]
 async fn a_refused_search_still_files_the_issue() {
-    let gateway = std::sync::Arc::new(FakeGateway::new(
-        Scripted {
-            status: 503,
-            body: String::new(),
-        },
-        Scripted {
-            status: 201,
-            body: r#"{"key":"VHP-321"}"#.to_owned(),
-        },
-    ));
-    let client = OagwJiraClient::new(gateway.clone());
+    // JIRA's own answer (not the gateway's), and not a credential refusal.
+    for status in [500, 503, 400, 404] {
+        let gateway = std::sync::Arc::new(FakeGateway::new(
+            Scripted {
+                status,
+                body: String::new(),
+            },
+            Scripted {
+                status: 201,
+                body: r#"{"key":"VHP-321"}"#.to_owned(),
+            },
+        ));
+        let client = OagwJiraClient::new(gateway.clone());
 
-    let filed = client
-        .create_or_find_issue(&ctx(TENANT), &config(), issue())
-        .await
-        .unwrap();
+        let filed = client
+            .create_or_find_issue(&ctx(TENANT), &config(), issue())
+            .await
+            .unwrap();
 
-    assert_eq!(filed.jira_key, "VHP-321");
-    assert!(filed.created);
-    assert_eq!(gateway.requests().len(), 2);
+        assert_eq!(filed.jira_key, "VHP-321", "{status}");
+        assert!(filed.created);
+        assert_eq!(gateway.requests().len(), 2);
+        assert_creates(&gateway, 1);
+    }
 }
 
 /// **A non-JSON 200 from the dedupe search still files the issue — and,

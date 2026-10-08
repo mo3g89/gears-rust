@@ -52,14 +52,24 @@ the Helm deployment — not against internals.
 1. `POST /qa/v1/ssh-keys` — a name and key material.
 2. `POST /qa/v1/test-repos` referencing the product and, optionally, the key.
 3. `POST /qa/v1/test-repos/{id}/sync`.
-4. `GET /qa/v1/test-repos/{id}/branches`, then `GET /qa/v1/plans?repo_id=…`.
+4. `GET /qa/v1/test-repos/{id}/branches`, then `GET /qa/v1/plans?repo_id=…&branch=<branch>` (both
+   parameters are required).
 
 **Must hold**
 
-* `GET /qa/v1/ssh-keys/{id}` returns a fingerprint and never the private key.
+* `GET /qa/v1/ssh-keys` lists each key's name and fingerprint and never the private key (there is
+  no per-key read).
 * After sync, `last_synced_at` is set and the branch list is populated.
 * Plans are discovered from the work tree and identified by `(repo_id, path)`.
 * A sync failure sets `sync_error` on the repository, readable through the API.
+* A branch that was never synced needs no manual sync to be read: `GET /qa/v1/plans?repo_id=…&branch=<branch>`
+  for a branch the remote has syncs it on that first read and returns its plans. The caller needs
+  `SYNC` on the repository for it.
+* The same read for a branch the remote does not have is `404` naming the branch. It does not run
+  a sync, so `sync_error` stays unchanged and the other branches stay readable.
+* The same read on a repository whose credential the remote rejects answers `400` naming the
+  failure, and the repository's `sync_error` carries it, as after an explicit sync. A remote that
+  cannot be reached answers `503` and leaves `sync_error` as it was.
 
 ## S3. Launch a plan against a free environment
 
@@ -72,6 +82,10 @@ the Helm deployment — not against internals.
 **Must hold**
 
 * The run never enters `queued`: it goes `created → dispatching → running`.
+* The plan's branch needs no earlier manual sync: a launch on a non-default branch that was never
+  synced syncs it while resolving the target and succeeds.
+* A launch naming a branch the remote does not have is `404` with the catalog's message, not a
+  `500`, and creates no run.
 * `GET /qa/v1/environments/{id}/lease` shows the run as a holder.
 * Log lines arrive on the stream while the run is live.
 * Tallies (`passed`, `failed`, `skipped`, `total`) advance **during** the run, not only at the end.
@@ -83,13 +97,13 @@ the Helm deployment — not against internals.
 **Preconditions**: an exclusive run holds the environment.
 
 1. `POST /qa/v1/runs` targeting the same environment.
-2. `GET /qa/v1/queue?environment=…`.
+2. `GET /qa/v1/queue?environment_id=…`.
 3. Let the first run finish.
 
 **Must hold**
 
 * The second run is `queued`, not rejected — a busy environment never fails a launch.
-* It appears in the queue listing and can be cancelled from there.
+* It appears in the queue listing and can be cancelled from there (`DELETE /qa/v1/queue/{id}`).
 * When the first run finishes and the lease releases, the queued run starts automatically within
   the dispatcher interval.
 * `POST /qa/v1/queue/{id}/force-start` bypasses the FIFO for one entry.
@@ -104,8 +118,11 @@ the Helm deployment — not against internals.
 
 * The run reaches `canceled` (one `l`); the queue row reaches `cancelled` (two).
 * The execution is stopped at the backend, not merely marked cancelled in the database.
-* The environment lease is released.
-* A second cancel is rejected by the state-machine guard rather than rewriting `finished_at`.
+* The environment lease is released once the end of the execution is observed (the ingest
+  service's `Finished` branch, or the next dispatcher tick), not synchronously inside the cancel
+  request.
+* A second cancel is idempotent: it answers 204 and leaves the run as it stands, without rewriting
+  `finished_at`.
 
 ## S6. Survive a control-plane restart mid-run
 
@@ -125,9 +142,13 @@ the Helm deployment — not against internals.
 
 ## S7. Collect case counts
 
-1. `POST /qa/v1/collect/{repo_id}` for a branch.
-2. Wait for the collect run to finish.
-3. Query the recorded counts.
+1. `POST /qa/v1/analytics/collect?branch=<branch>` — launches a collect run for every repository
+   the caller's universe admits (`branch` is optional and falls back to the deployment's default
+   collect branch). The runner's own report back, `POST /qa/v1/collect/{repo_id}`, is anonymous
+   and HMAC-signed; a caller never makes it.
+2. Wait for the collect runs to finish.
+3. Query the recorded counts: `GET /qa/v1/analytics/overview?product_id=…&version=…&scope=all`
+   reports the expected-cases number.
 
 **Must hold**
 
@@ -239,7 +260,9 @@ the Helm deployment — not against internals.
 
 **Must hold**
 
-* Migrations run before the gears start.
+* Migrations run in the `db-migrate` post-install hook, after the gears Deployment has been
+  created. The gears pod may restart a few times until the migration and tenant-seed jobs have
+  completed, and then becomes Ready.
 * The designated tenant is seeded.
 * TLS material is generated for Keycloak and the UI.
 * The RBAC the execution backend needs is created.

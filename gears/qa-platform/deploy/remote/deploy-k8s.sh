@@ -32,26 +32,33 @@
 #
 # THIS SCRIPT IS A CONVENIENCE, NOT A DEPENDENCY OF THE CHART. Everything
 # the platform needs to exist is in the chart: `helm upgrade --install
-# deploy/helm/qa-platform --set publicOrigin=... --set keycloak.adminPassword=...
-# --set bundleDownloadSigningSecret=... --set collectReportSigningSecret=...`
+# deploy/helm/qa-platform --set publicOrigin=... --set-file keycloak.adminPassword=...
+# --set-file bundleDownloadSigningSecret=... --set-file collectReportSigningSecret=...
+# --set-file argo.workflowClientSecret=... --set-file postgres.password=...`
+# (files, not `--set`, so no secret is in helm's argv -- see CHART_SECRETS)
 # installs a working stack on any cluster that can pull the images -- those
-# FOUR are the chart's `required` values (values.yaml documents each), and
-# there is no fifth. The count was two until 2026-09-21; the two signing
-# secrets joined it when their per-render `randAlphaNum` fallback turned out
-# to rotate a live key on every upgrade. What
+# SIX are the chart's `required` values (values.yaml documents each), and
+# there is no seventh. The count was two until 2026-09-21, when the two signing
+# secrets joined it -- their per-render `randAlphaNum` fallback turned out to
+# rotate a live key on every upgrade -- four until 2026-09-29, when
+# `argo.workflowClientSecret` joined it because it had shipped as a committed
+# literal on a fullScopeAllowed service-account client, five from then, and
+# six on 2026-10-07, when `postgres.password` lost its committed `qa` default.
+# What
 # this script adds is the part a chart cannot do on a registry-less k3s node
 # -- build the three images from this checkout and import them into
 # containerd -- plus the rsync and the post-deploy verification that make a
 # dev round-trip one command. It also supplies `keycloak.adminPassword` and
-# `devMode=true` for you (see ADMIN_PASSWORD and the HELM_ARGS below) so that
+# `devMode=true` for you (see ADMIN_PASSWORD, CHART_SECRETS and the HELM_ARGS below) so that
 # the one-command convenience stays one command; that is this script's own
 # choice as a dev-stand tool, not something the chart needs.
 #
 # In particular the realm and the Argo workflow Secret are NO LONGER RENDERED
 # HERE. Keycloak 26.0.8 still will not expand a `${env.VAR}` placeholder in an
 # import file (measured, it aborts start-up), but the substitution now happens
-# at TEMPLATE time inside the chart -- see keycloak-realm-secret.yaml and
-# workflow-oidc-secret.yaml, which carry the full reasoning.
+# at TEMPLATE time inside the chart -- see keycloak-realm-secret.yaml, which
+# carries the full reasoning. (The workflow Secret template is deleted: no
+# runner-pod credential exists any more.)
 #
 # THERE IS NO REGISTRY IN THIS DEPLOYMENT. `docker build` puts an image in
 # the DOCKER daemon's store; k3s runs containerd, a completely separate
@@ -82,7 +89,7 @@
 #
 # Usage:
 #   deploy-k8s.sh [--target USER@HOST] [--public-origin URL]
-#                 [--admin-password PASSWORD] [--dry-run]
+#                 [--dry-run]
 #
 #   --target         ssh destination, e.g. root@node.example.com. REQUIRED
 #                     (or set QA_PLATFORM_TARGET). No default: this used to
@@ -96,11 +103,14 @@
 #                     for the same reason as --target: the old default baked one
 #                     development host into every UI bundle and certificate this
 #                     script produced.
-#   --admin-password Keycloak's MASTER-REALM bootstrap admin password (chart
+#   QA_PLATFORM_ADMIN_PASSWORD (environment)
+#                     Keycloak's MASTER-REALM bootstrap admin password (chart
 #                     value keycloak.adminPassword, which values.yaml ships
 #                     with no default and keycloak-deployment.yaml `required`s
-#                     -- see that file's header for why). Optional (or set
-#                     QA_PLATFORM_ADMIN_PASSWORD): when omitted, this script
+#                     -- see that file's header for why). Environment only
+#                     since 2026-10-07 -- a flag put it in this script's
+#                     argv, and `--admin-password` now exits 2 saying so.
+#                     Optional: when unset, this script
 #                     generates one with `openssl rand -base64 24` and prints
 #                     it at the end, rather than falling back to the
 #                     well-known "admin" fixture -- keycloak-deployment.yaml's
@@ -144,20 +154,21 @@ PUBLIC_ORIGIN="${QA_PLATFORM_PUBLIC_ORIGIN:-}"
 # The chart's OTHER required value (keycloak.adminPassword -- see
 # keycloak-deployment.yaml's `required` and values.yaml's comment). Left
 # empty here on purpose: generated below, after parsing, only if the caller
-# did not supply one -- see the --admin-password case below and the usage
-# block above for why a generated value, not a committed default.
+# did not export QA_PLATFORM_ADMIN_PASSWORD -- see the usage block above for
+# why a generated value, not a committed default.
 ADMIN_PASSWORD="${QA_PLATFORM_ADMIN_PASSWORD:-}"
 # The chart's two OTHER required values, added 2026-09-21. Each is the only
 # access control on an anonymously reachable route (qa-catalog's bundle
 # download, qa-insights' collect report) and each used to fall back to a
-# per-render `randAlphaNum 32` in gears-config-configmap.yaml -- which rotated
+# per-render `randAlphaNum 32` in gears-config-secret.yaml -- which rotated
 # the key on every render and produced a 403 for any bundle built before an
 # upgrade and fetched after it. Generated below if unset, exactly like
 # ADMIN_PASSWORD, and for the same reason: no committed literal in this file.
 #
-# ENVIRONMENT ONLY, NO FLAG, unlike --admin-password. A stand's bootstrap admin
-# password is something an operator types once and reads back off the terminal;
-# a signing key is not, and this script's stand is thrown away and rebuilt on
+# ENVIRONMENT ONLY, NO FLAG, like QA_PLATFORM_ADMIN_PASSWORD: a value on the
+# command line is in this script's argv for anyone running `ps`. Unlike the
+# admin password, a signing key is never read back off the terminal, and this
+# script's stand is thrown away and rebuilt on
 # every run anyway -- IMAGE_TAG already forces a pod roll, so a fresh key per
 # run is never a key the running process disagrees with. Export
 # QA_PLATFORM_BUNDLE_SIGNING_KEY/QA_PLATFORM_COLLECT_SIGNING_KEY to pin them
@@ -165,6 +176,34 @@ ADMIN_PASSWORD="${QA_PLATFORM_ADMIN_PASSWORD:-}"
 # `?sig=` across a deploy.
 BUNDLE_SIGNING_KEY="${QA_PLATFORM_BUNDLE_SIGNING_KEY:-}"
 COLLECT_SIGNING_KEY="${QA_PLATFORM_COLLECT_SIGNING_KEY:-}"
+# The chart's FIFTH required value, `required` since 2026-09-29. It is the
+# qa-platform-workflow Keycloak client's confidential secret, and that client
+# is serviceAccountsEnabled and fullScopeAllowed -- a client-credentials token
+# minted with it carries full tenant access. It used to be a committed literal
+# in values.yaml with no `required` and no gate.
+#
+# ENVIRONMENT ONLY, NO FLAG, exactly like the two signing keys, and generated
+# here for the same reason: this file carries no credential literal.
+#
+# CHANGING IT ROLLS KEYCLOAK, which is not a cost on a stand but is worth
+# knowing: Keycloak imports a realm only on a first start against an empty
+# database, so keycloak-deployment.yaml hashes the realm into a
+# `checksum/realm` pod annotation and a changed value replaces the pod (its H2
+# store is ephemeral by design, so the new pod re-imports). Export
+# QA_PLATFORM_WORKFLOW_CLIENT_SECRET to pin it across runs and keep that pod
+# where it is.
+WORKFLOW_CLIENT_SECRET="${QA_PLATFORM_WORKFLOW_CLIENT_SECRET:-}"
+# The chart's SIXTH required value, `required` since 2026-10-07:
+# postgres.password, whose committed `qa` the chart refuses outside devMode.
+# NOT generated fresh per run like the four above, and that is the point:
+# Postgres applies POSTGRES_PASSWORD only when it initialises an EMPTY data
+# directory, and the StatefulSet's volume survives every run of this script. A
+# fresh value on an existing stand would rewrite the Secret, roll the gears and
+# leave them dialling a database that still answers to the old password. So:
+# QA_PLATFORM_POSTGRES_PASSWORD if set; else whatever secret/qa-platform-postgres
+# already holds (read below, after preflight proves kubectl works); else, on a
+# first install, a generated one.
+POSTGRES_PASSWORD="${QA_PLATFORM_POSTGRES_PASSWORD:-}"
 DRY_RUN=false
 
 NAMESPACE="qa-platform"
@@ -176,7 +215,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --target)          REMOTE_TARGET="${2:?--target needs a value}"; shift 2 ;;
         --public-origin)   PUBLIC_ORIGIN="${2:?--public-origin needs a value}"; shift 2 ;;
-        --admin-password)  ADMIN_PASSWORD="${2:?--admin-password needs a value}"; shift 2 ;;
+        --admin-password|--admin-password=*) echo "deploy-k8s: --admin-password is gone: a password on the command line is in this script's argv for anyone running 'ps'. Export QA_PLATFORM_ADMIN_PASSWORD instead." >&2; exit 2 ;;
         --dry-run)        DRY_RUN=true; shift ;;
         -h|--help)        sed -n '/^# Usage:/,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//;$d'; exit 0 ;;
         *)                echo "deploy-k8s: unknown argument '$1' (try --help)" >&2; exit 2 ;;
@@ -203,28 +242,32 @@ fi
 # keycloak.adminPassword is the chart's other REQUIRED value (see
 # keycloak-deployment.yaml's `required` and values.yaml's comment). Generate
 # one HERE, not as a bash default on the assignment above, so a caller who
-# passed --admin-password/QA_PLATFORM_ADMIN_PASSWORD never pays for a
+# exported QA_PLATFORM_ADMIN_PASSWORD never pays for a
 # subshell they did not ask for, and so this script never carries a
 # committed password literal for check_no_environment_hardcode.py-style
 # guards to eventually have to ban the same way it banned the old
 # hostname/IP defaults.
 if [[ -z "$ADMIN_PASSWORD" ]]; then
-    command -v openssl >/dev/null 2>&1 || die "openssl not found locally -- needed to generate keycloak.adminPassword. Install it, or pass --admin-password/QA_PLATFORM_ADMIN_PASSWORD yourself."
+    command -v openssl >/dev/null 2>&1 || die "openssl not found locally -- needed to generate keycloak.adminPassword. Install it, or export QA_PLATFORM_ADMIN_PASSWORD yourself."
     ADMIN_PASSWORD="$(openssl rand -base64 24)"
-    echo "deploy-k8s: no --admin-password/QA_PLATFORM_ADMIN_PASSWORD -- generated a fresh Keycloak bootstrap admin password for this run (printed again at the end)."
+    echo "deploy-k8s: no QA_PLATFORM_ADMIN_PASSWORD -- generated a fresh Keycloak bootstrap admin password for this run (printed again at the end)."
 fi
 
-# The two signing keys, generated the same way and for the same reasons. Not
-# printed: unlike the admin password there is nothing for a human to log in
-# with, and the run view renders pod logs, so the fewer places a signing key is
-# echoed the better. `-hex 24` rather than `-base64 24` because the value
-# travels through `--set` into a YAML scalar and a base64 alphabet includes
-# characters `--set` treats specially.
-if [[ -z "$BUNDLE_SIGNING_KEY" ]] || [[ -z "$COLLECT_SIGNING_KEY" ]]; then
-    command -v openssl >/dev/null 2>&1 || die "openssl not found locally -- needed to generate the chart's two signing keys. Install it, or set QA_PLATFORM_BUNDLE_SIGNING_KEY and QA_PLATFORM_COLLECT_SIGNING_KEY yourself."
+# The two signing keys, generated the same way and for the same reasons.
+# Never printed: not on a real run (unlike the admin password there is nothing
+# for a human to log in with, and the run view renders pod logs), and not by
+# --dry-run, which prints every remote body through lib.sh's redact_secrets --
+# each secret is registered right below. `-hex 24` rather than `-base64 24`
+# is a leftover of when the value travelled through `--set`, which treats
+# characters of the base64 alphabet specially; `--set-file` (see CHART_SECRETS
+# below) takes any bytes, and hex is kept because nothing needs it changed.
+if [[ -z "$BUNDLE_SIGNING_KEY" ]] || [[ -z "$COLLECT_SIGNING_KEY" ]] || [[ -z "$WORKFLOW_CLIENT_SECRET" ]]; then
+    command -v openssl >/dev/null 2>&1 || die "openssl not found locally -- needed to generate the chart's two signing keys and the workflow client secret. Install it, or set QA_PLATFORM_BUNDLE_SIGNING_KEY, QA_PLATFORM_COLLECT_SIGNING_KEY and QA_PLATFORM_WORKFLOW_CLIENT_SECRET yourself."
 fi
 [[ -n "$BUNDLE_SIGNING_KEY" ]]  || BUNDLE_SIGNING_KEY="$(openssl rand -hex 24)"
 [[ -n "$COLLECT_SIGNING_KEY" ]] || COLLECT_SIGNING_KEY="$(openssl rand -hex 24)"
+[[ -n "$WORKFLOW_CLIENT_SECRET" ]] || WORKFLOW_CLIENT_SECRET="$(openssl rand -hex 24)"
+register_secret "$ADMIN_PASSWORD"; register_secret "$BUNDLE_SIGNING_KEY"; register_secret "$COLLECT_SIGNING_KEY"; register_secret "$WORKFLOW_CLIENT_SECRET"
 
 # --------------------------------------------------------------- repo root --
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -617,21 +660,48 @@ case "$HOSTALIASES_ENABLED" in
 esac
 echo "deploy-k8s: gears.hostAliases.enabled=$HOSTALIASES_ENABLED (chart default; NOTES-hairpin.md measured the hairpin working, so 'false' is expected)"
 
+step "postgres.password: the cluster's current value, or a new one for a first install"
+if [[ -z "$POSTGRES_PASSWORD" ]]; then
+    # PRESENT/ABSENT, never "empty means absent": a kubectl that failed for any
+    # other reason must stop this script, not make it generate a password the
+    # existing database will refuse. stdout and stderr are read separately so
+    # a warning kubectl prints on a successful read cannot end up inside the
+    # password.
+    pg_probe="$(ssh_ro_script "$NAMESPACE" <<'PGPW'
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+if out="$(kubectl -n "$1" get secret qa-platform-postgres -o jsonpath='{.data.POSTGRES_PASSWORD}' 2>/dev/null)"; then
+    printf 'PRESENT %s\n' "$out"
+elif err="$(kubectl -n "$1" get secret qa-platform-postgres -o name 2>&1 >/dev/null)"; [[ "$err" == *NotFound* ]]; then
+    echo ABSENT
+else
+    echo "kubectl could not read secret/qa-platform-postgres: $err" >&2
+    exit 1
+fi
+PGPW
+)" || die "could not read secret/qa-platform-postgres on $REMOTE_TARGET (output above). Refusing to guess postgres.password: a wrong one leaves the gears unable to reach a database that keeps its original password. Set QA_PLATFORM_POSTGRES_PASSWORD."
+    case "$pg_probe" in
+        "PRESENT "?*)
+            POSTGRES_PASSWORD="$(printf '%s' "${pg_probe#PRESENT }" | base64 -d)" \
+                || die "secret/qa-platform-postgres's POSTGRES_PASSWORD is not valid base64. Set QA_PLATFORM_POSTGRES_PASSWORD."
+            echo "deploy-k8s: postgres.password: reusing the value secret/qa-platform-postgres already holds (the database was initialised with it)" ;;
+        ABSENT)
+            command -v openssl >/dev/null 2>&1 || die "openssl not found locally -- needed to generate postgres.password for a first install. Install it, or set QA_PLATFORM_POSTGRES_PASSWORD."
+            POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+            echo "deploy-k8s: postgres.password: no secret/qa-platform-postgres in namespace $NAMESPACE -- generated one for this first install" ;;
+        *) die "unexpected answer reading secret/qa-platform-postgres: '${pg_probe%% *}'" ;;
+    esac
+fi
+register_secret "$POSTGRES_PASSWORD"
+
 HELM_ARGS=(upgrade --install "$RELEASE" "$CHART_REL"
            --namespace "$NAMESPACE" --create-namespace
            --set "publicOrigin=$PUBLIC_ORIGIN"
            --set "images.gears.tag=$IMAGE_TAG"
            --set "images.ui.tag=$IMAGE_TAG"
-           # keycloak.adminPassword is the chart's other REQUIRED value --
-           # ADMIN_PASSWORD above is either --admin-password/
-           # QA_PLATFORM_ADMIN_PASSWORD or a freshly generated one; either
-           # way it is never empty and never the well-known "admin" fixture
-           # by default.
-           --set "keycloak.adminPassword=$ADMIN_PASSWORD"
-           # The chart's two remaining required values -- see their
-           # declarations near ADMIN_PASSWORD above.
-           --set "bundleDownloadSigningSecret=$BUNDLE_SIGNING_KEY"
-           --set "collectReportSigningSecret=$COLLECT_SIGNING_KEY"
+           # THE SIX REQUIRED VALUES' FIVE SECRETS ARE NOT HERE. On --set they
+           # were in the remote helm process's argv; helm_secret_files (lib.sh)
+           # writes each into a mode-600 file the heredocs below hand helm with
+           # --set-file. CHART_SECRETS is the list.
            # devMode=true: a deliberate choice OF THIS SCRIPT, not the
            # chart's own default (values.yaml's devMode stays false). This
            # is a throwaway dev stand by construction -- rebuilt from
@@ -674,6 +744,14 @@ HELM_ARGS=(upgrade --install "$RELEASE" "$CHART_REL"
            # of the three does not reach Available.
            # ---------------------------------------------------------------
            --timeout 10m)
+# ADMIN_PASSWORD is QA_PLATFORM_ADMIN_PASSWORD or a freshly generated one, so
+# never empty and never the well-known "admin" fixture by default; the other
+# four are declared near it above.
+CHART_SECRETS=(keycloak.adminPassword "$ADMIN_PASSWORD"
+               bundleDownloadSigningSecret "$BUNDLE_SIGNING_KEY"
+               collectReportSigningSecret "$COLLECT_SIGNING_KEY"
+               argo.workflowClientSecret "$WORKFLOW_CLIENT_SECRET"
+               postgres.password "$POSTGRES_PASSWORD")
 
 if [[ "$HOSTALIASES_ENABLED" == "true" ]]; then
     step "hostAliases.enabled=true: first helm upgrade to create the UI Service, then resolving its ClusterIP"
@@ -686,7 +764,8 @@ if [[ "$HOSTALIASES_ENABLED" == "true" ]]; then
 set -euo pipefail
 cd "\$1"
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-helm ${HELM_ARGS[@]@Q}
+$(helm_secret_files "${CHART_SECRETS[@]}")
+helm ${HELM_ARGS[@]@Q} "\${SECRET_SET_FILE_ARGS[@]}"
 HELM1
     step "Resolving the UI Service's ClusterIP for hostAliases"
     if $DRY_RUN; then
@@ -736,8 +815,9 @@ remote_sh "helm upgrade --install" "$REMOTE_PATH" <<HELM2
 set -euo pipefail
 cd "\$1"
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+$(helm_secret_files "${CHART_SECRETS[@]}")
 echo "=== helm upgrade --install starting \$(date -Is) ==="
-helm ${HELM_ARGS[@]@Q}
+helm ${HELM_ARGS[@]@Q} "\${SECRET_SET_FILE_ARGS[@]}"
 echo "=== helm upgrade --install returned 0 at \$(date -Is) -- post-install/post-upgrade hooks have already run to completion at this point ==="
 HELM2
 
@@ -825,11 +905,11 @@ echo "ROLLOUT: all three Deployments are available"
 ROLLOUT
 
 # ============================================================== verify ==
-step "deploy/remote/verify-k8s.sh (Task 12)"
-# NAMED ABSENCE, NOT A CRASH: Task 12 had not landed yet when this script was
-# written. A future run of this exact script picks up verify-k8s.sh the
-# moment it exists on the remote (it is rsynced along with everything else
-# above) -- nothing here needs editing for that to start working.
+step "deploy/remote/verify-k8s.sh"
+# A MISSING VERIFY SCRIPT IS FATAL, like every other absence in this file. It
+# used to print a NOTE and exit 0 because verify-k8s.sh had not been written
+# yet; it has been for a long time, it is rsynced with everything else above,
+# and a deploy that cannot verify itself must not report success.
 #
 # IMAGE_TAG IS PASSED THROUGH, not just PUBLIC_ORIGIN/NAMESPACE: verify-k8s.sh's
 # first new check (every Deployment rolled to the tag this run just built)
@@ -838,7 +918,7 @@ step "deploy/remote/verify-k8s.sh (Task 12)"
 # the remote. Without it, that one check has no expected value to compare
 # against and has to skip itself (see verify-k8s.sh's own handling of an
 # unset IMAGE_TAG).
-remote_sh "verify-k8s.sh (if present)" "$REMOTE_PATH" "$PUBLIC_ORIGIN" "$NAMESPACE" "$IMAGE_TAG" <<'VERIFYK8S'
+remote_sh "verify-k8s.sh" "$REMOTE_PATH" "$PUBLIC_ORIGIN" "$NAMESPACE" "$IMAGE_TAG" <<'VERIFYK8S'
 set -euo pipefail
 cd "$1"
 VERIFY_SCRIPT="gears/qa-platform/deploy/remote/verify-k8s.sh"
@@ -846,11 +926,11 @@ VERIFY_SCRIPT="gears/qa-platform/deploy/remote/verify-k8s.sh"
 # "$VERIFY_SCRIPT"` runs it as a bash argument either way, so its own execute
 # bit is irrelevant to whether this can invoke it -- only whether the file
 # exists at all.
-if [ -e "$VERIFY_SCRIPT" ]; then
-    PUBLIC_ORIGIN="$2" NAMESPACE="$3" IMAGE_TAG="$4" bash "$VERIFY_SCRIPT"
-else
-    echo "NOTE: $VERIFY_SCRIPT does not exist yet (Task 12) -- skipping automated verification. Check by hand: 'kubectl -n $3 get pods', the UI at $2, and Keycloak's discovery document at $2/realms/qa-platform/.well-known/openid-configuration."
+if [ ! -e "$VERIFY_SCRIPT" ]; then
+    echo "deploy-k8s: FAIL: $VERIFY_SCRIPT does not exist on the remote, so this deploy cannot be verified. It is part of this repository and is rsynced with it: a missing copy means the rsync or the checkout is broken. Check by hand with 'kubectl -n $3 get pods' and $2, then fix that before trusting this stack." >&2
+    exit 1
 fi
+PUBLIC_ORIGIN="$2" NAMESPACE="$3" IMAGE_TAG="$4" bash "$VERIFY_SCRIPT"
 VERIFYK8S
 
 step "Done"

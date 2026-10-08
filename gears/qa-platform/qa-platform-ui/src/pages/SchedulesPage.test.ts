@@ -96,3 +96,21 @@ describe('SchedulesPage — a failed /schedules', () => {
     expect(document.querySelector('.animate-spin')).toBeNull();
   });
 });
+
+// ADR-0010: a surface that scopes in the browser says so in the UI.
+describe('SchedulesPage — product scope', () => {
+  it('says the product filter runs in the browser', async () => {
+    mockedApiGet.mockImplementation(async (path: string) => {
+      if (path === '/environments') {
+        return { items: [], page_info: { limit: 200, next_cursor: null, prev_cursor: null } } as never;
+      }
+      if (path === '/products') return [{ id: PROD_1, key: 'p1', name: 'One' }] as never;
+      if (path.startsWith('/test-repos')) {
+        return [{ id: 'repo-1', name: 'repo-1', product_id: PROD_1 }] as never;
+      }
+      return [] as never;
+    });
+    renderPage();
+    await waitFor(() => expect(screen.queryByText(/filtered in your browser/)).not.toBeNull());
+  });
+});

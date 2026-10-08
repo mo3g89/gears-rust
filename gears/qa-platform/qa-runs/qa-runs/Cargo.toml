@@ -131,7 +131,7 @@ qa-environments-sdk = { path = "../../qa-environments/qa-environments-sdk" }
 # The product-plugin contract. This gear consumes only the **access** half —
 # `RunAccess`, `MountSpec`, `RunnerSpec`, re-exported from
 # `domain::ports::run_executor`, which is the port `KubeconfigMount`
-# generalised into (spec §5.2, §7). It never resolves a plugin itself: the
+# generalised into. It never resolves a plugin itself: the
 # resolver is qa-catalog's, and dispatch reaches it through that gear's client.
 #
 # Carries no Kubernetes dependency, so ADR-0001's containment is unaffected —
@@ -174,10 +174,6 @@ http = { workspace = true }
 time = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
-# `runvars::base_domain_from_url` — derives `VPADM_BASE_DOMAIN` from a
-# platform's `vhp_base_url`, ported from `manager/src/services/argo.rs:2476`.
-# Not Kubernetes-related, so it stays outside the `argo` feature gate.
-url = { workspace = true }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
 
@@ -328,9 +324,9 @@ qa-vhp-product-plugin = { path = "../../plugins/qa-vhp-product-plugin" }
 # mount variant this executor refuses to render.
 #
 # A **dev**-dependency deliberately. This gear never resolves credential
-# plaintext: it passes credstore *references* through to the execution plane
-# (spec §5.2, ruling D-19), and `prepare_run_access` is required to work from a
-# reference alone. Keeping the type out of `[dependencies]` means production
+# plaintext: it passes credstore *references* through to the execution plane,
+# and `prepare_run_access` is required to work from a reference alone
+# (ADR-0008, "Decision Outcome"). Keeping the type out of `[dependencies]` means production
 # code here cannot construct one even by accident.
 credstore-sdk = { workspace = true }
 # The encoding axum's `Query` extractor uses, so the queue read's query struct

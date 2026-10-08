@@ -331,6 +331,7 @@ fn the_declared_boundaries_include_the_pollers_floor_and_default_interval() {
     let floor = crate::config::ObservationConfig {
         enabled: true,
         poll_interval_seconds: 0,
+        ..crate::config::ObservationConfig::default()
     }
     .effective_poll_interval_seconds();
     let default_interval =

@@ -17,6 +17,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
+import { CREDSTORE_REF_PLACEHOLDERS } from '@/lib/credstoreRef';
 import { cn } from '@/lib/utils';
 import {
   EVENT_OPTIONS,
@@ -131,7 +132,7 @@ export function NotificationsSlackPage() {
   }, [
     form.slack_channel,
     form.manager_ui_base_url,
-    form.slack_webhook_url,
+    form.slack_webhook_credstore_ref,
     selectedEvent,
     selectedTemplate.status_icon,
     selectedTemplate.header,
@@ -167,17 +168,20 @@ export function NotificationsSlackPage() {
         </CardHeader>
         <CardContent className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(280px,0.85fr)]">
           <div className="space-y-2">
-            <Label htmlFor="notif-slack-webhook">Slack Webhook URL</Label>
+            <Label htmlFor="notif-slack-webhook">Slack webhook credential reference</Label>
             <Input
               id="notif-slack-webhook"
-              value={form.slack_webhook_url}
+              value={form.slack_webhook_credstore_ref}
               onChange={(e) =>
-                setForm((current) => ({ ...current, slack_webhook_url: e.target.value }))
+                setForm((current) => ({ ...current, slack_webhook_credstore_ref: e.target.value }))
               }
-              placeholder="https://hooks.slack.com/services/..."
+              placeholder={CREDSTORE_REF_PLACEHOLDERS.slackWebhook}
             />
             <p className="text-xs text-muted-foreground">
+              The name of a credential-store secret that holds the full
+              https://hooks.slack.com/services/… URL. The URL itself is never stored here.
               Required to render previews and send scheduled-run test messages to Slack.
+              Letters, digits, underscores and dashes only.
             </p>
           </div>
 
@@ -372,7 +376,7 @@ export function NotificationsSlackPage() {
                   </Button>
                   <Button
                     onClick={sendSelectedSlackTest}
-                    disabled={testScheduledNotification.isPending || !form.slack_webhook_url.trim()}
+                    disabled={testScheduledNotification.isPending || !form.slack_webhook_credstore_ref.trim()}
                   >
                     {testScheduledNotification.isPending ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />

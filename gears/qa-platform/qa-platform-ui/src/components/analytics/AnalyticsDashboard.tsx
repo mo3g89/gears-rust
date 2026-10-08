@@ -595,7 +595,7 @@ export function AnalyticsDashboard({ scope, planId }: AnalyticsDashboardProps) {
   const activeProduct = useActiveProduct();
 
   // Seeded from the URL or the switcher, and then **kept in sync with the
-  // switcher** while the URL named no product (spec D3). Seeding alone left the
+  // switcher** while the URL named no product (the product-scoping rule). Seeding alone left the
   // report on the previous product when someone switched while already on this
   // page, because `ProductSwitcher` mutates a module store without navigating
   // or remounting — this is the one page where the switcher appeared to do
@@ -974,7 +974,7 @@ export function AnalyticsDashboard({ scope, planId }: AnalyticsDashboardProps) {
     });
   }, [overview]);
 
-  // CONTRACT-DIFF §9.3, condition and copy taken verbatim. Evaluated only on a
+  // Condition and copy taken verbatim from the legacy UI. Evaluated only on a
   // settled query, so a loading page shows nothing. `case_expected` is the plan
   // universe qa-catalog resolved and stays accurate; the outcome counts below are
   // 0 when no execution row matched the selected version, which is not the same

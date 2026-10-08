@@ -176,7 +176,7 @@ spec:
         runAsGroup: 0
       initContainers:
         - name: gen-cert
-          image: "{{ .Values.images.postgres.repository }}:{{ .Values.images.postgres.tag }}"
+          image: {{ include "qa-platform.image" .Values.images.postgres | quote }}
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -290,7 +290,7 @@ spec:
               readOnly: true
       containers:
         - name: apply-secret
-          image: "{{ .Values.images.kubectl.repository }}:{{ .Values.images.kubectl.tag }}"
+          image: {{ include "qa-platform.image" .Values.images.kubectl | quote }}
           # Exec form, no shell: this image has none.
           #
           # `--server-side` IS NOT OPTIONAL AND MUST NOT BE DROPPED. It is

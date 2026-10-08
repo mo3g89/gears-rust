@@ -48,7 +48,7 @@
 //!    resolves even when the switch is off —
 //!    `a_bug_resolves_even_when_auto_rerun_is_off` pins it.
 //! 4. `:60-70` — the rerun needs **both** `auto_rerun_on_resolve` and a new
-//!    build (D8) — `a_resolved_bug_without_a_new_build_does_not_rerun` pins
+//!    build — `a_resolved_bug_without_a_new_build_does_not_rerun` pins
 //!    the second half.
 //! 5. `:88-96` and `:100-118` — the rerun goes through the normal admission
 //!    path (`trigger_auto_rerun`'s own doc, and — because a stale comment
@@ -154,7 +154,7 @@ use time::OffsetDateTime;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use crate::domain::error::DomainError;
+use crate::domain::error::{DomainError, EgressFailure};
 use crate::domain::ports::jira_client::StatusCategory;
 use crate::domain::ports::metrics::{
     JiraBugOutcome, JiraPollMetrics, JiraPollOutcome, NoopMetrics,
@@ -290,10 +290,22 @@ where
         // `JiraRepository::resolve_bug`'s own doc: "the poller stamps every
         // bug in one pass with one instant."
         let resolved_at = OffsetDateTime::now_utc();
+        // A refused credential refuses every bug of the pass alike: it is
+        // logged as an error once per pass, and every later refusal in the
+        // same pass as a warning, so one bad secret is one error line per pass
+        // rather than one per open bug. Each bug is still asked and counted
+        // (a refusal can be per project), only the log level changes.
+        let mut refusal = RefusalLog::default();
 
         for bug in &open_bugs {
             let outcome = self
-                .poll_one_bug(ctx, bug, poller_config.auto_rerun_on_resolve, resolved_at)
+                .poll_one_bug(
+                    ctx,
+                    bug,
+                    poller_config.auto_rerun_on_resolve,
+                    resolved_at,
+                    &mut refusal,
+                )
                 .await;
             // The emission is here rather than inside `poll_one_bug` so that
             // there is exactly one per bug however many ways that chain can
@@ -327,9 +339,11 @@ where
         bug: &JiraBug,
         auto_rerun_on_resolve: bool,
         resolved_at: OffsetDateTime,
+        refusal: &mut RefusalLog,
     ) -> JiraBugOutcome {
-        let Some(status) = self.checked_status(ctx, bug).await else {
-            return JiraBugOutcome::StatusCheckFailed;
+        let status = match self.checked_status(ctx, bug, refusal).await {
+            Ok(status) => status,
+            Err(outcome) => return outcome,
         };
         if !status.is_resolved() {
             return JiraBugOutcome::Unresolved;
@@ -367,20 +381,36 @@ where
         }
     }
 
-    /// `bug`'s status category, or `None` when the check itself failed —
-    /// already logged, so the caller only has to decide what "no answer"
-    /// means for it.
-    async fn checked_status(&self, ctx: &SecurityContext, bug: &JiraBug) -> Option<StatusCategory> {
+    /// `bug`'s status category, or the outcome to count when the check failed —
+    /// already logged. A credential refusal is an `error!` the first time in
+    /// the pass (`refusal`) and a `warn!` after that.
+    async fn checked_status(
+        &self,
+        ctx: &SecurityContext,
+        bug: &JiraBug,
+        refusal: &mut RefusalLog,
+    ) -> Result<StatusCategory, JiraBugOutcome> {
         match self.jira.check_status(ctx, &bug.jira_key).await {
-            Ok(status) => Some(status),
+            Ok(status) => Ok(status),
             Err(error) => {
-                tracing::warn!(
-                    jira_key = %bug.jira_key,
-                    %error,
-                    "failed to check JIRA status for this bug; skipping it for this pass \
-                     (manager/src/services/jira_poller.rs:83-85)",
-                );
-                None
+                if matches!(
+                    &error,
+                    DomainError::UpstreamEgress {
+                        failure: EgressFailure::Authentication,
+                        ..
+                    }
+                ) {
+                    refusal.log(bug, &error);
+                    Err(JiraBugOutcome::StatusCheckRefused)
+                } else {
+                    tracing::warn!(
+                        jira_key = %bug.jira_key,
+                        %error,
+                        "failed to check JIRA status for this bug; skipping it for this pass \
+                         (manager/src/services/jira_poller.rs:83-85)",
+                    );
+                    Err(JiraBugOutcome::StatusCheckFailed)
+                }
             }
         }
     }
@@ -413,8 +443,9 @@ where
         true
     }
 
-    /// D8: a resolved bug reruns only when a new build has appeared since the
-    /// version it was filed against (`manager/src/services/jira_poller.rs:60-70`).
+    /// The new-build gate: a resolved bug reruns only when a new build has
+    /// appeared since the version it was filed against
+    /// (`manager/src/services/jira_poller.rs:60-70`).
     ///
     /// The three no-op paths below all answer [`JiraBugOutcome::Resolved`]:
     /// each is a decision *not* to rerun, taken deliberately and on purpose,
@@ -465,7 +496,8 @@ where
         };
         if latest_version == bug_version {
             // The very build that already failed. Reprising it proves
-            // nothing and costs a platform slot — the whole reason D8 exists.
+            // nothing and costs a platform slot — the whole reason the
+            // new-build gate exists.
             return JiraBugOutcome::Resolved;
         }
 
@@ -635,6 +667,43 @@ enum PassEnd {
     Skipped,
     /// Every open bug this tenant has was processed.
     Completed,
+}
+
+/// Whether a poll pass has already logged JIRA's credential refusal as an
+/// error. One per pass: the next pass logs its first refusal as an error
+/// again, so a credential that stays broken stays visible at that level.
+#[derive(Default)]
+struct RefusalLog {
+    logged: bool,
+}
+
+impl RefusalLog {
+    /// `true` the first time it is asked in a pass, `false` after that.
+    fn first(&mut self) -> bool {
+        !std::mem::replace(&mut self.logged, true)
+    }
+
+    /// Log JIRA's refusal of the credential for `bug`: an `error!` the first
+    /// time in the pass, a `warn!` after that.
+    fn log(&mut self, bug: &JiraBug, error: &DomainError) {
+        if self.first() {
+            tracing::error!(
+                jira_key = %bug.jira_key,
+                %error,
+                "JIRA refused this deployment's credential, so this bug's status could \
+                 not be checked: the secret behind the tenant's api_token_credstore_ref \
+                 must hold base64(email:api_token) of an account that can read the \
+                 project; every open bug of this tenant is skipped until it is fixed",
+            );
+        } else {
+            tracing::warn!(
+                jira_key = %bug.jira_key,
+                %error,
+                "JIRA refused this deployment's credential again; this bug is skipped \
+                 for this pass (the first refusal of the pass was logged as an error)",
+            );
+        }
+    }
 }
 
 #[cfg(test)]

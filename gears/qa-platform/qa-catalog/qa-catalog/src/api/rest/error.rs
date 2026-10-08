@@ -43,10 +43,8 @@ impl From<DomainError> for CanonicalError {
             // Same AIP-193 category as `NotFound` above, and deliberately
             // so: from a caller's point of view a product whose plugin
             // cannot be resolved has no usable product behaviour to address.
-            // (`PRODUCT-PLUGINS-DESIGN.md` §4.2 was cited here for this
-            // outcome; that document is not in the repository, and its
-            // successor, `docs/features/product-plugins.md`, does not state
-            // it either -- the not-found-at-use-rather-than-boot-failure
+            // (`docs/features/product-plugins.md` does not state this
+            // outcome either -- the not-found-at-use-rather-than-boot-failure
             // choice stands on this arm's own reasoning, not on a citation.)
             //
             // One shape since Task 20a: a product always names a plugin, so
@@ -83,17 +81,38 @@ impl From<DomainError> for CanonicalError {
             // Server-held state (the repository has no synced working copy
             // for the branch), not a malformed request: FailedPrecondition,
             // which renders as HTTP 400 (mirrors qa-environments'
-            // PlatformLeased precedent).
-            DomainError::RepoNotSynced { repo_id, branch } => {
+            // PlatformLeased precedent). The recorded sync failure, when
+            // there is one, is part of the message: it is sanitized when
+            // recorded and already published as the repository's
+            // `sync_error`, and without it the caller cannot tell a broken
+            // remote from a missing snapshot.
+            DomainError::RepoNotSynced {
+                repo_id,
+                branch,
+                reason,
+            } => {
+                let description = match reason {
+                    Some(reason) => format!(
+                        "Repository {repo_id} has no synced content for branch '{branch}': \
+                         the repository's last sync failed: {reason}"
+                    ),
+                    None => {
+                        format!("Repository {repo_id} has no synced content for branch '{branch}'")
+                    }
+                };
                 TestRepoResourceError::failed_precondition()
-                    .with_precondition_violation(
-                        "sync_state",
-                        format!("Repository {repo_id} has no synced content for branch '{branch}'"),
-                        "NOT_SYNCED",
-                    )
+                    .with_precondition_violation("sync_state", description, "NOT_SYNCED")
                     .with_resource(repo_id.to_string())
                     .create()
             }
+
+            // The remote has no such branch: the addressed thing does not
+            // exist, so NotFound (404), naming the branch.
+            DomainError::BranchNotFound { repo_id, branch } => TestRepoResourceError::not_found(
+                format!("Branch '{branch}' does not exist in repository {repo_id}"),
+            )
+            .with_resource(repo_id.to_string())
+            .create(),
 
             // Also FailedPrecondition rather than InvalidArgument: the
             // offending `plan.yaml` is server-side repository content, not
@@ -134,15 +153,6 @@ impl From<DomainError> for CanonicalError {
                     .create()
             }
 
-            // Retryable write-write race, like qa-environments'
-            // LeaseConflict: Aborted → HTTP 409.
-            DomainError::BranchCacheConflict { repo_id } => {
-                TestRepoResourceError::aborted("Concurrent branch cache update, retry")
-                    .with_reason("BRANCH_CACHE_CONFLICT")
-                    .with_resource(repo_id.to_string())
-                    .create()
-            }
-
             DomainError::Forbidden => CatalogResourceError::permission_denied()
                 .with_reason("ACCESS_DENIED")
                 .create(),
@@ -157,6 +167,45 @@ impl From<DomainError> for CanonicalError {
                 tracing::error!(error = ?e, "Repository sync failed");
                 CanonicalError::service_unavailable()
                     .with_detail("Repository synchronization failed")
+                    .create()
+            }
+
+            // A configuration fault (DESIGN §3.3): FailedPrecondition (400), not
+            // 503's "retry". No route forwards this variant today — the lazy
+            // read records it and answers `RepoNotSynced`, and every engine
+            // caller records it — so the description is fixed text: the engine
+            // message names the remote and is logged, not surfaced.
+            DomainError::CredentialRejected { .. } => {
+                tracing::warn!(error = ?e, "Repository remote rejected the configured credential");
+                TestRepoResourceError::failed_precondition()
+                    .with_precondition_violation(
+                        "credential_ref",
+                        "The repository's remote rejected the configured credential",
+                        "CREDENTIAL_REJECTED",
+                    )
+                    .create()
+            }
+
+            // Same category and the same no-detail rule as `SyncFailed`: an
+            // upstream that did not answer in time.
+            DomainError::RemoteTimedOut { .. } => {
+                tracing::error!(error = ?e, "Repository remote timed out");
+                CanonicalError::service_unavailable()
+                    .with_detail("Repository synchronization timed out")
+                    .create()
+            }
+
+            // The repository is too large for this deployment's limits: not a
+            // retry (FailedPrecondition, 400). The fixed text names the cause;
+            // the engine message with its numbers is logged and recorded.
+            DomainError::SyncBudgetExceeded { .. } => {
+                tracing::warn!(error = ?e, "Repository exceeds the sync byte budget");
+                TestRepoResourceError::failed_precondition()
+                    .with_precondition_violation(
+                        "repository_size",
+                        "The repository exceeds this deployment's sync size limits",
+                        "SYNC_BUDGET_EXCEEDED",
+                    )
                     .create()
             }
 
@@ -289,12 +338,50 @@ mod tests {
         let ce: CanonicalError = DomainError::RepoNotSynced {
             repo_id: Uuid::new_v4(),
             branch: "main".to_owned(),
+            reason: None,
         }
         .into();
         assert_eq!(ce.status_code(), 400);
         assert!(
             matches!(ce, CanonicalError::FailedPrecondition { .. }),
             "expected FailedPrecondition, got {ce:?}"
+        );
+    }
+
+    /// The recorded sync failure reaches the caller: a lazy sync that failed
+    /// must say why, not only that the branch has no content.
+    #[test]
+    fn repo_not_synced_carries_the_recorded_sync_failure_in_its_message() {
+        let ce: CanonicalError = DomainError::RepoNotSynced {
+            repo_id: Uuid::new_v4(),
+            branch: "26.7".to_owned(),
+            reason: Some("remote rejected fetch of https://***@git.example/r.git".to_owned()),
+        }
+        .into();
+        assert_eq!(ce.status_code(), 400);
+        let rendered = format!("{ce:?}");
+        assert!(
+            rendered.contains("branch '26.7'")
+                && rendered.contains("the repository's last sync failed: remote rejected fetch"),
+            "the message must name the branch and the recorded reason: {rendered}"
+        );
+    }
+
+    #[test]
+    fn branch_not_found_maps_to_not_found_404_naming_the_branch() {
+        let ce: CanonicalError = DomainError::BranchNotFound {
+            repo_id: Uuid::new_v4(),
+            branch: "26.9-typo".to_owned(),
+        }
+        .into();
+        assert_eq!(ce.status_code(), 404);
+        assert!(
+            matches!(ce, CanonicalError::NotFound { .. }),
+            "expected NotFound, got {ce:?}"
+        );
+        assert!(
+            format!("{ce:?}").contains("Branch '26.9-typo' does not exist"),
+            "the message must name the branch: {ce:?}"
         );
     }
 
@@ -347,19 +434,6 @@ mod tests {
     }
 
     #[test]
-    fn branch_cache_conflict_maps_to_aborted_409() {
-        let ce: CanonicalError = DomainError::BranchCacheConflict {
-            repo_id: Uuid::new_v4(),
-        }
-        .into();
-        assert_eq!(ce.status_code(), 409);
-        assert!(
-            matches!(ce, CanonicalError::Aborted { .. }),
-            "expected Aborted, got {ce:?}"
-        );
-    }
-
-    #[test]
     fn forbidden_maps_to_permission_denied_403() {
         let ce: CanonicalError = DomainError::Forbidden.into();
         assert_eq!(ce.status_code(), 403);
@@ -379,6 +453,68 @@ mod tests {
         );
         assert!(
             !format!("{ce:?}").contains("example.com"),
+            "engine error text must not be surfaced: {ce:?}"
+        );
+    }
+
+    /// DESIGN §3.3 "Branch model and the first read of a branch": a remote that refuses the repository's credential (or demands one
+    /// none is configured) is a configuration fault an operator fixes, not an
+    /// outage a retry may cure — `400`, never `503`. The engine text names the
+    /// remote and is logged, not surfaced.
+    #[test]
+    fn credential_rejected_maps_to_failed_precondition_400_without_detail_leak() {
+        let ce: CanonicalError = DomainError::CredentialRejected {
+            message: "ls-refs failed: Credentials provided for \"https://git.example/r.git\" were not accepted by the remote".to_owned(),
+        }
+        .into();
+        assert_eq!(ce.status_code(), 400);
+        assert!(
+            matches!(ce, CanonicalError::FailedPrecondition { .. }),
+            "expected FailedPrecondition, got {ce:?}"
+        );
+        assert!(
+            !format!("{ce:?}").contains("git.example"),
+            "engine error text must not be surfaced: {ce:?}"
+        );
+    }
+
+    /// DESIGN §3.3 "Limits on talking to a remote": a sync or listing that ran
+    /// past its deadline is an outage, `503`, and the engine text (which names
+    /// the remote) is logged, not surfaced.
+    #[test]
+    fn remote_timed_out_maps_to_service_unavailable_503() {
+        let ce: CanonicalError = DomainError::RemoteTimedOut {
+            message: "ls-refs did not finish within 30 s at git.example".to_owned(),
+        }
+        .into();
+        assert_eq!(ce.status_code(), 503);
+        assert!(
+            matches!(ce, CanonicalError::ServiceUnavailable { .. }),
+            "expected ServiceUnavailable, got {ce:?}"
+        );
+        assert!(
+            !format!("{ce:?}").contains("git.example"),
+            "engine error text must not be surfaced: {ce:?}"
+        );
+    }
+
+    /// DESIGN §3.3 "Limits on talking to a remote": a repository past the byte
+    /// budget is its own property, not an outage — `400`, never `503`, with
+    /// the engine numbers kept out of the answer.
+    #[test]
+    fn sync_budget_exceeded_maps_to_failed_precondition_400() {
+        let ce: CanonicalError = DomainError::SyncBudgetExceeded {
+            message: "pack grew past max_fetch_bytes (1073741824) at git.example".to_owned(),
+        }
+        .into();
+        assert_eq!(ce.status_code(), 400);
+        assert!(
+            matches!(ce, CanonicalError::FailedPrecondition { .. }),
+            "expected FailedPrecondition, got {ce:?}"
+        );
+        assert!(
+            !format!("{ce:?}")
+                .contains("pack grew past max_fetch_bytes (1073741824) at git.example"),
             "engine error text must not be surfaced: {ce:?}"
         );
     }
@@ -420,7 +556,7 @@ mod tests {
     /// Bumping this without adding a value to that array is a **compile**
     /// error: the array literal would then be one element short of its declared
     /// length. That is the one link in the chain the compiler holds on its own.
-    const DOMAIN_ERROR_VARIANTS: usize = 18;
+    const DOMAIN_ERROR_VARIANTS: usize = 21;
 
     /// One of every `DomainError` variant.
     ///
@@ -469,6 +605,11 @@ mod tests {
             DomainError::RepoNotSynced {
                 repo_id: Uuid::nil(),
                 branch: "main".to_owned(),
+                reason: Some("fetch failed".to_owned()),
+            },
+            DomainError::BranchNotFound {
+                repo_id: Uuid::nil(),
+                branch: "nope".to_owned(),
             },
             DomainError::Validation {
                 field: "name".to_owned(),
@@ -490,13 +631,19 @@ mod tests {
             DomainError::SshKeyNameExists {
                 name: "dup".to_owned(),
             },
-            DomainError::BranchCacheConflict {
-                repo_id: Uuid::nil(),
-            },
             DomainError::Forbidden,
             DomainError::CredStore("sealed".to_owned()),
             DomainError::SyncFailed {
                 message: "fetch failed".to_owned(),
+            },
+            DomainError::CredentialRejected {
+                message: "rejected".to_owned(),
+            },
+            DomainError::RemoteTimedOut {
+                message: "timed out".to_owned(),
+            },
+            DomainError::SyncBudgetExceeded {
+                message: "too big".to_owned(),
             },
             DomainError::Storage("disk full".to_owned()),
             DomainError::database("connection reset"),
@@ -524,18 +671,21 @@ mod tests {
             DomainError::PlanNotFound { .. } => 2,
             DomainError::FileNotFound { .. } => 3,
             DomainError::RepoNotSynced { .. } => 4,
-            DomainError::Validation { .. } => 5,
-            DomainError::ProductPluginUnavailable { .. } => 6,
-            DomainError::RepositoryNameExists { .. } => 7,
-            DomainError::CustomPlanNameExists { .. } => 8,
-            DomainError::ProductNameExists { .. } => 9,
-            DomainError::SshKeyNameExists { .. } => 10,
-            DomainError::BranchCacheConflict { .. } => 11,
+            DomainError::BranchNotFound { .. } => 5,
+            DomainError::Validation { .. } => 6,
+            DomainError::ProductPluginUnavailable { .. } => 7,
+            DomainError::RepositoryNameExists { .. } => 8,
+            DomainError::CustomPlanNameExists { .. } => 9,
+            DomainError::ProductNameExists { .. } => 10,
+            DomainError::SshKeyNameExists { .. } => 11,
             DomainError::Forbidden => 12,
             DomainError::CredStore(_) => 13,
             DomainError::SyncFailed { .. } => 14,
-            DomainError::Storage(_) => 15,
-            DomainError::Database { .. } => 16,
+            DomainError::CredentialRejected { .. } => 15,
+            DomainError::RemoteTimedOut { .. } => 16,
+            DomainError::SyncBudgetExceeded { .. } => 17,
+            DomainError::Storage(_) => 18,
+            DomainError::Database { .. } => 19,
             DomainError::Internal(_) => DOMAIN_ERROR_VARIANTS - 1,
         }
     }

@@ -1,7 +1,6 @@
 //! The contract every QA Platform product plugin implements. See
 //! `gears/qa-platform/docs/features/product-plugins.md`'s "The contract"
-//! section (`PRODUCT-PLUGINS-DESIGN.md` §5, cited here before the docs
-//! squash, no longer exists).
+//! section.
 
 use std::collections::BTreeMap;
 use std::fmt;

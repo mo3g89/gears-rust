@@ -39,12 +39,11 @@ fn new_environment(name: &str, default_branch: Option<&str>) -> NewEnvironment {
     NewEnvironment {
         credentials: std::collections::BTreeMap::new(),
         name: name.to_owned(),
-        // A product is required to store a credential at all since Task 19
-        // (ruling F-13): the key comes from the product's plugin, so a
-        // productless create has nowhere to put the reference.
+        // Required by the type: `NewEnvironment::product_id` is a plain `Uuid`
+        // since Task 20b, so a productless create cannot be constructed.
         product_id: Uuid::from_u128(0x9001),
         description: None,
-        kubeconfig_credstore_ref: Some("credstore://test".to_owned()),
+        kubeconfig_credstore_ref: Some("kc-test".to_owned()),
         kubeconfig: None,
         default_branch: default_branch.map(str::to_owned),
         is_default: false,

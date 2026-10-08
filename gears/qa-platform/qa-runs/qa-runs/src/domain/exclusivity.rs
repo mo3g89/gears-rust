@@ -35,8 +35,8 @@
 //! [`file_declares_exclusive`] (an admitted file always votes), and by
 //! [`combine_nested`]'s fourth branch; legacy has an explicit test forbidding
 //! the collapse (`manager/src/services/exclusivity.rs:656-664`), and it is the
-//! reconciliation `DECOMPOSITION.md:148` flags for
-//! `cpt-cf-qa-fr-runs-exclusivity`.
+//! reconciliation `cpt-cf-qa-fr-runs-exclusivity` needs between the legacy
+//! `bool` and this gear's `Option<bool>`.
 
 use qa_runs_sdk::ExclusiveTier;
 
@@ -140,8 +140,7 @@ pub fn aggregate_test_meta(flags: &[bool]) -> Option<bool> {
 /// prove membership. Fail-open for exclude, fail-closed for include
 /// (`test_meta.rs:89-91`). All three inputs are trimmed and lowercased here so
 /// no caller can normalize one side and forget the other
-/// (`test_meta.rs:86-87`). qa-catalog deliberately leaves this to qa-runs
-/// (`DECOMPOSITION.md:149`).
+/// (`test_meta.rs:86-87`). qa-catalog deliberately leaves this to qa-runs.
 #[must_use]
 pub fn tags_admit(tags: &[String], include_tags: &[String], exclude_tags: &[String]) -> bool {
     fn normalize(values: &[String]) -> Vec<String> {
@@ -166,8 +165,7 @@ pub fn tags_admit(tags: &[String], include_tags: &[String], exclude_tags: &[Stri
 /// *after* tag filtering" (`manager/src/services/exclusivity.rs:160-173`; guide
 /// lines 47-49).
 ///
-/// The `Option<bool>` -> `bool` reconciliation flagged in DECOMPOSITION 2.2
-/// (`DECOMPOSITION.md:148`) lives on the last line. The source system's
+/// The `Option<bool>` -> `bool` reconciliation lives on the last line. The source system's
 /// per-file parser returns `bool`, where a missing `exclusive` key is `false`
 /// (`manager/src/services/test_meta.rs:42-54`, its test at `:138-142`), so an
 /// admitted file **always votes** and votes `false` when it declared nothing
@@ -389,8 +387,7 @@ mod tests {
         assert_eq!(r.tier, ExclusiveTier::TestMeta);
     }
 
-    /// The tier reconciliation DECOMPOSITION 2.2 flags (`DECOMPOSITION.md:148`):
-    /// an explicit all-parallel answer from `TEST_META` must report the
+    /// The tier reconciliation: an explicit all-parallel answer from `TEST_META` must report the
     /// `TestMeta` tier, not `Default`. Legacy asserts this directly
     /// (`manager/src/services/exclusivity.rs:722-730`).
     #[test]

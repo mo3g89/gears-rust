@@ -33,7 +33,7 @@ use crate::domain::service::{
 use crate::domain::system_actor;
 use crate::infra::bundle_store::LocalFsBundleStore;
 use crate::infra::fs::create_private_dir_all;
-use crate::infra::git::GixSyncEngine;
+use crate::infra::git::{GixSyncEngine, SyncLimits};
 use crate::domain::ports::metrics::{BundleDownloadMetrics, PluginResolutionMetrics};
 use crate::infra::metrics::build_default_adapter;
 use crate::infra::storage::{
@@ -120,12 +120,17 @@ impl Gear for QaCatalog {
     async fn init(&self, ctx: &GearCtx) -> anyhow::Result<()> {
         let cfg: QaCatalogConfig = ctx.config_or_default()?;
         debug!(
-            "Loaded qa-catalog config: repos_dir={}, bundles_dir={}, bundle_ttl_seconds={}, branch_refresh_interval_seconds={}, branch_freshness_ttl_seconds={}",
+            "Loaded qa-catalog config: repos_dir={}, bundles_dir={}, bundle_ttl_seconds={}, branch_refresh_interval_seconds={}, branch_freshness_ttl_seconds={}, remote_failure_backoff_seconds={}, sync_timeout_seconds={}, ls_refs_timeout_seconds={}, max_fetch_bytes={}, max_checkout_bytes={}",
             cfg.repos_dir,
             cfg.bundles_dir,
             cfg.bundle_ttl_seconds,
             cfg.branch_refresh_interval_seconds,
-            cfg.branch_freshness_ttl_seconds
+            cfg.branch_freshness_ttl_seconds,
+            cfg.remote_failure_backoff_seconds,
+            cfg.sync_timeout_seconds,
+            cfg.ls_refs_timeout_seconds,
+            cfg.max_fetch_bytes,
+            cfg.max_checkout_bytes
         );
         // The one loud signal for an unset download signing secret. It is
         // fail-closed at request time -- `BundlesService::verify_download_
@@ -178,7 +183,12 @@ impl Gear for QaCatalog {
 
         // Infra ports (ADR-0005 gix engine; local-fs bundle store, which
         // creates its own directory owner-only).
-        let sync_engine: Arc<dyn RepoSyncPort> = Arc::new(GixSyncEngine);
+        let sync_engine: Arc<dyn RepoSyncPort> = Arc::new(GixSyncEngine::new(SyncLimits {
+            sync_timeout: Duration::from_secs(cfg.sync_timeout_seconds),
+            ls_refs_timeout: Duration::from_secs(cfg.ls_refs_timeout_seconds),
+            max_fetch_bytes: cfg.max_fetch_bytes,
+            max_checkout_bytes: cfg.max_checkout_bytes,
+        }));
         let bundle_store: Arc<dyn BundleStore> =
             Arc::new(LocalFsBundleStore::new(&cfg.bundles_dir).map_err(|e| {
                 anyhow::anyhow!(
@@ -243,9 +253,12 @@ impl Gear for QaCatalog {
                 // still called exactly once -- see
                 // `init_installs_exactly_one_metrics_adapter_into_the_plugin_registry`.
                 bundle_download_metrics: metrics as Arc<dyn BundleDownloadMetrics>,
-                sync_cache: Arc::new(SyncCache::new(Duration::from_secs(
-                    cfg.branch_freshness_ttl_seconds,
-                ))),
+                sync_cache: Arc::new(
+                    SyncCache::new(Duration::from_secs(cfg.branch_freshness_ttl_seconds))
+                        .with_failure_backoff(Duration::from_secs(
+                            cfg.remote_failure_backoff_seconds,
+                        )),
+                ),
             },
         ));
 
@@ -319,11 +332,10 @@ impl QaCatalog {
     /// the runtime sees an abort.
     ///
     /// **No cluster-wide leader election** — deliberately: both jobs are
-    /// idempotent (a branch refresh converges to the same cache and a
-    /// concurrent duplicate at worst surfaces a retryable
-    /// `BranchCacheConflict`; expired-bundle deletes are idempotent), so
-    /// multiple replicas running them concurrently waste a little work but
-    /// never corrupt state.
+    /// idempotent (a branch refresh is an idempotent diff, so a concurrent
+    /// duplicate converges to the same cache; expired-bundle deletes are
+    /// idempotent), so multiple replicas running them concurrently waste a
+    /// little work but never corrupt state.
     ///
     /// # Errors
     /// Returns `Err` only if a spawned ticker task panics / aborts

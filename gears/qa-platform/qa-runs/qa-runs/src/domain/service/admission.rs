@@ -132,9 +132,8 @@ use crate::domain::repos::{NewQueueRow, QueueRepository, RunsRepository};
 /// two replicas hold two counters and both can pass a cap of one. Closing that
 /// needs the reservations to be durable, which is a schema change; a distributed
 /// lock around the read would not do it, for the reason in the first paragraph.
-/// The frozen guide scopes the promise the same way — *"admission correctness
-/// assumes a **single manager replica**"*
-/// (`exclusive-runs-and-the-queue.md`, Known limitations) — and
+/// The legacy guide scopes the promise the same way — *"admission correctness
+/// assumes a **single manager replica**"* — and
 /// [`PlatformLocks`] records the same limit for the platform half.
 #[derive(Default)]
 pub(in crate::domain::service) struct GlobalCapGate {

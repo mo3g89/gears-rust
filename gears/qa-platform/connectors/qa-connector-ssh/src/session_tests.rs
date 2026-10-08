@@ -1,6 +1,6 @@
 use credstore_sdk::SecretValue;
 
-use super::{SshSession, SshTarget, argv_for_parts};
+use super::{MAX_STDOUT_BYTES, SshSession, SshTarget, argv_for_parts, read_capped};
 use crate::test_support::SshdFixture;
 use crate::{HOST_KEY_VERIFICATION_OPTIONS, SshFailure};
 
@@ -344,5 +344,57 @@ async fn dropping_the_identity_file_from_the_argv_breaks_authentication() {
         "IdentitiesOnly=yes without IdentityFile must NOT authenticate with the agent key -- \
          if this ever passes, the pairing is no longer load-bearing and `transport_options` \
          should be revisited"
+    );
+}
+
+/// The reader stops one byte past the cap and refuses — it never buffers the
+/// rest. Finite fixture: `MAX_STDOUT_BYTES + 1 MiB` bytes from `repeat`.
+#[tokio::test]
+async fn output_past_the_cap_is_refused_not_buffered() {
+    use tokio::io::AsyncReadExt as _;
+    let source = tokio::io::repeat(b'x').take(MAX_STDOUT_BYTES + 1024 * 1024);
+    let outcome = read_capped(source, MAX_STDOUT_BYTES).await;
+    assert!(
+        matches!(outcome, Err(SshFailure::OutputTooLarge)),
+        "{:?}",
+        outcome.map(|out| out.len())
+    );
+}
+
+#[tokio::test]
+async fn output_at_the_cap_is_returned_whole() {
+    use tokio::io::AsyncReadExt as _;
+    let len = usize::try_from(MAX_STDOUT_BYTES).unwrap();
+    let source = tokio::io::repeat(b'x').take(MAX_STDOUT_BYTES);
+    let out = read_capped(source, MAX_STDOUT_BYTES)
+        .await
+        .expect("at the cap is allowed");
+    assert_eq!(out.len(), len);
+}
+
+/// End to end against the sshd fixture: a remote command that prints past the
+/// cap is `OutputTooLarge`, promptly. Finite: 2 MiB from `head`.
+#[tokio::test]
+async fn a_command_printing_past_the_cap_is_refused() {
+    let Some(fixture) = SshdFixture::start() else {
+        return; // no sshd on this host; the fixture said so
+    };
+    let key = SecretValue::from(fixture.client_key_pem().to_owned());
+    let session = SshSession::open(target(&fixture), &key).expect("session");
+
+    let started = std::time::Instant::now();
+    let outcome = session.exec("head -c 2097152 /dev/zero").await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(outcome, Err(SshFailure::OutputTooLarge)),
+        "{:?}",
+        outcome.map(|out| out.len())
+    );
+    // Promptly, not by waiting out `DEFAULT_TIMEOUT` (60 s): the over-cap
+    // read returns at once and dropping the child kills it.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "took {elapsed:?}"
     );
 }

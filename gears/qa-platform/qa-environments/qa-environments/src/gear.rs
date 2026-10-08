@@ -1,7 +1,6 @@
 //! Composition root: `#[toolkit::gear]` bootstrap, `Gear::init`, the
 //! `DatabaseCapability`/`RestApiCapability` implementations, and the stateful
-//! lifecycle entry (`serve`) hosting the background observation ticker
-//! (Task 8).
+//! lifecycle entry (`serve`) hosting the background observation ticker.
 
 use std::sync::{Arc, OnceLock};
 
@@ -129,9 +128,8 @@ impl Gear for QaEnvironments {
         // is absent altogether — still boots, and fails only where the
         // capability is actually needed, on one environment's observation,
         // with text on that environment's row saying so. See
-        // `infra::product_plugin`'s module doc, and ruling D-14, which
-        // `qa-catalog` applied to its own types-registry client for the same
-        // reason.
+        // `infra::product_plugin`'s module doc; `qa-catalog` resolves its own
+        // types-registry client lazily for the same reason.
         let product_plugins: Arc<dyn ProductPluginPort> =
             Arc::new(HubProductPluginResolver::new(ctx.client_hub()));
 
@@ -166,6 +164,7 @@ impl Gear for QaEnvironments {
             Some(observation_metrics),
             Some(metrics),
             cfg.max_variables,
+            cfg.observation.effective_observe_timeout(),
         ));
 
         self.service
@@ -220,7 +219,7 @@ impl RestApiCapability for QaEnvironments {
 impl QaEnvironments {
     /// Lifecycle entry (`stateful` capability). Delegates to
     /// [`Self::serve_with_services`], which spawns the background
-    /// observation ticker (Task 8) unless `qa-environments.observation.enabled`
+    /// observation ticker unless `qa-environments.observation.enabled`
     /// says not to — unconditionally, in every build, since Task 19b. See that
     /// method's own doc for why there is no longer a cargo-feature branch
     /// here to describe.

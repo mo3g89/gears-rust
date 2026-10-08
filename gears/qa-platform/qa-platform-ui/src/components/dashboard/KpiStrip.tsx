@@ -94,8 +94,7 @@ export function KpiStrip({
   // health now HAS a source (the cluster-health design), and `EnvironmentsStrip`
   // below renders the full healthy/degraded/unhealthy/unreachable breakdown.
   // A KPI tile would restate one slice of that card a few pixels above it, so
-  // it stays out on redundancy grounds rather than for want of data — see
-  // REMOVED-SURFACES.md (Task 8a C3).
+  // it stays out on redundancy grounds rather than for want of data.
   return (
     <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
       <KpiCard

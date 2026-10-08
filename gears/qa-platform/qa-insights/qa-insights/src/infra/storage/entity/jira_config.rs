@@ -1,8 +1,8 @@
 //! `SeaORM` entity for the `qa_jira_config` table.
 //!
 //! One row per tenant. Legacy `JiraConfig` (`manager/src/models.rs:678-685`),
-//! which lives as a JSON bag in an untyped `settings` table; D6 replaces the
-//! bag with typed columns and keeps the same GET/PUT surface.
+//! which lives as a JSON bag in an untyped `settings` table; this gear replaces
+//! the bag with typed columns and keeps the same GET/PUT surface.
 
 use sea_orm::entity::prelude::*;
 use time::OffsetDateTime;

@@ -1,4 +1,4 @@
-//! qa-environments-internal "system actor" `SecurityContext` factory.
+//! qa-environments-internal "system actor" `SecurityContext` factories.
 //!
 //! The background observation ticker (Task 8, `crate::gear`'s
 //! `observation_ticker`) has no end-user `SecurityContext` to forward, but its
@@ -6,8 +6,9 @@
 //! reading its `VPADM_NAMESPACE` variable, persisting what it observed —
 //! still runs through the exact same PEP-enforced service layer as every
 //! other caller (`EnvironmentsService::observe_environment`,
-//! `EnvironmentsService::run_observation_cycle`). This factory mints the
-//! identity that work uses.
+//! `EnvironmentsService::run_observation_cycle`). These factories mint the
+//! identity that work uses, and the identity every read of an environment's
+//! credential uses, on a request as much as in the background.
 //!
 //! Structure copied from `qa-runs`' and `qa-insights`' `domain::system_actor`
 //! modules, which trace back to `qa-catalog`'s and, before that, the
@@ -37,10 +38,11 @@
 //! authorize. That sidesteps the failure mode the paragraph above names: an
 //! operator who has not granted this gear's system actor a cross-tenant PDP
 //! policy still gets a working self-heal ticker, rather than one that silently
-//! evaluates zero environments forever. [`for_observation`] is this module's only
-//! factory because it is the only context anything in this gear's background
-//! work ever needs: one per environment, bound to the tenant
-//! `list_all_with_tenant` paired that environment with.
+//! evaluates zero environments forever. [`for_observation`] is the
+//! per-environment context of that background work, bound to the tenant
+//! `list_all_with_tenant` paired that environment with; [`for_credential_read`]
+//! is the one identity every credential read uses, background or not, so a
+//! refresh cannot succeed on a secret the cycle cannot read.
 
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
@@ -97,6 +99,37 @@ pub fn for_observation(tenant_id: Uuid) -> SecurityContext {
         .expect("QA_ENVIRONMENTS_SYSTEM_ACTOR_UUID + tenant_id are always present")
 }
 
+/// The credential-store read of an environment's credential, on every path
+/// that resolves one: an observation (refresh or cycle) and the runner
+/// `Secret` write (create, update, self-heal). Bound to the tenant that
+/// **owns** the environment, read off its row — the tenant [`for_observation`]
+/// is bound to — never the tenant of the caller, which for a caller whose
+/// scope spans a tenant hierarchy is not the owner.
+///
+/// **Not the caller's identity, on purpose.** The observation cycle reads as
+/// [`for_observation`], which is this gear's system actor; a refresh that read
+/// as the user would see a secret only that user can see — one with `private`
+/// sharing — and observe, while every background cycle failed on the same
+/// environment. The caller is authorized first under its own context.
+///
+/// # Panics
+///
+/// Never in practice: both required builder fields are set unconditionally
+/// below.
+#[must_use]
+#[allow(
+    clippy::expect_used,
+    reason = "both builder fields are statically set, as in for_observation"
+)]
+pub fn for_credential_read(tenant_id: Uuid) -> SecurityContext {
+    SecurityContext::builder()
+        .subject_id(QA_ENVIRONMENTS_SYSTEM_ACTOR_UUID)
+        .subject_type(QA_ENVIRONMENTS_SYSTEM_SUBJECT_TYPE)
+        .subject_tenant_id(tenant_id)
+        .build()
+        .expect("QA_ENVIRONMENTS_SYSTEM_ACTOR_UUID + tenant_id are always present")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +140,14 @@ mod tests {
         let ctx = for_observation(tenant);
         assert_eq!(ctx.subject_tenant_id(), tenant);
         assert_eq!(ctx.subject_id(), QA_ENVIRONMENTS_SYSTEM_ACTOR_UUID);
+    }
+
+    #[test]
+    fn the_credential_read_context_is_the_observation_identity_in_the_tenant_it_was_given() {
+        let tenant = Uuid::new_v4();
+        let ctx = for_credential_read(tenant);
+        assert_eq!(ctx.subject_tenant_id(), tenant);
+        assert_eq!(ctx.subject_id(), QA_ENVIRONMENTS_SYSTEM_ACTOR_UUID);
+        assert_eq!(ctx.subject_type(), for_observation(tenant).subject_type());
     }
 }

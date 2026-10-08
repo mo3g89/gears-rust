@@ -19,8 +19,7 @@
 //! them). Holding the wrapper rather than the bare plugin moves that from a
 //! convention ("`init` remembers to call the checker") to a type-system
 //! fact. [`RegisteredPlugin`]'s own doc comment records why the
-//! free-function form was withdrawn (`PRODUCT-PLUGINS-DESIGN.md` §5.3 was
-//! cited here before the docs squash; that document no longer exists).
+//! free-function form was withdrawn.
 //!
 //! A schema failure therefore leaves `init` as an error and the process does
 //! not come up: a plugin whose `observed_schema` declared a secret would

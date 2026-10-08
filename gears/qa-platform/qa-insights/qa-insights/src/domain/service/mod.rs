@@ -47,37 +47,54 @@
 //!   said "callable and tested, not yet ticked or wired onto [`AppServices`]"
 //!   until then, and that struct's field doc records the forecast being
 //!   discharged. `crate::gear`'s `jira_poller_ticker` is the loop.
-//! * [`notify`] — the notification service: settings CRUD, the audit log,
-//!   the test/preview surfaces and the send-once path over
-//!   `domain::notify::routing`/`domain::notify::render` (Tasks 36-38). It
-//!   **is** a field of [`AppServices`], generic over `N: NotifyRepository`
-//!   exactly like every other repository parameter here — unlike
-//!   [`jira_poller`], it has a REST caller in this same task (the four
-//!   `/qa/v1/settings/notifications*` routes), so it could not wait for Task
-//!   40 the way a purely-ticked service can. Its two egress ports are real
-//!   `ServiceDeps` fields (`slack_client`, `mail_client`), and **Task 40 bound
-//!   the real adapters** (`infra::notify::SlackOagwClient`,
-//!   `infra::notify::UnsupportedMailClient`) in place of the inert stand-ins
-//!   `gear.rs` carried from Task 38's fix round 1 (R103).
+//! * [`notify`] — the notification service: settings CRUD, the audit log, the
+//!   test/preview surfaces and the send-once path over
+//!   `domain::notify::routing`/`domain::notify::render`. It **is** a field of
+//!   [`AppServices`], generic over `N: NotifyRepository` exactly like every
+//!   other repository parameter here — unlike [`jira_poller`], it has a REST
+//!   caller in this same task (the four `/qa/v1/settings/notifications*`
+//!   routes), so it could not wait for Task 40 the way a purely-ticked service
+//!   can. Its two egress ports are real `ServiceDeps` fields (`slack_client`,
+//!   `mail_client`). Task 40 bound real adapters in place of the inert stand-ins
+//!   `gear.rs` carried from Task 38's fix round 1; today `gear.rs` binds
+//!   `infra::notify::SlackOagwClient` for Slack and, for email,
+//!   `infra::notify::SmtpMailClient` or — with `smtp_allowed_hosts` empty —
+//!   `infra::notify::UnsupportedMailClient`.
 //! * [`tenants`] — which tenants the three tickers work on, Task 40. The only
 //!   service here with no request-scoped caller at all, and the only place in
 //!   the crate that compiles a scope for a nil-tenant actor; its own header
 //!   carries why, what it costs, and why the plan's first candidate for the
 //!   question could not work.
 //!
-//! **Still to come, at the end of Phase C**: nothing calls
-//! [`notify::NotifyService::notify_run_completed`]. The send path, its claim
-//! lifecycle and its audit log all ship and are tested, but no producer routes
-//! a `run.canceled` / `run.queue_expired` / `schedule.fired` event into it. A
-//! transactional broker consumer's routing table skipped all three through
-//! Task 40, on the grounds that Task 40's charter was binding what exists, not
-//! adding a routing arm and the per-schedule settings port R104 says it would
-//! need; that consumer and the event-broker dependency it needed were deleted
-//! once it was established that no deployment ever registered the client it
-//! needed (`crate::gear`'s header). Wiring this producer now needs a source for
-//! those three events that is not a broker route, which is a design question
-//! this deletion did not answer — recorded in `crate`'s own header beside the
-//! other two release-gate items.
+//! # `notify_run_completed` has a producer; the three *other* alerts still do
+//! # not
+//!
+//! **This section used to say "Still to come, at the end of Phase C: nothing
+//! calls [`notify::NotifyService::notify_run_completed`]", and half of that
+//! is no longer true.** [`reconcile::ReconcileService::reproject`] calls it
+//! once a run's projection has committed — see that method's "Notification,
+//! after the commit" — which makes the reconcile sweep the producer for the
+//! run-completed alert, over the only terminal transition this gear can
+//! actually observe. [`notify::RunCompletionNotifier`] is the seam.
+//!
+//! What has **not** changed is everything that is not a run completing —
+//! except that it is no longer routed here either. `domain::notify::routing`
+//! also routed `Queued`, `QueueExpired` and `ScheduledRun`, and no service
+//! method in this module ever raised any of them: there is no
+//! `notify_queue_event` here, and nothing sources a `run.queue_expired` or
+//! `schedule.fired` event. A transactional broker consumer's routing table
+//! skipped all three through Task 40, on the grounds that Task 40's charter
+//! was binding what exists; that consumer and the event-broker dependency it
+//! needed were deleted once it was established that no deployment ever
+//! registered the client it needed (`crate::gear`'s header). **The three
+//! routing arms were then deleted too**, on the owner's ruling — they still
+//! needed a source that is not a broker route, which is a design question a
+//! dead routing arm did not answer and a dead test did not guard.
+//!
+//! The distinction matters because the run-completed path is the one the PRD
+//! states as a MUST (5.5 "Insights", `cpt-cf-qa-fr-insights-notifications` —
+//! "notify on run outcomes"); the queue and schedule alerts are legacy
+//! behaviour this gear inherited a router for and never had a caller for.
 //!
 //! # Two callers do not compile their `AccessScope` from the PEP, and neither
 //! # is a shortcut
@@ -241,7 +258,7 @@ pub(in crate::domain::service) fn emit(silenced: &AtomicBool, record: impl FnOnc
 /// preserving the domain variant instead of flattening it to a database error.
 /// `gear::init` has built the provider this way since Task 9; this alias is the
 /// name the service layer uses for it.
-pub(crate) type DbProvider = DBProvider<DomainError>;
+pub type DbProvider = DBProvider<DomainError>;
 
 /// Authorization resource types and their PEP-supported properties.
 ///
@@ -254,7 +271,7 @@ pub(crate) type DbProvider = DBProvider<DomainError>;
 /// ([`resources::JIRA_CONFIG`]) and Task 33 the fourth
 /// ([`resources::JIRA_BUG`]); Tasks 36-39 add `qa.notification_config` when
 /// they compile their first scope.
-pub(crate) mod resources {
+pub mod resources {
     use super::ResourceType;
     use toolkit_gts::gts_id;
     use toolkit_security::pep_properties;
@@ -497,7 +514,7 @@ pub(crate) mod resources {
 /// never reaches the PDP, which is why it keeps working under the shipped
 /// `static-authz-plugin` — see [`ingest`]'s header. A deployment that grants
 /// nothing at all still ingests; it simply has no rebuild.
-pub(crate) mod actions {
+pub mod actions {
     /// Read a set of result rows, or an aggregate over one.
     ///
     /// Task 17's two `OData` collections over both result tables, and — from Task
@@ -642,15 +659,16 @@ pub(crate) mod actions {
 /// `qa_test_results` / `qa_test_case_results` rows, silently double-counting in
 /// every dashboard and analytics read Tasks 18-27 build on top.
 ///
-/// Ruling R2's own justification — *"`upsert_run_results` already fails closed
-/// via `validate_tenant_in_scope`"* — is true of the tenant and of nothing else.
-/// R2 exists to let a *narrower* request-scoped scope through, and a narrower
-/// scope is exactly the input that double-writes, so the guard belongs at every
-/// request-scoped writer that shares `upsert_run_results`' shape: a bulk
-/// insert or delete run through `.scope_unchecked(scope)` (or otherwise not
-/// filtered by the *full* compiled scope on every statement it performs),
-/// where a narrower-than-tenant scope can reach the table but not every
-/// statement that writes to it applies the narrowing.
+/// The justification for letting a request-scoped scope reach this writer at
+/// all — *"`upsert_run_results` already fails closed via
+/// `validate_tenant_in_scope`"* — is true of the tenant and of nothing else.
+/// That allowance exists to let a *narrower* request-scoped scope through, and
+/// a narrower scope is exactly the input that double-writes, so the guard
+/// belongs at every request-scoped writer that shares `upsert_run_results`'
+/// shape: a bulk insert or delete run through `.scope_unchecked(scope)` (or
+/// otherwise not filtered by the *full* compiled scope on every statement it
+/// performs), where a narrower-than-tenant scope can reach the table but not
+/// every statement that writes to it applies the narrowing.
 ///
 /// **Stated by shape, not by task number — corrected in the Phase B fix wave
 /// (Finding 4).** This used to say "Tasks 28, 33 and 38 add three more such
@@ -729,7 +747,7 @@ pub(crate) mod actions {
 /// # Errors
 ///
 /// [`DomainError::UnsupportedScope`], naming `resource`.
-pub(crate) fn refuse_scope_beyond_tenant(
+pub fn refuse_scope_beyond_tenant(
     scope: &AccessScope,
     resource: &'static str,
 ) -> Result<(), DomainError> {
@@ -794,7 +812,7 @@ pub(crate) fn refuse_scope_beyond_tenant(
 /// the argument holding rather than being outgrown — and the running count in
 /// this paragraph keeps going stale, which is why it now carries the date it was
 /// measured.)
-pub(crate) struct ServiceDeps {
+pub struct ServiceDeps {
     pub(crate) db: Arc<DbProvider>,
     pub(crate) authz: Arc<dyn AuthZResolverApi>,
     /// The qa-runs reads, behind [`RunsReader`]. `infra::clients::QaRunsReader`
@@ -846,20 +864,16 @@ pub(crate) struct ServiceDeps {
     /// `runs_launcher` are sibling gears and `clock` is the process's own — which
     /// is why its adapter, not this struct, carries the egress argument.
     pub(crate) jira_client: Arc<dyn JiraClient>,
-    /// The outbound Slack egress, behind [`SlackClient`]. Task 39's
-    /// `infra::slack::SlackOagwClient` in production once it exists;
-    /// `gear.rs`'s own `NeverWiredSlackClient` stand-in until then (R103) —
-    /// see that type's doc for why the stand-in lives in `gear.rs` rather
-    /// than in `domain::service::notify`.
+    /// The outbound Slack egress, behind [`SlackClient`]:
+    /// `infra::notify::SlackOagwClient` in production, bound in `gear.rs`.
     ///
     /// **Added by Task 38, fix round 1.** [`notify::NotifyService`]'s only
     /// reader.
     pub(crate) slack_client: Arc<dyn SlackClient>,
-    /// The outbound email egress, behind [`MailClient`]. D10 defers the
-    /// real send indefinitely, so `gear.rs`'s stand-in
-    /// (`NeverWiredMailClient`) is not only a placeholder for a future
-    /// adapter the way [`Self::slack_client`]'s is — see that module's own
-    /// header.
+    /// The outbound email egress, behind [`MailClient`]: `gear.rs`'s
+    /// `mail_client` binds `infra::notify::SmtpMailClient` when
+    /// `smtp_allowed_hosts` is non-empty and `UnsupportedMailClient`, which
+    /// fails every send, when it is empty (ADR-0011).
     ///
     /// **Added by Task 38, fix round 1.**
     pub(crate) mail_client: Arc<dyn MailClient>,
@@ -1002,7 +1016,7 @@ pub(crate) struct ServiceDeps {
 /// `OrmJiraRepository` is a fourth unit struct beside `OrmResultsRepository`,
 /// `OrmSavedViewsRepository` and `OrmCollectRepository`.
 #[domain_model]
-pub(crate) struct AppServices<R, W, V, C, J, N>
+pub struct AppServices<R, W, V, C, J, N>
 where
     R: ResultsRepository + Clone + 'static,
     W: WatermarkRepository + Clone + 'static,
@@ -1036,27 +1050,27 @@ where
     /// [`Self::analytics`]: both hold a [`CollectRepository`], and [`analytics`]
     /// reads the table this writes.
     pub(crate) collect: Arc<collect::CollectService<C>>,
-    /// The JIRA settings surface and outbound status read (Task 32), plus the
-    /// bug registry's list and filing path (Task 33). See [`jira`]'s header
+    /// The JIRA settings surface and outbound status read, plus the
+    /// bug registry's list and filing path. See [`jira`]'s header
     /// for the five defaults and clamps the settings half owns, and for why
-    /// the poller (Task 35) is not here.
+    /// the poller is not here.
     pub(crate) jira: Arc<jira::JiraService<J, R>>,
     /// The notification settings surface, the audit log, and the send-once
-    /// path (Task 38). Generic over `N` — a sixth repository parameter
+    /// path. Generic over `N` — a sixth repository parameter
     /// alongside `J`, [`crate::domain::service::jira::JiraService`]'s own
     /// reason: [`NotifyRepository`]'s methods are generic over the `DBRunner`
     /// they run on, so the trait is not object-safe.
     ///
-    /// **Fix round 1, ruling R103.** A first draft named
+    /// **Fix round 1.** A first draft named
     /// `crate::infra::storage::notify_sea_repo::OrmNotifyRepository` directly
     /// here instead of adding `N`, to avoid touching `gear.rs`'s
     /// `ConcreteAppServices` alias. That broke the rule the alias's own doc
-    /// states — "the domain layer must not know which repository
-    /// implementation a deployment uses" — for a mechanical, one-line fix
-    /// `gear.rs` was always the right place for. Corrected: `N` joins `R`,
-    /// `W`, `V`, `C` and `J` as a plain generic parameter, and `gear.rs`
-    /// names `OrmNotifyRepository` as `ConcreteAppServices`'s sixth argument,
-    /// exactly as it already names the other five.
+    /// states — "the domain layer must not know which repository implementation
+    /// a deployment uses" — for a mechanical, one-line fix `gear.rs` was always
+    /// the right place for. Corrected: `N` joins `R`, `W`, `V`, `C` and `J` as
+    /// a plain generic parameter, and `gear.rs` names `OrmNotifyRepository` as
+    /// `ConcreteAppServices`'s sixth argument, exactly as it already names the
+    /// other five.
     pub(crate) notify: Arc<notify::NotifyService<N>>,
     /// The JIRA poller's one pass, Task 35 — **a field since Task 40**.
     ///
@@ -1176,10 +1190,10 @@ where
             deps.jira_client,
             enforcer.clone(),
         ));
-        // Task 38's field, following every sibling repository's shape now
-        // (fix round 1, R103): `notify_repo` arrives the same way
-        // `jira_repo` does, and the two egress ports arrive from `deps`,
-        // the same way `jira_client` does.
+        // Task 38's field, following every sibling repository's shape now (fix
+        // round 1): `notify_repo` arrives the same way `jira_repo` does, and
+        // the two egress ports arrive from `deps`, the same way `jira_client`
+        // does.
         let notify_service = Arc::new(notify::NotifyService::new(
             Arc::clone(&deps.db),
             notify_repo,
@@ -1201,7 +1215,6 @@ where
         let tenants = Arc::new(tenants::TenantDirectory::new(
             Arc::clone(&deps.db),
             results.clone(),
-            enforcer.clone(),
         ));
         let reconcile = Arc::new(reconcile::ReconcileService::new(
             deps.db,
@@ -1209,6 +1222,14 @@ where
             watermarks,
             deps.runs,
             ingest,
+            // The run's terminal transition is where a completion
+            // notification belongs, and the sweep is the only thing in this
+            // gear that observes one — see `reconcile::ReconcileService::reproject`'s
+            // "Notification, after the commit". The *same* `NotifyService` the
+            // settings surface uses, not a second one: the claim table is
+            // shared state and two services over it would be two caches of
+            // nothing plus two of everything else.
+            Arc::clone(&notify_service) as Arc<dyn notify::RunCompletionNotifier>,
             enforcer,
             deps.reconcile_lookback,
             deps.reconcile_page_size,

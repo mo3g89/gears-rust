@@ -39,6 +39,13 @@ pub(crate) const H_ENDPOINT_PORT: &str = "x-oagw-internal-endpoint-port";
 pub(crate) const H_ENDPOINT_SCHEME: &str = "x-oagw-internal-endpoint-scheme";
 pub(crate) const H_INSTANCE_URI: &str = "x-oagw-internal-instance-uri";
 pub(crate) const H_RESOLVED_ADDR: &str = "x-oagw-internal-resolved-addr";
+/// The resolved upstream's alias — what the proxy logs name instead of the
+/// request path.
+pub(crate) const H_UPSTREAM_ALIAS: &str = "x-oagw-internal-upstream-alias";
+/// The matched route's path **pattern** (e.g. `/services`), never the request
+/// path: a request's path suffix can itself be a credential (a Slack
+/// incoming-webhook URL's path is), so logs carry the pattern only.
+pub(crate) const H_ROUTE_PATH: &str = "x-oagw-internal-route-path";
 
 use super::HOP_BY_HOP_HEADERS;
 
@@ -481,6 +488,11 @@ pub struct ProxyCtx {
     instance_uri: String,
     /// Upstream that owns this endpoint (for diagnostic logs).
     upstream_id: Option<Uuid>,
+    /// The upstream's alias (for diagnostic logs).
+    upstream_alias: String,
+    /// The matched route's path pattern (for diagnostic logs) — never the
+    /// request path; see [`H_ROUTE_PATH`].
+    route_path: String,
     /// Pre-resolved socket address from the load balancer's DNS cache.
     /// When set, `upstream_peer` skips DNS and connects directly.
     resolved_addr: Option<std::net::SocketAddr>,
@@ -516,6 +528,12 @@ impl ProxyCtx {
         if let Some(v) = headers.get(H_UPSTREAM_ID).and_then(|v| v.to_str().ok()) {
             self.upstream_id = v.parse().ok();
         }
+        if let Some(v) = headers.get(H_UPSTREAM_ALIAS).and_then(|v| v.to_str().ok()) {
+            self.upstream_alias = v.to_string();
+        }
+        if let Some(v) = headers.get(H_ROUTE_PATH).and_then(|v| v.to_str().ok()) {
+            self.route_path = v.to_string();
+        }
         if let Some(v) = headers.get(H_RESOLVED_ADDR).and_then(|v| v.to_str().ok()) {
             self.resolved_addr = v.parse().ok();
         }
@@ -532,6 +550,8 @@ impl Default for ProxyCtx {
             },
             instance_uri: String::new(),
             upstream_id: None,
+            upstream_alias: String::new(),
+            route_path: String::new(),
             resolved_addr: None,
         }
     }
@@ -890,13 +910,21 @@ impl ProxyHttp for PingoraProxy {
         _digest: Option<&Digest>,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<()> {
-        info!(
-            reused,
-            peer = %peer,
-            instance = %ctx.instance_uri,
-            "Connected to upstream"
-        );
+        log_connected(reused, peer, ctx);
         Ok(())
+    }
+
+    /// The request description pingora itself appends to **its own** error
+    /// and retry logs ("Fail to proxy: …, {summary}" in `pingora-proxy`'s
+    /// `lib.rs`, `handle_error`, and the body-forwarding warnings in
+    /// `proxy_h1`/`proxy_h2`/`proxy_custom`). Pingora's default is the
+    /// downstream request line — `"{method} {path}, Host: {host}"` — and the
+    /// in-process bridge writes the upstream request's path, route plus
+    /// suffix, into that line, so the default would log the suffix at ERROR
+    /// on every failed request. This names the method, the upstream alias and
+    /// the route pattern instead — see "Request logs" below.
+    fn request_summary(&self, session: &Session, ctx: &Self::CTX) -> String {
+        request_summary_line(session.req_header().method.as_str(), ctx)
     }
 
     /// Log request summary with timing. (D3)
@@ -904,7 +932,7 @@ impl ProxyHttp for PingoraProxy {
         &self,
         session: &mut Session,
         e: Option<&pingora_core::Error>,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) {
         let status = session
             .as_downstream()
@@ -912,13 +940,82 @@ impl ProxyHttp for PingoraProxy {
             .map(|r| r.status.as_u16())
             .unwrap_or(0);
         let method = session.req_header().method.as_str();
-        let path = session.req_header().uri.path();
+        log_summary(
+            method,
+            status,
+            e.map(|err| err as &dyn std::fmt::Display),
+            ctx,
+        );
+    }
+}
 
-        if let Some(err) = e {
-            warn!(method, path, status, error = %err, "Proxy request failed");
+// ---------------------------------------------------------------------------
+// Request logs (D3) — the route pattern and alias, never the request path
+// ---------------------------------------------------------------------------
+//
+// A request's path suffix can itself be a credential: a Slack incoming
+// webhook's secret *is* its URL path, and a consumer proxying one hands it to
+// this gateway as the suffix. So neither log below carries the request path or
+// `instance_uri` (the full `/<alias>/<suffix>` proxy URI). They name the
+// upstream (id and alias) and the matched route's path **pattern**, which is
+// what the metrics already label by (`http.route`), plus method, status and
+// error as before. `instance_uri` still reaches the caller in problem
+// details; it is only kept out of logs.
+//
+// pingora's own error and retry lines append `ProxyHttp::request_summary`,
+// which `PingoraProxy` overrides for the same reason. **Residual:** pingora
+// also dumps the whole request header at DEBUG/TRACE (`pingora_proxy`'s
+// "Request header: …" trace and `proxy_h1`/`proxy_h2`'s "Sending header to
+// upstream {req:?}" debug). Those are not hooks and cannot be overridden, so a
+// deployment that raises the `pingora_*` targets above `info` logs request
+// paths; keep them at `info` or below.
+//
+// **Second named residual:** pingora-core 0.8.0 logs its `InvalidHTTPHeader`
+// parse error at ERROR with the raw request buffer, path included
+// (`protocols/http/v1/server.rs`, the header-parse failure branch). It fires
+// before any hook runs, so it cannot be overridden or filtered here. It is
+// unreachable from qa-insights' fixed header set and the plugin-free Slack
+// route, but another consumer that sends a malformed request with a credential
+// in its path would leak it.
+
+/// What [`PingoraProxy::request_summary`] returns: method, upstream alias and
+/// route pattern — no path, no query. `-` for a field the request never got as
+/// far as resolving.
+fn request_summary_line(method: &str, ctx: &ProxyCtx) -> String {
+    let or_dash = |s: &str| {
+        if s.is_empty() {
+            "-".to_owned()
         } else {
-            info!(method, path, status, "Proxy request completed");
+            s.to_owned()
         }
+    };
+    format!(
+        "{method} upstream={} route={}",
+        or_dash(&ctx.upstream_alias),
+        or_dash(&ctx.route_path)
+    )
+}
+
+/// "Connected to upstream". `peer` is the socket address and SNI host.
+fn log_connected(reused: bool, peer: &dyn std::fmt::Display, ctx: &ProxyCtx) {
+    info!(
+        reused,
+        peer = %peer,
+        upstream_id = ?ctx.upstream_id,
+        upstream = %ctx.upstream_alias,
+        route = %ctx.route_path,
+        "Connected to upstream"
+    );
+}
+
+/// "Proxy request completed" / "Proxy request failed".
+fn log_summary(method: &str, status: u16, error: Option<&dyn std::fmt::Display>, ctx: &ProxyCtx) {
+    let upstream = ctx.upstream_alias.as_str();
+    let route = ctx.route_path.as_str();
+    if let Some(err) = error {
+        warn!(method, upstream, route, status, error = %err, "Proxy request failed");
+    } else {
+        info!(method, upstream, route, status, "Proxy request completed");
     }
 }
 
@@ -1350,6 +1447,185 @@ mod tests {
         assert_eq!(ctx.upstream_id, Some(upstream_id));
         let expected: std::net::SocketAddr = "93.184.216.34:8443".parse().unwrap();
         assert_eq!(ctx.resolved_addr, Some(expected));
+    }
+
+    // -----------------------------------------------------------------------
+    // Request logs never carry the request path suffix
+    // -----------------------------------------------------------------------
+
+    /// A request path suffix that is a credential — a Slack incoming
+    /// webhook's secret is its path.
+    const SECRET_SUFFIX: &str = "T000/B000/SENTINELwebhookTOKEN";
+
+    /// The context the data plane hands Pingora for a proxied Slack webhook:
+    /// `instance_uri` carries the whole `/<alias>/<suffix>` proxy URI.
+    fn webhook_ctx() -> ProxyCtx {
+        let mut ctx = ProxyCtx::default();
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            H_INSTANCE_URI,
+            format!("/hooks.slack.com/services/{SECRET_SUFFIX}")
+                .parse()
+                .unwrap(),
+        );
+        headers.insert(H_UPSTREAM_ALIAS, "hooks.slack.com".parse().unwrap());
+        headers.insert(H_ROUTE_PATH, "/services".parse().unwrap());
+        ctx.populate_from_headers(&headers);
+        ctx
+    }
+
+    #[test]
+    fn populate_from_headers_parses_alias_and_route_pattern() {
+        let ctx = webhook_ctx();
+        assert_eq!(ctx.upstream_alias, "hooks.slack.com");
+        assert_eq!(ctx.route_path, "/services");
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn request_logs_name_the_route_pattern_and_alias_never_the_path_suffix() {
+        let ctx = webhook_ctx();
+
+        log_connected(false, &"1.2.3.4:443 (hooks.slack.com)", &ctx);
+        log_summary("POST", 200, None, &ctx);
+        log_summary("POST", 502, Some(&"upstream connection error"), &ctx);
+
+        assert!(logs_contain("Connected to upstream"));
+        assert!(logs_contain("Proxy request completed"));
+        assert!(logs_contain("Proxy request failed"));
+        assert!(logs_contain("/services"), "the route pattern is logged");
+        assert!(logs_contain("hooks.slack.com"), "the alias is logged");
+        assert!(
+            !logs_contain("SENTINEL"),
+            "no log line may carry the request path suffix"
+        );
+    }
+
+    #[test]
+    fn the_request_summary_names_method_alias_and_route_pattern_only() {
+        let ctx = webhook_ctx();
+        let summary = request_summary_line("POST", &ctx);
+        assert_eq!(summary, "POST upstream=hooks.slack.com route=/services");
+        assert_eq!(
+            request_summary_line("GET", &ProxyCtx::default()),
+            "GET upstream=- route=-"
+        );
+    }
+
+    /// **The real hooks, end to end.** A request whose path carries a
+    /// credential-shaped suffix is driven through the same in-process bridge
+    /// `DataPlaneServiceImpl` uses (`session_bridge::serialize_request_wire`
+    /// into a Pingora `ServerSession` over a duplex stream, then
+    /// `HttpProxy::process_new_http`) against a **closed local port**, so the
+    /// connection is refused at once and the fixture is finite. That failure
+    /// runs pingora's own "Fail to proxy" ERROR (which appends
+    /// `request_summary`), `fail_to_proxy`, and `logging`. pingora logs through
+    /// the `log` crate, bridged here into the captured output exactly as the
+    /// toolkit's logging bootstrap bridges it in production.
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn a_failed_proxy_through_the_real_hooks_logs_no_path_suffix() {
+        use pingora_core::apps::HttpServerApp as _;
+        use tokio::io::AsyncWriteExt as _;
+
+        let _ = tracing_log::LogTracer::init();
+
+        // A port nothing listens on: bind, read the port, close.
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+
+        let conf = Arc::new(pingora_core::server::configuration::ServerConf::default());
+        let proxy = Arc::new(new_http_proxy(
+            &conf,
+            PingoraProxy::new(
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+                Duration::from_secs(3600),
+                ssrf_off(),
+            ),
+        ));
+
+        let mut headers = http::HeaderMap::new();
+        headers.insert(H_ENDPOINT_HOST, "127.0.0.1".parse().unwrap());
+        headers.insert(H_ENDPOINT_PORT, port.to_string().parse().unwrap());
+        headers.insert(H_ENDPOINT_SCHEME, "http".parse().unwrap());
+        headers.insert(
+            H_INSTANCE_URI,
+            format!("/hooks.slack.com/services/{SECRET_SUFFIX}")
+                .parse()
+                .unwrap(),
+        );
+        headers.insert(H_UPSTREAM_ALIAS, "hooks.slack.com".parse().unwrap());
+        headers.insert(H_ROUTE_PATH, "/services".parse().unwrap());
+        headers.insert(http::header::HOST, "hooks.slack.com".parse().unwrap());
+        let wire = super::super::session_bridge::serialize_request_wire(
+            &http::Method::POST,
+            &format!("http://127.0.0.1:{port}/services/{SECRET_SUFFIX}"),
+            &headers,
+            Some(&Bytes::from_static(b"{}")),
+        );
+
+        let (mut client_io, server_io) = tokio::io::duplex(65_536);
+        let session = pingora_core::protocols::http::ServerSession::new_http1(Box::new(server_io));
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+
+        let serve = proxy.process_new_http(session, &shutdown);
+        let client = async move {
+            client_io.write_all(&wire).await.unwrap();
+            super::super::session_bridge::parse_response_stream(client_io)
+                .await
+                .map(|(status, _, _)| status)
+        };
+        let (_, status) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(serve, client)
+        })
+        .await
+        .expect("a refused connection fails fast");
+
+        let status = status.expect("the gateway answers with a problem response");
+        assert!(
+            status.is_server_error(),
+            "a refused upstream is a 5xx, got {status}"
+        );
+        assert!(
+            logs_contain("Fail to proxy"),
+            "pingora's own failure line is kept"
+        );
+        assert!(
+            logs_contain("Proxy request failed"),
+            "oagw's `logging` hook ran"
+        );
+        assert!(
+            logs_contain("upstream=hooks.slack.com route=/services"),
+            "the failure line names the alias and route pattern"
+        );
+        // INFO and above — every level a deployment runs pingora at (the
+        // chart's default is `info`). pingora's own DEBUG/TRACE dumps of the
+        // request header ("Request header: Parts { … uri … }", "Sending header
+        // to upstream {req:?}") do carry the path; they are not hooks and
+        // cannot be overridden, which is why they are excluded here and
+        // documented as the residual ("Request logs" above).
+        logs_assert(|lines: &[&str]| {
+            let leaking: Vec<&&str> = lines
+                .iter()
+                .filter(|line| {
+                    [" INFO ", " WARN ", " ERROR "]
+                        .iter()
+                        .any(|lvl| line.contains(lvl))
+                })
+                .filter(|line| line.contains("SENTINEL"))
+                .collect();
+            if leaking.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "an INFO+ log line — oagw's or pingora's — carries the request path \
+                     suffix: {leaking:?}"
+                ))
+            }
+        });
     }
 
     #[test]

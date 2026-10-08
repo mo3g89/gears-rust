@@ -44,7 +44,7 @@ use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::repos::{WatermarkKind, WatermarkRepository, Watermarks};
+use crate::domain::repos::{SweepCursor, WatermarkKind, WatermarkRepository, Watermarks};
 use crate::infra::storage::db::db_err;
 use crate::infra::storage::entity::ingest_watermark::{
     self, Column as MarkColumn, Entity as MarkEntity,
@@ -58,14 +58,11 @@ pub struct OrmWatermarkRepository;
 impl WatermarkKind {
     /// The column this kind writes.
     ///
-    /// Both arms are named, and the mapping is the whole reason
-    /// `the_two_marks_are_independent_columns_of_one_row` exists: a `SweptAt`
-    /// arm returning `LastReconciledFinishedAt` compiles, is correct Rust, and
-    /// would make the reconcile poller replay from the sweep's clock.
+    /// Kept as a mapping rather than inlined so a second kind, if one ever
+    /// returns, has exactly one place that says which column it writes.
     fn column(self) -> MarkColumn {
         match self {
             Self::ReconciledFinishedAt => MarkColumn::LastReconciledFinishedAt,
-            Self::SweptAt => MarkColumn::LastSweptAt,
         }
     }
 }
@@ -140,12 +137,15 @@ impl WatermarkRepository for OrmWatermarkRepository {
             tenant_id: ActiveValue::Set(tenant_id),
             last_reconciled_finished_at: ActiveValue::Set(match kind {
                 WatermarkKind::ReconciledFinishedAt => Some(at),
-                WatermarkKind::SweptAt => None,
             }),
-            last_swept_at: ActiveValue::Set(match kind {
-                WatermarkKind::ReconciledFinishedAt => None,
-                WatermarkKind::SweptAt => Some(at),
-            }),
+            // A row created by an advance carries no resume cursor, and that
+            // is the right value rather than a default worth thinking about:
+            // `set_sweep_cursor` is the only writer of these three, the sweep
+            // calls it after this, and a cursor invented here would name a
+            // window no pass walked.
+            sweep_cursor_at: ActiveValue::Set(None),
+            sweep_cursor_run_id: ActiveValue::Set(None),
+            sweep_cursor_floor: ActiveValue::Set(None),
             created_at: ActiveValue::Set(now),
             updated_at: ActiveValue::Set(now),
         };
@@ -184,6 +184,67 @@ impl WatermarkRepository for OrmWatermarkRepository {
             Err(e) => Err(db_err(e)),
         }
     }
+
+    /// One scoped `UPDATE` writing all three cursor columns together.
+    ///
+    /// # No monotonic predicate, and that is the contract rather than an
+    /// # omission
+    ///
+    /// [`Self::advance`] above puts its whole guarantee in a `WHERE` clause
+    /// because a mark that rewinds is unbounded work. This statement carries no
+    /// such predicate *on purpose*: the cursor is a within-window resume point
+    /// that the sweep must be able to move backwards and to erase, and a
+    /// forward-only one would be a second watermark with the lookback dead
+    /// behind it. [`SweepCursor`]'s own doc carries why last-writer-wins is
+    /// safe when two replicas share the row.
+    ///
+    /// # The three columns move as one
+    ///
+    /// Written in one statement, `None` writing `NULL` into all three, so no
+    /// interleaving of two replicas' writes can leave a row holding one
+    /// replica's instant beside another's run id. `mapper::watermarks_from_row`
+    /// folds a partial row to `None` as the second line of that defence.
+    ///
+    /// # Bound, never formatted
+    ///
+    /// `Expr::value` hands `sea_query` the `Uuid` and the two instants and lets
+    /// the driver encode them for whichever dialect this runner is. A `Uuid`
+    /// formatted into SQL text reads back on `SQLite` as a length error and
+    /// *compares* as a non-match — see
+    /// `m20260929_000006_ingest_watermarks_sweep_cursor`'s header, and
+    /// `m20260929_000004_run_completed_notification_cutoff`'s for the round
+    /// this argument was first paid for.
+    async fn set_sweep_cursor<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        cursor: Option<SweepCursor>,
+    ) -> Result<(), DomainError> {
+        // Destructured into three `Option`s rather than three `map` calls at
+        // the point of use, so "all three or none of them" is visible in one
+        // line instead of being a property of three separate expressions.
+        let (floor, at, run_id) = cursor.map_or((None, None, None), |c| {
+            (Some(c.window_floor), Some(c.at), Some(c.run_id))
+        });
+
+        MarkEntity::update_many()
+            .secure()
+            .scope_with(scope)
+            .col_expr(MarkColumn::SweepCursorFloor, Expr::value(floor))
+            .col_expr(MarkColumn::SweepCursorAt, Expr::value(at))
+            .col_expr(MarkColumn::SweepCursorRunId, Expr::value(run_id))
+            .col_expr(
+                MarkColumn::UpdatedAt,
+                Expr::value(OffsetDateTime::now_utc()),
+            )
+            .exec(runner)
+            .await
+            .map_err(db_err)?;
+        // Zero rows affected is not an error: a tenant with no watermark row
+        // has no window to resume inside, and clearing a cursor that does not
+        // exist is what the caller asked for.
+        Ok(())
+    }
 }
 
 /// Move one column forward if and only if `at` is ahead of what is stored.
@@ -220,9 +281,19 @@ mod tests {
     use time::Duration;
     use uuid::Uuid;
 
-    use crate::domain::repos::{WatermarkKind, WatermarkRepository, Watermarks};
+    use crate::domain::repos::{
+        SweepCursor, WatermarkKind, WatermarkRepository, Watermarks,
+    };
     use crate::infra::storage::test_db::{inmem_db, now, scope};
     use crate::infra::storage::watermark_sea_repo::OrmWatermarkRepository;
+
+    fn cursor_at(at: time::OffsetDateTime, run: u128) -> SweepCursor {
+        SweepCursor {
+            window_floor: at - Duration::hours(1),
+            at,
+            run_id: Uuid::from_u128(run),
+        }
+    }
 
     /// A tenant that has never been reconciled reads back as "never", and
     /// **never is not the epoch**: "reconciled up to 1970" would make the first
@@ -405,7 +476,7 @@ mod tests {
                             tx,
                             &ctx,
                             tenant,
-                            WatermarkKind::SweptAt,
+                            WatermarkKind::ReconciledFinishedAt,
                             later + Duration::hours(2),
                         )
                         .await?;
@@ -425,13 +496,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             marks.last_reconciled_finished_at,
-            Some(later),
-            "the mark must not have rewound"
-        );
-        assert_eq!(
-            marks.last_swept_at,
             Some(later + Duration::hours(2)),
-            "and the work done after the two no-ops must have committed"
+            "the mark must not have rewound, and the forward advance made after the two \
+             no-ops must have committed"
         );
     }
 
@@ -477,44 +544,245 @@ mod tests {
         );
     }
 
-    /// **The two marks share a row and must not overwrite each other.**
+    /// The cursor round-trips through the row, and `None` **erases** it.
     ///
-    /// This is the arm-mixing failure the [`WatermarkKind`] enum exists to make
-    /// visible: an `advance(SweptAt, …)` that wrote
-    /// `last_reconciled_finished_at` would compile, would pass every test that
-    /// only ever set one mark, and would make the reconcile poller replay from
-    /// the sweep's clock.
+    /// The erase is the half worth a test of its own: a caught-up sweep clears
+    /// the cursor on every pass, and a `set_sweep_cursor(None)` that quietly
+    /// left the old value standing would make the resume point a second
+    /// watermark — the lookback would never be re-walked and a run written
+    /// behind the cursor would be lost for good.
     #[tokio::test]
-    async fn the_two_marks_are_independent_columns_of_one_row() {
+    async fn a_sweep_cursor_round_trips_and_is_erased_by_none() {
         let db = inmem_db().await;
         let conn = db.conn().unwrap();
         let tenant = Uuid::from_u128(0xA);
         let ctx = scope(tenant);
-        let reconciled = now();
-        let swept = reconciled + Duration::hours(2);
+        let cursor = cursor_at(now(), 0xC1);
 
         OrmWatermarkRepository
-            .advance(
-                &conn,
-                &ctx,
-                tenant,
-                WatermarkKind::ReconciledFinishedAt,
-                reconciled,
-            )
+            .advance(&conn, &ctx, tenant, WatermarkKind::ReconciledFinishedAt, now())
             .await
             .unwrap();
         OrmWatermarkRepository
-            .advance(&conn, &ctx, tenant, WatermarkKind::SweptAt, swept)
+            .set_sweep_cursor(&conn, &ctx, Some(cursor))
             .await
             .unwrap();
 
         assert_eq!(
-            OrmWatermarkRepository.get(&conn, &ctx).await.unwrap(),
-            Watermarks {
-                last_reconciled_finished_at: Some(reconciled),
-                last_swept_at: Some(swept),
-            },
-            "each kind must write its own column and leave the other alone"
+            OrmWatermarkRepository
+                .get(&conn, &ctx)
+                .await
+                .unwrap()
+                .sweep_cursor,
+            Some(cursor),
+            "all three columns must come back as one cursor"
+        );
+
+        OrmWatermarkRepository
+            .set_sweep_cursor(&conn, &ctx, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            OrmWatermarkRepository
+                .get(&conn, &ctx)
+                .await
+                .unwrap()
+                .sweep_cursor,
+            None,
+            "`None` erases; anything else makes this a second, monotonic mark"
+        );
+    }
+
+    /// **The cursor may move backwards, and that is the contract**, not an
+    /// accident of the implementation.
+    ///
+    /// [`WatermarkRepository::advance`] above is monotonic in its `WHERE`
+    /// clause and must stay so. This one must *not* be: two replicas share the
+    /// row under `NoopLeaderElector` and the sweep has to be able to rewind and
+    /// erase. Adding the tempting `WHERE sweep_cursor_at < at` predicate here
+    /// turns the resume point into a second watermark and kills the lookback;
+    /// this is the assertion that goes red if anyone does.
+    #[tokio::test]
+    async fn a_sweep_cursor_may_move_backwards() {
+        let db = inmem_db().await;
+        let conn = db.conn().unwrap();
+        let tenant = Uuid::from_u128(0xA);
+        let ctx = scope(tenant);
+        let later = cursor_at(now(), 0xC1);
+        let earlier = cursor_at(now() - Duration::hours(2), 0xC2);
+
+        OrmWatermarkRepository
+            .advance(&conn, &ctx, tenant, WatermarkKind::ReconciledFinishedAt, now())
+            .await
+            .unwrap();
+        OrmWatermarkRepository
+            .set_sweep_cursor(&conn, &ctx, Some(later))
+            .await
+            .unwrap();
+        OrmWatermarkRepository
+            .set_sweep_cursor(&conn, &ctx, Some(earlier))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            OrmWatermarkRepository
+                .get(&conn, &ctx)
+                .await
+                .unwrap()
+                .sweep_cursor,
+            Some(earlier),
+            "last writer wins; a rewind costs repeated work, which every write on \
+             the sweep's path is idempotent under"
+        );
+    }
+
+    /// A cursor written under one tenant's scope is invisible to another, and
+    /// writing under a scope that matches no row changes nothing.
+    ///
+    /// `set_sweep_cursor` takes no `tenant_id` — unlike `advance`, it creates
+    /// no row — so the scope is the *only* thing keeping it inside the tenant.
+    #[tokio::test]
+    async fn a_sweep_cursor_is_scoped_to_its_tenant() {
+        let db = inmem_db().await;
+        let conn = db.conn().unwrap();
+        let mine = Uuid::from_u128(0xA);
+        let theirs = Uuid::from_u128(0xB);
+        let cursor = cursor_at(now(), 0xC1);
+
+        OrmWatermarkRepository
+            .advance(
+                &conn,
+                &scope(mine),
+                mine,
+                WatermarkKind::ReconciledFinishedAt,
+                now(),
+            )
+            .await
+            .unwrap();
+        OrmWatermarkRepository
+            .advance(
+                &conn,
+                &scope(theirs),
+                theirs,
+                WatermarkKind::ReconciledFinishedAt,
+                now(),
+            )
+            .await
+            .unwrap();
+
+        OrmWatermarkRepository
+            .set_sweep_cursor(&conn, &scope(mine), Some(cursor))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            OrmWatermarkRepository
+                .get(&conn, &scope(theirs))
+                .await
+                .unwrap()
+                .sweep_cursor,
+            None,
+            "another tenant's row must be untouched"
+        );
+    }
+
+    /// Writing a cursor for a tenant with no row at all is a successful no-op.
+    ///
+    /// `ReconcileService::sweep` calls this after the advance, so in practice a
+    /// row exists — but the one case where it does not is a first pass that
+    /// consumed nothing, and answering `Err` there would turn "there is no
+    /// window to resume inside" into a failed sweep.
+    #[tokio::test]
+    async fn setting_a_cursor_for_a_tenant_with_no_row_is_a_no_op() {
+        let db = inmem_db().await;
+        let conn = db.conn().unwrap();
+        let tenant = Uuid::from_u128(0xA);
+
+        OrmWatermarkRepository
+            .set_sweep_cursor(&conn, &scope(tenant), Some(cursor_at(now(), 0xC1)))
+            .await
+            .expect("no row is not an error");
+
+        assert_eq!(
+            OrmWatermarkRepository
+                .get(&conn, &scope(tenant))
+                .await
+                .unwrap(),
+            Watermarks::default(),
+            "and nothing was created"
+        );
+    }
+
+    /// **The same round trip on a real Postgres**, because the deployed dialect
+    /// is the one `m20260929_000006_ingest_watermarks_sweep_cursor` has to be
+    /// accepted by.
+    ///
+    /// The unit tier runs `SQLite`, where a `Uuid` lands as a BLOB in a
+    /// `TEXT`-affinity column and an instant lands as text; Postgres has real
+    /// `UUID` and `TIMESTAMPTZ` types and a stricter `ALTER TABLE`. A migration
+    /// green only on `SQLite` is not proven — which is the lesson
+    /// `m20260929_000004_run_completed_notification_cutoff`'s header records
+    /// from the opposite direction, where the defect shipped green on Postgres.
+    ///
+    /// Gated on `integration` so a default `cargo test` needs no Docker daemon.
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    async fn the_sweep_cursor_round_trips_on_postgres() {
+        use crate::infra::storage::test_db::pg_db;
+
+        let harness = pg_db().await;
+        let conn = harness.db.conn().unwrap();
+        let tenant = Uuid::from_u128(0xA);
+        let ctx = scope(tenant);
+        let cursor = cursor_at(now(), 0xC1);
+
+        OrmWatermarkRepository
+            .advance(&conn, &ctx, tenant, WatermarkKind::ReconciledFinishedAt, now())
+            .await
+            .unwrap();
+        OrmWatermarkRepository
+            .set_sweep_cursor(&conn, &ctx, Some(cursor))
+            .await
+            .expect("the Postgres DDL must accept the bound cursor write");
+
+        assert_eq!(
+            OrmWatermarkRepository
+                .get(&conn, &ctx)
+                .await
+                .unwrap()
+                .sweep_cursor,
+            Some(cursor),
+            "the three columns the migration adds must round-trip on the deployed \
+             dialect, not only on the unit tier's"
+        );
+
+        // A rewind, then an erase: the two writes the sweep depends on and the
+        // two a monotonic predicate would silently swallow.
+        let earlier = cursor_at(now() - Duration::hours(2), 0xC2);
+        OrmWatermarkRepository
+            .set_sweep_cursor(&conn, &ctx, Some(earlier))
+            .await
+            .unwrap();
+        assert_eq!(
+            OrmWatermarkRepository
+                .get(&conn, &ctx)
+                .await
+                .unwrap()
+                .sweep_cursor,
+            Some(earlier)
+        );
+
+        OrmWatermarkRepository
+            .set_sweep_cursor(&conn, &ctx, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            OrmWatermarkRepository
+                .get(&conn, &ctx)
+                .await
+                .unwrap()
+                .sweep_cursor,
+            None
         );
     }
 

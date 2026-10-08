@@ -107,8 +107,8 @@ impl<P: ProductsRepository> ProductsService<P> {
         // `GET /qa/v1/product-plugins` lives (finding FW-1).
         //
         // `update_product` keeps its `Option`, and that asymmetry is
-        // deliberate: there `None` means "leave the stored binding alone"
-        // (ruling D-18), a third state a create does not have.
+        // deliberate: there `None` means "leave the stored binding alone",
+        // a third state a create does not have.
         validate_plugin_instance_id(Some(&new.plugin_instance_id))?;
 
         let scope = self
@@ -138,7 +138,7 @@ impl<P: ProductsRepository> ProductsService<P> {
     /// Replace a product's mutable fields — the whole of [`ProductUpdate`] —
     /// as a full replace, so `folder: None` moves the product back to the
     /// root. **`plugin_instance_id: None` does NOT unbind** — it leaves the
-    /// current binding alone (ruling D-18; corrected at the Phase E review,
+    /// current binding alone (corrected at the Phase E review,
     /// finding FW-3, which found three copies of the old sentence still
     /// standing).
     #[instrument(skip(self, ctx, update), fields(product_id = %id, name = %update.name))]
@@ -160,7 +160,7 @@ impl<P: ProductsRepository> ProductsService<P> {
 
         // A rebind must resolve for create's reason, and asks **after**
         // authorization for create's reason too (finding m-2). `None` still
-        // means "leave the binding alone" (ruling D-18) and reaches neither
+        // means "leave the binding alone" and reaches neither
         // check.
         if let Some(instance_id) = update.plugin_instance_id.as_deref() {
             self.require_registered_plugin(instance_id)?;
@@ -175,12 +175,13 @@ impl<P: ProductsRepository> ProductsService<P> {
 
     /// Refuse a binding that names no plugin this process registers.
     ///
-    /// **At the API, not at first use** — Task 20 Step 3's own words, and
-    /// ruling F-10. Accepting an id that resolves to nothing produces a
+    /// **At the API, not at first use** — Task 20 Step 3's own words.
+    /// Accepting an id that resolves to nothing produces a
     /// product whose every environment is silently unobservable and
     /// undispatchable until somebody notices, which is the failure shape
-    /// **D6** ("every product names a plugin; there is no fallback path")
-    /// exists to prevent.
+    /// `qa_products.plugin_instance_id` being NOT NULL (DESIGN §3.8,
+    /// "qa-catalog schema") exists to prevent: every product names a plugin,
+    /// with no fallback path.
     ///
     /// The message names the endpoint that lists valid values rather than just
     /// refusing, because the realistic cause is a typo or a plugin gear that

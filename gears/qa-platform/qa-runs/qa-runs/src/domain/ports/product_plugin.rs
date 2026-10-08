@@ -36,14 +36,12 @@ use uuid::Uuid;
 /// failure's message is persisted on the run row and rendered to an operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginUnavailable {
-    /// The target environment names no product, so there is nothing to resolve
-    /// a plugin from. `Environment::product_id` is still `Option<Uuid>` until
-    /// Task 20 makes the column `NOT NULL`.
-    NoProduct,
-    /// The product is not visible to this caller, names no plugin, or names one
-    /// this binary does not register. `qa-catalog` distinguishes all three in
-    /// its own log and message and projects them onto one error; this gear does
-    /// not re-split what it cannot see.
+    /// The product is not visible to this caller, or names a plugin this
+    /// binary does not register. (A product naming no plugin at all has been
+    /// unrepresentable since Task 20a made `plugin_instance_id` NOT NULL.)
+    /// `qa-catalog` distinguishes the two in its own log and message and
+    /// projects them onto one error; this gear does not re-split what it
+    /// cannot see.
     Unresolvable,
     /// The resolver itself could not be reached — the deployment is missing
     /// `qa-catalog`, or its gear failed before registering.
@@ -60,14 +58,10 @@ impl PluginUnavailable {
     #[must_use]
     pub const fn detail(self) -> &'static str {
         match self {
-            Self::NoProduct => {
-                "this run's target environment names no product, so no product plugin \
-                 can say how to reach it: assign the environment a product"
-            }
             Self::Unresolvable => {
-                "this run's target environment belongs to a product that names no \
-                 product plugin, or names one this deployment does not carry: check \
-                 the product's plugin binding"
+                "this run's target environment belongs to a product whose product \
+                 plugin this deployment does not carry: check the product's plugin \
+                 binding"
             }
             Self::ResolverAbsent => {
                 "the product-plugin resolver is not available in this deployment: \

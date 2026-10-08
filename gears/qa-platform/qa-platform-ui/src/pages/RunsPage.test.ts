@@ -3,7 +3,7 @@
 // UI casing fix: `STATUS_CHIPS` compared `run.phase` against Title-Case
 // strings ('Succeeded', 'Failed', ...), but `WorkflowRun.phase` is qa-runs'
 // own lowercase `RunState` set — `runFromDto` sets it to `dto.state` "without
-// re-casing" (`adapters.ts`, decision X4; `RunState::as_str`,
+// re-casing" (`adapters.ts`; `RunState::as_str`,
 // qa-runs-sdk/src/models.rs:271-284). This was the worst of the casing bugs:
 // selecting any status chip filtered the run list to zero rows and every chip
 // count read zero. This suite renders the actual page against a mocked API
@@ -85,7 +85,7 @@ function mockApiFor(runs: unknown[]) {
       return { items: [], page_info: { next_cursor: null } } as never;
     }
     if (path === '/environments') {
-      // A page since review finding #55, empty here.
+      // A page, empty here.
       return { items: [], page_info: { limit: 200, next_cursor: null, prev_cursor: null } } as never;
     }
     if (path.startsWith('/test-repos')) {
@@ -209,8 +209,8 @@ describe('RunsPage — collect runs', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Ruling G-5: `platform` is a deprecated FQL alias for `environment`, not an
-// error. Unlike the OData `$filter` field (G-3), this keyword is typed by an
+// `platform` is a deprecated FQL alias for `environment`, not an
+// error. Unlike the OData `$filter` field, this keyword is typed by an
 // operator and persisted in `localStorage['qa:fql:saved:runs']`, so silently
 // rejecting the old spelling would turn a saved filter into a silent
 // zero-match rather than a visible one. Both spellings must narrow the same
@@ -246,7 +246,7 @@ describe('RunsPage — FQL filter accepts both `environment` and its deprecated 
   });
 
   it('narrows the same way when queried with the deprecated `platform` alias', async () => {
-    // This is the exact case C-2 found broken: before the alias, `platform` fell to
+    // This is the case that was once broken: before the alias, `platform` fell to
     // `compileFql`'s unhandled `default:` arm, the accessor returned `undefined`, and
     // `.some(...)` over an empty list matched **zero** runs — not an error, a silent
     // wrong answer indistinguishable from "nothing matched".
@@ -304,5 +304,14 @@ describe('RunsPage — a failed /runs', () => {
     // And the spinner is gone: `RunsPage` returns early on `isLoading`, so a
     // still-true flag would have kept the panel unreachable.
     expect(document.querySelector('.animate-spin')).toBeNull();
+  });
+});
+
+// ADR-0010: a surface that scopes in the browser says so in the UI.
+describe('RunsPage — product scope', () => {
+  it('says the product filter runs in the browser', async () => {
+    mockApiFor([]);
+    renderPage();
+    await waitFor(() => expect(screen.queryByText(/filtered in your browser/)).not.toBeNull());
   });
 });

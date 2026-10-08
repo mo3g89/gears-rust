@@ -1,5 +1,5 @@
-//! The two flat `OData` collections. Task 17, and per D7 the only `OData` in this
-//! gear.
+//! The two flat `OData` collections. Task 17, and the only `OData` in this
+//! gear (`api::rest`'s header).
 //!
 //! # Three declarations per route carry the whole contract
 //!
@@ -16,21 +16,12 @@
 //! and a collision **aborts the process** at startup — qa-runs records that
 //! measurement, and `routes::tests` is what makes it visible to `cargo test`.
 //!
-//! # Why the page-size numbers are literals in the descriptions
+//! # Where the page-size numbers come from
 //!
-//! `PAGE_LIMITS` is a `const` in `infra::storage::db`, so a description cannot
-//! interpolate it — `OperationBuilder::description` takes a `&str`. The numbers
-//! are therefore written out, once per route, exactly as qa-runs writes them into
-//! its own runs-listing description.
-//!
-//! **So 200 and 500 appear in the constant and again in each description below**,
-//! and nothing checks the copies against the constant.
-//! `db::tests::the_page_limits_match_the_subsystem_convention` pins the constant
-//! alone; a change to it has to be carried into both strings by hand. Recorded
-//! rather than hidden — it is worse than a format argument and better than an
-//! undocumented ceiling, and the field *lists* in the same descriptions are
-//! checked, by
-//! `api::rest::routes::tests::each_description_names_every_field_its_enum_admits`.
+//! The `limit` parameter each route declares interpolates `PAGE_LIMITS`, so its
+//! published bounds follow the constant. The 200 and 500 written into the two
+//! route descriptions are still literals, and
+//! `db::tests::the_page_limits_match_the_subsystem_convention` does not check them.
 
 use http::StatusCode;
 
@@ -40,6 +31,7 @@ use toolkit::api::operation_builder::{OperationBuilder, OperationBuilderODataExt
 
 use super::{API_TAG, License};
 use crate::api::rest::{dto, handlers};
+use crate::infra::storage::db::PAGE_LIMITS;
 use crate::infra::storage::odata::{TestCaseResultsField, TestResultsField};
 
 pub(super) fn register_collection_routes(
@@ -80,6 +72,24 @@ pub(super) fn register_collection_routes(
         // The same enum `ResultsRepository::list_page` translates with.
         .with_odata_filter::<TestResultsField>()
         .with_odata_orderby::<TestResultsField>()
+        // The toolkit's `OData` extractor binds both on every route it serves
+        // (`ODataParams`); `with_odata_filter` declares neither, so they are
+        // declared here. `qa-platform-openapi`'s
+        // `every_odata_list_operation_declares_limit_and_cursor` keeps it so.
+        .query_param_typed(
+            "limit",
+            false,
+            format!(
+                "Page size; defaults to {}, 1 or more, capped at {}; 0 is a 400. `$top` is the same parameter, and sending both is a 400.",
+                PAGE_LIMITS.default, PAGE_LIMITS.max
+            ),
+            "integer",
+        )
+        .query_param(
+            "cursor",
+            false,
+            "Opaque token from the previous page's `next_cursor`. `$skiptoken` is the same parameter.",
+        )
         // 400 is reachable and is the caller's: a `$filter` or `$orderby` naming
         // a field outside the allow-list, a `$top` of zero, or a cursor from a
         // different sort order. There is no 404 — an empty page is a successful
@@ -121,6 +131,24 @@ pub(super) fn register_collection_routes(
         )
         .with_odata_filter::<TestCaseResultsField>()
         .with_odata_orderby::<TestCaseResultsField>()
+        // The toolkit's `OData` extractor binds both on every route it serves
+        // (`ODataParams`); `with_odata_filter` declares neither, so they are
+        // declared here. `qa-platform-openapi`'s
+        // `every_odata_list_operation_declares_limit_and_cursor` keeps it so.
+        .query_param_typed(
+            "limit",
+            false,
+            format!(
+                "Page size; defaults to {}, 1 or more, capped at {}; 0 is a 400. `$top` is the same parameter, and sending both is a 400.",
+                PAGE_LIMITS.default, PAGE_LIMITS.max
+            ),
+            "integer",
+        )
+        .query_param(
+            "cursor",
+            false,
+            "Opaque token from the previous page's `next_cursor`. `$skiptoken` is the same parameter.",
+        )
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)

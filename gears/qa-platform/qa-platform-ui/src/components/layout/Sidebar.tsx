@@ -143,7 +143,7 @@ export function Sidebar({ isOpen = true, onClose }: SidebarProps) {
         {/* Footer.
 
             The signed-in identity and the logout control are the ONLY addition
-            this file received in Task 15; everything above is the copied-verbatim
+            this file received over the copied original; everything above is the copied-verbatim
             component. `preferred_username` is the claim Keycloak puts the login
             name in (`admin`/`viewer` on the qa-platform realm); `sub` is the
             fallback because a realm is free not to map it. */}

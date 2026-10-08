@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 //
-// `EnvironmentsTable` had no render test at all — the final review of the cluster-health
-// work flagged exactly that, alongside `EnvironmentsStrip`. This suite opens the gap with
+// `EnvironmentsTable` had no render test at all, nor did `EnvironmentsStrip`. This suite opens the gap with
 // the surface that most needs it: the **Default** badge.
 //
 // The badge is the only place in the product that answers "which environment does the Run
@@ -114,8 +113,7 @@ function renderTable(environments: EnvironmentInfo[]) {
  *  paint — *before* `/product-plugins` answers. An assertion that something is
  *  ABSENT is therefore a no-op unless it waits for the catalogue first:
  *  measured, a version of the empty-catalogue test below that awaited only the
- *  row name passed even when the mock was changed to return VHP's plugin
- *  (re-review, N-1). Awaiting a positive heading is what the other tests here
+ *  row name passed even when the mock was changed to return VHP's plugin. Awaiting a positive heading is what the other tests here
  *  do; this is what works when the expected outcome is that no new heading
  *  appears. */
 async function settled(client: QueryClient) {
@@ -201,8 +199,7 @@ describe('EnvironmentsTable — descriptor-driven columns', () => {
   it('falls back to the fixed columns alone for a row whose product resolves no plugin', async () => {
     // Named for what it varies. It used to say "when the plugin catalogue is
     // empty", which the mock never made true -- the catalogue still returned
-    // VHP's plugin and the row simply had no product (whole-branch review,
-    // m-10).
+    // VHP's plugin and the row simply had no product.
     renderTable([environment({ product_id: null })]);
 
     expect(await screen.findByText('sv-test')).toBeTruthy();
@@ -216,8 +213,7 @@ describe('EnvironmentsTable — descriptor-driven columns', () => {
     // Mocked BY PATH, not with `mockImplementationOnce`: "once" replaces the
     // next single `apiGet` call whichever it is, and the next one here is
     // `/products` -- so the first version of this test emptied the product
-    // list and left the catalogue exactly as the test above it (re-review,
-    // N-1). The row keeps its product; only the catalogue is empty.
+    // list and left the catalogue exactly as the test above it. The row keeps its product; only the catalogue is empty.
     const client = vi.mocked(apiGet);
     const original = client.getMockImplementation();
     client.mockImplementation(async (path: string) => {

@@ -88,7 +88,7 @@ pub async fn seed_product(
                 key: name.to_uppercase(),
                 description: format!("{name} fixture product"),
                 folder: None,
-                // Every product names a plugin since Task 20 (D6), so the
+                // Every product names a plugin since Task 20, so the
                 // fixture names the one `fixture_plugin_registry` registers.
                 plugin_instance_id: FIXTURE_PLUGIN_INSTANCE_ID.to_owned(),
             },
@@ -424,7 +424,7 @@ pub const FIXTURE_PLUGIN_INSTANCE_ID: &str =
 ///
 /// A deployment running two product plugins is the shape the whole plan exists
 /// to support, and since Task 20 a rebind target has to actually resolve
-/// (ruling F-10) — so a test that rebinds needs two registered ids, not one
+/// — so a test that rebinds needs two registered ids, not one
 /// and an invented string.
 pub const FIXTURE_PLUGIN_INSTANCE_ID_B: &str =
     "gts.cf.toolkit.plugins.plugin.v1~cf.core.qa_product.plugin.v1~cf.core._.other_product.v1";
@@ -488,7 +488,7 @@ impl QaProductPluginV1 for FixturePlugin {
 ///
 /// It was, and its doc said so: "for fixtures that never resolve a plugin".
 /// Task 20 Step 3 made `create_product` refuse a binding that resolves to
-/// nothing (ruling F-10), and the registry is what answers that question
+/// nothing, and the registry is what answers that question
 /// through [`ProductPluginPresence`] — so an empty hub now means **no fixture
 /// can create a product at all**.
 ///
@@ -527,6 +527,22 @@ fn build_services_with_engine(
     sync_engine: Arc<dyn RepoSyncPort>,
     repos_dir: PathBuf,
 ) -> Arc<ConcreteAppServices> {
+    build_services_with_engine_and_credstore(
+        db,
+        authz,
+        sync_engine,
+        repos_dir,
+        Arc::new(MockCredStoreClient::empty()),
+    )
+}
+
+fn build_services_with_engine_and_credstore(
+    db: Db,
+    authz: Arc<dyn AuthZResolverApi>,
+    sync_engine: Arc<dyn RepoSyncPort>,
+    repos_dir: PathBuf,
+    credstore: Arc<dyn CredStoreClientV1>,
+) -> Arc<ConcreteAppServices> {
     let db = Arc::new(DBProvider::<DomainError>::new(db));
 
     let plugin_registry = fixture_plugin_registry(Arc::clone(&db), Arc::clone(&authz));
@@ -541,7 +557,7 @@ fn build_services_with_engine(
         ServiceDeps {
             db,
             authz,
-            credstore: Arc::new(MockCredStoreClient::empty()),
+            credstore,
             sync_engine,
             bundle_store: Arc::new(NoopBundleStore),
             repos_dir,
@@ -643,6 +659,26 @@ pub fn build_services_with_branch_listing(
     )
 }
 
+/// [`build_services_with_branch_listing`] over a caller-supplied credential
+/// store — for the refresher tests that need to know which identity, in which
+/// tenant, read a repository's credential.
+pub fn build_services_with_branch_listing_and_credstore(
+    db: Db,
+    branches: &[&str],
+    system_tenants: Vec<Uuid>,
+    credstore: Arc<dyn CredStoreClientV1>,
+) -> Arc<ConcreteAppServices> {
+    build_services_with_engine_and_credstore(
+        db,
+        Arc::new(SystemActorGrantAuthZ { system_tenants }),
+        Arc::new(BranchListingSyncEngine {
+            branches: branches.iter().map(|b| (*b).to_owned()).collect(),
+        }),
+        throwaway_repos_dir(),
+        credstore,
+    )
+}
+
 /// Tenant-scoped services rooted at a caller-owned `repos_dir`, with a sync
 /// engine that materializes an **empty** branch snapshot instead of talking to
 /// git.
@@ -727,6 +763,30 @@ pub async fn all_branch_rows(db: &Db) -> Vec<(Uuid, Uuid, String)> {
     out
 }
 
+/// Insert one `qa_repo_branches` row under `tenant_id`, bypassing the
+/// service: the shape a write filed under the *caller's* tenant left before
+/// rows carried the owning tenant (DESIGN §3.8), which a refresh must now replace. Scoped to that one
+/// tenant, so the insert passes the same validation a production write does.
+pub async fn seed_raw_branch_row(db: &Db, tenant_id: Uuid, repo_id: Uuid, name: &str) {
+    use sea_orm::ActiveValue;
+    use toolkit_db::secure::secure_insert;
+    use toolkit_security::AccessScope;
+
+    use crate::infra::storage::entity::repo_branch;
+
+    let conn = db.conn().expect("conn");
+    let am = repo_branch::ActiveModel {
+        id: ActiveValue::Set(Uuid::new_v4()),
+        tenant_id: ActiveValue::Set(tenant_id),
+        repo_id: ActiveValue::Set(repo_id),
+        name: ActiveValue::Set(name.to_owned()),
+        refreshed_at: ActiveValue::Set(time::OffsetDateTime::now_utc()),
+    };
+    secure_insert::<repo_branch::Entity>(am, &AccessScope::for_tenants(vec![tenant_id]), &conn)
+        .await
+        .expect("seed qa_repo_branches row");
+}
+
 /// Insert a `qa_custom_plans` row with an **arbitrary `files` payload**, bypassing
 /// the service and its conversions, and return its id.
 ///
@@ -778,4 +838,74 @@ pub async fn seed_raw_custom_plan_row(
     .await
     .expect("seed qa_custom_plans row");
     id
+}
+
+/// The Postgres image the `postgres` tier runs against. Pinned, not inherited
+/// from `testcontainers-modules`, for the reason qa-insights' `PG_IMAGE_TAG`
+/// records; the same value as that gear's pin.
+#[cfg(feature = "postgres")]
+pub const PG_IMAGE_TAG: &str = "15-alpine";
+
+/// A live Postgres container with this gear's real migrations applied, and a
+/// pool onto it. Hold the harness for as long as the pool is used: dropping it
+/// tears the database down.
+#[cfg(feature = "postgres")]
+pub struct PgHarness {
+    /// More than one connection, unlike [`inmem_db`]: the branch-cache race
+    /// needs two transactions overlapping inside the server.
+    pub db: Db,
+    _container: testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
+}
+
+#[cfg(feature = "postgres")]
+pub async fn pg_db() -> PgHarness {
+    use testcontainers::{ContainerRequest, ImageExt, runners::AsyncRunner};
+    use testcontainers_modules::postgres::Postgres;
+
+    let container = ContainerRequest::from(Postgres::default())
+        .with_tag(PG_IMAGE_TAG)
+        .with_env_var("POSTGRES_PASSWORD", "pass")
+        .with_env_var("POSTGRES_USER", "user")
+        .with_env_var("POSTGRES_DB", "app")
+        .start()
+        .await
+        .expect("postgres container starts");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("the container publishes 5432");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+    while tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .is_err()
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the postgres container on {port}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    let db = connect_db(
+        &format!("postgres://user:pass@127.0.0.1:{port}/app"),
+        ConnectOpts {
+            max_conns: Some(8),
+            min_conns: Some(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("failed to connect to the postgres container");
+    run_migrations_for_testing(
+        &db,
+        crate::infra::storage::migrations::Migrator::migrations(),
+    )
+    .await
+    .expect("failed to run qa-catalog migrations against postgres");
+
+    PgHarness {
+        db,
+        _container: container,
+    }
 }

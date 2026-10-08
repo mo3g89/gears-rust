@@ -175,6 +175,126 @@ mod tests {
         );
     }
 
+    /// **Finding 3: the published contract declares the status its own error
+    /// mapping produces.**
+    ///
+    /// `POST /qa/v1/settings/notifications/test` propagates a send failure by
+    /// design, and `DomainError::UpstreamEgress` — a relay or webhook that
+    /// answered and refused — maps to **503**
+    /// (`api::rest::error::a_failed_relay_is_503_carrying_the_relays_own_answer`).
+    /// The operation declared 200/400/401/403/500 and nothing else, so the one
+    /// status an operator testing a broken channel is most likely to receive
+    /// was absent from `docs/openapi.json` and from the UI's generated types.
+    ///
+    /// **`make qa-openapi-check` structurally cannot catch this class**: it
+    /// compares the generated document against the committed one, and an
+    /// undeclared response is missing from both. Only an assertion that starts
+    /// from the status the *code* produces can, which is what this is — the
+    /// expected digit is taken from the real `CanonicalError` conversion
+    /// rather than written out a second time, so removing `.error_503` from
+    /// the route or re-mapping the error both fail here.
+    ///
+    /// The 501 `DomainError::UnsupportedEgress` produces is deliberately not
+    /// asserted: `OperationBuilder` has no `error_501`, so that one genuinely
+    /// cannot be declared, and the route says so in a comment.
+    ///
+    /// **Deliberately per route, not a table over every operation.** Only two
+    /// operations can answer `DomainError::UpstreamEgress`: this one and
+    /// `POST /qa/v1/jira/bugs` (its own guard below). Every other qa-insights
+    /// route reaches no egress port, so a generic "every route declares 503"
+    /// check would be false. A new route that reaches an egress port needs its
+    /// own guard of this shape.
+    #[test]
+    fn the_test_notification_operation_declares_the_status_a_refused_relay_produces() {
+        use toolkit_canonical_errors::CanonicalError;
+
+        use crate::domain::error::{DomainError, EgressFailure};
+
+        let refused: CanonicalError = DomainError::UpstreamEgress {
+            channel: "email".to_owned(),
+            endpoint: "smtp.corp.example".to_owned(),
+            failure: EgressFailure::Authentication,
+            detail: "permanent error (535)".to_owned(),
+        }
+        .into();
+        let produced = refused.status_code().to_string();
+
+        let openapi = OpenApiRegistryImpl::new();
+        let _router = register_operations(Router::new(), &openapi);
+        let doc = openapi
+            .build_openapi(&OpenApiInfo::default())
+            .expect("the OpenAPI document must build");
+
+        let item = doc
+            .paths
+            .paths
+            .get("/qa/v1/settings/notifications/test")
+            .expect("the test-notification route must be registered");
+        let item = serde_json::to_value(item).expect("a path item serialises");
+        let responses = item
+            .get("post")
+            .and_then(|post| post.get("responses"))
+            .and_then(serde_json::Value::as_object)
+            .expect("the operation declares responses");
+
+        assert!(
+            responses.contains_key(&produced),
+            "the endpoint answers {produced} for a refused relay and does not declare it; \
+             declared: {:?}",
+            responses.keys().collect::<Vec<_>>(),
+        );
+    }
+
+    /// `POST /qa/v1/jira/bugs` answers `DomainError::UpstreamEgress` (channel
+    /// `jira`) when nothing was filed or found and JIRA failed on egress
+    /// (`JiraService::file_bugs`); the operation must declare the status that
+    /// error maps to. The digit comes from the real conversion, as in the
+    /// test-notification guard above.
+    ///
+    /// Deliberately per route, for the reason the test-notification guard
+    /// above gives: these two are the only operations that reach an egress
+    /// port.
+    #[test]
+    fn the_file_jira_bugs_operation_declares_the_status_a_jira_outage_produces() {
+        use toolkit_canonical_errors::CanonicalError;
+
+        use crate::domain::error::{DomainError, EgressFailure};
+
+        let outage: CanonicalError = DomainError::UpstreamEgress {
+            channel: "jira".to_owned(),
+            endpoint: "jira.corp.example".to_owned(),
+            failure: EgressFailure::Unreachable,
+            detail: "the gateway could not reach JIRA (HTTP 503)".to_owned(),
+        }
+        .into();
+        let produced = outage.status_code().to_string();
+
+        let openapi = OpenApiRegistryImpl::new();
+        let _router = register_operations(Router::new(), &openapi);
+        let doc = openapi
+            .build_openapi(&OpenApiInfo::default())
+            .expect("the OpenAPI document must build");
+
+        let item = doc
+            .paths
+            .paths
+            .get("/qa/v1/jira/bugs")
+            .expect("the file-bugs route must be registered");
+        let item = serde_json::to_value(item).expect("a path item serialises");
+        let responses = item
+            .get("post")
+            .and_then(|post| post.get("responses"))
+            .and_then(serde_json::Value::as_object)
+            .expect("the operation declares responses");
+
+        assert!(
+            responses.contains_key(&produced),
+            "the endpoint answers {produced} for a JIRA outage and does not declare it; \
+             declared: {:?}",
+            responses.keys().collect::<Vec<_>>(),
+        );
+    }
+
     /// The two collections advertise a `$filter` and an `$orderby` parameter, and
     /// the field list inside each one is the *repository's* enum.
     ///
@@ -316,6 +436,10 @@ mod tests {
     /// mirrors `domain::analytics::query::Scope`. The two happen to share a
     /// value space; they are not the same contract, and the UI keeps them
     /// apart too.
+    ///
+    /// `AnalyticsOverviewDto::group_by` joined them (the third pass): it was a
+    /// `String` filled by `group_to_str` from the closed `GroupBy`, the same
+    /// shape finding #35 retyped for `scope`.
     #[test]
     fn the_published_schema_declares_closed_enums_for_both_scopes() {
         let openapi = OpenApiRegistryImpl::new();
@@ -325,9 +449,25 @@ mod tests {
             .expect("the OpenAPI document must build");
         let rendered = serde_json::to_value(&doc).expect("the document must serialize");
 
-        for (schema_name, owner) in [
-            ("SavedViewScopeDto", "SavedViewDto"),
-            ("AnalyticsScopeDto", "AnalyticsOverviewDto"),
+        for (schema_name, owner, field, values) in [
+            (
+                "SavedViewScopeDto",
+                "SavedViewDto",
+                "scope",
+                &["all", "plan"][..],
+            ),
+            (
+                "AnalyticsScopeDto",
+                "AnalyticsOverviewDto",
+                "scope",
+                &["all", "plan"][..],
+            ),
+            (
+                "AnalyticsGroupByDto",
+                "AnalyticsOverviewDto",
+                "group_by",
+                &["none", "component", "tag", "environment"][..],
+            ),
         ] {
             let schema = &rendered["components"]["schemas"][schema_name];
             let published: Vec<&str> = schema["enum"]
@@ -339,16 +479,15 @@ mod tests {
                 .filter_map(serde_json::Value::as_str)
                 .collect();
             assert_eq!(
-                published,
-                vec!["all", "plan"],
+                published, values,
                 "{schema_name} must publish legacy's spellings, not the Rust variant names"
             );
 
-            let property = &rendered["components"]["schemas"][owner]["properties"]["scope"];
+            let property = &rendered["components"]["schemas"][owner]["properties"][field];
             assert_eq!(
                 property["$ref"],
                 serde_json::Value::String(format!("#/components/schemas/{schema_name}")),
-                "{owner}.scope must reference {schema_name}, not inline a string: {property}"
+                "{owner}.{field} must reference {schema_name}, not inline a string: {property}"
             );
         }
     }

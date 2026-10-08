@@ -9,10 +9,10 @@
 //!
 //! # Where the code came from
 //!
-//! Copied from `qa-environments/src/domain/observation.rs`, which stays in
-//! place and stays working until Task 19 removes it. A **copy**, not a move:
-//! Phase C must not change `qa-environments`' behaviour, so both paths exist
-//! side by side until the one-way door in Phase E.
+//! Copied from `qa-environments/src/domain/observation.rs`. A **copy**, not a
+//! move, at the time: Phase C must not change `qa-environments`' behaviour, so
+//! both paths existed side by side until the one-way door in Phase E. The
+//! original has since been deleted; this is the only copy.
 //!
 //! What came along is the VHP *install topology* half — `platformVersion`,
 //! `core-install-metadata`, `vp-gateway-hostnames`, and the

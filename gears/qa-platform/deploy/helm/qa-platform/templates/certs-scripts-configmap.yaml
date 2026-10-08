@@ -24,11 +24,11 @@
 
      IF YOU ADD ANOTHER PRE-INSTALL HOOK THAT MOUNTS A CONFIGMAP OR SECRET,
      that resource needs this same treatment. Checked at the time of writing:
-     the only other ConfigMaps mounted by hooks are qa-platform-seed-scripts
-     (job-tenant-seed.yaml) and qa-platform-gears-config
-     (job-db-migrate.yaml), and both of those Jobs are POST-install hooks --
-     by which point every normal resource, those two ConfigMaps included, has
-     already been created. Those two are correct as plain resources; this one
+     the only other config objects mounted by hooks are the ConfigMap
+     qa-platform-seed-scripts (job-tenant-seed.yaml) and the Secret
+     qa-platform-gears-migrate-config (job-db-migrate.yaml), and both of those Jobs
+     are POST-install hooks -- by which point every normal resource, those
+     two included, has already been created. Those two are correct as plain resources; this one
      was not. */}}
 apiVersion: v1
 kind: ConfigMap

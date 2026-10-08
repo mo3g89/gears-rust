@@ -21,7 +21,7 @@ const PER_PAGE_OPTIONS = [10, 25, 50, 100];
 // own lowercase `RunState` set (`created | queued | dispatching | running |
 // succeeded | failed | canceled | timed_out | expired | error` —
 // `RunState::as_str`, qa-runs-sdk/src/models.rs:271-284), passed through
-// unchanged by `runFromDto` (decision X4, `adapters.ts`). These used to be
+// unchanged by `runFromDto` (`adapters.ts`). These used to be
 // Title-Case and so matched zero rows for every chip — this was the worst of
 // the casing bugs: picking any chip filtered the run list to nothing and every
 // chip count read zero. `'Pending'` and `'Skipped'` are left as literal,
@@ -128,7 +128,7 @@ export function RunsPage() {
       // included them, and `-kind:collect` excludes them again.
       'kind',
       'environment',
-      // `platform` is the field's retired name (ruling G-5): unlike the OData
+      // `platform` is the field's retired name: unlike the OData
       // `$filter` field this UI never authors by hand, this one is typed by an
       // operator and persisted in `localStorage['qa:fql:saved:runs']`, so the old
       // spelling stays a working alias rather than becoming a silent zero-match.
@@ -355,8 +355,8 @@ export function RunsPage() {
             Test Runs
           </h1>
           <p className="text-muted-foreground">
-            View and manage workflow executions — scoped to the selected product.
-            A run that can't be attributed to one product isn't listed here:
+            View and manage workflow executions — scoped to the selected product,
+            filtered in your browser. A run that can't be attributed to one product isn't listed here:
             its repository or custom plan has been deleted, or it ran a custom
             plan whose tests span two products or resolve to none.
           </p>

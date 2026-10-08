@@ -48,7 +48,7 @@
 
 use async_trait::async_trait;
 use qa_insights_sdk::{TestCaseResultRecord, TestResultRecord};
-use sea_orm::sea_query::{Expr, Func, SimpleExpr};
+use sea_orm::sea_query::{Expr, Func, OnConflict, SimpleExpr};
 use sea_orm::{
     ActiveValue, ColumnTrait, Condition, EntityTrait, ExprTrait, FromQueryResult, Order,
     QueryFilter, QueryOrder, QuerySelect,
@@ -56,7 +56,8 @@ use sea_orm::{
 use time::OffsetDateTime;
 use toolkit_db::odata::sea_orm_filter::paginate_odata;
 use toolkit_db::secure::{
-    DBRunner, SecureDeleteExt, SecureEntityExt, SecureInsertManyExt, validate_tenant_in_scope,
+    DBRunner, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureInsertManyExt,
+    validate_tenant_in_scope,
 };
 use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
@@ -69,6 +70,9 @@ use crate::domain::repos::{
     RunStatusCount, StatusRowCount,
 };
 use crate::infra::storage::db::{PAGE_LIMITS, db_err, odata_err};
+use crate::infra::storage::entity::run_projection_lock::{
+    self, Column as LockColumn, Entity as LockEntity,
+};
 use crate::infra::storage::entity::test_case_result::{
     self, Column as CaseColumn, Entity as CaseEntity,
 };
@@ -113,11 +117,10 @@ pub struct OrmResultsRepository;
 /// This function read `created_at` through Task 21b. Its fix round added
 /// `run_created_at` and pointed the **dashboard** reads at a second expression,
 /// leaving the analytics reads here — recorded at the time as a known divergence
-/// with an owner. Controller Ruling C closed that in the round after: four
-/// downstream tasks (22, 23, 24, 25) fold over `list_for_universe`, so a window
-/// *and* an ordering tiebreak that disagree with legacy would have been
-/// discovered by whichever of them first noticed a universe it could not
-/// explain. The two expressions are now one again.
+/// with an owner. The round after closed that: four downstream tasks (22, 23, 24, 25)
+/// fold over `list_for_universe`, so a window *and* an ordering tiebreak that
+/// disagree with legacy would have been discovered by whichever of them first
+/// noticed a universe it could not explain. The two expressions are now one again.
 ///
 /// What that fixes on the analytics side: a run still in progress sorted and
 /// bucketed by when its rows were last re-ingested rather than by when it
@@ -465,6 +468,33 @@ impl ResultsRepository for OrmResultsRepository {
         validate_tenant_in_scope(tenant_id, scope).map_err(db_err)?;
 
         let now = OffsetDateTime::now_utc();
+
+        // Serialize every writer of this run before touching its rows. The
+        // upsert takes a row lock a concurrent writer of the same run waits on
+        // until this transaction ends; that writer's DELETE then runs on a
+        // fresh snapshot and removes this batch, so the later write replaces
+        // the earlier one instead of both batches surviving
+        // (`m20261007_000009_run_projection_locks`). Requires the caller's
+        // per-run transaction, which both callers already open; outside one
+        // the lock is released at once and only the old race remains.
+        let lock = run_projection_lock::ActiveModel {
+            id: ActiveValue::Set(Uuid::new_v4()),
+            tenant_id: ActiveValue::Set(tenant_id),
+            run_id: ActiveValue::Set(run_id),
+            projected_at: ActiveValue::Set(now),
+        };
+        LockEntity::insert(lock.clone())
+            .secure()
+            .scope_with_model(scope, &lock)
+            .map_err(db_err)?
+            .on_conflict_raw(
+                OnConflict::columns([LockColumn::TenantId, LockColumn::RunId])
+                    .update_column(LockColumn::ProjectedAt)
+                    .to_owned(),
+            )
+            .exec(runner)
+            .await
+            .map_err(db_err)?;
 
         // Delete-then-insert, per **run** and not per row, and deliberately in
         // the caller's runner rather than a transaction of our own: Task 14's
@@ -2243,9 +2273,9 @@ mod tests {
     }
 
     /// A tenant outside the caller's single-tenant scope never sees another
-    /// tenant's version. This alone does not exercise the `tenant_id`
-    /// predicate R86 requires — `.secure().scope_with(scope)` already
-    /// excludes `other` here, since `test_db::scope` only ever compiles a
+    /// tenant's version. This alone does not exercise the `tenant_id` predicate
+    /// the explicit-`tenant_id` rule requires — `.secure().scope_with(scope)`
+    /// already excludes `other` here, since `test_db::scope` only ever compiles a
     /// scope over one tenant — so
     /// [`latest_version_for_plan_returns_the_callers_own_tenant_under_a_multi_tenant_scope`]
     /// below is the test that actually pins the predicate's own necessity.
@@ -2283,10 +2313,10 @@ mod tests {
         );
     }
 
-    /// **Controller ruling R86, the property the single-tenant-scope test
+    /// **The explicit-`tenant_id` rule, the property the single-tenant-scope test
     /// above cannot exercise.** Under a scope spanning both tenants,
-    /// `latest_version_for_plan` must answer with the *caller's own*
-    /// tenant's version, never another in-scope tenant's — the same defect
+    /// `latest_version_for_plan` must answer with the *caller's own* tenant's
+    /// version, never another in-scope tenant's — the same defect
     /// `JiraRepository::find_by_key_returns_the_callers_own_row_under_a_multi_tenant_scope`
     /// (`jira_sea_repo.rs`) pins for its own `.one()` read.
     ///
@@ -2693,7 +2723,7 @@ mod tests {
             running.ts < before,
             "and it is not the row's own created_at, which this write stamped \
              from the repository's clock. That is the column this read used until \
-             controller Ruling C, and `effective_ts` records why an unfinished \
+             the analytics reads moved to the run's instant, and `effective_ts` records why an unfinished \
              run sorted by it moved every time another of its results landed"
         );
     }
@@ -2908,10 +2938,10 @@ mod tests {
     /// # Three runs, because two could not say *which* column the fallback reads
     ///
     /// This test had two: an old finished run (excluded) and an unfinished one
-    /// (admitted). It stayed green through controller Ruling C's column change and
-    /// that was the problem — with a one-day window, the row's `created_at` (this
-    /// write's `now()`) and `result_row`'s `run_created_at` (two hours back) are
-    /// *both* inside it, so the assertion could not tell them apart. It pinned
+    /// (admitted). It stayed green through the column change to the run's instant
+    /// and that was the problem — with a one-day window, the row's `created_at`
+    /// (this write's `now()`) and `result_row`'s `run_created_at` (two hours back)
+    /// are *both* inside it, so the assertion could not tell them apart. It pinned
     /// that a fallback exists, not that it is legacy's.
     ///
     /// The third run is what discriminates: unfinished, created **thirty days
@@ -3002,7 +3032,8 @@ mod tests {
     }
 
     /// **A long-running run does not sort to the front just because its rows were
-    /// re-ingested a moment ago** — the ordering half of controller Ruling C.
+    /// re-ingested a moment ago** — the ordering half of the move to the run's
+    /// instant.
     ///
     /// The three tests above pin the *window* and the derived `ExecRow::ts`. This
     /// pins what `sort_key` does with them, which is the half with four consumers
@@ -3494,7 +3525,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "redelivery must not duplicate: {rows:?}");
     }
     // -----------------------------------------------------------------------
-    // The two `OData` collections (Task 17)
+    // The two `OData` collections
     // -----------------------------------------------------------------------
 
     /// One run's worth of rows, written as a single batch under `tenant`.
@@ -4374,7 +4405,8 @@ mod tests {
     }
 
     /// **An unfinished run is windowed by the *run's* age, not by when its rows
-    /// were last ingested.** This is the test for the defect Ruling A closed.
+    /// were last ingested.** This is the test for the defect `run_created_at`
+    /// closed.
     ///
     /// The KPI rule counts runs that have not finished — legacy's query carries no
     /// phase predicate at all (`manager/src/routes/dashboard.rs:317-348`) — so the
@@ -5033,9 +5065,9 @@ mod tests {
     /// `COUNT(*)`.**
     ///
     /// `COUNT(*) FILTER (WHERE tr.status IN ('PASSED','FAILED','ERROR'))`
-    /// (`manager/src/routes/dashboard.rs:388`) — ruling R5's sixth row, indexed in
-    /// `domain::service::ingest`' header. One group holding every kind of row this
-    /// gear has seen:
+    /// (`manager/src/routes/dashboard.rs:388`) — the sixth row of the
+    /// status-classification table in `domain::service::ingest`' header. One group
+    /// holding every kind of row this gear has seen:
     ///
     /// | rows | status | in `passed` | in `failed` | in `total` |
     /// |---|---|---|---|---|
@@ -6156,8 +6188,8 @@ mod tests {
         );
     }
 
-    /// **The denominator is `PASSED`+`FAILED`+`ERROR` and nothing else** — ruling
-    /// R5's sixth classification (`dashboard.rs:487`).
+    /// **The denominator is `PASSED`+`FAILED`+`ERROR` and nothing else** — the
+    /// status-classification table's sixth row (`dashboard.rs:487`).
     ///
     /// A `SKIPPED` row and an unknown status are in **no** counter, the total
     /// included, so a file that ran once and skipped four times reports

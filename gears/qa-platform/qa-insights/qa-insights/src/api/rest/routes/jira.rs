@@ -6,28 +6,29 @@
 //!
 //! # `POST /qa/v1/jira/bugs` answers `200`, not Task 28's `201`
 //!
-//! Task 28's convention — create returns `201` with a `Location` header —
-//! does not fit an endpoint whose response is a list of zero, one or many
-//! filed-or-found bugs with no single created resource for a `Location` to
-//! name, and R84's own text says so directly: "a partial success is a `200`
-//! with fewer entries". Legacy's `api_create_jira_ticket` answers `200` with
-//! the same `Vec<JiraCreateResponse>` shape (`manager/src/routes/settings.rs:630`,
-//! the bare `Ok(Json(responses))`), so this is not a new choice, only a
-//! confirmed one.
+//! Task 28's convention — create returns `201` with a `Location` header — does not
+//! fit an endpoint whose response is a list of zero, one or many filed-or-found bugs
+//! with no single created resource for a `Location` to name: a partial success is a
+//! `200` with fewer entries (`JiraService::file_bugs`'s doc); only a JIRA outage
+//! that left nothing filed or found is a `503`. Legacy's
+//! `api_create_jira_ticket` answers `200` with the same `Vec<JiraCreateResponse>`
+//! shape (`manager/src/routes/settings.rs:630`, the bare `Ok(Json(responses))`), so
+//! this is not a new choice, only a confirmed one.
 //!
 //! # `POST /qa/v1/jira/bugs` needs three grants, not one — fix round 1,
 //! # Important 4
 //!
-//! An earlier revision of this description named only `gts.cf.qa.insights.jira_bug.v1~/create`.
+//! An earlier revision of this description named only
+//! `gts.cf.qa.insights.jira_bug.v1~/create`.
 //! [`crate::domain::service::jira::JiraService::file_bugs`] also reads
 //! `qa_test_results`/`qa_test_case_results` under a separately-compiled
-//! `gts.cf.qa.insights.test_result.v1~/list` scope (controller ruling R87) and reads the tenant's
-//! JIRA settings under `gts.cf.qa.insights.jira_config.v1~/get` (via
-//! [`crate::domain::service::jira::JiraService::active_config`]) before
-//! filing starts — an operator who granted exactly what the old text said
-//! would see every request refused. The description below names all three,
-//! and states that the config-read denial is a bulk `403` rather than a
-//! per-test swallow, matching
+//! `gts.cf.qa.insights.test_result.v1~/list` scope (`jira.rs`'s header, "The results
+//! reads compile their own scope") and reads the tenant's JIRA settings under
+//! `gts.cf.qa.insights.jira_config.v1~/get` (via
+//! [`crate::domain::service::jira::JiraService::active_config`]) before filing starts
+//! — an operator who granted exactly what the old text said would see every request
+//! refused. The description below names all three, and states that the config-read
+//! denial is a bulk `403` rather than a per-test swallow, matching
 //! [`JiraService::file_bugs`](crate::domain::service::jira::JiraService::file_bugs)'s
 //! own "What is never swallowed" doc.
 
@@ -106,9 +107,16 @@ pub(super) fn register_jira_routes(mut router: Router, openapi: &dyn OpenApiRegi
              JIRA's own search already tracks, is not re-filed: the entry for it carries \
              created: false and the existing key. A test this call cannot file for (JIRA is not \
              configured or disabled, the test has no plan identity in this run's projection, or \
-             the JIRA call itself failed) is silently dropped from the response rather than \
-             failing the whole request - a partial success is a 200 with fewer entries than \
-             failed tests, matching the system being replaced's own per-test error handling. \
+             the JIRA call itself failed) is dropped from the response rather than failing the \
+             whole request - a partial success is a 200 with fewer entries than failed tests, \
+             matching the system being replaced's own per-test error handling. Failed tests are \
+             tried in test_name order. The first time the gateway cannot reach JIRA, a call times \
+             out, or JIRA refuses the credential, no further test is tried (the tenant has one \
+             JIRA endpoint and one credential); JIRA refusing one issue's request does not stop \
+             the others. If no test was filed or found, the answer is a 503 naming the jira \
+             channel and its failure class (the failure that stopped the attempts, else the \
+             first refused request), not an empty 200; if one was, it is a 200 with those \
+             entries. \
              404 means run_id has no ingested results at all, which is distinct from a run with \
              no failures (a 200 with an empty list). Requires three grants: gts.cf.qa.insights.jira_bug.v1~/create \
              for the registry write, gts.cf.qa.insights.test_result.v1~/list to read the run's own results, and \
@@ -134,5 +142,9 @@ pub(super) fn register_jira_routes(mut router: Router, openapi: &dyn OpenApiRegi
         .error_403(openapi)
         .error_404(openapi)
         .error_500(openapi)
+        // 503 is `DomainError::UpstreamEgress` (channel `jira`): nothing was
+        // filed or found and a JIRA call failed on egress
+        // (`JiraService::file_bugs`, "What is never swallowed").
+        .error_503(openapi)
         .register(router, openapi)
 }

@@ -986,7 +986,7 @@ mod tests {
             assembled,
             [(
                 "RP_API_KEY".to_owned(),
-                SecretRef::new("credstore://reportportal-token"),
+                SecretRef::new("reportportal-token"),
             )]
             .into_iter()
             .collect(),
@@ -997,9 +997,7 @@ mod tests {
         let recorded = executor.submitted();
         assert_eq!(
             recorded[0].env.get("RP_API_KEY"),
-            Some(&EnvSource::Secret(SecretRef::new(
-                "credstore://reportportal-token"
-            )))
+            Some(&EnvSource::Secret(SecretRef::new("reportportal-token")))
         );
         // Independent of the assertion above rather than implied by it: that
         // one pins the entry under its own name, this one sweeps *every*

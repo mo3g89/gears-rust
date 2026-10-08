@@ -3,8 +3,8 @@
 //! # Founded here, and expected to grow twice
 //!
 //! The plan lists this file under Task 38 only, which would have left Task 32
-//! unable to register the `settings/jira` pair its own text mandates; controller
-//! ruling R69 moves the module here. `handlers::settings`' header names both
+//! unable to register the `settings/jira` pair its own text mandates, so the
+//! module moved here. `handlers::settings`' header names both
 //! extensions — Task 35's `settings/jira-poller` pair and Task 38's four
 //! notification routes — and each is a `router = OperationBuilder::…` block
 //! beside the two below, in a band of its own. Nothing about adding one requires
@@ -25,9 +25,9 @@
 //! apikey auth plugin concatenates a prefix onto whatever the reference resolves
 //! to (`gears/system/oagw/oagw/src/infra/plugin/apikey_auth.rs:60-61`), the
 //! secret behind it must be `base64("email:api_token")` rather than the bare
-//! token. Its *name*: the reference itself reaches `SecretRef::new` after a
-//! `cred://` strip, and that accepts `[a-zA-Z0-9_-]` only
-//! (`gears/credstore/credstore-sdk/src/models.rs:42-83`) — **added in fix round
+//! token. Its *name*: the reference itself must be what `SecretRef::new`
+//! accepts, `[a-zA-Z0-9_-]` only (`credstore_sdk::SecretRef`'s own doc) —
+//! **added in fix round
 //! 1, finding 1**, which found the syntax contract undocumented and violated by
 //! every example in the change that introduced it.
 //! `infra::jira::oagw_client`'s header carries the contents argument and
@@ -68,7 +68,7 @@ pub(super) fn register_settings_routes(
     mut router: Router,
     openapi: &dyn OpenApiRegistry,
 ) -> Router {
-    // ==================== JIRA (Task 32) ====================
+    // ==================== JIRA ====================
 
     // GET /qa/v1/settings/jira
     router = OperationBuilder::get("/qa/v1/settings/jira")
@@ -104,8 +104,8 @@ pub(super) fn register_settings_routes(
             "A full replace of the tenant's JIRA settings. api_token_credstore_ref is a \
              credential-store reference, not a token, and it has two contracts. Its NAME \
              must be letters, digits, underscores and dashes only, at most 255 characters, \
-             optionally prefixed with cred:// - slashes and colons are rejected by the \
-             credential store, so a URL-shaped value such as credstore://qa/jira/token is \
+             with no scheme prefix (cred:// is refused) - slashes and colons are rejected by \
+             the credential store, so a URL-shaped value such as credstore://qa/jira/token is \
              refused here with a 400 rather than failing later on the first JIRA call. Its \
              CONTENTS must be the base64 encoding of email:api_token, because JIRA's REST \
              API takes HTTP basic auth and the gateway's credential plugin prepends Basic to \
@@ -143,7 +143,7 @@ pub(super) fn register_settings_routes(
         .error_500(openapi)
         .register(router, openapi);
 
-    // ==================== JIRA poller (Task 35) ====================
+    // ==================== JIRA poller ====================
 
     // GET /qa/v1/settings/jira-poller
     router = OperationBuilder::get("/qa/v1/settings/jira-poller")
@@ -224,8 +224,8 @@ fn register_notification_routes(mut router: Router, openapi: &dyn OpenApiRegistr
              404. slack_webhook_credstore_ref is a credential-store reference, never a URL - \
              possession of a Slack incoming-webhook URL is itself the authorization to post, \
              so it is treated the same as a JIRA API token, and the PUT enforces the same \
-             syntax: letters, digits, underscores and dashes only, optionally prefixed with \
-             cred://. Requires the gts.cf.qa.insights.notification_config.v1~/get grant.",
+             syntax: letters, digits, underscores and dashes only, with no scheme prefix \
+             (cred:// is refused). Requires the gts.cf.qa.insights.notification_config.v1~/get grant.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -249,8 +249,8 @@ fn register_notification_routes(mut router: Router, openapi: &dyn OpenApiRegistr
             "A full replace of the tenant's notification settings. \
              slack_webhook_credstore_ref must be a credential-store reference and never a \
              webhook URL - letters, digits, underscores and dashes only, at most 255 \
-             characters, optionally prefixed with cred://, exactly as the JIRA endpoint's \
-             api_token_credstore_ref. Slashes and colons are rejected by the credential \
+             characters, with no scheme prefix (cred:// is refused), exactly as the JIRA \
+             endpoint's api_token_credstore_ref. Slashes and colons are rejected by the credential \
              store, so a URL-shaped value such as https://hooks.slack.com/services/T00/B00/XXX \
              is refused here with a 400 naming that field rather than a row stored for the GET \
              to hand back. Unlike the JIRA endpoint there is no \
@@ -289,11 +289,19 @@ fn register_notification_routes(mut router: Router, openapi: &dyn OpenApiRegistr
              in_progress, succeeded, failed, error, skipped) rather than the stored settings - \
              the config override must have Slack enabled with a non-empty webhook reference, or \
              this is likewise refused with a 400 before anything is sent. Neither shape claims a \
-             dedupe slot or writes the audit log; both are pinned by \
+             dedupe slot - a test send is about no run - but both write one row to the \
+             notification audit log (GET /qa/v1/settings/notifications/log) for every channel \
+             they actually attempt, on success and on failure alike; a request refused before \
+             any channel is attempted writes none. The event tokens are pinned by \
              qa_insights_sdk::SLACK_NOTIFICATION_EVENTS. Unlike the automatic completion path, a \
              send failure here is returned rather than swallowed - an operator testing a channel \
-             deserves to know it does not work, including a 501 when the channel this deployment \
-             ships has no adapter at all (D10). This endpoint's OpenAPI schema shows the body as \
+             deserves to know it does not work. With no body and both channels enabled, both are attempted and audited \
+             even when the first fails, and the response carries the first failure (Slack \
+             before email); the audit log holds the other. Both channels read their secret as the \
+             qa-insights system actor, as real sends do, so a secret stored with private sharing \
+             is refused with a 400 that says so. The failure statuses: a 501 when the channel has \
+             no adapter in this deployment, and a 503 when the SMTP relay or the Slack webhook refused the \
+             message, timed out or could not be reached. This endpoint's OpenAPI schema shows the body as \
              required; posting no body at all is also accepted. Requires the \
              gts.cf.qa.insights.notification_config.v1~/test grant.",
         )
@@ -317,14 +325,38 @@ fn register_notification_routes(mut router: Router, openapi: &dyn OpenApiRegistr
         // settings shape - no channel being both enabled and configured to
         // send at all (`NO_CHANNEL_ENABLED_FIELD`, WS2 data-correctness
         // remediation Task 4); see `NotifyService::send_test`'s `# Errors`.
-        // There is no declared 501 here: `OperationBuilder` has no
-        // `error_501` (only the seven fixed codes above and `error_500`), so
-        // `DomainError::UnsupportedEgress`'s mapping is documented in prose
-        // above rather than in the schema.
+        // 503 is `DomainError::UpstreamEgress` — a notification channel's far
+        // side did not deliver: the SMTP relay refused, timed out or could not
+        // be reached (`infra::notify::mail_smtp`), or Slack's webhook did
+        // (`infra::notify::slack_oagw`: a gateway error, a timeout, or a
+        // non-2xx such as the 403/404 Slack answers for a revoked webhook).
+        // This endpoint propagates it rather than swallowing it, and
+        // `api::rest::error`'s
+        // `a_failed_relay_is_503_carrying_the_relays_own_answer` pins the
+        // mapping. The Slack arm's detail is fixed text or an HTTP status and
+        // never the webhook path, which is the credential. It went undeclared
+        // until the final branch review; `make qa-openapi-check` could not
+        // have caught that, because the generated document and the committed
+        // one were missing it together.
+        //
+        // **Until the third review pass this was "the relay only, not the
+        // webhook"**: `SlackOagwClient` mapped every failure onto
+        // `DomainError::Internal`, a bare 500, so the one test-send an
+        // operator can actually reach from the settings page (Slack —
+        // `NotificationsEmailPage` has no test control) could never produce
+        // this 503. Slack now uses the same egress vocabulary as SMTP.
+        //
+        // 501 is `DomainError::UnsupportedEgress` — the channel has no adapter
+        // in this deployment (email with an empty `smtp_allowed_hosts`), which
+        // `api::rest::error`'s `an_unsupported_egress_channel_is_501_unimplemented`
+        // pins. `OperationBuilder` has no `error_501` wrapper, so it is declared
+        // through `problem_response` directly.
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
         .error_500(openapi)
+        .problem_response(openapi, StatusCode::NOT_IMPLEMENTED, "Not Implemented")
+        .error_503(openapi)
         .register(router, openapi);
 
     // POST /qa/v1/settings/notifications/preview

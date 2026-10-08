@@ -1,7 +1,9 @@
-//! Lifted from `qa-environments/src/infra/observer/secret_writer.rs`, which
-//! stays in place and stays active until Task 19 removes it. This is a copy,
-//! not a move: Phase C must not change `qa-environments`' behaviour, so both
-//! paths exist side by side until the one-way door in Phase E.
+//! Lifted from `qa-environments/src/infra/observer/secret_writer.rs`. It was a
+//! copy, not a move: Phase C must not change `qa-environments`' behaviour, so
+//! both paths existed side by side until the one-way door in Phase E. The
+//! original was not deleted with the observer: Task 19b moved it to
+//! `qa-environments/src/infra/runner_secret_writer.rs`, where it still writes
+//! the runner `Secret` behind `runner-secret`, so two copies remain.
 //!
 //! What changed in the copy: failures cross the boundary as
 //! [`PluginFailure`] rather than `String`, so the values the original

@@ -45,7 +45,7 @@ use crate::domain::error::DomainError;
 /// exhaustive mapping raises the same type for the four queue-row variants
 /// that already carry it -- one `gts_id` per resource, not two.
 #[resource_error(gts_id!("cf.qa.runs.queue_entry.v1~"))]
-pub(crate) struct QueueResourceError;
+pub struct QueueResourceError;
 
 /// `qa_schedules`, the third resource type this gear owns.
 ///
@@ -74,7 +74,7 @@ pub(crate) struct QueueResourceError;
 /// wrappers that raise it; the exhaustive mapping it also serves did not, and
 /// imports it back.)
 #[resource_error(gts_id!("cf.qa.runs.schedule.v1~"))]
-pub(crate) struct ScheduleResourceError;
+pub struct ScheduleResourceError;
 
 /// Render an error from a **schedule** operation, attributing a field violation
 /// to the schedule resource rather than to the run.
@@ -150,7 +150,7 @@ pub(crate) struct ScheduleResourceError;
 /// exactly as they were — the first two already carry the schedule's own type.
 /// It is also why a later variant becomes an ordinary error here rather than a
 /// wrongly-attributed one.
-pub(crate) fn as_schedule_error(e: DomainError) -> CanonicalError {
+pub fn as_schedule_error(e: DomainError) -> CanonicalError {
     match e {
         DomainError::Validation { field, message } => ScheduleResourceError::invalid_argument()
             .with_field_violation(field, message, "VALIDATION")
@@ -198,7 +198,7 @@ pub(crate) fn as_schedule_error(e: DomainError) -> CanonicalError {
 ///   row-to-run association is already readable by anyone who can list the row.
 /// * **`Validation`** — the same field-without-a-resource problem
 ///   [`as_schedule_error`] documents. `QueueQuery::reject_legacy_field`
-///   raises one for a caller still sending `environment_id` (ruling G-4); this
+///   raises one for a caller still sending `platform_id`; this
 ///   arm is what keeps that refusal attributed to the queue entry rather than
 ///   silently becoming a run's.
 ///
@@ -214,7 +214,7 @@ pub(crate) fn as_schedule_error(e: DomainError) -> CanonicalError {
 /// Everything else falls through untouched, which is what keeps the wrapper
 /// cheap: `QueueRowNotFound`, `QueueRowNotQueued` and `QueueRowExists` already
 /// carry this type, and `Database`/`CorruptState` stay opaque.
-pub(crate) fn as_queue_error(addressed: Option<Uuid>, e: DomainError) -> CanonicalError {
+pub fn as_queue_error(addressed: Option<Uuid>, e: DomainError) -> CanonicalError {
     match e {
         DomainError::Forbidden => QueueResourceError::permission_denied()
             .with_reason("ACCESS_DENIED")

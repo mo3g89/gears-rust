@@ -15,6 +15,10 @@
 # docker-install body below, for instance) simply passes none. They close over
 # no caller globals, deliberately: an earlier single-script version baked eight
 # of them into every call, and that is what made the code impossible to reuse.
+# No caller passes a secret as one of those arguments: they become ssh's argv
+# locally and `bash`'s on the remote. A secret goes in the BODY (stdin),
+# through helm_secret_files, and is registered with register_secret so
+# --dry-run does not print it.
 #
 # THE CALLER MUST HAVE SET, before calling anything below: REMOTE_TARGET
 # (ssh destination), REMOTE_PATH (mirror directory, used only in die()
@@ -71,6 +75,50 @@ PROG_NAME="${PROG_NAME:-remote}"
 step() { printf '\n=== %s ===\n' "$*"; }
 die()  { echo "$PROG_NAME: $*" >&2; exit 1; }
 
+# ------------------------------------------------------------- secrets --
+# Values the dry-run printers below must never print. A driver registers
+# each secret once it is known. Both the raw value AND its `${v@Q}` form are
+# kept, the @Q one first: an unquoted heredoc interpolates a value as
+# `${v@Q}` (see helm_secret_files), and a value carrying a quote does not
+# appear raw inside its own @Q form.
+REDACT_VALUES=()
+register_secret() {
+    [[ -n "${1:-}" ]] || return 0
+    REDACT_VALUES+=("${1@Q}" "$1")
+}
+redact_secrets() {
+    local text="$1" v
+    for v in "${REDACT_VALUES[@]}"; do
+        text="${text//"$v"/<redacted>}"
+    done
+    printf '%s' "$text"
+}
+
+# The opening of a remote `helm` heredoc body, for KEY VALUE pairs: each VALUE
+# into its own mode-600 file in a fresh mktemp directory, by the `printf`
+# BUILTIN -- a builtin is not exec'd, so the value reaches no process's argv
+# on the remote, where `--set KEY=VALUE` put it in helm's -- and an array
+# SECRET_SET_FILE_ARGS of `--set-file KEY=FILE` for the helm line to splice in
+# as "${SECRET_SET_FILE_ARGS[@]}". `--set-file` hands helm the file's bytes as
+# a string, verbatim (no `--set` comma/backslash parsing, no number typing).
+# The directory goes on the body's EXIT. The value itself is in the BODY,
+# i.e. on ssh's stdin -- never its argv -- and register_secret keeps it out
+# of --dry-run's output. check_deploy_secrets_not_in_argv.sh is the guard.
+helm_secret_files() {
+    printf '%s\n' 'old_umask="$(umask)"' 'umask 077' \
+        'secrets_dir="$(mktemp -d)"' \
+        "trap 'rm -rf \"\$secrets_dir\"' EXIT" \
+        'SECRET_SET_FILE_ARGS=()'
+    while [[ $# -ge 2 ]]; do
+        [[ "$1" =~ ^[A-Za-z0-9._]+$ ]] || die "helm_secret_files: '$1' is not a chart value path"
+        printf 'printf %%s %s > "$secrets_dir/%s"\n' "${2@Q}" "$1"
+        printf 'SECRET_SET_FILE_ARGS+=(--set-file "%s=$secrets_dir/%s")\n' "$1" "$1"
+        shift 2
+    done
+    [[ $# -eq 0 ]] || die "helm_secret_files: odd number of arguments (KEY VALUE pairs)"
+    printf '%s\n' 'umask "$old_umask"'
+}
+
 # Read-only remote command. Runs even under --dry-run, on purpose: knowing
 # whether the host is reachable and already has Docker (or kubectl/helm) is
 # exactly what a dry run is for, and none of these calls change anything.
@@ -96,7 +144,8 @@ ssh_ro_script() {
 # parameters -- passed as arguments rather than interpolated into the text,
 # so a value containing a shell metacharacter cannot become code, and so a
 # quoted heredoc (which expands nothing locally) can still reach them. Under
-# --dry-run the body is printed and not run.
+# --dry-run the body is printed, with every register_secret value replaced by
+# `<redacted>`, and not run.
 #
 # EVERY FAILURE IS NAMED. Without the `|| die`, a failed remote build, `up
 # -d`/`helm upgrade` or verify aborted the calling script through `set -e`
@@ -110,7 +159,7 @@ remote_sh() {
     body="$(cat)"
     if $DRY_RUN; then
         printf '\n--- [dry-run] would run on %s: %s ---\n%s\n--- end ---\n' \
-            "$REMOTE_TARGET" "$label" "$body"
+            "$REMOTE_TARGET" "$label" "$(redact_secrets "$body")"
         return 0
     fi
     printf '%s\n' "$body" | ssh "${SSH_OPTS[@]}" "$REMOTE_TARGET" bash -s -- "$@" \
@@ -130,11 +179,24 @@ remote_sh() {
 # VERIFY block after that -- seven checks -- had been silently skipped, and
 # the deploy reported success.
 #
-# The direct fix is `</dev/null` on every command that could forward stdin,
-# and that is done at each call site. This function is the fix for the
-# CLASS: the body must print a sentinel line as its last act, and a step
-# that exits 0 without printing it is a failure. Any future command that
-# eats the script is then loud instead of invisible.
+# The direct fix is `</dev/null` on every command that could forward stdin.
+# **This comment used to claim that is done at each call site, and it is
+# not** (second review, finding #99): no `remote_sh` body in
+# `deploy-k8s.sh` carries the redirect, and two of them end in a sub-shell
+# that could forward stdin -- `bash deploy/runner/build-and-import.sh` in
+# the BUILDRUNNER heredoc, and `bash "$VERIFY_SCRIPT"` in the VERIFYK8S
+# one. Neither eats anything today, and the reason is positional rather
+# than defensive: each is the **last statement** of its heredoc, so there
+# is nothing after it left to swallow. Add the redirect before adding a
+# line after either.
+#
+# This function is the fix for the CLASS, and it is what the codebase
+# actually relies on: the body must print a sentinel line as its last act,
+# and a step that exits 0 without printing it is a failure. Any future
+# command that eats the script is then loud instead of invisible. It is
+# also why the two bodies above are `remote_sh` and not this -- neither
+# prints a sentinel, so neither is covered, which is the other half of
+# what the missing redirects cost.
 #
 # The cost is that output is captured and printed at the end rather than
 # streamed. Acceptable for the bounded verify-style steps this is used for,
@@ -145,7 +207,7 @@ remote_sh_expect() {
     body="$(cat)"
     if $DRY_RUN; then
         printf '\n--- [dry-run] would run on %s: %s (must print %q) ---\n%s\n--- end ---\n' \
-            "$REMOTE_TARGET" "$label" "$sentinel" "$body"
+            "$REMOTE_TARGET" "$label" "$sentinel" "$(redact_secrets "$body")"
         return 0
     fi
     # 2>&1 so the FAIL lines the bodies write to stderr are interleaved with

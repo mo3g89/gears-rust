@@ -7,11 +7,17 @@ Issuer:        {{ include "qa-platform.issuer" . }}
 {{- if .Values.keycloakRealmJson }}
 
 NOTE: keycloakRealmJson is set, so the qa-platform-realm Secret carries the
-realm you supplied rather than the one this chart renders. It must already list
+realm you supplied, verbatim. Nothing this chart substitutes reaches it:
+publicOrigin, seedTenantId, devMode's fixture users and
+argo.workflowClientSecret are not applied, and argo.workflowClientSecret is
+read by nothing in this mode. The supplied realm must itself list
 {{ .Values.publicOrigin }} in the qa-platform-ui client's redirectUris and
-webOrigins, and must pin the qa-platform-workflow client's secret to
-argo.workflowClientSecret -- nothing checks either, and a mismatch surfaces as a
-failed login or a 401 from a workflow pod, neither of which names this setting.
+webOrigins -- a mismatch is a failed login that does not name this setting.
+verify-k8s.sh's product-plugin check takes a client-credentials token with the
+qa-platform-workflow client's secret, read back out of this same Secret, so the
+realm needs that client with serviceAccountsEnabled; the chart has already
+refused it if its secret is under 16 characters or, outside devMode, the
+development literal.
 {{- end }}
 {{- if and .Values.gears.hostAliases.enabled (not .Values.uiServiceClusterIP) }}
 

@@ -15,15 +15,19 @@
 //! to system?" stays grep-able and auditable. A new background flow must
 //! add a new factory here — a deliberate review-magnet.
 //!
-//! # One of these runs on a request, not on a ticker
+//! # Two of these run on a request, not on a ticker
 //!
-//! [`for_bundle_download`] is the exception to the sentence above: it backs
+//! [`for_bundle_download`] is one exception to the sentence above: it backs
 //! `GET /qa/v1/test-bundles/{id}?sig=...`, which is registered
 //! `.anonymous().exposed()` because its caller is a workflow pod with no user
 //! to borrow a session from. It is tenant-bound to the tenant the descriptor
 //! row names — recovered from the row, never asserted by the caller — and it
 //! is only reached after the caller's HMAC tag has verified against that
 //! tenant's derived key. See its own doc.
+//!
+//! [`for_credential_read`] is the other: it also runs on requests — an
+//! explicit sync and a read's lazy sync — after the caller's own `SYNC`
+//! authorization; see its doc.
 //!
 //! # The nil/tenant-bound split
 //!
@@ -105,14 +109,42 @@ pub fn for_branch_refresh_enumeration() -> SecurityContext {
 }
 
 /// Branch-cache refresher, per-repository step. Tenant-bound to the
-/// repository's owning tenant so the refreshed branch rows are written
-/// under the CORRECT tenant (`ReposService` derives the rows' `tenant_id`
-/// from the context) and the per-repo credstore read runs tenant-scoped.
+/// repository's owning tenant so the refresh is authorized under that
+/// tenant's SYNC grant. The repository's credential is read under
+/// [`for_credential_read`], bound to the same owning tenant, as every other
+/// path reads it.
+/// The binding does not choose the rows' tenant: `replace_branches` files
+/// them under the repository's owning tenant, read off its row (DESIGN §3.8
+/// "qa-catalog schema"), whatever the context's tenant is.
 #[must_use]
 pub fn for_branch_refresh(tenant_id: Uuid) -> SecurityContext {
     tracing::info!(
         target: "qa_catalog.system_actor",
         site = "branch_refresh",
+        tenant_id = %tenant_id,
+        "qa-catalog system actor constructed",
+    );
+    build_inner(Some(tenant_id))
+}
+
+/// The credential-store read of a repository's credential, for every path that
+/// resolves one: an explicit sync, a read's lazy sync, and the branch-cache
+/// refresher (whose own context is [`for_branch_refresh`], the same identity).
+/// Tenant-bound to the repository's **owning** tenant, read off its row — the
+/// tenant the refresher binds to — never the tenant of the caller, which for a
+/// caller whose scope spans a tenant hierarchy is not the owner.
+///
+/// **Not the caller's own identity, on purpose.** The refresher has no user to
+/// read as. A sync or a read that read as the user would see a secret only that
+/// user can see — one with `private` sharing — and pass, while every refresher
+/// pass failed on the same repository. The caller is authorized first (`SYNC`
+/// on the repository, under its own context); only the read of the secret runs
+/// as this actor.
+#[must_use]
+pub fn for_credential_read(tenant_id: Uuid) -> SecurityContext {
+    tracing::info!(
+        target: "qa_catalog.system_actor",
+        site = "credential_read",
         tenant_id = %tenant_id,
         "qa-catalog system actor constructed",
     );
@@ -235,7 +267,20 @@ mod tests {
         assert_eq!(
             ctx.subject_tenant_id(),
             tenant,
-            "branch rows must be written under the repository's own tenant"
+            "the refresh must be authorized under the repository's own tenant"
+        );
+    }
+
+    #[test]
+    fn credential_read_factory_carries_supplied_tenant() {
+        let tenant = Uuid::from_u128(0xC0FF_EE00_DEAD_BEEF);
+        let ctx = for_credential_read(tenant);
+        assert_eq!(ctx.subject_id(), QA_CATALOG_SYSTEM_ACTOR_UUID);
+        assert_eq!(ctx.subject_type(), Some(QA_CATALOG_SYSTEM_SUBJECT_TYPE));
+        assert_eq!(
+            ctx.subject_tenant_id(),
+            tenant,
+            "the credential must be read under the repository's own tenant"
         );
     }
 

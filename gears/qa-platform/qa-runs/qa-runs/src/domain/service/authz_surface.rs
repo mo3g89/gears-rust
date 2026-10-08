@@ -77,7 +77,7 @@ use super::{actions, resources};
     dead_code,
     reason = "read under cfg(test) only - see this module's header"
 )]
-pub(crate) const ENFORCED: &[(&str, &str)] = &[
+pub const ENFORCED: &[(&str, &str)] = &[
     // `qa.run` - `runs`, `launch`, `admission`, `dispatch`, `ingest` and
     // `crate::infra::logs::archive`. `dispatch` is the write verb for a run's
     // own child data as well as for the dispatch itself, which is why the log
@@ -137,7 +137,7 @@ pub(crate) const ENFORCED: &[(&str, &str)] = &[
 /// no such registration could be built from these strings — which stopped being
 /// true when it was.
 #[cfg(test)]
-pub(crate) const RESOURCE_TYPES: &[&str] = &[
+pub const RESOURCE_TYPES: &[&str] = &[
     resources::QUEUE_ENTRY_NAME,
     resources::RUN_NAME,
     resources::SCHEDULE_NAME,

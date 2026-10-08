@@ -315,8 +315,8 @@ pub struct Run {
     /// and no log text is reachable through this SDK.**
     ///
     /// Corrected 2026-08-31; it previously read "populated on completion (p2
-    /// with 2.7)". Design D-RLP-6 decided it stays unwritten permanently
-    /// rather than pending a feature: the column is `VARCHAR(2048)` and is
+    /// with 2.7)". The decision of that date is that it stays unwritten
+    /// permanently rather than pending a feature: the column is `VARCHAR(2048)` and is
     /// published here shaped like a URI a consumer may fetch, so putting an
     /// internal reference in it would publish a schema detail and invite that
     /// misreading. A run's durable log lives in qa-runs' own `qa_run_logs`
@@ -565,7 +565,7 @@ pub struct QueueEntry {
     pub blocked_by: Option<String>,
 }
 
-/// The seven queue states (guide lines 88-96; decision D1). `Dispatching`
+/// The seven queue states (guide lines 88-96). `Dispatching`
 /// and `Running` are the two that hold a claim on the platform.
 ///
 /// **`Cancelled` has two `l`s, [`RunState::Canceled`] has one. This is
@@ -621,7 +621,7 @@ pub struct Schedule {
     pub parameters: Vec<RunParameter>,
     /// Whether this schedule's runs notify Slack at all.
     ///
-    /// The first of the three per-schedule settings (D9). Read-only through
+    /// The first of the three per-schedule settings. Read-only through
     /// [`Schedule`]: they are written by
     /// [`QaRunsClientV1::update_schedule_notifications`], never by a
     /// [`NewSchedule`] — see [`ScheduleNotificationSettings`] for why the two
@@ -671,7 +671,7 @@ pub struct ScheduleTick {
 /// never fires.
 ///
 /// Declared in the SDK rather than in the gear because **qa-insights parses
-/// these strings** (Task 36) and the two gears must agree on the set. It is the
+/// these strings** and the two gears must agree on the set. It is the
 /// closed set the service validates against, so an unknown event name is refused
 /// at the boundary.
 pub const SLACK_NOTIFICATION_EVENTS: [&str; 6] = [
@@ -715,8 +715,10 @@ pub struct ScheduleNotificationSettings {
     /// The event vocabulary: `pending`, `in_progress`, `succeeded`, `failed`,
     /// `error`, `skipped` — the **serialized** spellings, listed
     /// in [`SLACK_NOTIFICATION_EVENTS`]. Stored as strings rather than an enum
-    /// because the SDK is `serde`-free and the column is JSON; the routing core
-    /// in qa-insights parses them (Task 36).
+    /// because the SDK is `serde`-free and the column is JSON. Nothing reads them
+    /// for routing today: qa-insights' scheduled-run routing arm, which parsed
+    /// them, was deleted, so the list is stored and validated but has
+    /// no effect until a scheduled-run producer is built.
     pub slack_events: Vec<String>,
 }
 

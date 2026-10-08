@@ -1,6 +1,9 @@
 # Multi-stage build for the qa-platform gears server.
 #
-# Modeled on testing/docker/cyberware.Dockerfile: same pinned builder image,
+# Modeled on testing/docker/cyberware.Dockerfile: same builder image tag
+# (rust:1.95.0-bookworm) but NOT the same digest -- this file pins the newer
+# digest `make qa-pins-online` resolves, while cyberware.Dockerfile and
+# gears/mini-chat/deploy/docker/mini-chat.Dockerfile still carry the older one;
 # same protobuf toolchain, same workspace copies. It differs only in which
 # binary/features get built and in the runtime stage's config + entrypoint,
 # which this stack needs to point the server at a deployment's own Postgres
@@ -8,7 +11,7 @@
 # expansion in the config file itself).
 
 # Stage 1: Builder
-FROM rust:1.95.0-bookworm@sha256:6bb82db0878825e157664188b319c875de4f1fff5d70f5917b3a3f1974b472e4 AS builder
+FROM rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS builder
 
 # Build arguments for cargo features
 #
@@ -134,7 +137,7 @@ COPY proto ./proto
 RUN cargo build --release --bin cf-gears-example-server --features "$CARGO_FEATURES"
 
 # Stage 2: Runtime - must match builder's base OS
-FROM debian:13.3-slim
+FROM debian:13.3-slim@sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430
 
 # `ca-certificates` -- the runtime stage's first apt package, so this is the
 # first RUN to install anything here; kept single-`RUN` /
@@ -186,7 +189,7 @@ COPY --from=builder /build/target/release/cf-gears-example-server /usr/local/bin
 # fields into a separate file under /var/lib/cf-gears and points the server
 # at that rendered copy, without ever opening this file for writing. This
 # file may therefore be mounted read-only -- e.g. a Kubernetes ConfigMap
-# volume (Task 17) -- unlike an earlier revision of the entrypoint, which
+# volume -- unlike an earlier revision of the entrypoint, which
 # rewrote this file in place and did require it to stay writable by the
 # runtime user. The `chown -R 1000:1000 /etc/cf-gears` below is no longer
 # required by the entrypoint for that reason; left as-is here since changing

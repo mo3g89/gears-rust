@@ -52,7 +52,7 @@
 //! covered it and its writer shipped untruncated.
 //!
 //! Operator text, **not** truncated: the saved-view, bug and settings writers
-//! take input through a REST surface that validates it (Tasks 16, 27, 32).
+//! take input through a REST surface that validates it.
 //! Silently shortening a name or a webhook reference there would corrupt data the
 //! operator can see, where refusing it tells them. Producer text is the opposite
 //! case: nobody is watching, and a dropped result is unrecoverable.
@@ -103,7 +103,7 @@ use uuid::Uuid;
 
 use crate::domain::analytics::{CaseRow, ExecRow};
 use crate::domain::error::DomainError;
-use crate::domain::repos::{PlanExecRow, Watermarks};
+use crate::domain::repos::{PlanExecRow, SweepCursor, Watermarks};
 use crate::infra::storage::entity::{
     ingest_watermark, jira_bug, jira_config, jira_poller_config, notification_config,
     notification_log, saved_view, test_case_collect, test_case_result, test_result,
@@ -123,21 +123,21 @@ fn corrupt(what: &'static str, id: Uuid, value: impl Display) -> DomainError {
 // ---------------------------------------------------------------------------
 
 /// `qa_test_results.status` / `qa_test_case_results.status` — `VARCHAR(16)`.
-pub(crate) const MAX_STATUS: usize = 16;
+pub const MAX_STATUS: usize = 16;
 /// `qa_test_results.{test_file,plan_path}`,
 /// `qa_test_case_results.{test_file,nodeid}`,
 /// `qa_test_case_collect.test_file` — `VARCHAR(1024)`.
-pub(crate) const MAX_PATH: usize = 1024;
+pub const MAX_PATH: usize = 1024;
 /// `qa_test_results.{test_name,branch}`, `qa_test_case_results.name`,
 /// `qa_test_case_collect.branch` — `VARCHAR(512)`.
-pub(crate) const MAX_NAME: usize = 512;
+pub const MAX_NAME: usize = 512;
 /// `qa_test_results.duration`, `qa_test_case_results.duration` — `VARCHAR(64)`.
-pub(crate) const MAX_DURATION: usize = 64;
+pub const MAX_DURATION: usize = 64;
 /// `qa_test_results.launch_id`, `qa_test_results.product_version`,
 /// `qa_test_results.app_build` — `VARCHAR(255)`.
-pub(crate) const MAX_SHORT_TEXT: usize = 255;
+pub const MAX_SHORT_TEXT: usize = 255;
 /// `qa_test_results.jira_key`, `qa_test_case_results.ticket` — `VARCHAR(64)`.
-pub(crate) const MAX_KEY: usize = 64;
+pub const MAX_KEY: usize = 64;
 
 /// Make a producer-supplied value fit its column, so the column can never
 /// reject it. See this module's header for why truncating beats rejecting on
@@ -145,7 +145,7 @@ pub(crate) const MAX_KEY: usize = 64;
 ///
 /// By `char`, not by byte: the columns are measured in characters and slicing a
 /// byte index would panic mid-codepoint.
-pub(crate) fn truncate(value: String, max: usize, column: &'static str) -> String {
+pub fn truncate(value: String, max: usize, column: &'static str) -> String {
     // Counted once. Both the guard and the log line need it, and `chars().count()`
     // is a full walk of the string — on the hot ingest path, for every column of
     // every row.
@@ -165,7 +165,7 @@ pub(crate) fn truncate(value: String, max: usize, column: &'static str) -> Strin
 }
 
 /// [`truncate`] over an optional column.
-pub(crate) fn truncate_opt(
+pub fn truncate_opt(
     value: Option<String>,
     max: usize,
     column: &'static str,
@@ -227,7 +227,7 @@ fn u64_from_db(value: i64, what: &'static str, id: Uuid) -> Result<u64, DomainEr
 /// # Errors
 ///
 /// [`DomainError::Validation`] if the value does not fit an `i32`.
-pub(crate) fn db_i32_from_u32(value: u32, field: &str) -> Result<i32, DomainError> {
+pub fn db_i32_from_u32(value: u32, field: &str) -> Result<i32, DomainError> {
     i32::try_from(value).map_err(|_| DomainError::Validation {
         field: field.to_owned(),
         message: format!("must be within 0..={}", i32::MAX),
@@ -245,17 +245,18 @@ pub(crate) fn db_i32_from_u32(value: u32, field: &str) -> Result<i32, DomainErro
 /// `qa_analytics_saved_views.plan_key` is `NOT NULL DEFAULT ''`, so a writer
 /// that forgets it compiles, inserts, and silently collides a plan-scoped view
 /// with the owner's *global* view of the same name — a wrong 409 with no error
-/// anywhere. It exists as a named function, rather than inline at the three call
-/// sites that need it, so that the read probe
-/// (`find_by_natural_key`) and the two writers cannot derive it differently:
-/// a probe that disagreed with what a write would produce is precisely the
-/// failure obligation #2 is about.
+/// anywhere. It exists as a named function, rather than inline at the two
+/// writers that need it, so the two cannot derive it differently. It was three
+/// call sites until finding #38's triage deleted the unused
+/// `find_by_natural_key` read probe; a probe that disagreed with what a write
+/// would produce is precisely the failure obligation #2 is about, which is why
+/// any reader added later derives its key here and not inline.
 ///
 /// `""` when the plan identity is absent, otherwise `"<repo_id>/<plan_path>"`.
 /// A half-present identity — one of the two `None` — is also `""`: the pair is
 /// one value, and a key built from half of it would be a third spelling of
 /// "global".
-pub(crate) fn plan_key(repo_id: Option<Uuid>, plan_path: Option<&str>) -> String {
+pub fn plan_key(repo_id: Option<Uuid>, plan_path: Option<&str>) -> String {
     match (repo_id, plan_path) {
         (Some(repo_id), Some(plan_path)) => format!("{repo_id}/{plan_path}"),
         _ => String::new(),
@@ -272,7 +273,7 @@ pub(crate) fn plan_key(repo_id: Option<Uuid>, plan_path: Option<&str>) -> String
 /// `AccessScope`, not something a consumer reads off a row, and `updated_at`
 /// moves on any write while `TestResultRecord` models an outcome that happened
 /// once.
-pub(crate) fn test_result_to_sdk(m: test_result::Model) -> TestResultRecord {
+pub fn test_result_to_sdk(m: test_result::Model) -> TestResultRecord {
     TestResultRecord {
         id: m.id,
         run_id: m.run_id,
@@ -320,7 +321,7 @@ pub(crate) fn test_result_to_sdk(m: test_result::Model) -> TestResultRecord {
 /// `results_sea_repo::tests::the_case_collection_maps_every_column_to_its_own_field`
 /// — a transposition of `name` and `nodeid`, or of `reason` and `ticket`, is two
 /// `String`/`Option<String>` fields swapping places and compiles clean.
-pub(crate) fn test_case_result_to_sdk(m: test_case_result::Model) -> TestCaseResultRecord {
+pub fn test_case_result_to_sdk(m: test_case_result::Model) -> TestCaseResultRecord {
     TestCaseResultRecord {
         id: m.id,
         run_id: m.run_id,
@@ -348,7 +349,7 @@ pub(crate) fn test_case_result_to_sdk(m: test_case_result::Model) -> TestCaseRes
 /// because the alternative is `build_case_data` learning the entity type — and
 /// `status` in particular must cross unvalidated, which is this module's one
 /// deliberate exception and is stated in its header.
-pub(crate) fn case_row_from_result(m: test_case_result::Model) -> CaseRow {
+pub fn case_row_from_result(m: test_case_result::Model) -> CaseRow {
     CaseRow {
         run_id: m.run_id,
         test_file: m.test_file,
@@ -402,7 +403,7 @@ pub(crate) fn case_row_from_result(m: test_case_result::Model) -> CaseRow {
 /// produce; a row that hit that default resolves to nothing in
 /// [`resolve_rows`](crate::domain::analytics::universe::resolve_rows) and is
 /// dropped there, exactly as an out-of-universe row already is.
-pub(crate) fn exec_row_from_result(m: test_result::Model) -> ExecRow {
+pub fn exec_row_from_result(m: test_result::Model) -> ExecRow {
     // The in-memory twin of `results_sea_repo::effective_ts`, which names this
     // function back and carries the both-NULL corner from the SQL side. It has to
     // stay the same expression: this value is what the analytics cores fold over,
@@ -446,7 +447,7 @@ pub(crate) fn exec_row_from_result(m: test_result::Model) -> ExecRow {
 /// and the two are different columns. No `ts`/`day` derivation here: the
 /// repository's own `ORDER BY` is what a caller of [`PlanExecRow`] must trust,
 /// exactly as [`ExecRow`]'s header states for its own ordering.
-pub(crate) fn plan_exec_row_from_result(m: test_result::Model) -> PlanExecRow {
+pub fn plan_exec_row_from_result(m: test_result::Model) -> PlanExecRow {
     PlanExecRow {
         run_id: m.run_id,
         test_name: m.test_name,
@@ -467,7 +468,7 @@ pub(crate) fn plan_exec_row_from_result(m: test_result::Model) -> PlanExecRow {
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] if `case_count` is negative.
-pub(crate) fn collect_count_to_sdk(
+pub fn collect_count_to_sdk(
     m: test_case_collect::Model,
 ) -> Result<CollectCount, DomainError> {
     Ok(CollectCount {
@@ -507,7 +508,7 @@ fn saved_view_scope_from_str(value: &str, id: Uuid) -> Result<SavedViewScope, Do
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] if `scope` is not `all` or `plan`.
-pub(crate) fn saved_view_to_sdk(m: saved_view::Model) -> Result<SavedView, DomainError> {
+pub fn saved_view_to_sdk(m: saved_view::Model) -> Result<SavedView, DomainError> {
     Ok(SavedView {
         id: m.id,
         owner_id: m.owner_id,
@@ -539,7 +540,7 @@ pub(crate) fn saved_view_to_sdk(m: saved_view::Model) -> Result<SavedView, Domai
 ///
 /// [`DomainError::Validation`] if the text is not JSON. This is caller input,
 /// not stored state, so it is a 400 rather than a `CorruptState`.
-pub(crate) fn query_json_to_column(text: &str) -> Result<Json, DomainError> {
+pub fn query_json_to_column(text: &str) -> Result<Json, DomainError> {
     serde_json::from_str(text).map_err(|error| DomainError::Validation {
         field: "query_json".to_owned(),
         message: format!("must be a JSON document: {error}"),
@@ -557,7 +558,7 @@ pub(crate) fn query_json_to_column(text: &str) -> Result<Json, DomainError> {
 /// come back from the JIRA API (`check_jira_status`,
 /// `manager/src/services/jira.rs:254`), so it is an open set like the result
 /// statuses.
-pub(crate) fn jira_bug_to_sdk(m: jira_bug::Model) -> JiraBug {
+pub fn jira_bug_to_sdk(m: jira_bug::Model) -> JiraBug {
     JiraBug {
         id: m.id,
         jira_key: m.jira_key,
@@ -586,7 +587,7 @@ pub(crate) fn jira_bug_to_sdk(m: jira_bug::Model) -> JiraBug {
 /// token with `"********"` on the way out
 /// (`manager/src/routes/settings.rs:254-259`), which is a mitigation for storing
 /// the material in the first place.
-pub(crate) fn jira_config_to_sdk(m: jira_config::Model) -> JiraConfig {
+pub fn jira_config_to_sdk(m: jira_config::Model) -> JiraConfig {
     JiraConfig {
         url: m.url,
         project_key: m.project_key,
@@ -605,7 +606,7 @@ pub(crate) fn jira_config_to_sdk(m: jira_config::Model) -> JiraConfig {
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] if `poll_interval_seconds` is negative.
-pub(crate) fn jira_poller_config_to_sdk(
+pub fn jira_poller_config_to_sdk(
     m: &jira_poller_config::Model,
 ) -> Result<JiraPollerConfig, DomainError> {
     Ok(JiraPollerConfig {
@@ -629,7 +630,7 @@ pub(crate) fn jira_poller_config_to_sdk(
 /// # Errors
 ///
 /// [`DomainError::Validation`] if the value does not fit an `i64`.
-pub(crate) fn db_i64_from_u64(value: u64, field: &str) -> Result<i64, DomainError> {
+pub fn db_i64_from_u64(value: u64, field: &str) -> Result<i64, DomainError> {
     i64::try_from(value).map_err(|_| DomainError::Validation {
         field: field.to_owned(),
         message: format!("must be within 0..={}", i64::MAX),
@@ -751,7 +752,7 @@ fn slack_template_to_json(t: &ScheduledRunSlackTemplate) -> Json {
 
 /// The six templates into the stored document. Encoding half of
 /// [`slack_templates_from_json`].
-pub(crate) fn slack_templates_to_json(t: &ScheduledRunSlackTemplates) -> Json {
+pub fn slack_templates_to_json(t: &ScheduledRunSlackTemplates) -> Json {
     let mut map = serde_json::Map::new();
     for (key, value) in [
         ("pending", &t.pending),
@@ -773,14 +774,16 @@ pub(crate) fn slack_templates_to_json(t: &ScheduledRunSlackTemplates) -> Json {
 /// on the contract would be a value with no operation that takes it.
 ///
 /// Returns [`NotificationConfig::slack_webhook_credstore_ref`] and never a
-/// webhook URL — obligation #3 of the schema. The column holds a
-/// credential-store reference and the material never enters this gear.
+/// webhook URL — obligation #3 of the schema.
+/// The column holds a credential-store reference. The webhook URL it names is
+/// resolved only inside `infra::notify::slack_oagw`, for the length of one
+/// send, and is never stored, returned or formatted.
 ///
 /// # Errors
 ///
 /// [`DomainError::CorruptState`] if `email_smtp_port` is outside `u16`, or if
 /// the templates document does not decode.
-pub(crate) fn notification_config_to_sdk(
+pub fn notification_config_to_sdk(
     m: notification_config::Model,
 ) -> Result<NotificationConfig, DomainError> {
     Ok(NotificationConfig {
@@ -813,7 +816,7 @@ pub(crate) fn notification_config_to_sdk(
 
 /// `qa_notification_log` → the contract entry. `tenant_id` and `updated_at` are
 /// omitted for the reasons [`test_result_to_sdk`] gives.
-pub(crate) fn notification_log_to_sdk(m: notification_log::Model) -> NotificationLogEntry {
+pub fn notification_log_to_sdk(m: notification_log::Model) -> NotificationLogEntry {
     NotificationLogEntry {
         id: m.id,
         created_at: m.created_at,
@@ -829,18 +832,35 @@ pub(crate) fn notification_log_to_sdk(m: notification_log::Model) -> Notificatio
 // Watermarks
 // ---------------------------------------------------------------------------
 
-/// `qa_ingest_watermarks` → the two marks.
+/// `qa_ingest_watermarks` → its marks.
 ///
 /// `id`, `tenant_id`, `created_at` and `updated_at` have no domain field: the
-/// row is a per-tenant singleton and `Watermarks` is the pair of marks, nothing
+/// row is a per-tenant singleton and `Watermarks` is the marks, nothing
 /// else. A caller that has no row at all gets [`Watermarks::default`], which is
 /// the same value — see the trait's note on why "no row" and "row with nulls"
 /// must be indistinguishable.
-pub(crate) fn watermarks_from_row(m: &ingest_watermark::Model) -> Watermarks {
+pub fn watermarks_from_row(m: &ingest_watermark::Model) -> Watermarks {
     Watermarks {
         last_reconciled_finished_at: m.last_reconciled_finished_at,
-        last_swept_at: m.last_swept_at,
+        sweep_cursor: sweep_cursor_from_row(m),
     }
+}
+
+/// The three cursor columns → [`SweepCursor`], **all or nothing**.
+///
+/// They are written together and cleared together
+/// (`WatermarkRepository::set_sweep_cursor`), so a row holding some of them and
+/// not others is a state nothing writes. Folding a partial row to `None` rather
+/// than reconstructing a cursor from whatever survived is the fail-closed
+/// answer this file's header promises: the cost is one re-derivation of
+/// `mark - lookback`, which is the sweep's ordinary behaviour, where a
+/// half-built cursor would be a resume point standing on a value nobody chose.
+fn sweep_cursor_from_row(m: &ingest_watermark::Model) -> Option<SweepCursor> {
+    Some(SweepCursor {
+        window_floor: m.sweep_cursor_floor?,
+        at: m.sweep_cursor_at?,
+        run_id: m.sweep_cursor_run_id?,
+    })
 }
 
 /// Mapper tests.
@@ -1050,7 +1070,7 @@ mod tests {
         let row = notification_config::Model {
             id: uuid(1),
             tenant_id: uuid(2),
-            slack_webhook_credstore_ref: "cred://hook".to_owned(),
+            slack_webhook_credstore_ref: "hook".to_owned(),
             slack_channel: "#qa".to_owned(),
             manager_ui_base_url: "https://qa.example".to_owned(),
             slack_enabled: true,
@@ -1071,7 +1091,7 @@ mod tests {
             updated_at: datetime!(2026-08-18 00:00:00 UTC),
         };
         let config = notification_config_to_sdk(row).unwrap();
-        assert_eq!(config.slack_webhook_credstore_ref, "cred://hook");
+        assert_eq!(config.slack_webhook_credstore_ref, "hook");
         assert_eq!(config.email_smtp_port, 2525);
         assert_eq!(config.email_smtp_username, "qa@example");
         assert_eq!(

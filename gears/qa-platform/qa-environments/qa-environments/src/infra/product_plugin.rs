@@ -8,9 +8,8 @@
 //! initialises after it, or is absent. Lazy resolution makes the same
 //! deployment fail only where the capability is actually needed — one
 //! environment's observation, recorded on that environment's row with text
-//! naming the cause — which is design §4.2's own principle and the ruling
-//! (D-14) `qa-catalog` already applied to its types-registry client for the
-//! identical reason.
+//! naming the cause — the same lazy resolution `qa-catalog` already applies
+//! to its types-registry client, for the identical reason.
 //!
 //! The hub lookup is a `TypeId` hash probe, so doing it per observation costs
 //! nothing measurable next to the cluster round-trip that follows it.
@@ -68,8 +67,9 @@ impl ProductPluginPort for HubProductPluginResolver {
         };
 
         // `QaCatalogError`'s own message is not persisted or returned: the far
-        // side already logged which of the three causes it was (no such
-        // product, no plugin bound, plugin not registered), and this gear
+        // side already logged which of the two causes it was (no such
+        // product, or plugin not registered -- "no plugin bound" has been
+        // unrepresentable since Task 20a), and this gear
         // records fixed text instead. `%error` here is a log line, not a
         // stored or published value — and it is qa-catalog's own canonical
         // error, never anything derived from a credential.

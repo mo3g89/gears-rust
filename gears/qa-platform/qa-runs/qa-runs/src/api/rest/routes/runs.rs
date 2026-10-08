@@ -7,6 +7,7 @@ use toolkit::api::operation_builder::{OperationBuilder, OperationBuilderODataExt
 
 use super::{API_TAG, License};
 use crate::api::rest::{dto, handlers};
+use crate::infra::storage::db::PAGE_LIMITS;
 use crate::infra::storage::odata::RunFilterField;
 
 pub(super) fn register_run_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
@@ -19,7 +20,9 @@ pub(super) fn register_run_routes(mut router: Router, openapi: &dyn OpenApiRegis
              admit it to its environment's queue (202). A queued run starts on its own - no \
              further call is needed. 429 means the launch was refused by a capacity \
              setting, and the response names which one: queue_max_depth for a full \
-             per-environment queue, max_concurrent_runs for the cluster-wide cap.",
+             per-environment queue, max_concurrent_runs for the cluster-wide cap. 409 means \
+             a concurrent write won: another call moved the run while this one was starting \
+             it, or concurrent launches took every run name this one tried.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -43,6 +46,11 @@ pub(super) fn register_run_routes(mut router: Router, openapi: &dyn OpenApiRegis
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
+        // 409 is a conflict with a concurrent write, never the caller's input:
+        // another call moved the run while this one was starting it
+        // (`IllegalTransition`, `aborted`), or concurrent launches took every run
+        // name this one tried (`RunNameExists`, `already_exists`).
+        .error_409(openapi)
         .error_429(openapi)
         .error_500(openapi)
         .register(router, openapi);
@@ -73,6 +81,24 @@ pub(super) fn register_run_routes(mut router: Router, openapi: &dyn OpenApiRegis
         // translatable fields drifting apart.
         .with_odata_filter::<RunFilterField>()
         .with_odata_orderby::<RunFilterField>()
+        // The toolkit's `OData` extractor binds both on every route it serves
+        // (`ODataParams`); `with_odata_filter` declares neither, so they are
+        // declared here. `qa-platform-openapi`'s
+        // `every_odata_list_operation_declares_limit_and_cursor` keeps it so.
+        .query_param_typed(
+            "limit",
+            false,
+            format!(
+                "Page size; defaults to {}, 1 or more, capped at {}; 0 is a 400. `$top` is the same parameter, and sending both is a 400.",
+                PAGE_LIMITS.default, PAGE_LIMITS.max
+            ),
+            "integer",
+        )
+        .query_param(
+            "cursor",
+            false,
+            "Opaque token from the previous page's `next_cursor`. `$skiptoken` is the same parameter.",
+        )
         // 400 is reachable here and is the caller's: a `$filter` naming a field
         // outside the allow-list, or a cursor from a different sort order.
         .error_400(openapi)
@@ -108,7 +134,10 @@ pub(super) fn register_run_routes(mut router: Router, openapi: &dyn OpenApiRegis
         .summary("Cancel a run")
         .description(
             "Stop a run in any state. Idempotent: a run that has already finished, been \
-             cancelled, expired or timed out is left as it stands and still answers 204.",
+             cancelled, expired or timed out is left as it stands and still answers 204. 409 \
+             means the run changed state while this call was cancelling it; for a running \
+             run the execution has already been asked to stop, and repeating the cancel is \
+             safe.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -121,6 +150,12 @@ pub(super) fn register_run_routes(mut router: Router, openapi: &dyn OpenApiRegis
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
+        // 409 when the run moved between this call's read and its write
+        // (`IllegalTransition`), or a queued run's row left `queued` first
+        // (`QueueRowNotQueued`); both map to `aborted`. For a running run the
+        // executor was already asked to stop (`RunsService::cancel`'s doc), so a
+        // retry is safe.
+        .error_409(openapi)
         // A live execution the executor refuses to cancel is `ExecutorFailed`,
         // which is an opaque 500 - the run, its claim and its lease are all
         // left alone and the next tick retries.
@@ -135,7 +170,9 @@ pub(super) fn register_run_routes(mut router: Router, openapi: &dyn OpenApiRegis
             "Launch a new run with the original's target, branch, parameters and tag \
              filter. Same two-outcome shape as a launch: 200 started, 202 queued. A run \
              that records no branch is refused with 400 rather than re-resolved, so a \
-             re-run cannot silently execute a different branch's files.",
+             re-run cannot silently execute a different branch's files. 409 means a \
+             concurrent write won: another call moved the run while this one was starting \
+             it, or concurrent launches took every run name this one tried.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -156,6 +193,11 @@ pub(super) fn register_run_routes(mut router: Router, openapi: &dyn OpenApiRegis
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
+        // 409 is a conflict with a concurrent write, never the caller's input:
+        // another call moved the run while this one was starting it
+        // (`IllegalTransition`, `aborted`), or concurrent launches took every run
+        // name this one tried (`RunNameExists`, `already_exists`).
+        .error_409(openapi)
         .error_429(openapi)
         .error_500(openapi)
         .register(router, openapi);

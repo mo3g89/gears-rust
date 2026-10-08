@@ -60,7 +60,7 @@
 //! [`FixedClock`] is the constant-date [`Clock`] the analytics windows are
 //! anchored on. It lives here rather than in `analytics::aggregates_tests`
 //! because Tasks 22-25 all anchor on the same date and because the *service*
-//! tier (Task 25b) is what holds the port; a second copy inside one test module
+//! tier is what holds the port; a second copy inside one test module
 //! would have been the one `domain::service::analytics_tests` could not reach,
 //! and it is now the module that constructs this.
 //!
@@ -82,7 +82,7 @@
 //! [`FakePlatforms::batches`] — because the resolution being once-per-request
 //! rather than once-per-row is a property with no other witness. Same shape and
 //! same reason as [`FakeRuns::recent_limits`], and
-//! `the_platform_names_are_resolved_in_one_batch_of_distinct_ids` (Task 25b) is
+//! `the_platform_names_are_resolved_in_one_batch_of_distinct_ids` is
 //! the assertion it exists for.
 //!
 //! They are builders and not fakes, with two exceptions: [`FakeCatalog`] is the
@@ -145,9 +145,10 @@ use uuid::Uuid;
 
 use crate::domain::analytics::ExecRow;
 use crate::domain::error::DomainError;
+use crate::domain::ports::jira_client::{IssueRef, NewIssue, StatusCategory};
 use crate::domain::ports::{
-    CatalogReader, Clock, EnvironmentReader, IssueRef, JiraClient, JiraIssue, MailClient, NewIssue,
-    RunsLauncher, RunsReader, SendOutcome, SlackClient, SlackMessage, StatusCategory,
+    CatalogReader, Clock, EnvironmentReader, JiraClient, MAX_FINISHED_RUNS_PAGE, MailClient,
+    RunsLauncher, RunsReader, SendOutcome, SlackClient, SlackMessage,
 };
 use crate::domain::repos::CollectRepository;
 use crate::domain::service::{AppServices, DbProvider, ServiceDeps};
@@ -199,9 +200,9 @@ pub struct FakeRuns {
     /// a denied caller would not reach anyway.
     listings: AtomicUsize,
     /// Per-schedule notification settings, behind
-    /// [`RunsReader::get_schedule_notifications`] — Task 38's fix round 1
-    /// (R105). Absent means "no such schedule, or not visible", matching the
-    /// port's own fold of both into `None`.
+    /// [`RunsReader::get_schedule_notifications`] — Task 38's fix round 1.
+    /// Absent means "no such schedule, or not visible", matching the port's own
+    /// fold of both into `None`.
     schedules: Mutex<HashMap<Uuid, ScheduleNotificationSettings>>,
     /// Added by Task 5a. Reproduces the one thing this fake could not
     /// otherwise reproduce: the real local client's own `db.conn()` call.
@@ -229,6 +230,16 @@ pub struct FakeRuns {
     /// [`Self::add_finished_run_that_vanishes`] for why this is a second list
     /// rather than a flag on an existing entry.
     phantom_listed: Mutex<Vec<Run>>,
+    /// Fail the *n*-th [`RunsReader::list_runs_finished_since`] of this fake's
+    /// life, one-based. See [`Self::fail_listing_on_page`].
+    fail_listing_on_page: Mutex<Option<usize>>,
+    /// How many finished-since listings have been attempted, which is the page
+    /// number [`Self::fail_listing_on_page`] counts against.
+    ///
+    /// Separate from [`Self::listings`], which counts the dashboard's listing
+    /// too: a page number that moved when an unrelated read happened would
+    /// make the switch depend on what else the test did.
+    finished_listings: AtomicUsize,
 }
 
 impl FakeRuns {
@@ -293,6 +304,20 @@ impl FakeRuns {
 
     pub fn fail_listing(&self, fail: bool) {
         *self.fail_listing.lock().unwrap() = fail;
+    }
+
+    /// Fail the `page`-th [`RunsReader::list_runs_finished_since`], one-based,
+    /// and answer every other one normally.
+    ///
+    /// [`Self::fail_listing`] fails *every* listing, which can only produce a
+    /// sweep that did nothing at all. The property that needs this one is what
+    /// a walk does with the progress it had already earned when a **later**
+    /// page failed: pages 1..k-1 were consumed and their rows written, and a
+    /// sweep that returns the error without persisting how far it got makes
+    /// the next tick re-walk them — and re-walk them again on the tick after,
+    /// for as long as the failure lasts.
+    pub fn fail_listing_on_page(&self, page: usize) {
+        *self.fail_listing_on_page.lock().unwrap() = Some(page);
     }
 
     pub fn result_reads(&self) -> usize {
@@ -395,7 +420,10 @@ impl RunsReader for FakeRuns {
         // Counted before the failure switch: a listing that was *attempted* is
         // what the ordering assertions are about.
         self.listings.fetch_add(1, Ordering::SeqCst);
-        if *self.fail_listing.lock().unwrap() {
+        let page_number = self.finished_listings.fetch_add(1, Ordering::SeqCst) + 1;
+        if *self.fail_listing.lock().unwrap()
+            || *self.fail_listing_on_page.lock().unwrap() == Some(page_number)
+        {
             return Err(DomainError::Internal("qa-runs is unreachable".to_owned()));
         }
         let mut runs: Vec<Run> = self
@@ -422,7 +450,22 @@ impl RunsReader for FakeRuns {
         // Oldest first, which the sweep depends on. `run.id` breaks ties so the
         // fake is deterministic; the real client's tiebreak is its own business.
         runs.sort_by(|a, b| a.finished_at.cmp(&b.finished_at).then(a.id.cmp(&b.id)));
-        runs.truncate(limit as usize);
+        // **The port's cap, not the caller's `limit`.** qa-runs clamps this
+        // listing with `runs_sea_repo::sweep_limit` — `min(limit,
+        // PAGE_LIMITS.max)` — and returns the cut page with nothing to say it
+        // was cut. This fake truncated to `limit` alone until the second
+        // review's #121, which meant it answered an 800-row request with 800
+        // rows: no test in this crate could see a sweep read a truncated page
+        // as a short one, which is the whole of that finding. See
+        // [`MAX_FINISHED_RUNS_PAGE`].
+        //
+        // A `truncate_finished_pages_at` knob and a `finished_page_cap` field
+        // sat behind this until finding #38's triage, letting a test lower the
+        // cap to a size it could seed. No test ever called it, so both were
+        // deleted and the port's own cap is applied unconditionally. What must
+        // not come back is a fake that can be told to answer a *larger* page
+        // than qa-runs will serve — that is exactly the fake #121 was about.
+        runs.truncate(limit.min(MAX_FINISHED_RUNS_PAGE) as usize);
         Ok(runs)
     }
 
@@ -491,7 +534,7 @@ pub const TODAY: Date = time::macros::date!(2026 - 08 - 18);
 /// and they have to agree — see [`TODAY`]. This is the double behind the port,
 /// for the tier that holds it: `domain::ports::clock`'s header records that the
 /// folds take a [`Date`] and the service holds the [`Clock`], so
-/// `domain::service::analytics_tests` constructs this (Task 25b) and Task 22's
+/// `domain::service::analytics_tests` constructs this and Task 22's
 /// fold tests mostly pass [`TODAY`] directly.
 ///
 /// A chosen date rather than only the constant, because a window test has to be
@@ -1251,15 +1294,6 @@ impl JiraClient for UnreachableJiraClient {
         _jira_key: &str,
     ) -> Result<StatusCategory, DomainError> {
         unreachable!("Fleet's tests do not poll JIRA status")
-    }
-
-    async fn get_issue(
-        &self,
-        _ctx: &SecurityContext,
-        _config: &qa_insights_sdk::JiraConfig,
-        _jira_key: &str,
-    ) -> Result<JiraIssue, DomainError> {
-        unreachable!("Fleet's tests do not read a JIRA issue")
     }
 }
 

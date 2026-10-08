@@ -197,7 +197,7 @@ export async function apiDelete<T>(path: string, headers?: RequestHeaders): Prom
  * A `GET` that answers a binary body rather than JSON — today only the analytics export,
  * which returns a CSV or JSON *file*.
  *
- * It exists so that call site stops bypassing this module. Before Task 10,
+ * It exists so that call site stops bypassing this module. Before it was moved here,
  * `exportAnalytics` used a raw `fetch('/api/analytics/export?…')`: it hardcoded the old
  * `/api` prefix, so re-basing `API_BASE_URL` onto `/qa/v1` did not reach it, and it sat
  * outside the single `Authorization` injection point above — which would have made it the
@@ -230,7 +230,7 @@ export async function apiGetBlob(path: string, headers?: RequestHeaders): Promis
 
 /** `PATCH`. Added for `PATCH /qa/v1/environments/{id}`, which is what legacy's
  *  `PUT /platforms/{name}` and its dedicated `POST .../rename` verb both became
- *  (CONTRACT-DIFF rows 53, 56) — a true partial update, so an omitted key means "leave
+ *  — a true partial update, so an omitted key means "leave
  *  this field alone" rather than "clear it". */
 export async function apiPatch<T>(path: string, body?: unknown, headers?: RequestHeaders): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {

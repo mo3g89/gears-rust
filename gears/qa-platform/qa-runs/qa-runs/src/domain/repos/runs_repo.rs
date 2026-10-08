@@ -36,7 +36,7 @@ pub const MAX_TIMEOUT_SWEEP_SCAN: u64 = 100;
 /// A run paired with its five outcome counters, as [`RunsRepository::list_page`]
 /// returns them.
 ///
-/// Task 10: the run list needs the skip count visible next to the verdict
+/// The run list needs the skip count visible next to the verdict
 /// (product owner decision, 2026-08-28 — `domain::state_machine::derive_terminal_state`'s
 /// "Skips no longer fail a run" no longer reads `skipped`, so nothing about a
 /// `Succeeded` run says whether it asserted anything unless the count travels
@@ -189,8 +189,8 @@ pub struct RunStatePatch {
 /// | `log_storage_ref` | **nothing, by decision** — see below |
 ///
 /// `log_storage_ref` used to read "populated on completion with feature 2.7".
-/// It is not, and will not be: design D-RLP-6 (2026-08-31) decided it stays
-/// `NULL` deliberately. It is declared `VARCHAR(2048)`, published in `RunDto`
+/// It is not, and will not be: a 2026-08-31 decision keeps it `NULL`
+/// deliberately. It is declared `VARCHAR(2048)`, published in `RunDto`
 /// and shaped like a URI a consumer may fetch, so writing an internal table
 /// reference into it would publish a schema detail in a public DTO and invite
 /// exactly that misreading. A run's durable log lives in `qa_run_logs`, keyed
@@ -705,7 +705,7 @@ pub trait RunsRepository: Send + Sync {
     /// `derive_terminal_state` reads `failed` (only; `skipped` stopped voting
     /// on the verdict on 2026-08-28), so a recomputation on a late `failed`
     /// delta would then disagree with the recorded verdict. Whether a late event is
-    /// dropped belongs to ingest (Tasks 12/15); this layer does not decide it,
+    /// dropped belongs to ingest; this layer does not decide it,
     /// and does not pretend to.
     ///
     /// # Errors
@@ -724,12 +724,12 @@ pub trait RunsRepository: Send + Sync {
     /// **Added by Task 14, because rule 5 had nowhere to land.** `bundle_ids`
     /// was written only at insert (`NewRun::bundle_ids`, and
     /// `infra::storage::runs_sea_repo`'s insert model), and the launch path
-    /// writes it **empty** on purpose — parity spec §3.4 rules 4 and 5, the
-    /// force-sync and the per-group bundle build, belong to dispatch. So the run
-    /// row could never record which bundles its nodes ran from, and
+    /// writes it **empty** on purpose — launch rules 4 and 5, the force-sync
+    /// and the per-group bundle build, belong to dispatch. So the run row could
+    /// never record which bundles its nodes ran from, and
     /// `Resolved::clone_new_run`'s own doc says so: *"rule 5's 'each execution
-    /// node carrying its own bundle reference' has nowhere to be recorded on the
-    /// run row once dispatch builds the bundles."*
+    /// node carrying its own bundle reference' has nowhere to be recorded on
+    /// the run row once dispatch builds the bundles."*
     ///
     /// **Not folded into [`Self::set_execution_ref`]**, which was the other
     /// option that doc names. The two writes happen at different instants and

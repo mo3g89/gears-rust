@@ -41,7 +41,7 @@ import { resolveCustomPlanTests } from './customPlanTests';
  * answer. Otherwise — no tests, every test's repository deleted, or tests
  * spanning two products' repositories — the plan is unresolvable.
  *
- * `null` means "cannot be attributed", which the caller hides (spec D4).
+ * `null` means "cannot be attributed", which the caller hides.
  * That covers a deleted repository or custom plan, a custom plan with no
  * resolvable tests, and a custom plan whose tests name two different
  * products' repositories (ambiguous — asserting either product would be a
@@ -64,7 +64,7 @@ interface HasProduct {
 
 /** Every decodable test's repository must agree on one product; no tests, no
  *  decodable/resolvable repository at all, or a disagreement, all answer
- *  `null` (spec D4 extended to "ambiguous" — see the file doc above). */
+ *  `null` (the hide rule extended to "ambiguous" — see the file doc above). */
 export function productIdOfCustomPlan(
   plan: CustomPlan,
   repos: readonly HasProduct[],
@@ -142,9 +142,9 @@ export function keepForProduct<T extends ProductScopedRow>(
  * The Plans page's two tabs are the reason this exists: "Standard Plans" is
  * product-scoped on the server (`usePlans` passes `product_id`) and "Custom
  * Plans" sat beside it listing the whole deployment, so one page gave the
- * switcher two meanings. Spec §4's invariant is over *every* list surface.
+ * switcher two meanings. The invariant is over *every* list surface.
  *
- * D4's hide applies here too, and is the same rule the Runs and Schedules
+ * The hide-unattributable rule applies here too, and is the same rule the Runs and Schedules
  * lists follow: a plan with no resolvable tests, or with tests spanning two
  * products, is listed under no product.
  */

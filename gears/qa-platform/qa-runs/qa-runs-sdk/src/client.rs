@@ -58,6 +58,20 @@ pub trait QaRunsClientV1: Send + Sync {
     /// `limit` is mandatory for the same reason [`list_runs`](Self::list_runs)'
     /// is, and the implementation clamps it again.
     ///
+    /// # `limit` is capped at 500, silently
+    ///
+    /// The server clamps `limit` to its own page ceiling — `PAGE_LIMITS.max`,
+    /// 500 — and says nothing about having done so: a request for 800 returns
+    /// at most 500 rows with no error, no flag and no count. **A page shorter
+    /// than the `limit` you asked for is therefore not evidence that you have
+    /// reached the end.** A caller that tests `page.len() < limit` for "caught
+    /// up" is correct only while `limit <= 500`; above that it concludes it has
+    /// drained the source on its very first page and stops advancing, with
+    /// nothing logged. That is not hypothetical — it wedged qa-insights'
+    /// reconcile walk for three days in 2026-09. Page with
+    /// [`FinishedRunCursor::after`] until a page comes back **empty**, or keep
+    /// `limit` at or below 500 and let fullness mean what you think it means.
+    ///
     /// # Why this exists at all, and why there is no legacy citation for it
     ///
     /// The source system has **no counterpart**: its analytics reads the same
@@ -194,7 +208,7 @@ pub trait QaRunsClientV1: Send + Sync {
 
     async fn delete_schedule(&self, ctx: &SecurityContext, id: Uuid) -> Result<(), QaRunsError>;
 
-    /// Update the three notification settings on a schedule (D9).
+    /// Update the three notification settings on a schedule.
     ///
     /// **Edits those three fields and nothing else**, which is the behaviour
     /// legacy's own endpoint is written around — it rebuilds the whole

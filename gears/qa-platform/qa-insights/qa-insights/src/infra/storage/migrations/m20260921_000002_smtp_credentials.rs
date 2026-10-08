@@ -8,8 +8,12 @@
 //! them and would silently diverge the code's idea of the schema from the
 //! schema. This is the first migration this gear has added after its initial
 //! one, which is why `m20260818_000001_initial`'s
-//! `TABLES_OWNED_BY_LATER_MIGRATIONS` exists — it stays empty, because this
-//! migration creates no table.
+//! `TABLES_OWNED_BY_LATER_MIGRATIONS` exists — it stayed empty for this one,
+//! because this migration creates no table.
+//!
+//! **It is no longer empty.** `m20260929_000004_run_completed_notification_cutoff`
+//! creates `qa_notification_cutoff` and names it there, which is what that
+//! constant was put in place for.
 //!
 //! # Why the password is not a column
 //!
@@ -21,29 +25,30 @@
 //! `qa_jira_config` keeps `email` in the clear beside its token reference — a
 //! username names an account and authorizes nothing.
 //!
-//! **This is the first credential in this gear that the gear itself resolves.**
-//! The Slack webhook and the JIRA token both ride HTTP, so `oagw` fetches and
-//! injects them and no plaintext ever enters this process. SMTP is not HTTP,
-//! `oagw` cannot proxy it, and so `infra::notify::mail_smtp` reads this
-//! reference through `credstore_sdk::CredStoreClientV1` and holds the value for
-//! the length of one `send`. ADR-0011 is the decision; ADR-0008
-//! (`cpt-cf-qa-adr-credential-containment`) is the rule that still binds it —
-//! nothing derived from that value is ever formatted.
+//! **The gear resolves this credential itself.** SMTP is not HTTP, `oagw`
+//! cannot proxy it, and so `infra::notify::mail_smtp` reads this reference
+//! through `credstore_sdk::CredStoreClientV1` and holds the value for the
+//! length of one `send`. It was the first credential this gear resolved, and
+//! it is no longer the only one: the Slack webhook's credential is its URL
+//! *path*, which no `oagw` auth plugin can inject, so `infra::notify::slack_oagw`
+//! resolves that secret in-process too (ADR-0011, "Amendments", 2026-09-30).
+//! Only the JIRA token is still fetched and injected by `oagw`, so its
+//! plaintext never enters this process. ADR-0011 is the decision; ADR-0008
+//! (`cpt-cf-qa-adr-credential-containment`) is the rule that still binds both
+//! resolved values: nothing derived from either is ever formatted.
 //!
-//! # Two dialects, not three, and why this file has no `MYSQL_UP`
+//! # Two dialects, and no `MySQL` blob
 //!
-//! The initial migration declares one DDL blob per dialect including `MySQL`,
-//! which `up()` then refuses outright (five of this schema's indexes exceed
-//! `InnoDB`'s 3072-byte key limit). That blob earns its keep there because two
-//! parity tests read it: they assert every dialect *declares* the same columns
-//! and indexes in the same order, so a `MySQL` blob that drifted would fail a
-//! test rather than sit unnoticed.
+//! Like the initial migration, this file declares `POSTGRES_UP` and `SQLITE_UP`
+//! and nothing for `MySQL`: no `MYSQL_UP` exists in this gear, and `up()`
+//! refuses that backend outright (five of the initial schema's indexes exceed
+//! `InnoDB`'s 3072-byte key limit). The initial migration's two parity tests
+//! compare `POSTGRES_UP` with `SQLITE_UP` only.
 //!
 //! There is nothing here for those tests to compare — two `ALTER TABLE ... ADD
 //! COLUMN` statements, in a file whose `MySQL` path is unreachable by
-//! construction — so a `MYSQL_UP` here would be a constant nothing reads,
-//! nothing executes and nothing checks. [`up_ddl`] refuses the backend by name
-//! instead, pointing at the initial migration's header for the reason.
+//! construction. [`up_ddl`] refuses the backend by name, pointing at the
+//! initial migration's header for the reason.
 
 use sea_orm_migration::prelude::*;
 
@@ -73,7 +78,7 @@ ALTER TABLE qa_notification_config
 /// The DDL for `backend`, or an error naming why there is none.
 ///
 /// Same shape and the same refusal as the initial migration's `up_ddl`: handing
-/// `MYSQL_UP` to a `MySQL` engine would half-apply a schema this gear cannot
+/// a `MySQL` engine these statements would half-apply a schema this gear cannot
 /// run on, so the backend is refused instead of narrated.
 fn up_ddl(backend: sea_orm::DatabaseBackend) -> Result<&'static str, DbErr> {
     match backend {

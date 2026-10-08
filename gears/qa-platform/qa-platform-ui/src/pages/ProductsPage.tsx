@@ -53,12 +53,12 @@ export function ProductsPage() {
       key: product.key,
       description: product.description,
       tests_folder: product.tests_folder,
-      // `Product.plugin_instance_id` is nullable -- a deployment predating Task 20a, or a
+      // `Product.plugin_instance_id` is nullable -- a deployment predating the plugin requirement, or a
       // product whose stored plugin this deployment no longer registers. The Combobox
       // itself never offers an empty option, so this falls back to '' purely to keep the
       // field a string for controlled-input purposes: `handleSave` passes the product's
       // real (possibly-null) `plugin_instance_id` through as `currentPluginInstanceId`
-      // separately, and `productReqFromForm`'s omission logic (G-2) is what keeps this
+      // separately, and `productReqFromForm`'s omission logic is what keeps this
       // `''` from ever reaching the request body.
       plugin_instance_id: product.plugin_instance_id ?? '',
     });
@@ -81,12 +81,12 @@ export function ProductsPage() {
   };
 
   const handleSave = () => {
-    // The plugin is required to create (the gear's column is NOT NULL, D-18/Task 20a). It
+    // The plugin is required to create (the gear's column is NOT NULL). It
     // is exempted from this check on edit by construction -- `!editingProductId &&` -- not
     // because an edit is guaranteed to already have one: `openEditDialog` can pre-fill `''`
     // for a product whose stored plugin is null or no longer registered (see it), and this
     // guard deliberately lets that through. Requiring a plugin to save an edit that never
-    // touches the field would block exactly the case ruling D-18 and G-2 exist to keep
+    // touches the field would block exactly the case the "leave an unchanged binding alone" rule exists to keep
     // editable -- see `productReqFromForm`.
     if (!formData.name || !formData.key || (!editingProductId && !formData.plugin_instance_id)) {
       toast.error('Please fill in all required fields');
@@ -101,7 +101,7 @@ export function ProductsPage() {
         ? formData.tests_folder.trim() || deriveTestsFolder(formData.key)
         : deriveTestsFolder(formData.key),
       // What actually reaches the request body is decided downstream, in
-      // `productReqFromForm` (ruling G-2): create always sends this (the guard above
+      // `productReqFromForm`: create always sends this (the guard above
       // guarantees non-empty), but an edit only sends it when it names a plugin different
       // from `currentPluginInstanceId` below -- an unchanged edit must omit the key
       // entirely, not resend it, or it becomes an unwanted rebind request.
@@ -214,7 +214,7 @@ export function ProductsPage() {
                 {/* Loading, failed, and "registered but empty" all otherwise look the same
                  *  to the operator -- an unpickable empty dropdown plus a submit guard that
                  *  just says a required field is missing, pointing at a field there is
-                 *  nothing to be done about (m-2). Each gets its own honest line instead. */}
+                 *  nothing to be done about. Each gets its own honest line instead. */}
                 {pluginsLoading ? (
                   <p className="text-xs text-muted-foreground">Loading product plugins…</p>
                 ) : pluginsError ? (

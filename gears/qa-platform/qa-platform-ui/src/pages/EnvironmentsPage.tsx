@@ -57,7 +57,7 @@ export function EnvironmentsPage() {
           {/*
             Was "Manage Kubernetes platforms for test execution". Kubernetes is
             one product's substrate, not the environment's -- and this sits above
-            the very table Task 21 made descriptor-driven (re-review, N-6).
+            the very table that is descriptor-driven.
           */}
           <p className="text-muted-foreground">
             Manage the environments tests run against
@@ -74,6 +74,9 @@ export function EnvironmentsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            Scoped to the selected product, filtered in your browser.
+          </p>
           <EnvironmentsTable
             environments={environments || []}
             onDelete={handleDelete}

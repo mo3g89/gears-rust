@@ -225,8 +225,8 @@ mod tests {
         );
     }
 
-    /// D-RLP-1's retention shape, reused: deleting a run deletes its
-    /// positions along with it.
+    /// The log archive's retention shape, reused: deleting a run deletes its
+    /// positions along with it, by the same cascade.
     #[tokio::test]
     async fn deleting_a_run_deletes_its_log_positions() {
         let conn = migrated_db().await;

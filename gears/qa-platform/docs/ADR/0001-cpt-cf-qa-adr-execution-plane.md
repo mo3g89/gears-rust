@@ -119,7 +119,7 @@ per-product.
 
 **`qa-environments`' runner-`Secret` writer.** After this ADR's original acceptance,
 `qa-environments` gained a second Kubernetes-touching adapter: `KubeRunnerSecretWriter::ensure_runner_secret`
-(decision D4) writes each runner's credential `Secret` into the Argo cluster, which may differ from
+(the runner-`Secret` writer, labelled `D4` in code comments) writes each runner's credential `Secret` into the Argo cluster, which may differ from
 any environment's own. It needs a Kubernetes client for that write alone. This is gated behind
 `qa-environments`' own non-default `runner-secret` cargo feature — a second, independently-switched
 gate beside `qa-runs`' `argo`, not a relaxation of this ADR's Confirmation criterion: a default
@@ -131,9 +131,24 @@ The Kubernetes transport library the VHP product plugin links (`connectors/qa-co
 `kube` and `k8s-openapi` without a feature flag of its own. It needs none: it is not a gear, nothing
 resolves it at runtime, and the only edge to it in any gear's dependency graph is a product plugin
 that already requires a Kubernetes-shaped environment. `cargo tree -p qa-runs -i kube -e normal`
-still prints nothing for a default build; a deployment that never registers the VHP plugin never
-builds this crate's client either. The containment this ADR requires is structural here rather than
-a cargo feature, and is exactly as strong.
+still prints nothing for a default build; so does any build without the example server's
+`qa-platform` feature, which is the only thing that links the plugin. (A build *with* that feature
+links this crate's client whether or not a deployment registers the VHP plugin - see the cost paragraph
+below.) The containment this ADR requires is structural here rather than a cargo feature.
+
+**The cost of that, stated because `Cargo.toml` says this section states it.** Because
+`qa-connector-k8s` carries no feature gate and `cf-gears-example-server`'s `qa-platform` feature
+names both product plugins unconditionally, **there is no longer any way to build the `qa-platform`
+feature without `kube`**. Before Phase C there was, and that build is what the feature gate bought.
+This does not weaken the Confirmation criterion, which is about `qa-runs`' tree and still holds
+(`cargo tree -p qa-runs -i kube -e normal` prints nothing for a default build, and `qa-platform` is
+off by default in that binary). It does mean the containment argument above is the whole of the
+containment: a deployment that builds `qa-platform` at all builds the Kubernetes client, and what
+keeps it from being *reached* is that no product plugin is registered, not that no code is linked.
+
+*(Added 2026-09-29, second review, finding #76.
+`apps/cf-gears-example-server/Cargo.toml`'s `qa-platform` feature comment cited this paragraph
+before it existed.)*
 
 Several code comments across `qa-runs`, `qa-environments` and `qa-connector-k8s` referred to the
 two facts above as a "waiver" or an "amendment" dated 2026-08-27, 2026-08-28 or 2026-09-04. No such
@@ -142,4 +157,4 @@ and this ADR was not revised between its acceptance and today. This section is w
 meant to cite. It is added now, dated to when the gap was found rather than backdated to an event
 this document has no record of.
 
-*(Added 2026-09-18, QA Platform review remediation §5.6.2.)*
+*(Added 2026-09-18, during the QA Platform review remediation.)*

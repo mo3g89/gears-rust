@@ -1,40 +1,40 @@
 //! Tests for the notification routing core (Task 36 brief, Step 0/1).
 //!
-//! The first three are the brief's own tests, adapted where the brief's
-//! signature did not survive contact with the code:
+//! # Four tests were deleted with the events they covered
 //!
-//! * `the_dedupe_key_is_run_kind_and_event` types its second argument
-//!   [`NotificationKind`], not `Channel`. R92 (this module's header, "Dedupe:
-//!   `NotificationKind`, not `Channel`") is why: every `notification_kind`
-//!   legacy ever writes fuses a family and a channel into one string, and
-//!   typing the parameter as a bare channel would let two different families
-//!   sharing a channel collide on one claim slot. The property the brief pins
-//!   — two different kinds over the same run and event must not collide — is
-//!   unchanged.
+//! `the_expired_queue_event_routes_with_every_toggle_off`,
+//! `the_expired_queue_event_does_not_route_when_slack_is_disabled`,
+//! `the_queued_toggle_off_skip_is_silent_but_the_slack_disabled_skip_is_audited`
+//! and `the_queued_event_is_off_by_default` pinned `Event::Queued` and
+//! `Event::QueueExpired`, which the owner's ruling deleted for want of any
+//! producer (`routing.rs`'s header). They are deleted rather than adapted: a
+//! test that keeps passing over deleted-adjacent code is worse than no test,
+//! because it reports coverage of a decision nothing makes any more. The
+//! *reasoning* they carried survives where it still applies — the
+//! audited/silent split (`routing.rs`'s header, "Slack skips: audited or
+//! silent") is now pinned on `RunCompleted`'s own two skips, by the two tests
+//! that always pinned them.
 //!
-//! The fourth is the brief's explicit fourth requirement: one row per config
-//! field found in Step 0, not one function per field.
+//! [`every_notification_config_field_gates_what_step_0_found`] lost its Queued
+//! and `ScheduledRun` rows the same way; its own doc records what that costs.
 //!
-//! Mutation evidence for two representative rows (`slack_enabled` gating
-//! `Queued`, and `run_queue_queued_slack_enabled` gating `Queued` but not
-//! `QueueExpired`) is recorded in the Task 36 report rather than committed as
-//! code, per the verification gate.
+//! # The 2026-09-29 ruling's three behaviours
 //!
-//! # R94 fix round: `the_expired_queue_event_routes_with_every_toggle_off`
+//! `notify_on_failure` and `notify_on_success` stopped being inert, email
+//! stopped reading the schedule's Slack flag, and an ad-hoc run stopped being
+//! silent (`routing.rs`'s header carries the ruling). Two rows of the table
+//! above became positive claims as a result, and the four tests under "The
+//! owner's 2026-09-29 ruling" below pin the rest. Each one was mutated
+//! against [`route`] before it was trusted: the mutations are named in each
+//! test's own doc.
 //!
-//! This test's *name* and *pinned property* are unchanged from the brief:
-//! `Expired` has no per-event toggle, so a config with every per-event toggle
-//! off must still route it. Its *fixture* changed. The first implementation
-//! read the controller's dispatch ("must go red against an implementation
-//! that gates `Expired` on any config flag at all") literally and used a
-//! config with `slack_enabled` off too — which was wrong, per legacy's own
-//! doc comment (`notifications.rs:654-656`, quoted in `routing.rs`'s header):
-//! "no enable flag" is about the missing **per-event** toggle, not the
-//! tenant's master Slack switch. The fixture is now "every per-event toggle
-//! off, Slack egress on"
-//! ([`every_event_toggle_off_slack_on_config`]), and a companion test,
-//! [`the_expired_queue_event_does_not_route_when_slack_is_disabled`], pins the
-//! other half: `Expired` *does* respect `slack_enabled`.
+//! # `the_dedupe_key_is_run_kind_and_event`
+//!
+//! The brief's own test, adapted where the brief's signature did not survive
+//! contact with the code: its second argument is [`NotificationKind`], not
+//! `Channel`. `routing.rs`'s header, "Dedupe: `NotificationKind`, not
+//! `Channel`", is why. The property the brief pins — two different kinds over
+//! the same run and event must not collide — is unchanged.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -43,35 +43,10 @@ use uuid::Uuid;
 use qa_insights_sdk::{NotificationConfig, ScheduledRunSlackTemplate, ScheduledRunSlackTemplates};
 use qa_runs_sdk::ScheduleNotificationSettings;
 
-use super::{Event, NotificationKind, dedupe_key, route};
+use super::{Event, NotificationKind, RunOutcome, dedupe_key, route};
 
 fn run_id() -> Uuid {
     Uuid::new_v4()
-}
-
-/// Every *per-event* toggle off — including
-/// [`NotificationConfig::notify_on_failure`], legacy's only gate that defaults
-/// on — but the tenant's master Slack switch on. R94: this is deliberately
-/// not "every field off", because `slack_enabled` is not a per-event toggle
-/// and must stay on for this fixture to isolate what it's testing.
-fn every_event_toggle_off_slack_on_config() -> NotificationConfig {
-    NotificationConfig {
-        slack_enabled: true,
-        notify_on_failure: false,
-        ..NotificationConfig::default()
-    }
-}
-
-/// Legacy's actual defaults (`manager/src/models.rs:1364-1384`): every gate
-/// off except `notify_on_failure`.
-fn default_config() -> NotificationConfig {
-    NotificationConfig::default()
-}
-
-/// A schedule that has never had its notification settings touched:
-/// `slack_enabled: false`, no channel override, no event narrowing.
-fn no_schedule_settings() -> ScheduleNotificationSettings {
-    ScheduleNotificationSettings::default()
 }
 
 fn enabled_template() -> ScheduledRunSlackTemplate {
@@ -121,96 +96,9 @@ fn fully_enabled_schedule() -> ScheduleNotificationSettings {
     }
 }
 
-/// `QueueNotificationEvent::Expired` is mandatory and un-toggleable — the
-/// model comment calls it "the event that stops a run vanishing silently".
-/// This module's header ("`Expired` has no per-event toggle, but it still
-/// respects the master switch (R94)") records that legacy's own doc
-/// (`notifications.rs:654-656`) means *no per-event toggle*, not *no gate at
-/// all*: a config with every **per-event** toggle off, and Slack egress on,
-/// must still route it.
-#[test]
-fn the_expired_queue_event_routes_with_every_toggle_off() {
-    let decision = route(
-        &every_event_toggle_off_slack_on_config(),
-        &Event::QueueExpired,
-        &no_schedule_settings(),
-    );
-    assert!(decision.sends_slack(), "expired has no per-event toggle");
-}
-
-/// The other half of R94: `Expired` has no per-event toggle, but it is not
-/// toggle-immune outright — it still respects the tenant's master Slack
-/// switch, exactly as legacy's shared gate does
-/// (`notifications.rs:694-704`). Without this test, reintroducing the R94
-/// divergence (bypassing `slack_enabled` too) would not be caught.
-#[test]
-fn the_expired_queue_event_does_not_route_when_slack_is_disabled() {
-    let config = NotificationConfig {
-        slack_enabled: false,
-        run_queue_queued_slack_enabled: true,
-        ..NotificationConfig::default()
-    };
-    let decision = route(&config, &Event::QueueExpired, &no_schedule_settings());
-    assert!(
-        !decision.sends_slack(),
-        "expired still respects the master Slack switch"
-    );
-}
-
-/// R94a: legacy audits every "did not send" outcome from `notify_queue_event`
-/// except one. `Queued` skipped only because
-/// `run_queue_queued_slack_enabled` is off (`notifications.rs:685-692`) is
-/// deliberately silent — the function's own doc comment
-/// (`notifications.rs:645-652`) explains why: that is the default state,
-/// already visible in Settings, and auditing it would put a row on every
-/// admission and bury the rows that matter in a log with no retention sweep.
-/// The shared `slack_enabled` skip (`notifications.rs:694-704`) *is* audited.
-/// Because the `Queued`-only check runs first, a `Queued` skip is silent
-/// whenever the per-event toggle is off, regardless of `slack_enabled`.
-#[test]
-fn the_queued_toggle_off_skip_is_silent_but_the_slack_disabled_skip_is_audited() {
-    let toggle_off_only = NotificationConfig {
-        slack_enabled: true,
-        run_queue_queued_slack_enabled: false,
-        ..NotificationConfig::default()
-    };
-    let toggle_off_decision = route(&toggle_off_only, &Event::Queued, &no_schedule_settings());
-    assert!(!toggle_off_decision.sends_slack());
-    assert!(
-        !toggle_off_decision.slack_skip_is_audited(),
-        "the default-state, per-event-toggle skip is silent"
-    );
-
-    let slack_disabled = NotificationConfig {
-        slack_enabled: false,
-        run_queue_queued_slack_enabled: true,
-        ..NotificationConfig::default()
-    };
-    let slack_disabled_decision = route(&slack_disabled, &Event::Queued, &no_schedule_settings());
-    assert!(!slack_disabled_decision.sends_slack());
-    assert!(
-        slack_disabled_decision.slack_skip_is_audited(),
-        "the shared slack-disabled skip is audited"
-    );
-
-    // Even with both off at once, the toggle-off check runs first in legacy
-    // and this module preserves that precedence: still silent.
-    let both_off = NotificationConfig {
-        slack_enabled: false,
-        run_queue_queued_slack_enabled: false,
-        ..NotificationConfig::default()
-    };
-    let both_off_decision = route(&both_off, &Event::Queued, &no_schedule_settings());
-    assert!(!both_off_decision.sends_slack());
-    assert!(
-        !both_off_decision.slack_skip_is_audited(),
-        "the per-event toggle check is checked first, so this stays silent"
-    );
-}
-
-/// R96 (Task 36 review, Important): `RunCompleted` has a silent skip too, and
-/// an earlier draft of `routing.rs`'s R94a section wrongly claimed it did
-/// not. `notify_run_completed`'s Slack dispatch
+/// Task 36 review, Important: `RunCompleted` has a silent skip too, and an
+/// earlier draft of `routing.rs`'s "Slack skips: audited or silent" section
+/// wrongly claimed it did not. `notify_run_completed`'s Slack dispatch
 /// (`notifications.rs:263-322`) is an `if`/`else if`/`else if` chain with no
 /// final `else`, and all three arms require `config.slack_enabled`. When the
 /// schedule-level gate passed (`schedule.slack_enabled == true`) but
@@ -226,7 +114,12 @@ fn run_completed_is_silent_when_the_schedule_passed_but_slack_is_disabled() {
         slack_enabled: true,
         ..fully_enabled_schedule()
     };
-    let decision = route(&config, &Event::RunCompleted, &schedule);
+    let decision = route(
+        &config,
+        &Event::RunCompleted,
+        Some(&schedule),
+        RunOutcome::Failed,
+    );
     assert!(!decision.sends_slack());
     assert!(
         !decision.slack_skip_is_audited(),
@@ -250,18 +143,17 @@ fn run_completed_is_audited_when_the_schedule_gate_itself_blocked_it() {
         slack_enabled: false,
         ..fully_enabled_schedule()
     };
-    let decision = route(&config, &Event::RunCompleted, &schedule);
+    let decision = route(
+        &config,
+        &Event::RunCompleted,
+        Some(&schedule),
+        RunOutcome::Failed,
+    );
     assert!(!decision.sends_slack());
     assert!(
         decision.slack_skip_is_audited(),
         "the schedule-level gate's own early return always logs in legacy"
     );
-}
-
-/// `Queued` is opt-in and off by default (`run_queue_queued_slack_enabled`).
-#[test]
-fn the_queued_event_is_off_by_default() {
-    assert!(!route(&default_config(), &Event::Queued, &no_schedule_settings()).sends_slack());
 }
 
 /// The dedupe key is `(run, kind, event)` (`001_initial.sql:197-203`). Two
@@ -298,8 +190,8 @@ fn the_dedupe_key_is_run_kind_and_event() {
     );
 }
 
-/// One row per `NotificationConfig` field (fifteen fields, Step 0) rather than
-/// fifteen functions. Each row flips exactly one field from
+/// One row per `NotificationConfig` field (seventeen fields) rather than
+/// seventeen functions. Each row flips exactly one field from
 /// [`fully_enabled_config`]/[`fully_enabled_schedule`] and pins **both**
 /// halves of the property: what the fully-enabled baseline decides (so a
 /// row's "no effect" is proven against a known-on starting point, not just
@@ -311,106 +203,155 @@ fn the_dedupe_key_is_run_kind_and_event() {
 /// mutated would trivially agree. This shape was verified to reject that
 /// implementation (Task 36 report, RED evidence).
 ///
-/// `slack_enabled` (row 4) and `run_queue_queued_slack_enabled` (row 10) are
-/// this table's two mutation-proof rows: the Task 36 report records reverting
-/// each field's condition in [`route`] and observing this test go red on
-/// exactly that row.
+/// # Every row is `RunCompleted` now, and that is a real loss of reach
+///
+/// Five rows ran against `Event::Queued` and two against
+/// `Event::ScheduledRun("succeeded")`; those events were deleted for want of
+/// a producer (`routing.rs`'s header), so their rows moved to the one event
+/// that remains rather than being dropped — the field still has to be
+/// accounted for, and "this field does not affect the only decision this
+/// module makes" is the true statement about it now.
+///
+/// The consequence is stated rather than hidden: **thirteen of the seventeen
+/// rows are negative claims**. `run_queue_queued_slack_enabled`,
+/// `scheduled_run_slack_enabled` and `scheduled_run_slack_templates` used to
+/// be positive ones and are no longer read by [`route`] at all. Only
+/// `scheduled_run_slack_templates` is still read (by `render_scheduled_run`,
+/// behind `NotifyService::preview_scheduled_run` and `send_test`, which have
+/// their own tests); the other two are read by nothing.
+///
+/// # The four positive rows, and what each was mutated against
+///
+/// `slack_enabled` (row 4), `email_enabled` (row 17), `notify_on_failure`
+/// (row 5) and `notify_on_success` (row 6) are this table's mutation-proof
+/// rows: dropping each field's condition from [`route`]'s one arm was
+/// observed to turn this test red on exactly that row. The two outcome rows
+/// are also the table's only asymmetric ones — each runs under the
+/// [`RunOutcome`] its field speaks about, and each expects `(false, false)`
+/// rather than one channel, because the outcome policy sits **above** both
+/// channel gates rather than beside them.
 #[test]
 fn every_notification_config_field_gates_what_step_0_found() {
     struct Row {
         field: &'static str,
         event: Event,
+        /// The outcome the row is routed under. Every row but
+        /// `notify_on_success`'s runs as a **failing** run, because
+        /// `fully_enabled_config`'s `notify_on_failure` is what admits the
+        /// baseline; the one row about the success policy has to be a passing
+        /// run or it would be asserting that the field it names is ignored.
+        outcome: RunOutcome,
         baseline: (bool, bool),
         mutated: (bool, bool),
     }
 
     let baseline_schedule = fully_enabled_schedule();
-    let succeeded = Event::scheduled_run("succeeded").expect("succeeded is a valid token");
 
-    // Fully enabled baseline per event, verified once here rather than
-    // rederived per row: Queued and ScheduledRun("succeeded") both send Slack
-    // only; RunCompleted sends both channels.
-    let queued_baseline = (true, false);
+    // The fully enabled baseline, verified once here rather than rederived
+    // per row: `RunCompleted` sends over both channels.
     let run_completed_baseline = (true, true);
-    let scheduled_run_baseline = (true, false);
 
     let rows = vec![
-        // 1. Data only: no bearing on whether Queued sends (policy vs
-        //    capability — this module's header).
+        // 1. Data only: whether a webhook reference is configured is a
+        //    capability question, not a policy one — `routing.rs`'s header.
         Row {
             field: "slack_webhook_credstore_ref",
-            event: Event::Queued,
-            baseline: queued_baseline,
-            mutated: queued_baseline,
+            event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
+            baseline: run_completed_baseline,
+            mutated: run_completed_baseline,
         },
         // 2. Data only.
         Row {
             field: "slack_channel",
-            event: Event::Queued,
-            baseline: queued_baseline,
-            mutated: queued_baseline,
+            event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
+            baseline: run_completed_baseline,
+            mutated: run_completed_baseline,
         },
         // 3. Data only.
         Row {
             field: "manager_ui_base_url",
-            event: Event::Queued,
-            baseline: queued_baseline,
-            mutated: queued_baseline,
+            event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
+            baseline: run_completed_baseline,
+            mutated: run_completed_baseline,
         },
-        // 4. Mutation-proof: the master Slack switch gates Queued.
+        // 4. Mutation-proof: the master Slack switch gates the Slack side,
+        //    and only it — the email side is a separate gate, which is what
+        //    makes this row's `(false, true)` worth more than a `(false,
+        //    false)` would be.
         Row {
             field: "slack_enabled",
-            event: Event::Queued,
-            baseline: queued_baseline,
-            mutated: (false, false),
+            event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
+            baseline: run_completed_baseline,
+            mutated: (false, true),
         },
-        // 5. Dead in legacy (Step 0): no effect on RunCompleted either.
+        // 5. Dead in legacy, **live here** since the 2026-09-29 ruling
+        //    (`routing.rs`'s header): this run failed, so the failure policy
+        //    is what admits it, and turning the policy off silences **both**
+        //    channels — the outcome gate sits above the channel gates.
         Row {
             field: "notify_on_failure",
             event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
             baseline: run_completed_baseline,
-            mutated: run_completed_baseline,
+            mutated: (false, false),
         },
-        // 6. Dead in legacy.
+        // 6. The same, for a run that passed. This row is the reason `Row`
+        //    carries an outcome at all: under `RunOutcome::Failed` this field
+        //    is not consulted, so a row that did not switch outcomes would
+        //    assert the opposite of the property it is named for.
         Row {
             field: "notify_on_success",
             event: Event::RunCompleted,
+            outcome: RunOutcome::Succeeded,
             baseline: run_completed_baseline,
-            mutated: run_completed_baseline,
+            mutated: (false, false),
         },
-        // 7. Dead in legacy.
+        // 7. Still dead, and deliberately: see `routing.rs`'s header for why
+        //    this one was left out of the ruling.
         Row {
             field: "notify_on_schedule_completion",
             event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
             baseline: run_completed_baseline,
             mutated: run_completed_baseline,
         },
-        // 8. Gates the scheduled-run Slack template path specifically.
+        // 8. Gated `Event::ScheduledRun`, which is deleted. Still read by
+        //    the preview and test-send surfaces; no bearing on routing.
         Row {
             field: "scheduled_run_slack_enabled",
-            event: succeeded.clone(),
-            baseline: scheduled_run_baseline,
-            mutated: (false, false),
+            event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
+            baseline: run_completed_baseline,
+            mutated: run_completed_baseline,
         },
-        // 9. Per-event template `.enabled`; flipping "succeeded"'s alone.
+        // 9. Likewise: the per-event template `.enabled`, read when a
+        //    template is rendered and never when a run-completed alert is
+        //    routed.
         Row {
             field: "scheduled_run_slack_templates",
-            event: succeeded,
-            baseline: scheduled_run_baseline,
-            mutated: (false, false),
+            event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
+            baseline: run_completed_baseline,
+            mutated: run_completed_baseline,
         },
-        // 10. Mutation-proof: gates Queued, contrasted with QueueExpired's
-        //     immunity to every toggle (the "one with teeth" test above).
+        // 10. Gated `Event::Queued`, which is deleted. Read by nothing now —
+        //     kept as a settings field, not as a gate.
         Row {
             field: "run_queue_queued_slack_enabled",
-            event: Event::Queued,
-            baseline: queued_baseline,
-            mutated: (false, false),
+            event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
+            baseline: run_completed_baseline,
+            mutated: run_completed_baseline,
         },
         // 11. Data only (capability, not policy — see this module's header).
         Row {
             field: "email_smtp_host",
             event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
             baseline: run_completed_baseline,
             mutated: run_completed_baseline,
         },
@@ -418,6 +359,7 @@ fn every_notification_config_field_gates_what_step_0_found() {
         Row {
             field: "email_smtp_port",
             event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
             baseline: run_completed_baseline,
             mutated: run_completed_baseline,
         },
@@ -427,12 +369,14 @@ fn every_notification_config_field_gates_what_step_0_found() {
         Row {
             field: "email_smtp_username",
             event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
             baseline: run_completed_baseline,
             mutated: run_completed_baseline,
         },
         Row {
             field: "email_smtp_credstore_ref",
             event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
             baseline: run_completed_baseline,
             mutated: run_completed_baseline,
         },
@@ -440,6 +384,7 @@ fn every_notification_config_field_gates_what_step_0_found() {
         Row {
             field: "email_from",
             event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
             baseline: run_completed_baseline,
             mutated: run_completed_baseline,
         },
@@ -447,6 +392,7 @@ fn every_notification_config_field_gates_what_step_0_found() {
         Row {
             field: "email_recipients",
             event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
             baseline: run_completed_baseline,
             mutated: run_completed_baseline,
         },
@@ -454,6 +400,7 @@ fn every_notification_config_field_gates_what_step_0_found() {
         Row {
             field: "email_enabled",
             event: Event::RunCompleted,
+            outcome: RunOutcome::Failed,
             baseline: run_completed_baseline,
             mutated: (true, false),
         },
@@ -462,7 +409,12 @@ fn every_notification_config_field_gates_what_step_0_found() {
     assert_eq!(rows.len(), 17, "one row per NotificationConfig field");
 
     for row in rows {
-        let baseline_decision = route(&fully_enabled_config(), &row.event, &baseline_schedule);
+        let baseline_decision = route(
+            &fully_enabled_config(),
+            &row.event,
+            Some(&baseline_schedule),
+            row.outcome,
+        );
         assert_eq!(
             (
                 baseline_decision.sends_slack(),
@@ -474,7 +426,12 @@ fn every_notification_config_field_gates_what_step_0_found() {
         );
 
         let mutated_config = mutate(row.field);
-        let mutated_decision = route(&mutated_config, &row.event, &baseline_schedule);
+        let mutated_decision = route(
+            &mutated_config,
+            &row.event,
+            Some(&baseline_schedule),
+            row.outcome,
+        );
         assert_eq!(
             (
                 mutated_decision.sends_slack(),
@@ -514,4 +471,165 @@ fn mutate(field: &str) -> NotificationConfig {
         other => panic!("unknown NotificationConfig field in table: {other}"),
     }
     config
+}
+
+// ---------------------------------------------------------------------------
+// The owner's 2026-09-29 ruling: three behaviours that used to be silence
+// ---------------------------------------------------------------------------
+
+/// **Email no longer depends on the schedule's Slack flag.** The schedule has
+/// notifications off, which used to return before *both* branches
+/// (`notifications.rs:209-218`, ported exactly until this ruling), so email
+/// was silenced by a flag that does not name it. Slack is still blocked by
+/// it — that is the flag doing what it is called.
+///
+/// Mutated against: restoring `schedule_allows_slack &&` to [`route`]'s
+/// `email` term turns this red on the `sends_email` assertion.
+#[test]
+fn email_sends_when_the_schedules_slack_flag_is_off() {
+    let schedule = ScheduleNotificationSettings {
+        slack_enabled: false,
+        ..fully_enabled_schedule()
+    };
+    let decision = route(
+        &fully_enabled_config(),
+        &Event::RunCompleted,
+        Some(&schedule),
+        RunOutcome::Failed,
+    );
+    assert!(
+        !decision.sends_slack(),
+        "the schedule's own Slack flag must still gate Slack"
+    );
+    assert!(
+        decision.sends_email(),
+        "a flag named for Slack must not silence mail"
+    );
+}
+
+/// **An ad-hoc run notifies on the tenant's settings.** `None` is the run
+/// that legacy's `is_scheduled_run` gate returned on before consulting
+/// anything (`notifications.rs:193-206`); it now means "nothing to narrow
+/// with", so the tenant's own two switches decide, and turning them off still
+/// silences it.
+///
+/// Both halves are asserted from one baseline, so the positive half cannot
+/// pass by [`route`] ignoring its inputs.
+///
+/// Mutated against: restoring `schedule.is_some_and(|s| s.slack_enabled)`
+/// turns the first assertion red; making `None` mean "send regardless" turns
+/// the second red.
+#[test]
+fn an_ad_hoc_run_routes_on_the_tenants_own_settings() {
+    let decision = route(
+        &fully_enabled_config(),
+        &Event::RunCompleted,
+        None,
+        RunOutcome::Failed,
+    );
+    assert_eq!(
+        (decision.sends_slack(), decision.sends_email()),
+        (true, true),
+        "a run no schedule launched must route on the tenant's settings"
+    );
+
+    let silent = NotificationConfig {
+        slack_enabled: false,
+        email_enabled: false,
+        ..fully_enabled_config()
+    };
+    let decision = route(&silent, &Event::RunCompleted, None, RunOutcome::Failed);
+    assert_eq!(
+        (decision.sends_slack(), decision.sends_email()),
+        (false, false),
+        "and the tenant's settings must still be able to silence it"
+    );
+}
+
+/// **`notify_on_failure` and `notify_on_success` decide by outcome.** One
+/// table over the four (policy, outcome) combinations that matter, asserted
+/// on both channels because the outcome gate sits above both: a failing run
+/// is admitted only by the failure policy, a passing run only by the success
+/// policy, and each is silent under the other's.
+///
+/// The expectations are literals rather than a second [`route`] call, for the
+/// reason [`every_notification_config_field_gates_what_step_0_found`]'s doc
+/// gives: a derived expectation would agree with an implementation that
+/// ignored its inputs entirely.
+///
+/// Mutated against: swapping [`RunOutcome::notifies`]'s two arms — so the
+/// failure policy answers for a passing run and vice versa — turns rows 2 and
+/// 3 red; hard-coding `outcome_notifies = true` turns rows 2 and 4 red.
+#[test]
+fn the_outcome_policy_admits_the_outcome_it_names_and_no_other() {
+    let rows = [
+        // (notify_on_failure, notify_on_success, outcome, sends)
+        (true, false, RunOutcome::Failed, true),
+        (true, false, RunOutcome::Succeeded, false),
+        (false, true, RunOutcome::Failed, false),
+        (false, true, RunOutcome::Succeeded, true),
+    ];
+
+    for (on_failure, on_success, outcome, sends) in rows {
+        let config = NotificationConfig {
+            notify_on_failure: on_failure,
+            notify_on_success: on_success,
+            ..fully_enabled_config()
+        };
+        let decision = route(
+            &config,
+            &Event::RunCompleted,
+            Some(&fully_enabled_schedule()),
+            outcome,
+        );
+        assert_eq!(
+            (decision.sends_slack(), decision.sends_email()),
+            (sends, sends),
+            "notify_on_failure={on_failure}, notify_on_success={on_success}, {outcome:?}"
+        );
+        assert!(
+            sends || decision.slack_skip_is_audited(),
+            "an outcome-policy skip over a channel that is switched on is audited — \
+             the silent skip is about an unconfigured channel, not about which gate \
+             declined ({outcome:?})"
+        );
+    }
+}
+
+/// A run that neither passed nor failed — no results at all, the shape
+/// `domain::service::reconcile`'s header says the sweep re-projects on every
+/// tick — is admitted by **either** policy and silenced only when both are
+/// off. No policy speaks about it, so the only configuration that stops it is
+/// the one that stops everything.
+///
+/// Mutated against: making [`RunOutcome::Indeterminate`] read
+/// `notify_on_failure` alone turns row 2 red; making it unconditionally
+/// `true` turns row 4 red.
+#[test]
+fn a_run_that_neither_passed_nor_failed_needs_only_one_policy() {
+    let rows = [
+        (true, true, true),
+        (false, true, true),
+        (true, false, true),
+        (false, false, false),
+    ];
+
+    for (on_failure, on_success, sends) in rows {
+        let config = NotificationConfig {
+            notify_on_failure: on_failure,
+            notify_on_success: on_success,
+            ..fully_enabled_config()
+        };
+        let decision = route(
+            &config,
+            &Event::RunCompleted,
+            Some(&fully_enabled_schedule()),
+            RunOutcome::Indeterminate,
+        );
+        assert_eq!(
+            (decision.sends_slack(), decision.sends_email()),
+            (sends, sends),
+            "notify_on_failure={on_failure}, notify_on_success={on_success}, indeterminate"
+        );
+    }
 }

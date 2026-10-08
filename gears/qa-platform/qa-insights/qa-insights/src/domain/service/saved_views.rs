@@ -178,15 +178,14 @@
 //!
 //! # The collision: caught at the database, not pre-checked
 //!
-//! [`crate::domain::repos::SavedViewsRepository::find_by_natural_key`] exists
-//! and this service does not call it from [`Self::create`] or [`Self::update`].
-//! That is a deliberate reading of the brief's "decide deliberately" instruction
-//! and not an oversight, for one reason: **the repository's `create` and
-//! `update` already catch the database's own unique-constraint violation and
-//! map it to [`DomainError::SavedViewNameExists`]**
+//! This service pre-checks nothing before it writes. That is a deliberate
+//! reading of the brief's "decide deliberately" instruction and not an
+//! oversight, for one reason: **the repository's `create` and `update` already
+//! catch the database's own unique-constraint violation and map it to
+//! [`DomainError::SavedViewNameExists`]**
 //! (`infra::storage::saved_views_sea_repo`, both write methods,
 //! `Err(e) if e.is_unique_violation() => Err(DomainError::SavedViewNameExists { name })`).
-//! A `find_by_natural_key` probe run first, by contrast, opens exactly the
+//! A natural-key probe run first, by contrast, opens exactly the
 //! **TOCTOU window** the brief warns about — a second writer could insert
 //! between the probe and this service's own insert, and the probe would have
 //! reported "free" for a name that is no longer free by the time the write
@@ -242,13 +241,15 @@
 //! (`--features integration --lib`) with two real concurrent connections; none
 //! is added here; see this task's report for why.
 //!
-//! [`find_by_natural_key`] remains exactly what Task 12 built it for — a
-//! read-your-own-scope existence probe available to a *future* caller that
-//! needs one (an upsert-by-name endpoint, say, which legacy does not have and
-//! this task does not add) — and is simply not the tool Task 28's strict
-//! create/update pair needs.
-//!
-//! [`find_by_natural_key`]: crate::domain::repos::SavedViewsRepository::find_by_natural_key
+//! **The probe this section used to name is gone.** Task 12 built a
+//! `SavedViewsRepository::find_by_natural_key`, and the paragraphs above are
+//! why nothing ever called it: it was left standing for a *future* caller that
+//! needs one — an upsert-by-name endpoint, say, which legacy does not have and
+//! no task has added. Finding #38's triage deleted it and its two repository
+//! tests rather than carry a surface whose only documented use would be the
+//! TOCTOU mistake this section argues against. A reader that genuinely needs
+//! one re-adds it against the same unique index, deriving `plan_key` through
+//! `infra::storage::mapper::plan_key` so it cannot disagree with the writers.
 //!
 //! # `(repo_id, plan_path)` on the wire, not legacy's single `plan_id`
 //!

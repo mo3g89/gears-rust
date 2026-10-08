@@ -1,17 +1,12 @@
 // @vitest-environment jsdom
 //
-// I1 (final review): the Plans page's two tabs disagreed about what the global
-// product switcher means. "Standard Plans" is product-scoped on the server
-// (`usePlans` sends `product_id`); "Custom Plans" sat beside it, on the same
-// page, inside the same `RequireProduct`, listing every custom plan in the
-// deployment. Spec §4 states the invariant over *every* list surface — §1's
-// inventory was built from `hooks.ts` and missed this one, because the scoping
-// decision is made in the page rather than in a hook, and §7 does not record it
-// as out of scope.
-//
-// A custom plan carries no product key of its own, so it is attributed through
-// the repositories its tests name — `productScope.ts`'s resolver, the same one
-// the Runs and Schedules lists use — and D4's hide applies unchanged.
+// The Plans page's two tabs must agree about what the global product switcher
+// means. Both are scoped in the browser: the Standard tab lists plans per
+// repository after `reposForProduct` narrows the repository list
+// (`GET /qa/v1/test-repos` has no `product_id`), and the Custom tab attributes
+// each custom plan through the repositories its tests name — `productScope.ts`'s
+// resolver, the same one the Runs and Schedules lists use — with the
+// hide-unattributable rule applied unchanged. Each says so in the UI (ADR-0010).
 //
 // `.test.ts`, not `.test.tsx`: `vitest.config.ts`'s `include` glob is
 // `src/**/*.test.ts` only, so `createElement` stands in for JSX.
@@ -73,7 +68,7 @@ function mockApi(customPlans: unknown[]) {
   });
 }
 
-function renderPage() {
+function renderPage(tab: 'custom' | 'standard' = 'custom') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     createElement(
@@ -82,7 +77,7 @@ function renderPage() {
       createElement(
         ConfirmProvider,
         null,
-        createElement(MemoryRouter, { initialEntries: ['/plans?tab=custom'] }, createElement(PlansPage))
+        createElement(MemoryRouter, { initialEntries: [`/plans?tab=${tab}`] }, createElement(PlansPage))
       )
     )
   );
@@ -113,7 +108,7 @@ describe('PlansPage — the Custom Plans tab is scoped like the Standard Plans t
     expect(screen.queryByText('theirs-plan')).toBeNull();
   });
 
-  it('hides a plan whose tests span two products (spec D4, extended to ambiguous)', async () => {
+  it('hides a plan whose tests span two products (hidden, extended to ambiguous)', async () => {
     mockApi([
       customPlanDto('cp-mine', 'mine-plan', ['repo-a']),
       customPlanDto('cp-spanning', 'spanning-plan', ['repo-a', 'repo-b']),
@@ -135,5 +130,24 @@ describe('PlansPage — the Custom Plans tab is scoped like the Standard Plans t
     await waitFor(() => expect(screen.queryByText('mine-plan')).not.toBeNull());
     expect(screen.queryByText('empty-plan')).toBeNull();
     expect(screen.queryByText('deleted-repo-plan')).toBeNull();
+  });
+});
+
+// ADR-0010: a surface that scopes in the browser says so in the UI.
+describe('PlansPage — product scope', () => {
+  it('says the Custom Plans tab is filtered in the browser', async () => {
+    mockApi([]);
+    renderPage();
+    await waitFor(() => expect(screen.queryByText(/filtered in your browser/)).not.toBeNull());
+  });
+
+  // The Standard tab's repositories are filtered in the browser too
+  // (`reposForProduct`: `GET /qa/v1/test-repos` has no `product_id`), so it
+  // carries its own notice rather than relying on the Custom tab's.
+  it('says the Standard Plans tab is filtered in the browser', async () => {
+    mockApi([]);
+    renderPage('standard');
+    await waitFor(() => expect(screen.queryByText(/filtered in your browser/)).not.toBeNull());
+    expect(screen.queryByText(/Scoped to the selected product, filtered in your browser\. Plans are listed/)).not.toBeNull();
   });
 });

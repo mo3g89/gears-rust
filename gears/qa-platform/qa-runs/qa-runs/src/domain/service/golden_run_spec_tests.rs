@@ -25,7 +25,7 @@
 //! # Recording it
 //!
 //! ```text
-//! UPDATE_GOLDEN=1 cargo test -p qa-runs -j 6 golden_run_spec
+//! UPDATE_GOLDEN=1 PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=4 NEXTEST_TEST_THREADS=4 systemd-run --user --scope -q -p MemoryMax=16G -p MemorySwapMax=0 nice -n 19 ionice -c3 cargo nextest run -p qa-runs --features argo -E 'test(/golden_run_spec/)'
 //! ```
 //!
 //! That run **fails on purpose** once it has written the fixture: recording and
@@ -59,7 +59,13 @@
 //!   variable, no value and no precedence — only the permissions of a file in
 //!   the run's own filesystem. So this one field was re-recorded, deliberately,
 //!   with the change named here rather than absorbed silently. **That is the
-//!   only re-recording this fixture has had or may have.**
+//!   only re-recording the mode has had or may have.**
+//!
+//! **A second deliberate re-record (2026-10-07):** the mount's `credstore_ref`
+//! became `qa-environments-sv-staging-kubeconfig`, a bare name, because the
+//! fixture fed in a scheme-prefixed reference no deployment can store (a
+//! reference has `credstore_sdk::SecretRef`'s syntax in every gear). The input
+//! changed and the output followed it byte for byte; nothing else moved.
 //!
 //! # What is in the fixture, and what the spec deliberately leaves out
 //!
@@ -133,12 +139,13 @@ const REPO_BETA: Uuid = Uuid::from_u128(0x0B02);
 /// An observed VHP environment: the state the platform-observation cycle leaves
 /// behind, not the never-observed default the other dispatch tests use.
 ///
-/// `vhp_base_url` and `observed_base_url` carry the same value, and
-/// `observed_attrs` carries it a third time under the key the VHP plugin's
-/// `observed_schema()` declares for `FieldRole::BaseUrl`. That is not
-/// redundancy in the fixture — it is what Task 15's dual-write guarantees on a
-/// real row, and it is what lets Task 18 read the value from the plugin's
-/// projection and still produce this same spec.
+/// `observed_base_url` and `observed_attrs` carry the same value, the latter
+/// under the key the VHP plugin's `observed_schema()` declares for
+/// `FieldRole::BaseUrl`. That is not redundancy in the fixture — it is what
+/// the role projection guarantees on a real row (until Task 19 dropped it,
+/// `vhp_base_url` carried the value a third time), and it is what lets Task
+/// 18 read the value from the plugin's projection and still produce this same
+/// spec.
 fn observed_environment() -> Environment {
     let stamp = OffsetDateTime::from_unix_timestamp(1_756_900_000).unwrap();
     let mut observed_attrs = ObservedAttrs::default();
@@ -170,7 +177,7 @@ fn observed_environment() -> Environment {
         version_detected_at: Some(stamp),
         credentials: vec![EnvironmentCredential {
             key: "kubeconfig".to_owned(),
-            credstore_ref: "credstore://qa/environments/sv-staging/kubeconfig".to_owned(),
+            credstore_ref: "qa-environments-sv-staging-kubeconfig".to_owned(),
         }],
         observed_attrs,
         config: json!({ "vpadm_namespace": "virtuozzo" }),

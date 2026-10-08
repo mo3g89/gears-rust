@@ -22,8 +22,6 @@
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use toolkit_odata::ODataQuery;
-
 use qa_runs_sdk as sdk;
 
 use crate::domain::error::DomainError;
@@ -458,6 +456,48 @@ impl From<ExclusiveTierDto> for sdk::ExclusiveTier {
     }
 }
 
+/// What a queued run is: `plan`, `test`, `custom_plan` or `collect` —
+/// `sdk::RunKind::as_str`'s spellings.
+//
+// Mirrors `sdk::RunKind`; see `RunStateDto` for why this is a mirror.
+// `QueueEntryDto::run_kind` was a `String` filled from `sdk::RunKind::as_str`
+// while the closed enum sat beside it (the third pass, a sibling of review
+// finding #35); the published schema is now a four-value `enum`.
+// `RunTargetDto::kind` stays a `String` on purpose: that type is also the
+// launch *request*, and `TryFrom<RunTargetDto>` answers an unknown kind with
+// its own 400 naming the field, which a serde enum would replace with the
+// deserializer's message - a wire change on the request side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum RunKindDto {
+    Plan,
+    Test,
+    CustomPlan,
+    Collect,
+}
+
+impl From<sdk::RunKind> for RunKindDto {
+    fn from(kind: sdk::RunKind) -> Self {
+        match kind {
+            sdk::RunKind::Plan => Self::Plan,
+            sdk::RunKind::Test => Self::Test,
+            sdk::RunKind::CustomPlan => Self::CustomPlan,
+            sdk::RunKind::Collect => Self::Collect,
+        }
+    }
+}
+
+impl From<RunKindDto> for sdk::RunKind {
+    fn from(kind: RunKindDto) -> Self {
+        match kind {
+            RunKindDto::Plan => Self::Plan,
+            RunKindDto::Test => Self::Test,
+            RunKindDto::CustomPlan => Self::CustomPlan,
+            RunKindDto::Collect => Self::Collect,
+        }
+    }
+}
+
 /// Who asked for a run.
 //
 // Mirrors `sdk::RunSource`; see `RunStateDto` for why this is a mirror.
@@ -547,27 +587,27 @@ pub struct RunDto {
     /// text names the run holding an environment.
     pub name: String,
     pub target: RunTargetDto,
-    /// Renamed from `platform_id` (Task 25): the wire now agrees with the
+    /// Renamed from `platform_id`: the wire now agrees with the
     /// Rust field. The column moved with it: `environment_id` is now the
     /// column, the Rust field and the wire key alike. Every other `platform_id` on this
     /// crate's wire (requests and responses alike) was renamed the same way
     /// — this is the one place it is spelled out in full.
     ///
-    /// **This was a breaking API change** (Task 25): a client reading
+    /// **This was a breaking API change**: a client reading
     /// `platform_id` out of a response now finds it absent, replaced by
     /// `environment_id`. (This type is a response - a client never *sends*
     /// one, so there is no 400 to raise here. The 400 for a stale *request*
     /// is on the request-side types: [`LaunchRunReq::environment_id`] and
     /// [`NewScheduleReq::environment_id`] both refuse a `platform_id` sent in
-    /// their place explicitly - see the first one's doc, and ruling G-4.)
+    /// their place explicitly - see the first one's doc.)
     pub environment_id: Option<Uuid>,
     /// Branch actually resolved and executed against.
     pub test_version: Option<String>,
     /// Environment application version snapshotted at launch, not re-derived.
     pub app_version: Option<String>,
     pub app_build: Option<String>,
-    /// `sdk::RunState::as_str`'s spelling - a closed set on the wire since
-    /// Task 20, when this field stopped being a `String`.
+    /// `sdk::RunState::as_str`'s spelling - a closed set on the wire, typed
+    /// `RunStateDto` rather than a `String`.
     pub state: RunStateDto,
     /// The exclusivity decision that was actually made - **not** the launch's
     /// request, which is a tri-state.
@@ -607,7 +647,7 @@ pub struct RunDto {
     pub updated_at: OffsetDateTime,
     /// The run's five outcome counters, notably `skipped`.
     ///
-    /// Added on the run list DTO by Task 10, alongside the product owner's
+    /// Added on the run list DTO, alongside the product owner's
     /// decision that a skipped test no longer fails a run
     /// (`domain::state_machine::derive_terminal_state`). A `Succeeded` run
     /// whose `skipped` is non-zero asserted less than the word "succeeded"
@@ -659,7 +699,7 @@ impl From<sdk::Run> for RunDto {
     }
 }
 
-/// The run list's read, run and result from the same row (Task 10). See
+/// The run list's read, run and result from the same row. See
 /// [`RunDto::result`] for why the pairing matters.
 impl From<RunWithResult> for RunDto {
     fn from(item: RunWithResult) -> Self {
@@ -762,7 +802,7 @@ impl From<TestResultRow> for RunTestResultDto {
 /// separately would let a caller display totals that disagree with the list
 /// beneath them.
 ///
-/// **`result` lives on the flattened [`RunDto`], not here.** Task 10 moved it
+/// **`result` lives on the flattened [`RunDto`], not here.** It is
 /// there so the run list carries the same field — a caller building one view
 /// model for both the list and the detail read finds `result` in the same
 /// place either way. Before that move this struct had its own `result` field
@@ -788,11 +828,11 @@ pub struct RunDetailDto {
 pub struct QueueEntryDto {
     pub id: Uuid,
     pub run_id: Uuid,
-    /// Renamed from `platform_id` (Task 25) — see [`RunDto::environment_id`]'s
+    /// Renamed from `platform_id` — see [`RunDto::environment_id`]'s
     /// doc for why.
     pub environment_id: Uuid,
-    /// `plan`, `test`, or `custom_plan`.
-    pub run_kind: String,
+    /// `plan`, `test`, `custom_plan` or `collect` — see [`RunKindDto`].
+    pub run_kind: RunKindDto,
     /// Who asked - see [`RunSourceDto`].
     pub source: RunSourceDto,
     pub exclusive: bool,
@@ -826,7 +866,7 @@ impl From<sdk::QueueEntry> for QueueEntryDto {
             id: q.id,
             run_id: q.run_id,
             environment_id: q.environment_id,
-            run_kind: q.run_kind.as_str().to_owned(),
+            run_kind: q.run_kind.into(),
             source: q.source.into(),
             exclusive: q.exclusive,
             state: q.state.into(),
@@ -882,7 +922,7 @@ pub struct LaunchRunReq {
     pub target: RunTargetDto,
     /// `null` launches a run with no target environment. Such a run is never
     /// queued and never blocks anything. Renamed from `platform_id`
-    /// (Task 25) — see [`RunDto::environment_id`]'s doc for why.
+    /// — see [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// Test-content branch. When absent, resolution falls back to the
     /// environment's `default_branch` and then the repository's.
@@ -907,7 +947,7 @@ pub struct LaunchRunReq {
     // `environment_id`. `into_domain` refuses it with a 400 naming the
     // rename, rather than silently accepting it and launching a run
     // detached from any environment with `environment_id` left `None` - the
-    // Critical-1 defect the Task 25 review found and ruling G-4 closes.
+    // Critical-1 defect the Task 25 review found and this trap closes.
     // Not `#[serde(deny_unknown_fields)]`: that would be a blanket refusal
     // this type happens to tolerate safely, but the same blanket approach on
     // `QueueQuery` would break its deliberate tolerance of `OData`
@@ -932,12 +972,11 @@ impl LaunchRunReq {
     ///
     /// # What is checked here and why it is here rather than downstream
     ///
-    /// * **The pre-Task-25 field name.** The private `legacy_platform_id`
-    ///   field being `Some` means the caller sent the superseded `environment_id`
-    ///   key, and this is refused
-    ///   before anything else - ruling G-4, closing Critical-1 of the Task 25
-    ///   review, which found the field was otherwise silently ignored rather
-    ///   than refused.
+    /// * **The pre-Task-25 field name.** The private `legacy_platform_id` field
+    ///   being `Some` means the caller sent the superseded `environment_id`
+    ///   key, and this is refused before anything else, closing Critical-1 of
+    ///   the Task 25 review, which found the field was otherwise silently
+    ///   ignored rather than refused.
     /// * **`timeout_seconds` range.** `domain::timeout` clamps out-of-range
     ///   values as a fail-safe and its own doc says the boundary owes a 400
     ///   naming the ceiling instead: *"a caller who asks for a year should be
@@ -986,7 +1025,7 @@ impl LaunchRunReq {
         if self.legacy_platform_id.is_some() {
             return Err(DomainError::Validation {
                 field: "platform_id".to_owned(),
-                message: "was renamed to `environment_id` (Task 25); send \
+                message: "was renamed to `environment_id`; send \
                           `environment_id` instead of `platform_id`."
                     .to_owned(),
             });
@@ -1139,7 +1178,7 @@ pub struct ScheduleDto {
     pub target: RunTargetDto,
     /// `null` schedules a run with no target environment. Such a run is
     /// never queued and never blocks anything. Renamed from `platform_id`
-    /// (Task 25) — see [`RunDto::environment_id`]'s doc for why.
+    /// — see [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// Branch each fire resolves against. `null` falls back to the
     /// environment's `default_branch` and then the repository's, at launch
@@ -1311,7 +1350,7 @@ pub struct NewScheduleReq {
     pub name: String,
     pub target: RunTargetDto,
     /// `null` schedules a run with no target environment. Renamed from
-    /// `platform_id` (Task 25) — see [`RunDto::environment_id`]'s doc for why.
+    /// `platform_id` — see [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// `null` resolves the branch at launch time, as a manual launch does.
     pub branch: Option<String>,
@@ -1404,11 +1443,11 @@ impl TryFrom<NewScheduleReq> for sdk::NewSchedule {
     /// error mapping renders as a 400 naming the field.
     fn try_from(req: NewScheduleReq) -> Result<Self, Self::Error> {
         // The pre-Task-25 field name, refused before anything else - see
-        // `LaunchRunReq::into_domain`'s matching check and ruling G-4.
+        // `LaunchRunReq::into_domain`'s matching check.
         if req.legacy_platform_id.is_some() {
             return Err(ScheduleFieldError::from(DomainError::Validation {
                 field: "platform_id".to_owned(),
-                message: "was renamed to `environment_id` (Task 25); send \
+                message: "was renamed to `environment_id`; send \
                           `environment_id` instead of `platform_id`."
                     .to_owned(),
             }));
@@ -1530,28 +1569,22 @@ impl From<UpdateScheduleNotificationsReq> for sdk::ScheduleNotificationSettings 
 // Queue query
 // ===========================================================================
 
-/// Default `limit` on the queue read, and the ceiling it is clamped to
-/// (frozen guide: *"`limit` defaults to 200 and is clamped to 1-500"*).
-pub const QUEUE_LIMIT_DEFAULT: u32 = 200;
-/// See [`QUEUE_LIMIT_DEFAULT`].
-pub const QUEUE_LIMIT_MAX: u32 = 500;
-/// See [`QUEUE_LIMIT_DEFAULT`]. A `limit` of `0` returns nothing useful and is
-/// far more likely to be an uninitialised variable than a request for an empty
-/// page, so the floor is 1 rather than 0.
-pub const QUEUE_LIMIT_MIN: u32 = 1;
-
 /// Query parameters for the queue read.
+///
+/// **No page size here.** `limit` (alias `$top`) and `cursor` (alias
+/// `$skiptoken`) are bound by the toolkit's `OData` extractor (`ODataParams`),
+/// which the handler takes beside this struct: that extractor refuses `0` and
+/// both spellings at once with a 400, and the repository's `PAGE_LIMITS`
+/// supplies the default and the ceiling. A second `limit` field here read the
+/// same query key and could never differ from the extractor's.
 #[derive(Debug, Clone, Default)]
 #[toolkit_macros::api_dto(request)]
 pub struct QueueQuery {
     /// Absent spans every environment in the same window.
     ///
-    /// Renamed from `platform_id` (Task 25) — see
+    /// Renamed from `platform_id` — see
     /// [`RunDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
-    /// Absent means [`QUEUE_LIMIT_DEFAULT`]. Out-of-range values are **clamped,
-    /// not refused** - see [`Self::effective_limit`].
-    pub limit: Option<u32>,
     // Trap for a client still sending the pre-Task-25 field name. See
     // `LaunchRunReq`'s own `legacy_platform_id` comment, which this mirrors -
     // `reject_legacy_field` is the check `list_queue` runs before using
@@ -1580,81 +1613,23 @@ impl QueueQuery {
     /// Silently accepting it and leaving [`Self::environment_id`] at `None`
     /// was Critical-1 of the Task 25 review: `GET /qa/v1/queue?platform_id=X`
     /// returned the whole cluster's queue rather than one environment's, with
-    /// no signal to the caller that their filter was dropped. Ruling G-4
+    /// no signal to the caller that their filter was dropped. This refusal
     /// closes it.
     ///
     /// # Errors
     ///
-    /// [`DomainError::Validation`] naming `environment_id`, which the error
+    /// [`DomainError::Validation`] naming `platform_id`, which the error
     /// mapping renders as a 400.
     pub fn reject_legacy_field(&self) -> Result<(), DomainError> {
         if self.legacy_platform_id.is_some() {
             return Err(DomainError::Validation {
                 field: "platform_id".to_owned(),
-                message: "was renamed to `environment_id` (Task 25); send \
+                message: "was renamed to `environment_id`; send \
                           `environment_id` instead of `platform_id`."
                     .to_owned(),
             });
         }
         Ok(())
-    }
-
-    /// The window this query actually reads.
-    ///
-    /// Clamping rather than rejecting, which is the opposite of what
-    /// [`LaunchRunReq::into_domain`] does with `timeout_seconds`, so the
-    /// difference is worth stating. The guide specifies clamping for this
-    /// parameter in as many words, and the two cases are not alike: a clamped
-    /// `limit` changes how much of an answer a caller sees, whereas a clamped
-    /// timeout silently changes when their run is killed.
-    ///
-    /// **A clamped `limit` is not visible in the response either**, and an
-    /// earlier version of this doc claimed a caller could "see that it was
-    /// clamped by counting the rows". They cannot: asking for 5000 and getting
-    /// 500 is indistinguishable from asking for 5000 and there being 500 - which
-    /// is verbatim the argument `domain::repos::Windowed` exists to make about a
-    /// silent ceiling. What makes it tolerable here is the page's
-    /// `next_cursor`, which is present exactly when there is more, so a caller
-    /// paging correctly is never misled; a caller reading one page and stopping
-    /// is.
-    #[must_use]
-    pub fn effective_limit(&self) -> u32 {
-        self.limit
-            .unwrap_or(QUEUE_LIMIT_DEFAULT)
-            .clamp(QUEUE_LIMIT_MIN, QUEUE_LIMIT_MAX)
-    }
-
-    /// Fold the bare `limit` parameter into an `OData` query.
-    ///
-    /// Two spellings of "how many rows" reach this endpoint: `limit`, which the
-    /// frozen guide specifies and which every caller ported from the source
-    /// system sends, and `$top`, which is what the rest of this platform's
-    /// paginated collections use and what a pagination cursor round-trips.
-    ///
-    /// **`$top` wins when both are present.** It is the one tied to the cursor,
-    /// so honouring `limit` over it would let a caller's page size disagree with
-    /// the page size their `next_cursor` was minted for. `limit` fills in only
-    /// when `$top` is absent, which is exactly the ported-caller case it exists
-    /// for.
-    ///
-    /// The clamp is applied here as well as by `LimitCfg` inside the
-    /// repository. That is deliberate belt-and-braces of a specific kind: this
-    /// one is the *guide's* contract on the `limit` parameter (defaults 200,
-    /// clamped 1-500), while `LimitCfg` is the repository's own floor and
-    /// ceiling on any page.
-    ///
-    /// **They are pinned separately, and they have to be.** These constants
-    /// govern only this parameter: a request sending neither `limit` nor `$top`
-    /// takes its page size from `PAGE_LIMITS`, and a `$top` is clamped solely by
-    /// it. An earlier version of this paragraph said "if one moves, the failing
-    /// test says which contract changed" - no test would have failed, because
-    /// `PAGE_LIMITS` had none. It does now
-    /// (`infra::storage::db::tests::the_page_limits_are_the_literals_the_guide_freezes`).
-    pub fn merge_into(&self, mut query: ODataQuery) -> ODataQuery {
-        if query.limit.is_none() && self.limit.is_some() {
-            query.limit = Some(u64::from(self.effective_limit()));
-        }
-        query
     }
 }
 
@@ -1683,14 +1658,12 @@ impl From<String> for RunLogLineDto {
 mod tests {
     use super::{
         BoundaryLimits, ExclusiveTierDto, LaunchRunReq, MAX_BRANCH_LEN, MAX_SCHEDULE_NAME_LEN,
-        MAX_TARGET_PATH_LEN, NewScheduleReq, OffsetDateTime, QUEUE_LIMIT_DEFAULT, QUEUE_LIMIT_MAX,
-        QUEUE_LIMIT_MIN, QueueEntryDto, QueueQuery, QueueStateDto, RunDetailDto, RunDto,
-        RunSourceDto, RunStateDto, RunTargetDto, ScheduleDto, exclusive_choice_from_wire,
-        exclusive_choice_to_wire, sdk,
+        MAX_TARGET_PATH_LEN, NewScheduleReq, OffsetDateTime, QueueEntryDto, QueueQuery,
+        QueueStateDto, RunDetailDto, RunDto, RunKindDto, RunSourceDto, RunStateDto, RunTargetDto,
+        ScheduleDto, exclusive_choice_from_wire, exclusive_choice_to_wire, sdk,
     };
     use crate::domain::error::DomainError;
     use crate::domain::timeout::{MAX_LAUNCH_TIMEOUT_SECONDS, MIN_LAUNCH_TIMEOUT_SECONDS};
-    use toolkit_odata::ODataQuery;
     use uuid::Uuid;
 
     fn limits() -> BoundaryLimits {
@@ -2154,7 +2127,7 @@ mod tests {
         }
     }
 
-    // -- legacy field trap (ruling G-4) -------------------------------------
+    // -- legacy field trap -------------------------------------
 
     /// `environment_id` really is read off the wire under its own name - the
     /// positive half of the pair below. Driven from a JSON literal rather
@@ -2175,9 +2148,9 @@ mod tests {
     }
 
     /// **Critical-1 of the Task 25 review, closed.** A client still sending
-    /// `environment_id` used to get a 200 with `environment_id` silently left
+    /// `platform_id` used to get a 200 with `environment_id` silently left
     /// `None` - the CHANGELOG claimed a 400 that did not happen. Driven from a
-    /// JSON literal naming `environment_id`, not `environment_id`, so this is the
+    /// JSON literal naming `platform_id`, not `environment_id`, so this is the
     /// wire shape a stale client actually sends.
     #[test]
     fn a_legacy_platform_id_in_the_launch_body_is_refused_not_silently_dropped() {
@@ -2310,7 +2283,7 @@ mod tests {
     }
 
     /// **`RunDto` and `QueueEntryDto` serialize `environment_id`, never
-    /// `environment_id`.**
+    /// `platform_id`.**
     ///
     /// Important-4 of the Task 25 review: a struct-field read
     /// (`assert_eq!(dto.environment_id, ...)`) is a proxy for the wire shape,
@@ -2391,38 +2364,9 @@ mod tests {
 
     // -- queue query -------------------------------------------------------
 
-    /// `$top` wins over `limit`, and `limit` fills in when `$top` is absent.
-    ///
-    /// The precedence is not arbitrary: `$top` is the one a pagination cursor
-    /// is minted for, so honouring `limit` over it would let a caller's page
-    /// size disagree with the cursor they were handed.
-    #[test]
-    fn the_legacy_limit_fills_in_only_when_odata_did_not_ask() {
-        let query = QueueQuery {
-            environment_id: None,
-            limit: Some(50),
-            legacy_platform_id: None,
-        };
-        assert_eq!(query.merge_into(ODataQuery::new()).limit, Some(50));
-
-        let with_top = ODataQuery::new().with_limit(10);
-        assert_eq!(
-            query.merge_into(with_top).limit,
-            Some(10),
-            "$top must win when both are given"
-        );
-
-        // No `limit` at all leaves the query alone, so the repository's own
-        // default applies rather than this layer imposing one.
-        assert_eq!(
-            QueueQuery::default().merge_into(ODataQuery::new()).limit,
-            None
-        );
-    }
-
     /// The query struct is filled by axum's `Query` extractor from a raw query
-    /// string, so its two fields have to survive being absent, and the string
-    /// also carries `OData`'s own parameters, which this struct must ignore
+    /// string, so its field has to survive being absent, and the string also
+    /// carries `OData`'s own parameters and the paging ones, which this struct must ignore
     /// rather than reject.
     ///
     /// Driven through `serde_urlencoded` - the encoding `Query` uses - rather
@@ -2434,12 +2378,13 @@ mod tests {
         let empty: QueueQuery =
             serde_urlencoded::from_str("").expect("an empty query string is valid");
         assert_eq!(empty.environment_id, None);
-        assert_eq!(empty.limit, None);
 
-        let mixed: QueueQuery =
-            serde_urlencoded::from_str("limit=50&%24filter=state%20eq%20%27queued%27&%24top=10")
-                .expect("OData parameters must be ignored, not rejected");
-        assert_eq!(mixed.limit, Some(50));
+        // `limit` and `cursor` are the `OData` extractor's, so this struct must
+        // ignore them along with the `$`-parameters.
+        let mixed: QueueQuery = serde_urlencoded::from_str(
+            "limit=50&cursor=abc&%24filter=state%20eq%20%27queued%27&%24top=10",
+        )
+        .expect("OData and paging parameters must be ignored, not rejected");
         assert_eq!(mixed.environment_id, None);
 
         let scoped: QueueQuery =
@@ -2491,7 +2436,7 @@ mod tests {
 
     /// **NEW-Minor-1 of the Task 25 re-review.** Naming both parameters is
     /// refused the same as naming only the legacy one - the check does not
-    /// treat a present `environment_id` as license to ignore `environment_id`.
+    /// treat a present `environment_id` as license to ignore `platform_id`.
     #[test]
     fn a_queue_query_naming_both_the_legacy_and_the_new_parameter_is_still_refused() {
         let scoped: QueueQuery = serde_urlencoded::from_str(
@@ -2507,33 +2452,6 @@ mod tests {
             DomainError::Validation { field, .. } => assert_eq!(field, "platform_id"),
             other => panic!("expected a Validation on platform_id, got {other:?}"),
         }
-    }
-
-    /// The guide's clamp, applied to the legacy parameter on the way through.
-    #[test]
-    fn an_out_of_range_legacy_limit_is_clamped_before_it_reaches_the_query() {
-        let huge = QueueQuery {
-            environment_id: None,
-            limit: Some(u32::MAX),
-            legacy_platform_id: None,
-        };
-        assert_eq!(
-            huge.merge_into(ODataQuery::new()).limit,
-            Some(u64::from(QUEUE_LIMIT_MAX))
-        );
-    }
-
-    /// The guide's numbers, as numbers.
-    ///
-    /// `the_queue_limit_defaults_and_clamps_as_the_guide_specifies` compares
-    /// behaviour against the constants, so it stays green if a constant moves -
-    /// 200 to 15, 500 to 9999 and 1 to 0 were all green mutants. The literals
-    /// are the contract; this is where they are pinned.
-    #[test]
-    fn the_queue_limit_constants_are_the_literals_the_guide_freezes() {
-        assert_eq!(QUEUE_LIMIT_DEFAULT, 200);
-        assert_eq!(QUEUE_LIMIT_MIN, 1);
-        assert_eq!(QUEUE_LIMIT_MAX, 500);
     }
 
     // -- schedules ---------------------------------------------------------
@@ -2566,11 +2484,11 @@ mod tests {
     }
 
     /// **Critical-1 of the Task 25 review, closed.** A `PUT
-    /// /qa/v1/schedules/{id}` still sending `environment_id` used to get a 200
+    /// /qa/v1/schedules/{id}` still sending `platform_id` used to get a 200
     /// with `environment_id` silently `None` - detaching an exclusive
     /// schedule from its environment without telling the caller, exactly the
     /// worst of the four silent-replace effects this type's own doc
-    /// describes. Adds `environment_id` beside the fixture's `environment_id`,
+    /// describes. Adds `platform_id` beside the fixture's `environment_id`,
     /// so this is what a client that has not migrated actually sends.
     #[test]
     fn a_legacy_platform_id_in_the_schedule_body_is_refused_not_silently_dropped() {
@@ -2595,7 +2513,7 @@ mod tests {
 
     /// **NEW-Minor-1 of the Task 25 re-review.** Naming both fields is
     /// refused the same as naming only the legacy one - a caller cannot pair
-    /// `environment_id` with a stated `environment_id` and have the refusal
+    /// `platform_id` with a stated `environment_id` and have the refusal
     /// stand down.
     #[test]
     fn a_schedule_body_naming_both_the_legacy_and_the_new_field_is_still_refused() {
@@ -2912,35 +2830,6 @@ mod tests {
         assert_eq!(json["exclusive_choice"], "false");
     }
 
-    #[test]
-    fn the_queue_limit_defaults_and_clamps_as_the_guide_specifies() {
-        assert_eq!(QueueQuery::default().effective_limit(), QUEUE_LIMIT_DEFAULT);
-        assert_eq!(
-            QueueQuery {
-                limit: Some(0),
-                ..QueueQuery::default()
-            }
-            .effective_limit(),
-            QUEUE_LIMIT_MIN
-        );
-        assert_eq!(
-            QueueQuery {
-                limit: Some(u32::MAX),
-                ..QueueQuery::default()
-            }
-            .effective_limit(),
-            QUEUE_LIMIT_MAX
-        );
-        assert_eq!(
-            QueueQuery {
-                limit: Some(50),
-                ..QueueQuery::default()
-            }
-            .effective_limit(),
-            50
-        );
-    }
-
     // -- SDK enums on the wire (Task 20, review findings #34/#35) -----------
 
     /// **Every `sdk::RunState` renders the spelling it always rendered.**
@@ -3162,5 +3051,24 @@ mod tests {
         let body = serde_json::to_value(&entry).expect("a queue entry must serialize");
         assert_eq!(body["state"], "cancelled");
         assert_eq!(body["source"], "scheduled");
+        assert_eq!(body["run_kind"], "plan");
+    }
+
+    /// Every run kind renders `sdk::RunKind::as_str`'s spelling through
+    /// [`RunKindDto`], and the mirror round-trips.
+    #[test]
+    fn every_run_kind_serialises_to_its_persisted_spelling() {
+        for kind in [
+            sdk::RunKind::Plan,
+            sdk::RunKind::Test,
+            sdk::RunKind::CustomPlan,
+            sdk::RunKind::Collect,
+        ] {
+            assert_eq!(
+                serde_json::to_value(RunKindDto::from(kind)).expect("a kind must serialize"),
+                serde_json::json!(kind.as_str())
+            );
+            assert_eq!(sdk::RunKind::from(RunKindDto::from(kind)), kind);
+        }
     }
 }

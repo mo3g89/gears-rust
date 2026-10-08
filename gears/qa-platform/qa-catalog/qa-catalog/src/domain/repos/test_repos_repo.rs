@@ -34,6 +34,22 @@ pub trait TestReposRepository: Send + Sync {
         id: Uuid,
     ) -> Result<Option<TestRepository>, DomainError>;
 
+    /// The tenant that owns repository `id`, read off its row within `scope`;
+    /// `Ok(None)` when no such row is visible there.
+    ///
+    /// The SDK `TestRepository` model carries no `tenant_id`, so this is how
+    /// a request path learns the tenant the background branch refresher binds
+    /// its system context to (`RefreshTarget::tenant_id`). Reading a
+    /// repository's credential under that one tenant is what makes a request
+    /// and the refresher read it alike, whichever tenant the request's caller
+    /// belongs to (`ReposService::resolve_credential`).
+    async fn owner_tenant<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<Uuid>, DomainError>;
+
     /// List all test repositories visible within the given security scope.
     async fn list<C: DBRunner>(
         &self,
@@ -60,8 +76,8 @@ pub trait TestReposRepository: Send + Sync {
     /// `sync_error` in the SAME statement, leaving the row in its
     /// never-synced state. The caller sets it when the update makes the
     /// existing working copy stale (a changed `url` or `content_root`), so
-    /// content reads fail closed with `RepoNotSynced` instead of serving
-    /// content fetched from the old location. One statement, so a row can
+    /// content reads sync from the new location (or fail closed) instead of
+    /// serving content fetched from the old one. One statement, so a row can
     /// never be left advertising fresh content for a new URL.
     async fn update<C: DBRunner>(
         &self,
@@ -100,19 +116,27 @@ pub trait TestReposRepository: Send + Sync {
         sync_error: Option<String>,
     ) -> Result<Option<TestRepository>, DomainError>;
 
-    /// Replace the cached branch set of `repo_id` with `branches`
-    /// (delete-all-then-insert, both scoped; duplicates in the input are
-    /// collapsed). Not atomic on its own — callers that need the cache to
-    /// never be observed empty must pass a transaction runner.
+    /// Make the cached branch set of `repo_id` equal `branches` (duplicates
+    /// collapsed), as an idempotent diff (DESIGN §3.3 "Branch model and the
+    /// first read of a branch"): names already cached are kept, cached names
+    /// the listing lacks are deleted, new names are inserted with
+    /// `ON CONFLICT DO NOTHING` on `idx_qa_branches_unique`, so two calls
+    /// racing on one repository both succeed. A kept row keeps its
+    /// `refreshed_at`, which is therefore when the name was first listed. Not
+    /// atomic on its own: callers that need the cache never to be observed
+    /// half-written pass a transaction runner.
     ///
-    /// Callers must have already resolved `repo_id` through [`get`](Self::get)
-    /// under the same scope: this method writes rows carrying the `tenant_id`
-    /// it is handed and does not re-check that the repository belongs to it.
+    /// Rows are filed under the repository's **owning** tenant, read off its
+    /// row through `scope` — never the caller's tenant, which for a caller
+    /// whose scope spans a tenant hierarchy is not the owner (DESIGN §3.8). A
+    /// row of this repository cached under any other tenant *visible in
+    /// `scope`* is removed; one under a tenant outside `scope` is not seen and
+    /// stays.
+    /// [`DomainError::NotFound`] when the repository is not visible in `scope`.
     async fn replace_branches<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
-        tenant_id: Uuid,
         repo_id: Uuid,
         branches: Vec<String>,
     ) -> Result<(), DomainError>;

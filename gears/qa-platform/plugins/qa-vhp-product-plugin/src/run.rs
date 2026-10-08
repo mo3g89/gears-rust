@@ -61,7 +61,7 @@ use crate::schemas::{KUBECONFIG_KEY, observed_schema};
 /// from `qa-runs::domain::runvars::PLATFORM_BASE_URL_VAR`, which keeps its own
 /// until Task 18.
 ///
-/// **Deliberately not reserved** (parity decision D3, recorded in
+/// **Deliberately not reserved** (parity, recorded in
 /// `qa-runs::domain::params::RESERVED_NAMES`' SECURITY NOTE): a run parameter
 /// of this name really does redirect the run's base URL, and that exposure is
 /// carried forward on purpose rather than closed in a quiet edit here. See
@@ -196,10 +196,10 @@ fn run_vars(env: &EnvironmentHandle<'_>) -> Vec<RunVar> {
     }
 
     // `baseDomain` holds `https://<domain>` despite its key — it is the
-    // successor to the `vhp_base_url` column, which
-    // `environments_sea_repo.rs` writes as `format!("https://{domain}")`.
-    // `VPADM_BASE_DOMAIN` is the bare host derived back out of it, which is
-    // the direction `qa-runs` derives it today.
+    // successor to the `vhp_base_url` column (dropped by Task 19), which held
+    // `format!("https://{domain}")`; `observe` composes the scheme now.
+    // `VPADM_BASE_DOMAIN` is the bare host derived back out of it, the
+    // direction `qa-runs` derived it before Task 18 moved the derivation here.
     if let Some(base_url) = env.observed_role(&schema, FieldRole::BaseUrl) {
         // An unparseable URL suppresses only the *derived* domain. The value
         // an operator's cluster actually reported still reaches the run: a
@@ -263,9 +263,9 @@ fn base_domain_from_url(url: &str) -> Option<String> {
 /// `qa-runs.argo.runner_image`". That is what runs VHP's tests today, so
 /// declaring an image here would be a behaviour change, not a port.
 ///
-/// The method exists because **D11** says a runner shape varies per *product*,
-/// and the products that follow VHP will need one. Indifference is expressible
-/// and this is what it looks like.
+/// The method exists because a runner shape varies per *product* (DESIGN §3.7,
+/// "`qa-product-sdk`"), and the products that follow VHP will need one.
+/// Indifference is expressible and this is what it looks like.
 #[must_use]
 pub fn runner() -> RunnerSpec {
     RunnerSpec::default()
@@ -288,9 +288,9 @@ pub fn runner() -> RunnerSpec {
 /// Neither [`PLATFORM_BASE_URL_VAR`] nor [`BASE_DOMAIN_VAR`] is reserved, and
 /// that is the ported behaviour rather than an omission: today's
 /// `RESERVED_NAMES` does not list either, so a run parameter of either name
-/// overrides the value this plugin supplies. Decision D3 carried that forward
-/// deliberately, and `runvars.rs`' SECURITY NOTE says closing it belongs in a
-/// PRD amendment rather than a quiet edit. Reserving them here would close it
+/// overrides the value this plugin supplies. That is carried forward
+/// deliberately, and `RESERVED_NAMES`' SECURITY NOTE says closing it belongs in
+/// a PRD amendment rather than a quiet edit. Reserving them here would close it
 /// quietly, from the other side.
 ///
 /// # This can only ever add

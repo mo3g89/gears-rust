@@ -5,11 +5,11 @@
 //
 // **Every exported hook keeps its name, its parameters and its return shape**, and there
 // are now no exceptions: nothing under `src/components/` or `src/pages/` is modified by
-// this task at all. Every difference between what the components want and what the gears
+// the adapter layer at all. Every difference between what the components want and what the gears
 // serve is absorbed here or in `./adapters.ts`.
 //
 // (`useProductCoverage` briefly lost its `productId` in the first round, because
-// `GET /qa/v1/dashboard/coverage` declares no query parameters. Review round 1 found that
+// `GET /qa/v1/dashboard/coverage` declares no query parameters. It turned out that
 // the parameter is still needed — not as a server filter, but as the key for the
 // client-side one that keeps one product's card from charting another product's rows. See
 // its own doc.)
@@ -17,11 +17,11 @@
 // Three shapes of work live here that did not before, all of them consequences recorded in
 // `gears/qa-platform/docs/DESIGN.md` §3.6:
 //
-//  1. **Identifier resolution (X1).** The UI's own routes address runs, environments and
+//  1. **Identifier resolution.** The UI's own routes address runs, environments and
 //     schedules by *name*; every gear path segment is a uuid. So a hook that used to be
 //     one request is now a lookup plus a request. `GET /qa/v1/runs/smoke-2` is a 400, not
 //     a 404, so this is not optional.
-//  2. **Plan identity (X6).** A gear plan has no id — it is `(repo_id, path)`. The pair
+//  2. **Plan identity.** A gear plan has no id — it is `(repo_id, path)`. The pair
 //     travels through the components as one opaque encoded string (`encodePlanId`), so
 //     nothing downstream had to learn about pairs.
 //  3. **Fan-out.** `GET /qa/v1/plans` takes a *required* `repo_id`, so a product's plans
@@ -266,8 +266,8 @@ const ENVIRONMENT_DTOS_STALE_MS = 60_000;
  *    covers the one case a stale list gets wrong: an environment created
  *    outside this tab.
  *
- * The response is a `Page`, not an array, since review finding #55 bounded
- * `GET /qa/v1/environments`. `page_info.next_cursor` is deliberately not
+ * The response is a `Page`, not an array, since `GET /qa/v1/environments` became
+ * bounded. `page_info.next_cursor` is deliberately not
  * followed here: the page limit is 200 and the collection's own NFR ceiling is
  * 100, so a second page means a deployment that has outgrown its own sizing —
  * at which point the fix is a filtered read, not a drain loop in a name index.
@@ -287,7 +287,7 @@ async function fetchProductDtos(): Promise<S['ProductDto'][]> {
 /**
  * A drain loop's ceiling — this loop's own, and the only one there is.
  *
- * **Corrected 2026-09-07, final review finding 3.** This said "200 rows a page
+ * **Corrected 2026-09-07.** This said "200 rows a page
  * against the gear's `max_variables` cap of 500 means three requests at the very
  * most". `max_variables` is not a cap on the collection: it truncates a single
  * response, and on the `/variables` form this loop actually pages — no
@@ -308,7 +308,7 @@ const MAX_VARIABLE_PAGES = 10;
  * Pipeline variables, plus one environment's when `environmentId` is given —
  * **all of them**, following the cursor.
  *
- * `GET /qa/v1/variables` became a `Page` with review finding #55; the two halves
+ * `GET /qa/v1/variables` became a bounded `Page`; the two halves
  * of its union used to be unbounded reads. Not cached: unlike the environment
  * name index this is read once per settings screen rather than per poll, and
  * `saveVariables` re-reads it precisely to diff against what is *currently*
@@ -316,7 +316,7 @@ const MAX_VARIABLE_PAGES = 10;
  *
  * # Why the cursor is followed here and not on `/environments`
  *
- * **Corrected 2026-09-07, Task 24 review finding 3.** The first version of this
+ * **Corrected 2026-09-07.** The first version of this
  * function discarded `page_info.next_cursor`, on the reasoning that the union
  * case never returns one. That is true of the union case and false of the other
  * one: without `environment_id` the response is a single table and the cursor is
@@ -355,7 +355,7 @@ async function fetchVariableDtos(environmentId?: string | null): Promise<S['Vari
 }
 
 /** uuid -> display name, for the several places legacy drew a platform *name* and the
- *  gears send only the uuid (X1: rows 1, 5, 9, 14, 18). */
+ *  gears send only the uuid. */
 async function environmentNameIndex(): Promise<Map<string, string>> {
   const environments = await fetchEnvironmentDtos();
   return new Map(environments.map((environment) => [environment.id, environment.name]));
@@ -391,14 +391,13 @@ async function resolveEnvironmentId(name: string): Promise<string> {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Resolve a run *name* — or an id already — to its uuid (X1, §7.1).
+ * Resolve a run *name* — or an id already — to its uuid.
  *
- * `name` is a filterable field on `GET /qa/v1/runs` (`odata.rs:80`); §10 listed this as
- * inferred-not-driven, and it was driven for this task:
+ * `name` is a filterable field on `GET /qa/v1/runs` (`odata.rs:80`); it was driven live:
  * `?$filter=name eq 'collect-…-2'` answers exactly that one run.
  *
  * **The uuid short-circuit is not defensive padding — without it the dashboard's
- * Recent Failures list is broken.** X1 says the UI addresses runs by name, but several
+ * Recent Failures list is broken.** The UI addresses runs by name, but several
  * gear DTOs have no run name to give: `FailedTestCardDto`, `QueueEntryDto`,
  * `TestResultDto` and `NotificationLogEntryDto` all carry `run_id` and nothing else, so
  * `adapters.ts` binds that uuid to legacy's `workflow_name` field. A component that then
@@ -429,7 +428,7 @@ export async function resolveRunId(nameOrId: string): Promise<string> {
   return match.id;
 }
 
-/** Resolve a schedule *name* to its uuid (X1). The list is the only lookup available —
+/** Resolve a schedule *name* to its uuid. The list is the only lookup available —
  *  there is no `GET /qa/v1/schedules?name=`. */
 async function resolveScheduleId(name: string): Promise<string> {
   const schedules = await apiGet<ScheduleDtoWithEnvironmentId[]>('/schedules');
@@ -444,8 +443,8 @@ async function resolveScheduleId(name: string): Promise<string> {
  * Which repositories belong to a product.
  *
  * `GET /qa/v1/test-repos` has no `product_id` filter, but `TestRepositoryDto.product_id`
- * is present and required, so this is an honest client-side filter (§7.6) rather than one
- * of §8-C7's impossible ones. Beware X8 while reading this: the legacy `?product_id=`
+ * is present and required, so this is an honest client-side filter rather than one
+ * of the impossible ones. Beware while reading this: the legacy `?product_id=`
  * parameter answered 200 *unfiltered*, so nothing would have errored had the filter been
  * left out — it would just have shown another product's repositories.
  */
@@ -462,7 +461,7 @@ function reposForProduct(
 /**
  * Every plan in a product, as the concatenation of one `GET /qa/v1/plans` per repository.
  *
- * Both of that route's parameters are **required** (§2 fact 2), which is what forces the
+ * Both of that route's parameters are **required**, which is what forces the
  * fan-out and what forces a branch: when the caller pinned none, each repository is asked
  * for its own `default_branch` rather than a single guessed branch, because "the default
  * branch" is a per-repository fact.
@@ -518,10 +517,9 @@ async function fetchPlanDtos(
  * whatever the deployment holds. The visible consequence is that the Runs page works over
  * the newest 1,000 runs rather than all of them — its filtering and paging are client-side
  * (`RunsPage.tsx:61`), so an older run cannot be found there any more. That is a real
- * behaviour change, it is bounded and statable rather than silent, and it is recorded in
- * `CONTRACT-DIFF` §11.8 rather than left in a code comment. Raising the ceiling is a
- * one-constant change; making the page complete needs a server-side filter that X2 and
- * §8-C7 say does not exist.
+ * behaviour change, it is bounded and statable rather than silent, and it is recorded here
+ * and at `MAX_RUNS_WINDOW`. Raising the ceiling is a
+ * one-constant change; making the page complete needs a server-side filter that the gears do not offer.
  */
 const MAX_RUNS_WINDOW = 2 * MAX_PAGE_LIMIT;
 
@@ -529,8 +527,8 @@ const MAX_RUNS_WINDOW = 2 * MAX_PAGE_LIMIT;
  * Walk the runs collection forward far enough to answer `skip + limit` rows, and return the
  * `limit` rows after `skip` — never reading more than `MAX_RUNS_WINDOW` rows in total.
  *
- * X2: the gears page by opaque `cursor` with **no total and no page number**. `total` is
- * deliberately **not** derived from what this returns (§7.3): `items.length` after a
+ * The gears page by opaque `cursor` with **no total and no page number**. `total` is
+ * deliberately **not** derived from what this returns: `items.length` after a
  * bounded walk is a lower bound, and a pager that displayed it as a total would be
  * confidently wrong.
  */
@@ -558,7 +556,7 @@ async function fetchRunDtos(skip: number, limit: number): Promise<RunDtoWithEnvi
 }
 
 /** The per-function case rows for one run. `RunTestResultDto` has no `cases` field, but
- *  the rows exist on their own collection (§8-C2: `cases` is recoverable where `logs` is
+ *  the rows exist on their own collection (`cases` is recoverable where `logs` is
  *  not). The uuid is **unquoted** in the `$filter` — a quoted one is a 400 (see
  *  `odataLiteral`). A failure here is swallowed to `[]`: the case breakdown is an
  *  enrichment of the run detail, and losing it must not fail the page. */
@@ -666,7 +664,7 @@ export function usePlans(branch?: string, productIdOverride?: string | null, ena
  * One plan, by the opaque id `usePlans` handed out.
  *
  * There is no single-plan read anywhere in qa-catalog's 22 operations — a plan has no id
- * to read it by (X6) — so this is §7.7's "list standing in for a single read": ask the
+ * to read it by — so this is a "list standing in for a single read": ask the
  * plan's own repository for its plans and match on `path`. That is one request, not a
  * fan-out, because the id already carries the repository.
  */
@@ -705,13 +703,13 @@ export function usePlan(id: string, branch?: string) {
 }
 
 /**
- * Launch a plan. The legacy query string becomes a `LaunchRunReq` body (§7.4).
+ * Launch a plan. The legacy query string becomes a `LaunchRunReq` body.
  *
  * The platform arrives as a *name* and the request needs a uuid, so this resolves it
  * first. It may still be absent: `launchReqFromForm` sends `environment_id: null`
- * (renamed from `platform_id` at Task 25) rather than refusing, because a platformless
+ * (renamed from `platform_id`) rather than refusing, because a platformless
  * run is a supported case the gear dispatches
- * inline (see that function's doc for the CONTRACT-DIFF row 3 correction). The dialogs
+ * inline (see that function's doc for why it does not refuse one). The dialogs
  * resolve their "Default cluster" option to the product's platform before calling this,
  * so in practice a name arrives — but an API caller may legitimately omit one.
  */
@@ -721,7 +719,7 @@ export function useRunPlan() {
   return useMutation({
     mutationFn: async ({ planId, platform, branch, parameters, exclusive }: { planId: string; platform?: string; branch?: string; scheduleId?: string; parameters?: RunParameter[]; exclusive?: boolean }): Promise<LaunchResponse> => {
       // `scheduleId` is accepted and dropped: `RunDto.schedule_id` is server-set and
-      // `LaunchRunReq` has no such field (row 4). A manual launch is not a scheduled one.
+      // `LaunchRunReq` has no such field. A manual launch is not a scheduled one.
       const platformId = platform ? await resolveEnvironmentId(platform) : null;
       const body = launchReqFromForm({ planId, platformId, branch, parameters, exclusive });
       return launchResponseFromDto(await apiPost<S['RunDto'] | S['QueuedRunDto']>('/runs', body));
@@ -848,15 +846,15 @@ function useProductScopedRows<T extends ProductScopedRow>(
  * A run carries no product key of its own — `GET /runs` takes no `product_id`/
  * `product_key` either, and the backend ignores an unknown query parameter rather
  * than rejecting it, so sending one used to return 200 with the whole tenant's rows
- * while the page claimed a filter it never had (CONTRACT-DIFF §8-C7). The scope here
- * is client-side (§7.6): `keepForProduct` resolves each run's product through its
+ * while the page claimed a filter it never had. The scope here
+ * is client-side: `keepForProduct` resolves each run's product through its
  * *target* — the repository a standard-plan/collect run names, or the repositories a
  * custom-plan run's *effective* tests name — never through its environment, because a
  * collect run has no environment at all. A custom plan carries no product key of its
  * own (`productScope.ts`'s file doc has the reason); a run whose repository or custom
  * plan has since been deleted, or whose custom plan's tests span two products, resolves
  * to no product and is dropped rather than shown against the wrong one, or the wrong two
- * (spec D4, extended to "ambiguous").
+ * (hidden, extended to "ambiguous").
  *
  * **The scope is derived outside the query, and that placement is the whole
  * point.** It used to run inside `queryFn`, over `repos`/`customPlans` read
@@ -887,8 +885,8 @@ function useProductScopedRows<T extends ProductScopedRow>(
  *
  * `page` and `perPage` are still honoured, but what comes back is now the **bare array**
  * rather than legacy's `PaginatedResponse<WorkflowRun>` envelope: the gears page by cursor
- * with no total and no page count (X2), so there is no `pagination` object to fill and §7.3
- * forbids synthesising one from `items.length`. That is not a return-shape break — the bare
+ * with no total and no page count, so there is no `pagination` object to fill and synthesising one
+ * is forbidden from `items.length`. That is not a return-shape break — the bare
  * array was always one arm of this hook's declared union, and `RunsPage` already handles
  * both (`Array.isArray(response)` at `:69`). But a page-N-of-M pager cannot be rebuilt
  * from this data, which is a component-level consequence for the reviewer rather than
@@ -896,8 +894,8 @@ function useProductScopedRows<T extends ProductScopedRow>(
  *
  * **Cost:** two `GET /runs` plus one `GET /environments` per fetch, constant in the size of
  * the deployment — and this hook polls every 5 seconds on the Runs page. The bound is
- * `MAX_RUNS_WINDOW` and the truncation it implies is documented there and in
- * `CONTRACT-DIFF` §11.8; `perPage` above that ceiling is silently clamped, exactly as the
+ * `MAX_RUNS_WINDOW` and the truncation it implies is documented there;
+ * `perPage` above that ceiling is silently clamped, exactly as the
  * gear clamps `limit`. It used to also pay a `usePlans(undefined, null)` — a `GET /plans`
  * fan-out across **every repository in the deployment** — to feed the resolver a
  * standard-plan lookup for a branch that cannot be taken; `productScope.ts`'s file doc
@@ -938,8 +936,7 @@ export function useCollectCases() {
  * A plan's runs.
  *
  * `RunFilterField` has **no `target.*` member** (`odata.rs:79-90`), so there is no server
- * filter for "runs of this plan" and this is a client-side filter over a page of runs
- * (row 8, §7.11). The window is one maximal page, so a plan whose runs are all older than
+ * filter for "runs of this plan" and this is a client-side filter over a page of runs. The window is one maximal page, so a plan whose runs are all older than
  * the newest 500 in the deployment will show none — a real limitation of the substitute,
  * not a bug in the filter.
  */
@@ -959,7 +956,7 @@ export function useRunsByPlan(planId: string, refetchInterval?: number) {
   });
 }
 
-/** One run's detail. `name` -> uuid first (X1: `GET /qa/v1/runs/smoke-2` is a 400). */
+/** One run's detail. `name` -> uuid first (`GET /qa/v1/runs/smoke-2` is a 400). */
 export function useRun(name: string, refetchInterval?: number) {
   return useQuery({
     queryKey: queryKeys.run(name),
@@ -995,12 +992,12 @@ export function useRunDetailsMap(names: string[], enabled: boolean): Record<stri
  * One run's log text.
  *
  * The body is a `text/event-stream` of `RunLogLineDto {line}` where legacy served a plain
- * string (row 12), so it is flattened by `parseRunLogSse`. A finished run's stream
+ * string, so it is flattened by `parseRunLogSse`. A finished run's stream
  * terminates immediately — driven live: 200, `text/event-stream`, zero bytes — so a plain
  * GET is a complete read for the case the log viewer opens. A *live* run's stream stays
  * open and this 5-second poll will not start a second request while the first is in
  * flight, which is a behaviour difference from legacy's poll: making this incremental
- * needs `EventSource`, which is §6.4's job and carries §6.4's two consequences (no
+ * needs `EventSource`, which is `useRunLogStream`'s job and carries two consequences (no
  * headers on `EventSource`, and nginx `proxy_buffering off`).
  */
 export function useRunLogs(name: string, opts: { live?: boolean } = {}) {
@@ -1026,8 +1023,7 @@ export function useRunLogs(name: string, opts: { live?: boolean } = {}) {
  * despite the name there is one intent here, not two.
  *
  * It therefore maps to `POST /qa/v1/runs/{id}/cancel`, which serves it exactly
- * (CONTRACT-DIFF §7.12, which reclassified this row out of §8 once the *behaviour* rather
- * than the local variable name was read). Removing a run from the history has no endpoint
+ * (the behaviour, rather than the local variable name, is what decides that). Removing a run from the history has no endpoint
  * and no UI, and no delete is synthesised for one.
  */
 export function useDeleteRun() {
@@ -1049,10 +1045,10 @@ export function useDeleteRun() {
  * The run queue, optionally for one platform. `platform` is part of the query key
  * so the Runs page (all platforms) and a platform page do not share a cache entry.
  *
- * `environment_id` (renamed from `platform_id` at Task 25) is passed to the server rather
+ * `environment_id` (renamed from `platform_id`) is passed to the server rather
  * than filtered client-side even though `limit` would allow the latter: `queue_position`'s
  * own doc warns it is computed over *the rows that request returned*, so a truncating
- * window understates it. Narrowing on the server keeps the positions right (row 14).
+ * window understates it. Narrowing on the server keeps the positions right.
  */
 export function useRunQueue(platform?: string, refetchInterval?: number) {
   return useQuery({
@@ -1079,7 +1075,7 @@ export function useRunQueue(platform?: string, refetchInterval?: number) {
  * Drop a **queued row** from the queue.
  *
  * `DELETE /qa/v1/queue/{id}` and `POST /qa/v1/runs/{id}/cancel` are different operations
- * on different ids, and §5-C corrects spec §6.3 on exactly this: this hook holds a
+ * on different ids, and they are easy to confuse: this hook holds a
  * `RunQueueEntry.id` — a queue-row id — so it is the DELETE. The run cancel is
  * `useDeleteRun`. Legacy answered `{id, state}`; this answers `204` with no body, and no
  * consumer read the old body.
@@ -1136,14 +1132,14 @@ export function useRerunRun() {
  *
  * Same reasoning and the same `keepForProduct` as `useRuns`: a schedule carries no
  * product key of its own, and the ignored `product_key=…` parameter made the list
- * look scoped when it was not (CONTRACT-DIFF §8-C7). Scoping happens client-side,
+ * look scoped when it was not. Scoping happens client-side,
  * after the environment-name mapping, through each schedule's *target* — the
  * repository a plan/test/collect schedule names (`ScheduleInfo.repo_id`, set by
  * `scheduleFromDto` the same way `runFromDto` sets it), or the repositories a
  * custom-plan schedule's effective tests name — never through its environment.
  * A schedule whose repository or custom plan has since been deleted, or whose
  * custom plan's tests span two products, resolves to no product and is dropped
- * (spec D4, extended to "ambiguous"), same as for runs.
+ * (hidden, extended to "ambiguous"), same as for runs.
  *
  * The scope is derived **outside** the query, for the reason `useRuns`' doc
  * gives at length: computing it inside `queryFn` over sibling queries that are
@@ -1183,7 +1179,7 @@ export function useSchedules() {
  * Create a schedule, then set its notifications.
  *
  * Two requests, not one, and the second is not optional: `NewScheduleReq` carries **no**
- * notification fields at all (row 19), so a create that set the form's three `slack_*`
+ * notification fields at all, so a create that set the form's three `slack_*`
  * fields and stopped here would drop them silently — which is the failure this comment
  * exists to prevent. The follow-up `PUT .../notifications` only runs when the form
  * actually asked for notifications, so an ordinary create is still one request.
@@ -1231,8 +1227,8 @@ export function useCreateSchedule() {
  * `enabled` is read from the row as it stands rather than assumed — otherwise saving an
  * unrelated field on a suspended schedule would resume it. The platform falls back to the
  * row's current one for the same reason and one more: a schedule with a null
- * `environment_id` (renamed from `platform_id` at Task 25) is accepted and then never
- * fires (§2 fact 3, which `ScheduleDto`'s own doc repeats for schedules), so an edit that
+ * `environment_id` (renamed from `platform_id`) is accepted and then never
+ * fires (which `ScheduleDto`'s own doc repeats for schedules), so an edit that
  * did not name a platform must not clear it.
  */
 export function useUpdateSchedule() {
@@ -1281,7 +1277,7 @@ export function useUpdateSchedule() {
  * Read a schedule, then PUT it back with `enabled` flipped.
  *
  * Legacy's two dedicated verbs (`POST .../suspend`, `POST .../resume`) collapse into one
- * `PUT /qa/v1/schedules/{id}` (§6.3 row 1). The read is **required**, not an
+ * `PUT /qa/v1/schedules/{id}`. The read is **required**, not an
  * optimisation: the PUT replaces the whole record, so PUTting `{enabled}` alone would
  * clear the schedule's cron, target, platform, branch and tags. The other values come from
  * `GET /qa/v1/schedules/{id}` rather than from this hook's argument, because the argument
@@ -1354,7 +1350,7 @@ export function useSetScheduleNotifications() {
       data: UpdateScheduleNotificationsForm;
     }): Promise<ScheduleInfo> => {
       const scheduleId = await resolveScheduleId(name);
-      // POST -> PUT (row 24): the gear treats a notification block as replaceable state,
+      // POST -> PUT: the gear treats a notification block as replaceable state,
       // not as an event.
       const saved = await apiPut<ScheduleDtoWithEnvironmentId>(
         `/schedules/${scheduleId}/notifications`,
@@ -1373,15 +1369,15 @@ export function useSetScheduleNotifications() {
  * The test-file catalog, **degraded**.
  *
  * `GET /tests` has no counterpart anywhere in the gears: qa-catalog publishes 22
- * operations and none of them is a test-file catalog (§8-C1). What can be served honestly
+ * operations and none of them is a test-file catalog. What can be served honestly
  * is `PlanDto.test_files` — the paths, and the plan, repository and product above them.
  * What cannot is every metadata column the catalog page renders: `title`, `component`,
  * `description`, `tags`, `quality_vectors`, `versions` and `loc` have no source in any
  * gear, so `testFilesFromPlan` leaves all of them absent rather than blank-labelling a
  * fabricated value.
  *
- * §8-C1's question — degrade `/tests` to a path list or remove the surface the way §6.5
- * removed three settings pages — is a **human's** to answer and is still open. This
+ * The open question — degrade `/tests` to a path list or remove the surface the way three
+ * settings pages were removed — is a **human's** to answer and is still open. This
  * degradation is what keeps four routed consumers (`TestCatalogPage`, `TestDetailPage`,
  * `CustomPlanEditorPage`, `CreateScheduleDialog`) working rather than 404ing while it is
  * open, and it is reported as a decision taken pending that answer.
@@ -1405,8 +1401,7 @@ export function useTests(branch?: string) {
  * Warm the plans cache before the user commits to a branch, e.g. on dropdown-option hover.
  *
  * It no longer triggers a backend branch sync, and that is deliberate rather than an
- * omission: the gears sync via `POST /qa/v1/test-repos/{id}/sync`, which is a **mutation**
- * (row 26). A prefetch that fired a mutation on hover would fetch git for every option the
+ * omission: the gears sync via `POST /qa/v1/test-repos/{id}/sync`, which is a **mutation**. A prefetch that fired a mutation on hover would fetch git for every option the
  * pointer crossed. `useRefreshBranch` is the explicit control for that.
  */
 export function usePlansPrefetch() {
@@ -1430,7 +1425,7 @@ export function useTestRepositories(productId?: string | null) {
   return useQuery({
     queryKey: hasProductFilter ? [...queryKeys.testRepos, productId] : queryKeys.testRepos,
     queryFn: async (): Promise<TestRepository[]> => {
-      // Client-side (§7.6): `GET /qa/v1/test-repos` takes no `product_id`, but
+      // Client-side: `GET /qa/v1/test-repos` takes no `product_id`, but
       // `TestRepositoryDto.product_id` is required, so the key is on the row.
       const repos = await fetchRepos();
       return reposForProduct(repos, hasProductFilter ? productId : null).map(repoFromDto);
@@ -1442,8 +1437,7 @@ export function useTestRepositories(productId?: string | null) {
  * Force a fresh git fetch of a branch (bypassing the backend sync TTL) and
  * then refresh the plan/test listings so new commits show up immediately.
  *
- * The response is the **repository row**, not legacy's `{status, plans, tests}` counts
- * (row 30): success or failure now reads from `sync_error`/`last_synced_at`. No consumer
+ * The response is the **repository row**, not legacy's `{status, plans, tests}` counts : success or failure now reads from `sync_error`/`last_synced_at`. No consumer
  * read the counts, so nothing is invented to replace them.
  */
 export function useRefreshBranch() {
@@ -1464,7 +1458,7 @@ export function useRefreshBranch() {
 export function useTestRepoBranches(repoId: string) {
   return useQuery({
     queryKey: queryKeys.testRepoBranches(repoId),
-    // `{branches: string[]}` -> `string[]` (§7.2, row 31).
+    // `{branches: string[]}` -> `string[]`.
     queryFn: async (): Promise<string[]> =>
       (await apiGet<S['BranchListDto']>(`/test-repos/${repoId}/branches`)).branches ?? [],
     enabled: !!repoId,
@@ -1483,7 +1477,7 @@ export function useTestRepoBranches(repoId: string) {
  * every render — regardless of whether the branch set actually changed —
  * would make that effect re-run on every unrelated re-render too. The
  * envelope unwrapping happens inside each `queryFn`, so the memoised value is
- * still the plain `string[]` it always was (row 32).
+ * still the plain `string[]` it always was.
  */
 export function useTestRepoBranchesForRepos(repoIds: string[]): string[] {
   const ids = [...new Set(repoIds.filter(Boolean))];
@@ -1519,7 +1513,7 @@ export function useCreateTestRepository() {
 
   return useMutation({
     // `repoReqFromForm` refuses a pasted token rather than forwarding it as a credstore
-    // reference — X7 is the one place a rename adapter is wrong.
+    // reference — this is the one place a rename adapter is wrong.
     mutationFn: async (data: CreateTestRepositoryForm): Promise<TestRepository> =>
       repoFromDto(await apiPost<S['TestRepositoryDto']>('/test-repos', repoReqFromForm(data))),
     onSuccess: () => {
@@ -1534,7 +1528,7 @@ export function useUpdateTestRepository() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    // A replace, not a merge (row 35) — `UpdateTestRepoReq` is field-identical to the
+    // A replace, not a merge — `UpdateTestRepoReq` is field-identical to the
     // create request, so every field the form did not show is re-sent by the caller.
     mutationFn: async ({ id, data }: { id: string; data: CreateTestRepositoryForm }): Promise<TestRepository> =>
       repoFromDto(await apiPut<S['TestRepositoryDto']>(`/test-repos/${id}`, repoReqFromForm(data))),
@@ -1607,7 +1601,7 @@ export function useDeleteSshKey() {
 /**
  * Launch a single test file from a plan.
  *
- * §5-D corrects spec §6.3, which listed `/plans/{id}/run-test` among the dead paths: it is
+ * `/plans/{id}/run-test` is not among the dead paths: it is
  * neither dead (two consumers) nor absent. `RunTargetDto.kind` is *"`plan`, `test`,
  * `custom_plan` or `collect`"* and `test_file` is *"Required for `test`"*, so a
  * single-test launch is served exactly by `POST /qa/v1/runs` with a `test` target.
@@ -1633,8 +1627,7 @@ export function useRunSingleTest() {
  * Every custom plan in the deployment — **not** scoped to a product, for the
  * reason given on `useRuns`: a custom plan carries no product key (and, unlike a
  * run, no repository either, so there is nothing to walk to one), while the
- * ignored `product_id=…` parameter made the list look scoped (CONTRACT-DIFF
- * §8-C7).
+ * ignored `product_id=…` parameter made the list look scoped.
  *
  * @param enabled See `usePlans`'s `enabled` param — same rationale.
  */
@@ -1706,8 +1699,8 @@ function customPlanFileSource() {
  * `expandCustomPlanFiles`. Without that expansion the editor's "Whole plans" tab saves
  * cleanly and the plan then runs nothing, because `UpsertCustomPlanReq` has no
  * `included_plans` field to store it in. `description`, `product_id`, `nodes` and
- * `parallelism` have nowhere to go either (row 46); the first two are already gone from
- * the UI and the DAG pair is §8-C6.
+ * `parallelism` have nowhere to go either; the first two are already gone from
+ * the UI and the DAG pair has no gear equivalent.
  */
 export function useCreateCustomPlan() {
   const queryClient = useQueryClient();
@@ -1769,7 +1762,7 @@ export function useDeleteCustomPlan() {
 
 /** Launch a custom plan. `RunTargetDto.custom_plan_id` is *"Required for `custom_plan`"*,
  *  and a `repo_id` alongside it is accepted and ignored, so `targetFromPlanId` sends only
- *  the id (row 49). */
+ *  the id. */
 export function useRunCustomPlan() {
   const queryClient = useQueryClient();
 
@@ -1791,13 +1784,8 @@ export function useRunCustomPlan() {
  * The product's environments.
  *
  * `GET /qa/v1/environments` has no `product_id` filter, but `EnvironmentDto.product_id` is on
- * the row, so this is §7.6's honest client-side filter — with the one decision §7.6 flags:
- * **what to do with `null`**. An environment with no product is included. It belongs to no
- * product rather than to another one, so including it leaks nothing; and excluding it
- * would empty every environment picker in a deployment where `product_id` is null on every
- * environment (which it is on this stack), turning "run a plan" into a control with no
- * options and no error. That is a judgment call, not a fact the gear states, and it is
- * flagged as one.
+ * the row, so this is an honest client-side filter: qa-environments' column is `NOT NULL`, so
+ * every row the gear serves names its product.
  */
 export function useEnvironments() {
   const product = useActiveProduct();
@@ -1807,7 +1795,7 @@ export function useEnvironments() {
     queryFn: async (): Promise<EnvironmentInfo[]> => {
       const environments = await fetchEnvironmentDtos();
       const scoped = productId
-        ? environments.filter((environment) => !environment.product_id || environment.product_id === productId)
+        ? environments.filter((environment) => environment.product_id === productId)
         : environments;
       return scoped.map(environmentFromDto);
     },
@@ -1821,8 +1809,8 @@ export function useEnvironments() {
  * `GET /qa/v1/environments/{id}` serves the whole shape: `environmentDetailsFromDto`
  * is `environmentFromDto`, because there is no second half to map any more. The
  * cluster-shaped half this hook used to describe — status, six node counts,
- * `namespace_count`, `nodes[]` — was dropped with the `cluster_*` columns by
- * Task 19 (user decision U4), together with `clusterHealthFromDto` and
+ * `namespace_count`, `nodes[]` — was dropped together with the `cluster_*` columns (the node
+ * inventory is deliberately not replaced), and with `clusterHealthFromDto` and
  * `ClusterHealthCard.tsx`.
  *
  * What replaced it is product-defined rather than Kubernetes-shaped:
@@ -1832,7 +1820,7 @@ export function useEnvironments() {
  * so a product with no plugin attributes simply shows none — the "never observed"
  * and "observed and unreachable" distinction now lives in `health_state`.
  *
- * X1 on the name.
+ * The name is resolved to a uuid first.
  */
 export function useEnvironmentDetails(name: string) {
   return useQuery({
@@ -1850,10 +1838,11 @@ export function useCreateEnvironment() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    // A pasted kubeconfig is forwarded, not refused: `createEnvironmentReqFromForm` decodes
-    // the dialog's base64 and sends the YAML as `kubeconfig`, which the gear writes to
-    // credstore before any row exists, storing (and returning) only the reference. A
-    // caller who already holds a reference still gets `kubeconfig_credstore_ref`.
+    // A pasted kubeconfig is forwarded, not refused: `createEnvironmentReqFromForm` sends
+    // the form's `credentials` map (each entry's `material` is the pasted document), which
+    // the gear writes to credstore before any row exists, storing only the reference and
+    // returning neither. The pre-plugin `kubeconfig`/`kubeconfig_credstore_ref` pair is no
+    // longer sent on create (see the adapter); the update path still forwards a reference.
     mutationFn: async (data: CreateEnvironmentForm): Promise<void> => {
       await apiPost<S['EnvironmentDto']>('/environments', createEnvironmentReqFromForm(data));
     },
@@ -1863,7 +1852,7 @@ export function useCreateEnvironment() {
   });
 }
 
-/** PUT -> PATCH (row 53): `UpdateEnvironmentReq` is all-optional, a true partial, so only the
+/** PUT -> PATCH: `UpdateEnvironmentReq` is all-optional, a true partial, so only the
  *  keys the form carries are sent and an omitted one is left alone. */
 export function useUpdateEnvironment() {
   const queryClient = useQueryClient();
@@ -1897,7 +1886,7 @@ export function useDeleteEnvironment() {
 }
 
 /** The dedicated rename verb collapses into the partial update: `new_name` -> `name` on
- *  `PATCH /qa/v1/environments/{id}` (row 56, a reshape spec §6.3 does not list). */
+ *  `PATCH /qa/v1/environments/{id}` (a reshape of the legacy rename verb). */
 export function useRenameEnvironment() {
   const queryClient = useQueryClient();
 
@@ -1945,7 +1934,7 @@ export function useRefreshEnvironment() {
 export function useProductFolders() {
   return useQuery({
     queryKey: ['productFolders'] as const,
-    // `{folders: string[]}` -> `string[]` (§7.2, row 57).
+    // `{folders: string[]}` -> `string[]`.
     queryFn: async (): Promise<string[]> =>
       (await apiGet<S['ProductFolderListDto']>('/product-folders')).folders ?? [],
   });
@@ -1961,7 +1950,7 @@ export function useProducts() {
 }
 
 /** qa-catalog serves `POST`/`PUT`/`DELETE /qa/v1/products{/id}` but no single-product
- *  `GET`, so this is §7.7's list-as-single-read — over the list `useProducts` already
+ *  `GET`, so this is a list-as-single-read — over the list `useProducts` already
  *  caches. */
 export function useProduct(id: string) {
   return useQuery({
@@ -1984,7 +1973,7 @@ export function useProduct(id: string) {
  * `GET /qa/v1/dashboard/coverage` declares **zero** query parameters (verified against the
  * live document) and answers one point per product for the whole deployment. So `productId`
  * survives, but its meaning changes: it is no longer a *server* filter, it is the key for a
- * **client-side** one (§7.6, the same treatment `useTestRepositories` and `useEnvironments`
+ * **client-side** one (the same treatment `useTestRepositories` and `useEnvironments`
  * get). The narrowing is not optional — the only consumer is a per-product card captioned
  * *"Coverage belongs to this product…"* (`ProductCoverageCard.tsx:96`), so an unnarrowed
  * list would put another product's numbers in this product's chart under a caption saying
@@ -1994,7 +1983,7 @@ export function useProduct(id: string) {
  * the product list first.
  *
  * The array is **empty in every deployment today** — nothing in this system measures a
- * coverage point (§8-C8) — and the live consumer already renders an honest empty state, so
+ * coverage point — and the live consumer already renders an honest empty state, so
  * no zero is displayed. That is a deployment fact rather than a code guarantee, which is
  * why the filter is real rather than resting on the emptiness.
  */
@@ -2041,7 +2030,7 @@ export function useUpdateProduct() {
   return useMutation({
     // `currentPluginInstanceId` is the product's *stored* binding, not part of the form --
     // it exists only so `productReqFromForm` can tell "the form still names what's already
-    // stored" from "the form is naming a different plugin" (ruling G-2). Callers fetch it
+    // stored" from "the form is naming a different plugin". Callers fetch it
     // from the same product they opened the edit dialog on.
     mutationFn: async ({
       id,
@@ -2075,14 +2064,14 @@ export function useDeleteProduct() {
 /**
  * Versions observed for a product, from `EnvironmentDto.observed_version`.
  *
- * **The semantics change** (row 65). Legacy returned the distinct `app_version` values
+ * **The semantics change**. Legacy returned the distinct `app_version` values
  * seen *in run results*; this is the version currently observed *on an environment*, one per
  * environment. It is `null` on every environment in this deployment, because nothing here
  * observes an environment version at all — so this list is empty and the Analytics version
  * dropdown is empty.
  *
  * **And nothing on screen explains why.** An earlier revision of this comment said
- * "§9's banner is what tells the reader why"; that is false, and Task 12's gate is what
+ * "the banner is what tells the reader why"; that is false, and a test of the page's gating is what
  * disproved it. The banner is gated on `noExecutionDataCount !== null`
  * (`components/analytics/AnalyticsDashboard.tsx:968`), which is assigned only inside
  * `if (!overviewLoading && !overviewError && overview)` (`:950`) — and `overview` is
@@ -2099,9 +2088,9 @@ export function useDeleteProduct() {
  * `test-repos/{id}/branches`), **none of them `analytics/overview`**, and rendering no banner
  * text. `/analytics/plan/:planId` records the identical four.
  *
- * That is §9.3's own chosen remedy failing to fire in exactly the case its copy
- * describes. The decision is §9's and is a human's; the fix is a component edit no task
- * on this plan is authorised to make, so it is stated here rather than worked around.
+ * That is the banner's own chosen remedy failing to fire in exactly the case its copy
+ * describes. The decision is a human's; the fix is a component edit outside this
+ * module's remit, so it is stated here rather than worked around.
  * **Do not hardcode a fallback version**: the smoke script passes `version=unknown` as a
  * probe, and shipping that as a default would present a fabricated filter as a real one.
  */
@@ -2120,10 +2109,10 @@ export function useObservedProductVersions(productId: string) {
 }
 
 /**
- * Branches for a product's Analytics filter — a **documented substitution** (§7.10), not
+ * Branches for a product's Analytics filter — a **documented substitution**, not
  * an equivalent.
  *
- * §5-E: spec §6.3 category 2 mapped this onto `EnvironmentDto.observed_build`, and a build is
+ * The legacy mapping sent this to `EnvironmentDto.observed_build`, and a build is
  * not a branch. Nothing in the gears aggregates the distinct branches *seen in results*
  * (`TestResultDto.branch` exists but is not in `TestResultsField`, so it can be neither
  * filtered nor grouped). The nearest real source is each repository's **git** branches,
@@ -2154,9 +2143,7 @@ export function useObservedProductBranches(productId: string) {
 
 // Analytics
 /**
- * The three plan drill-downs move plan identity from the path into the query
- * (§6.3 row 3), and the parameter is spelled `plan_id` but carries the plan's **path**
- * (X6) — same name, different value space, and no repository disambiguation, so a path
+ * The three plan drill-downs move plan identity from the path into the query: the parameter is spelled `plan_id` but carries the plan's **path** — same name, different value space, and no repository disambiguation, so a path
  * that exists in two repositories matches both. `plan_id` is **required** on all three;
  * a value naming nothing answers an empty array, not a 404.
  */
@@ -2179,7 +2166,7 @@ export function useBuildDistribution(planId: string) {
     queryFn: async (): Promise<BuildDistribution[]> => {
       const qs = `plan_id=${encodeURIComponent(analyticsPlanId(planId))}`;
       // Field-identical (`build, total, passed, failed, skipped`), so `BuildDistribution`
-      // is an alias of the generated DTO and no reshape is needed (row 68).
+      // is an alias of the generated DTO and no reshape is needed.
       return apiGet<BuildDistribution[]>(`/analytics/plan/builds?${qs}`);
     },
     enabled: !!planId,
@@ -2199,8 +2186,8 @@ export function useTestHistory(planId: string) {
   });
 }
 
-/** Every parameter *name* survives from legacy (§2 fact 4), but `plan_id`'s **value** is
- *  the plan's path (X6), so the opaque id is unpacked on the way out. `scope`/`group_by`
+/** Every parameter *name* survives from legacy, but `plan_id`'s **value** is
+ *  the plan's path, so the opaque id is unpacked on the way out. `scope`/`group_by`
  *  are matched case-insensitively; `days_heatmap` clamps to 1–30 and `days_trend` to
  *  7–365, both silently. */
 function buildAnalyticsQueryParams(query: AnalyticsOverviewQuery): URLSearchParams {
@@ -2284,11 +2271,11 @@ export function useAnalyticsBuildTests(query: AnalyticsBuildTestsQuery, enabled 
 /**
  * Download an analytics export.
  *
- * It now goes through `client.ts` (`apiGetBlob`). Before this task it used a raw
+ * It now goes through `client.ts` (`apiGetBlob`). It used to use a raw
  * `fetch('/api/analytics/export?…')`, which hardcoded the pre-migration prefix — so
  * re-basing `API_BASE_URL` onto `/qa/v1` did not reach it — and sat outside the single
  * `Authorization` injection point, which would have made it the one request in the app
- * that went out unauthenticated once Phase C turns auth on (§4a).
+ * that went out unauthenticated once auth is turned on.
  *
  * Behaviour worth knowing before trusting the file: an unrecognised `format` answers JSON
  * rather than an error; an unrecognised `section` is a 400 on the JSON branch and a **200
@@ -2296,7 +2283,7 @@ export function useAnalyticsBuildTests(query: AnalyticsBuildTestsQuery, enabled 
  * `grouped` are reachable only via `section=all`; and the CSV `summary` block carries only
  * `total/passed/failed/not_run` and their percentages — i.e. exactly the fields that are 0
  * by construction here, and **not** `case_expected` — so a CSV export from this deployment
- * is all zeros with no banner attached to it (§9).
+ * is all zeros with no banner attached to it.
  */
 export async function exportAnalytics(
   query: AnalyticsOverviewQuery,
@@ -2313,7 +2300,7 @@ export async function exportAnalytics(
  * A caller's saved analytics views.
  *
  * `plan_id` becomes `(repo_id, plan_path)`, and both halves are **required together** when
- * `scope=plan` (X6), so an id that does not decode sends neither.
+ * `scope=plan`, so an id that does not decode sends neither.
  *
  * `ownerId` is now **inert**. `handlers/saved_views.rs:60-73` takes the owner from the
  * `SecurityContext` — the bearer token's subject — and the endpoint's own doc says *"A view
@@ -2349,7 +2336,7 @@ export function useAnalyticsSavedViews(
 /** `409` on a duplicate `(owner, scope, plan, name)`. A plan supplied with `scope=all` is
  *  *"accepted but not stored"* rather than rejected. `query_json` stays opaque — this gear
  *  never inspects it — so a legacy `plan_id` inside one is **not** reconciled with the new
- *  vocabulary (row 73). */
+ *  vocabulary. */
 export function useCreateAnalyticsSavedView(ownerId: string) {
   const queryClient = useQueryClient();
   // Inert — see `useAnalyticsSavedViews`. Kept in the signature so no call site changes,
@@ -2401,7 +2388,7 @@ export function useDeleteAnalyticsSavedView(ownerId: string, scope: AnalyticsSco
 export function useJiraConfig() {
   return useQuery({
     queryKey: queryKeys.jiraConfig,
-    // `api_token` is now `api_token_credstore_ref` (X7): what this form shows and saves is
+    // `api_token` is now `api_token_credstore_ref`: what this form shows and saves is
     // a *reference*, never a token.
     queryFn: async (): Promise<JiraConfig> =>
       jiraConfigFromDto(await apiGet<S['JiraSettingsDto']>('/settings/jira')),
@@ -2412,7 +2399,7 @@ export function useUpdateJiraConfig() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    // `envelope: void -> the saved config` (row 77). The return is discarded to keep the
+    // `envelope: void -> the saved config`. The return is discarded to keep the
     // hook's shape, and the invalidation below is what refreshes the form.
     mutationFn: async (data: JiraConfig): Promise<void> => {
       await apiPut<S['JiraSettingsDto']>('/settings/jira', jiraConfigReq(data));
@@ -2424,8 +2411,8 @@ export function useUpdateJiraConfig() {
 }
 
 /** Global pipeline variables. `{variables: […]}` -> a bare `VariableDto[]` on the wire,
- *  re-enveloped here (row 82). Asking without `environment_id` returns exactly the global
- *  rows, driven live. `secure` is gone from both sides — §8-C10, closed by Task 8a by
+ *  re-enveloped here. Asking without `environment_id` returns exactly the global
+ *  rows, driven live. `secure` is gone from both sides — that gap was closed by
  *  removing the affordance rather than by defaulting the field. */
 export function usePipelineVariables() {
   return useQuery({
@@ -2439,7 +2426,7 @@ export function usePipelineVariables() {
 /**
  * Save the global variables set.
  *
- * The granularity **inverts** (row 83): the editor hands over the whole list, and the gear
+ * The granularity **inverts**: the editor hands over the whole list, and the gear
  * upserts one row at a time by natural key plus a separate delete. So this re-reads the
  * current set, diffs it, and issues one PUT per changed row and one DELETE per removed
  * row — see `variableWritePlan`.
@@ -2482,8 +2469,8 @@ export function useUpdatePipelineVariables() {
  * `environment_id` is given"*, confirmed live (three seeded rows: no parameter answered the
  * global row only; `?environment_id=p1` answered global + p1; `?environment_id=p2` answered
  * global + p2). Legacy's `/platforms/{name}/variables` returned the platform's **own**
- * set, so the server filter alone is a superset and §7.6's client-side partition is still
- * needed on top of it (row 84).
+ * set, so the server filter alone is a superset and a client-side partition is still
+ * needed on top of it.
  */
 export function useEnvironmentVariables(environmentName: string) {
   return useQuery({
@@ -2497,7 +2484,7 @@ export function useEnvironmentVariables(environmentName: string) {
   });
 }
 
-/** As `useUpdatePipelineVariables` and `useEnvironmentVariables` combined (row 85). */
+/** As `useUpdatePipelineVariables` and `useEnvironmentVariables` combined. */
 export function useUpdateEnvironmentVariables(environmentName: string) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -2518,9 +2505,9 @@ export function useUpdateEnvironmentVariables(environmentName: string) {
 export function useNotificationsConfig() {
   return useQuery({
     queryKey: queryKeys.notificationsConfig,
-    // `slack_webhook_url` -> `slack_webhook_credstore_ref` (X7), so the input holds a
-    // reference. The gear's extra required `run_queue_queued_slack_enabled` has no UI
-    // field; it is round-tripped on write rather than dropped (row 86).
+    // Legacy's `slack_webhook_url` is `slack_webhook_credstore_ref`, in the UI shape
+    // too, so the input holds a reference. The gear's extra required `run_queue_queued_slack_enabled` has no UI
+    // field; it is round-tripped on write rather than dropped.
     queryFn: async (): Promise<NotificationsConfig> =>
       notificationsConfigFromDto(await apiGet<S['NotificationConfigDto']>('/settings/notifications')),
   });
@@ -2550,7 +2537,7 @@ export function usePreviewScheduledRunNotification() {
     mutationFn: async (
       data: ScheduledRunNotificationPreviewRequest
     ): Promise<ScheduledRunNotificationPreviewResponse> => {
-      // The request is identical modulo `config`'s own shape difference (row 89), so the
+      // The request is identical modulo `config`'s own shape difference, so the
       // saved config is re-read and the form's edits are laid over it — the same
       // round-trip `useUpdateNotificationsConfig` needs, for the same field.
       const current = await apiGet<S['NotificationConfigDto']>('/settings/notifications');
@@ -2589,7 +2576,7 @@ export function useNotificationLog(limit = 100) {
 export function useJiraPollerConfig() {
   return useQuery({
     queryKey: queryKeys.jiraPollerConfig,
-    // Field-identical both sides (row 92), so `JiraPollerConfig` is an alias of the
+    // Field-identical both sides, so `JiraPollerConfig` is an alias of the
     // generated DTO and nothing is reshaped.
     queryFn: () => apiGet<JiraPollerConfig>('/settings/jira-poller'),
   });
@@ -2607,9 +2594,9 @@ export function useUpdateJiraPollerConfig() {
   });
 }
 
-/** File JIRA bugs for a run. Filing and listing split (§6.3 row 7): this is the POST, and
+/** File JIRA bugs for a run. Filing and listing are split: this is the POST, and
  *  the run moves from a *path segment* to a `run_id` **uuid in the body**, so the name has
- *  to be resolved first (X1). The response element is unchanged — `{jira_key, created}`. */
+ *  to be resolved first. The response element is unchanged — `{jira_key, created}`. */
 export function useCreateJiraTicket() {
   return useMutation({
     mutationFn: async ({ runName, testName }: { runName: string; testName?: string }): Promise<JiraCreateResponse[]> => {
@@ -2625,7 +2612,7 @@ export function useCreateJiraTicket() {
 /**
  * Open JIRA bugs, for one plan or for all of them.
  *
- * The listing half of §6.3 row 7, keyed on **`(repo_id, plan_path)`, not `plan_id`**. The
+ * The listing half of that split, keyed on **`(repo_id, plan_path)`, not `plan_id`**. The
  * two are a co-requirement: `/openapi.json` marks neither individually required, and
  * driven live, omitting both is a 200 while supplying one alone is a 400 —
  * *"repo_id and plan_path must be supplied together, or not at all"*. So the "omit for all

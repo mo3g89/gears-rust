@@ -19,7 +19,7 @@ use super::{
     COUNTERS, DURATIONS, QA_INSIGHTS_COLLECT, QA_INSIGHTS_COLLECT_REPORT, QA_INSIGHTS_JIRA_BUG,
     QA_INSIGHTS_JIRA_POLL, QA_INSIGHTS_JIRA_RERUN,
 };
-use crate::domain::error::DomainError;
+use crate::domain::error::{DomainError, EgressFailure};
 use crate::domain::ports::metrics::{
     CollectMetrics, CollectOutcome, CollectReportOutcome, JiraBugOutcome, JiraPollMetrics,
     JiraPollOutcome, NoopMetrics,
@@ -301,6 +301,12 @@ fn every_domain_error() -> [DomainError; DOMAIN_ERROR_VARIANTS] {
             id: Uuid::nil(),
             value: "?".to_owned(),
         },
+        DomainError::UpstreamEgress {
+            channel: "email".to_owned(),
+            endpoint: "smtp.example.com".to_owned(),
+            failure: EgressFailure::Timeout,
+            detail: "no reply within 10s".to_owned(),
+        },
         DomainError::Validation {
             field: "branch".to_owned(),
             message: "required".to_owned(),
@@ -317,7 +323,7 @@ fn every_domain_error() -> [DomainError; DOMAIN_ERROR_VARIANTS] {
 /// Bumping this without adding a value to that array is a **compile** error:
 /// the array literal would then be one element short of its declared length.
 /// That is the one link in this chain the compiler holds on its own.
-const DOMAIN_ERROR_VARIANTS: usize = 13;
+const DOMAIN_ERROR_VARIANTS: usize = 14;
 
 /// A number per [`DomainError`] variant, in declaration order.
 ///
@@ -342,10 +348,11 @@ fn variant_index(error: &DomainError) -> usize {
         DomainError::JiraNotConfigured => 5,
         DomainError::BugNotFound { .. } => 6,
         DomainError::UnsupportedEgress { .. } => 7,
-        DomainError::CorruptState { .. } => 8,
-        DomainError::Validation { .. } => 9,
-        DomainError::Forbidden => 10,
-        DomainError::Database { .. } => 11,
+        DomainError::UpstreamEgress { .. } => 8,
+        DomainError::CorruptState { .. } => 9,
+        DomainError::Validation { .. } => 10,
+        DomainError::Forbidden => 11,
+        DomainError::Database { .. } => 12,
         DomainError::Internal(_) => DOMAIN_ERROR_VARIANTS - 1,
     }
 }

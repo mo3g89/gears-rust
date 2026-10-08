@@ -38,9 +38,12 @@ Recovery is therefore a property of a table rather than of a retry policy: whate
 qa-insights was down, the watermark says where to resume, which is what makes
 `cpt-cf-qa-nfr-ingest-recovery` meetable.
 
-`qa_leader_claims` gates the sweep per tenant, so only one replica reconciles, polls JIRA or sends
-a notification for a given tenant. `qa_run_notifications` records what has already been sent, so a
-re-swept run does not re-notify.
+`qa_leader_claims` gates only the JIRA poller, per tenant, because its effect is a launch and nothing
+downstream deduplicates one. The sweep runs on every replica under `NoopLeaderElector`: its writes
+converge on their own (the per-run projection is delete-then-insert and the watermark never moves
+backwards), so two replicas sweeping one tenant produce a correct projection. A notification is sent
+once because `qa_run_notifications`' unique claim is an insert only one replica can win, not because
+one replica sweeps. DESIGN §3.5, "Ingestion", has the full account.
 
 Pub/sub was rejected on a concrete fact rather than a preference: the event bus available here has
 no durable backend, so an event delivered while qa-insights is restarting is lost, and the design

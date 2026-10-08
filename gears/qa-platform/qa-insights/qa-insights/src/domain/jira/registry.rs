@@ -45,8 +45,8 @@
 //! `domain::local_client::client`'s `skip_list_for`, calls [`skip_list_entries`]
 //! and hands back `Vec<SkipListEntry>`; it never calls [`render_skip_list`], and
 //! a repo-wide search finds no caller of that function outside
-//! `registry_tests`. See `domain::jira`'s own header for why it ships ahead of
-//! its producer (R74) rather than being removed.
+//! `registry_tests`. `domain::jira`'s header, "No caller exists yet", says why
+//! it ships ahead of its caller instead of being removed.
 
 use qa_insights_sdk::{JiraBug, SkipListEntry};
 
@@ -79,6 +79,24 @@ pub fn skip_list_entries(bugs: &[JiraBug]) -> Vec<SkipListEntry> {
 /// `,`. No sort, no dedup, no surrounding whitespace — ported exactly, because a
 /// spacing or ordering change is a contract break for every test repository
 /// that reads the variable (`cpt-cf-qa-fr-runner-contract`).
+///
+/// # Why this is kept although nothing calls it
+///
+/// Kept on purpose. Its consumer is named, qa-runs' launch path, and that
+/// caller does not exist yet (`domain::jira`'s header, "No caller exists yet").
+/// What it renders is a
+/// wire format an external contract freezes
+/// (`cpt-cf-qa-fr-runner-contract`), so deleting it and re-deriving it beside
+/// that caller is how the format acquires a second spelling — the one outcome
+/// the frozen-format rule exists to prevent. An allowance rather than an
+/// `expect`, because the lint fires in the lib build and not in the test build,
+/// where `registry_tests` reaches it.
+#[allow(
+    dead_code,
+    reason = "the frozen SKIP_TESTS_WITH_BUGS renderer is kept for its named caller, qa-runs' \
+              launch path, which does not call it yet; `domain` is pub(crate), so the compiler \
+              sees that the caller is missing"
+)]
 #[must_use]
 pub fn render_skip_list(entries: &[SkipListEntry]) -> String {
     entries

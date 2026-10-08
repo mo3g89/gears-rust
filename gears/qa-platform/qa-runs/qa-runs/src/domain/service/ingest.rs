@@ -972,11 +972,11 @@ where
     /// # The prefix
     ///
     /// **A divergence, and a necessary one.** The source system has exactly one
-    /// log per run because it has one workflow; here a run has one execution node
-    /// per repository group (parity spec §3.4 rule 5), so an unprefixed
-    /// interleaving of two nodes' output is unreadable and, worse, ambiguous
-    /// about which repository failed. The prefix is ASCII and bracketed so a
-    /// consumer can strip it without guessing.
+    /// log per run because it has one workflow; here a run has one execution
+    /// node per repository group (launch rule 5), so an unprefixed interleaving
+    /// of two nodes' output is unreadable and, worse, ambiguous about which
+    /// repository failed. The prefix is ASCII and bracketed so a consumer can
+    /// strip it without guessing.
     ///
     /// **The archive is fed this same prefixed string**, not the runner's raw
     /// `line`. A replayed log therefore reads byte-identical to the live
@@ -984,7 +984,7 @@ where
     /// strip `[node] ` in `5538cf972` — needs no second rule for archived
     /// lines.
     ///
-    /// # One ingested line is exactly one archived line (Task 6)
+    /// # One ingested line is exactly one archived line
     ///
     /// `prefixed` never carries a `\n` or a `\r`, by construction rather than
     /// by the caller's good behaviour. That is what makes the two consumers
@@ -1233,10 +1233,10 @@ where
     /// paragraph used to reason about `REPEATABLE READ` "on MySQL/InnoDB, which
     /// this gear ships (the migration's `MYSQL_UP` arm)". **The gear does not
     /// ship `MySQL`** — this crate links `toolkit-db` with
-    /// `features = ["sqlite", "pg"]`. Every migration here carries three dialect
-    /// blobs by convention, so the presence of a `MYSQL_UP` arm is evidence of
-    /// the convention and not of a deployment. That inference is the defect; the
-    /// arm's existence is not.
+    /// `features = ["sqlite", "pg"]`, and its migrations carry two dialect blobs
+    /// (`POSTGRES_UP` and `SQLITE_UP`); there is no `MYSQL_UP` arm at all. The
+    /// premise named an arm that does not exist, and the inference from a
+    /// migration constant to a deployed dialect was the defect in any case.
     ///
     /// # What is **not** proven
     ///

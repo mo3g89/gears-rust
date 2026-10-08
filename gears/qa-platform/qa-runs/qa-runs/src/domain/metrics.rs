@@ -277,6 +277,22 @@ pub const QA_RUNS_INGEST_DURATION: &str = "qa_runs_ingest_duration_seconds";
 /// the set*: "every counter ends `_total`" is unstatable one constant at a
 /// time, and a constant added without being listed here is a constant no rule
 /// checks.
+///
+/// # Read only by the tests, and that is not dead code
+///
+/// `domain` is `pub(crate)` since finding #38's triage, so a catalog constant
+/// nothing outside the naming tests names is genuinely unreachable and the
+/// compiler says so. The allowance is on the two list constants only, and the
+/// alternative — deleting them — deletes the gate: every naming rule in this
+/// catalog is a property *of the set*, and a family absent from these lists is
+/// a family no rule checks. `qa-catalog` and `qa-environments` carry the same
+/// allowance for the same reason.
+#[allow(
+    dead_code,
+    reason = "read by `domain::metrics_tests` and `infra::metrics`'s tests; `domain` is \
+              pub(crate), so a constant with no production reader is unreachable and \
+              deleting it would delete the naming gate"
+)]
 pub const COUNTERS: &[&str] = &[
     QA_RUNS_DISPATCH,
     QA_RUNS_DISPATCH_DECISION,
@@ -285,7 +301,8 @@ pub const COUNTERS: &[&str] = &[
 ];
 
 /// Every duration histogram this gear exports. See [`COUNTERS`] for why the
-/// list is declared.
+/// list is declared, and for why it carries a dead-code allowance.
+#[allow(dead_code, reason = "see COUNTERS")]
 pub const DURATIONS: &[&str] = &[
     QA_RUNS_DISPATCH_DURATION,
     QA_RUNS_QUEUE_WAIT_DURATION,

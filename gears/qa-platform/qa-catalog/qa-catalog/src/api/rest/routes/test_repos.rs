@@ -86,8 +86,8 @@ pub(super) fn register_test_repo_routes(
             "Replace a repository's mutable fields (name, url, default_branch, \
              content_root, credential reference). Changing `url` or \
              `content_root` clears the synced state and the working area, so \
-             content reads report the repository as not synced until the next \
-             sync",
+             the next content read of a branch syncs it from the new location \
+             first",
         )
         .tag(API_TAG)
         .authenticated()
@@ -164,8 +164,6 @@ pub(super) fn register_test_repo_routes(
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
-        // BranchCacheConflict (concurrent sync) maps to Aborted → HTTP 409.
-        .error_409(openapi)
         .error_500(openapi)
         .register(router, openapi);
 

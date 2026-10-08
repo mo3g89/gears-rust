@@ -4,19 +4,18 @@
 //!
 //! [`JiraService::open_bugs`] already **is** legacy's `get_open_bugs(plan_id)`
 //! call site ported: it compiles the caller's `qa.jira_bug`/`list` scope
-//! (`JiraService::bug_scope`), applies controller ruling R85's "both present or
-//! neither" pairing rule on `(repo_id, plan_path)`, and — since Task 33 — is
-//! the exact method `qa_insights_sdk::client::QaInsightsClientV1::skip_list_for`'s
-//! own doc names as this trait's twin call site
-//! (`manager/src/routes/settings.rs:634-651`, the `GET /qa/v1/jira/open-bugs`
-//! route). Going straight to [`JiraRepository::list_open_for_plan`] instead
-//! would re-derive that scope compilation and that validation a second time,
-//! with no test to keep the two copies from drifting — exactly the shape
-//! `crate::domain::service::mod`'s own header warns against for a resource this
-//! crate already gates once. There is also no PDP decision to skip: an
-//! in-process caller gets the same `qa.jira_bug` grant check an HTTP caller
-//! does, which is qa-runs' own `QaRunsLocalClient` header's point about its
-//! sibling schedule methods.
+//! (`JiraService::bug_scope`), applies the "both present or neither" pairing rule
+//! on `(repo_id, plan_path)`, and — since Task 33 — is the exact method
+//! `qa_insights_sdk::client::QaInsightsClientV1::skip_list_for`'s own doc names as
+//! this trait's twin call site (`manager/src/routes/settings.rs:634-651`, the
+//! `GET /qa/v1/jira/open-bugs` route). Going straight to
+//! [`JiraRepository::list_open_for_plan`] instead would re-derive that scope
+//! compilation and that validation a second time, with no test to keep the two
+//! copies from drifting — exactly the shape `crate::domain::service::mod`'s own
+//! header warns against for a resource this crate already gates once. There is
+//! also no PDP decision to skip: an in-process caller gets the same `qa.jira_bug`
+//! grant check an HTTP caller does, which is qa-runs' own `QaRunsLocalClient`
+//! header's point about its sibling schedule methods.
 //!
 //! # `DomainError` becomes `QaInsightsError` through `as_jira_error`, not `Into`
 //!
@@ -35,19 +34,18 @@
 //! `cf.qa.insights.jira_bug.v1~`.
 //!
 //! **Correction (Task 34 fix round 1): both halves are reachable, not just
-//! `Forbidden`.** An earlier revision of this paragraph claimed
-//! `skip_list_for`'s mandatory `repo_id: Uuid`/`plan_path: &str` parameters
-//! closed off R85's `Validation` arm entirely, on the theory that both being
-//! non-`Option` meant `open_bugs`'s pairing check could never see just one of
-//! them. That is false, and mandatory-at-the-type-level never implied it:
-//! `optional_plan_ref` (`domain/service/jira.rs:956-973`) trims `plan_path`
-//! and treats an empty or whitespace-only string as **absent**
-//! (`.filter(|value| !value.is_empty())`), so
+//! `Forbidden`.** An earlier revision of this paragraph claimed `skip_list_for`'s
+//! mandatory `repo_id: Uuid`/`plan_path: &str` parameters closed off the pairing
+//! rule's `Validation` arm entirely, on the theory that both being non-`Option`
+//! meant `open_bugs`'s pairing check could never see just one of them. That is
+//! false, and mandatory-at-the-type-level never implied it: `optional_plan_ref`
+//! (`domain/service/jira.rs:956-973`) trims `plan_path` and treats an empty or
+//! whitespace-only string as **absent** (`.filter(|value| !value.is_empty())`), so
 //! `skip_list_for(ctx, repo_id, "")` calls
-//! `open_bugs(ctx, Some(repo_id), Some(""))`, which `optional_plan_ref` sees
-//! as `(Some(repo_id), None)` — the `_ => Err(Validation)` arm, not the
-//! `(Some, Some)` one. `&str` is not "non-empty `&str`". Both refusal shapes
-//! are therefore live, and `as_jira_error` attributes both to
+//! `open_bugs(ctx, Some(repo_id), Some(""))`, which `optional_plan_ref` sees as
+//! `(Some(repo_id), None)` — the `_ => Err(Validation)` arm, not the
+//! `(Some, Some)` one. `&str` is not "non-empty `&str`". Both refusal shapes are
+//! therefore live, and `as_jira_error` attributes both to
 //! `cf.qa.insights.jira_bug.v1~` — see this module's
 //! `an_empty_plan_path_gets_a_jira_attributed_validation_error` and
 //! `a_denied_caller_gets_a_jira_attributed_refusal` tests, one per shape.
@@ -148,9 +146,7 @@ mod tests {
 
     use super::QaInsightsLocalClient;
     use crate::domain::error::DomainError;
-    use crate::domain::ports::jira_client::{
-        IssueRef, JiraClient, JiraIssue, NewIssue, StatusCategory,
-    };
+    use crate::domain::ports::jira_client::{IssueRef, JiraClient, NewIssue, StatusCategory};
     use crate::domain::repos::JiraRepository;
     use crate::domain::service::jira::JiraService;
     use crate::domain::service::test_support::{DenyAllAuthZ, TenantScopedAuthZ, ctx};
@@ -192,15 +188,6 @@ mod tests {
             _jira_key: &str,
         ) -> Result<StatusCategory, DomainError> {
             unreachable!("skip_list_for never polls JIRA status")
-        }
-
-        async fn get_issue(
-            &self,
-            _ctx: &toolkit_security::SecurityContext,
-            _config: &JiraConfig,
-            _jira_key: &str,
-        ) -> Result<JiraIssue, DomainError> {
-            unreachable!("skip_list_for never reads a single issue")
         }
     }
 
@@ -402,14 +389,14 @@ mod tests {
         assert!(!body.contains("cf.qa.insights.test_result.v1~"), "{body}");
     }
 
-    /// The `Validation` half of `as_jira_error`'s attribution — added in
-    /// Task 34 fix round 1, correcting this module's own header, which
-    /// originally (wrongly) claimed `skip_list_for`'s mandatory `plan_path:
-    /// &str` parameter made this arm unreachable. `optional_plan_ref` treats
-    /// an empty or whitespace-only `plan_path` as **absent**, which is
-    /// exactly R85's "one without the other" shape, so `skip_list_for(ctx,
-    /// repo_id, "")` reaches the same `Validation { field: "plan_path", .. }`
-    /// a bare `repo_id` with no `plan_path` at all would.
+    /// The `Validation` half of `as_jira_error`'s attribution — added in Task 34
+    /// fix round 1, correcting this module's own header, which originally
+    /// (wrongly) claimed `skip_list_for`'s mandatory `plan_path: &str` parameter
+    /// made this arm unreachable. `optional_plan_ref` treats an empty or
+    /// whitespace-only `plan_path` as **absent**, which is exactly the pairing
+    /// rule's "one without the other" shape, so `skip_list_for(ctx, repo_id, "")`
+    /// reaches the same `Validation { field: "plan_path", .. }` a bare `repo_id`
+    /// with no `plan_path` at all would.
     ///
     /// # What makes this test able to fail
     ///

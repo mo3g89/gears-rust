@@ -35,8 +35,8 @@ use uuid::Uuid;
 /// remember.
 ///
 /// The material is never returned by any read path: `Environment` carries
-/// only [`EnvironmentCredential::credstore_ref`] and, until Task 19,
-/// [`Environment::kubeconfig_credstore_ref`].
+/// only [`EnvironmentCredential::credstore_ref`] (and, until Task 19 dropped
+/// it, the pre-plugin `kubeconfig_credstore_ref`).
 #[derive(Clone, PartialEq, Eq)]
 pub struct CredentialMaterial(String);
 
@@ -118,10 +118,11 @@ pub struct Environment {
     /// The product in qa-catalog this environment belongs to (by ID; no
     /// cross-gear FK).
     ///
-    /// **Required since Task 20b** (`m20260903_000013`, decision **D9**). It is
-    /// how the plugin resolves, so an environment without one could be neither
-    /// observed nor dispatched against — a row that existed only to record that
-    /// it could not be used.
+    /// **Required since Task 20b** (`m20260903_000013`, folded into
+    /// `migrations::m20260812_000001_initial` by the docs squash). It is how
+    /// the plugin resolves, so an environment without one
+    /// could be neither observed nor dispatched against — a row that existed
+    /// only to record that it could not be used.
     pub product_id: Uuid,
     pub description: Option<String>,
     /// Operator-controlled availability toggle: an unavailable environment accepts no new leases.
@@ -142,8 +143,7 @@ pub struct Environment {
     /// partially false.
     ///
     /// **No writer yet**, exactly like `observed_version`: the version poller is
-    /// unbuilt and both are tracked together in `DECOMPOSITION.md` 2.1 so one
-    /// retrofit closes both.
+    /// unbuilt and both are to be wired together, so one retrofit closes both.
     pub observed_build: Option<String>,
     /// Per-environment default branch **override**: the middle tier of qa-runs'
     /// branch-resolution chain, which is `explicit → this → the repository's
@@ -181,9 +181,11 @@ pub struct Environment {
     ///
     /// **At most one environment per (tenant, product) has this set.**
     /// `EnvironmentsService` enforces it by clearing the previous holder in the same
-    /// transaction, rather than a database constraint, because `MySQL` has no
-    /// partial unique indexes and a schema-level rule would hold on only two
-    /// of three dialects — see `environments_repo`'s
+    /// transaction, rather than a database constraint. The reason first given
+    /// was that `MySQL` has no partial unique indexes. This gear ships only
+    /// Postgres and `SQLite`, and both have them, so that reason no longer
+    /// applies and the placement is an open choice — see
+    /// `environments_repo`'s
     /// `OrmEnvironmentsRepository::clear_default_for_product` doc (the
     /// rationale originally lived in `m20260831_000009_platform_is_default`'s
     /// module doc, folded into `migrations::m20260812_000001_initial` by the
@@ -206,19 +208,17 @@ pub struct Environment {
     pub version_detected_at: Option<OffsetDateTime>,
     /// The environment's credentials in the shape a product plugin consumes:
     /// one entry per credential key, each naming the credstore reference the
-    /// material lives behind. Empty for an environment whose credentials have
-    /// never been written through the plugin path.
+    /// material lives behind. Empty for an environment that stores no
+    /// credential.
     ///
-    /// Populated by the plugin path; the single-reference column beside it
-    /// ([`Self::kubeconfig_credstore_ref`]) is still authoritative until the
-    /// contract migration. `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash)
-    /// backfills this from that field, so the two agree from the moment the
-    /// migration runs.
+    /// The only stored source since Task 19, which dropped the pre-plugin
+    /// single-reference `kubeconfig_credstore_ref` column after
+    /// `m20260903_000012` (folded into `migrations::m20260812_000001_initial`
+    /// by the docs squash) moved every row's reference into this list.
     ///
-    /// **In-process consumers only**, for [`Self::kubeconfig_credstore_ref`]'s
-    /// reason and no other: under `SharingMode::Tenant` a credstore reference
-    /// *is* a read path to the material, so `EnvironmentDto` drops this field
-    /// exactly as it drops that one.
+    /// **In-process consumers only**: under `SharingMode::Tenant` a credstore
+    /// reference *is* a read path to the material, so `EnvironmentDto` drops
+    /// this field.
     pub credentials: Vec<EnvironmentCredential>,
     /// The most recent observation's plugin-defined attributes, keyed by
     /// `FieldDesc::key`. Empty for an environment the plugin path has never
@@ -227,11 +227,12 @@ pub struct Environment {
     /// Every key here was declared in the plugin's `observed_schema()`:
     /// `qa_product_sdk::observation::retain_declared` drops the rest before
     /// the column is written, which is what makes this map safe to render.
-    /// The four role-claimed attributes are *also* projected into their own
-    /// columns ([`Self::observed_version`], [`Self::observed_build`],
-    /// [`Self::observed_base_url`] and [`Self::observed_namespace`]) by
-    /// `project_roles`, so a run variable and a column cannot disagree about
-    /// which attribute a role means.
+    /// Three of the four role-claimed attributes are *also* projected into
+    /// their own columns ([`Self::observed_version`], [`Self::observed_build`]
+    /// and [`Self::observed_base_url`]) by `project_roles`, so a run variable
+    /// and a column cannot disagree about which attribute a role means. The
+    /// namespace has had no column of its own since Task 19 dropped
+    /// `observed_namespace`; this map is its only home.
     ///
     /// Populated by the plugin path; deliberately **not** backfilled — the
     /// keys are the plugin's to choose, and the first observation cycle
@@ -247,39 +248,41 @@ pub struct Environment {
     /// may correct.
     ///
     /// Populated by the plugin path;
-    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash) backfills it from each
-    /// environment's `VPADM_NAMESPACE` variable, which stays authoritative
-    /// for the existing observer until the contract migration.
+    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash) backfilled it from each
+    /// environment's `VPADM_NAMESPACE` variable, which the pre-plugin
+    /// observer read until the plugin path replaced it.
     pub config: serde_json::Value,
-    /// The `FieldRole::BaseUrl` projection of [`Self::observed_attrs`] —
-    /// [`Self::vhp_base_url`] with the product's name taken out of it. `None`
-    /// means "never conclusively detected", exactly as it does there.
+    /// The `FieldRole::BaseUrl` projection of [`Self::observed_attrs`] — the
+    /// pre-plugin `vhp_base_url` with the product's name taken out of it.
+    /// `None` means "never conclusively detected", exactly as it did there.
     ///
-    /// Populated by the plugin path; the product-specific column beside it
-    /// (`vhp_base_url`) is still authoritative until the contract migration,
-    /// and both are written from the same observation until then.
+    /// Populated by the plugin path. Until Task 19 the product-specific
+    /// `vhp_base_url` column was written beside it from the same observation
+    /// and stayed authoritative for that time's readers; Task 19 dropped it,
+    /// and this is the only base-URL field.
     pub observed_base_url: Option<String>,
     /// The most recent health verdict, in the vocabulary every product can
     /// express. [`HealthState::Unknown`] both for an environment nothing has
     /// looked at and for one whose health read failed —
     /// [`Self::health_checked_at`] is what separates those two.
     ///
-    /// Populated by the plugin path; the [`Self::cluster`] view beside it is
-    /// still authoritative until the contract migration.
+    /// Populated by the plugin path, and the only health verdict this model
+    /// carries: the `cluster` view that used to sit beside it went with the
+    /// five `cluster_*` columns Task 19 dropped.
     pub health_state: HealthState,
     /// Why the most recent health read reached the state it did, when there is
     /// something to say. Classified text only — never a formatted error, and
     /// never anything derived from a credential.
     ///
-    /// Populated by the plugin path; `cluster.status_message` is still
-    /// authoritative until the contract migration.
+    /// Populated by the plugin path. Until Task 19 the legacy
+    /// `cluster_status_message` column ran beside it; Task 19 dropped it.
     pub health_detail: Option<String>,
     /// When the most recent health read ran, or `None` if **nothing ever
     /// looked** — a different fact from a [`HealthState::Unknown`] a failed
     /// read produced, and the only thing that distinguishes them.
     ///
-    /// Populated by the plugin path; `cluster.checked_at` is still
-    /// authoritative until the contract migration.
+    /// Populated by the plugin path. Until Task 19 the legacy
+    /// `cluster_checked_at` column ran beside it; Task 19 dropped it.
     pub health_checked_at: Option<OffsetDateTime>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
@@ -307,7 +310,7 @@ pub struct EnvironmentCredential {
 /// One node, as the environment's own cluster reported it in its most recent
 /// successful health read.
 ///
-/// **No consumer since Task 21** (user decision U4 deleted the cluster-health
+/// **No consumer since Task 21** (the user's decision deleted the cluster-health
 /// UI, and Task 19 dropped the five `cluster_*` columns that fed it), and the
 /// gear-side type it mirrored — `domain::observation::NodeSummary` — is
 /// deleted too, along with the `infra::storage::mapper` conversion. Kept for
@@ -365,7 +368,7 @@ pub struct NodeCounts {
 /// and an `Unreachable { message: String }` variant would make that half of
 /// the invariant unbreakable. It is a plain unit variant anyway, for two
 /// reasons. It would hold only *half*: `nodes` and `counts` must also be empty
-/// for an unreachable read (D-CH-3), and a data-carrying variant cannot say
+/// for an unreachable read (it reports no nodes), and a data-carrying variant cannot say
 /// so, which would leave the pair split between a type and a doc comment
 /// rather than moving it. And nothing populates [`ClusterHealthView`] today,
 /// so the shape a future producer must satisfy is better chosen alongside that
@@ -399,16 +402,19 @@ impl ClusterStatus {
 
 /// One environment's cluster-health reading, as of [`Self::checked_at`].
 ///
-/// # Why this is one optional field on [`Environment`], not several
+/// # Why this was one optional field on [`Environment`], not several
 ///
-/// `Environment::cluster` being `None` means "no cycle has reached this
-/// environment"; `Some(_)` here, even with [`ClusterStatus::Unreachable`],
-/// means one has. A set of flat nullable fields (`cluster_status:
-/// Option<String>` and so on, each independently `None`) cannot represent that
-/// distinction: both "never checked" and "checked, unreachable, nothing to
-/// show" would read as all-`None`. One optional struct keeps the three states
-/// — never checked, checked-and-failed, checked-and-read — distinguishable at
-/// the type level.
+/// [`Environment`] no longer has the field: its `cluster: Option<Self>` went
+/// with the five `cluster_*` columns Task 19 dropped, and nothing populates
+/// this type now (see [`NodeSummary`]'s header). The reasoning is kept for
+/// whoever gives it a producer again. `cluster` being `None` meant "no cycle
+/// has reached this environment"; `Some(_)`, even with
+/// [`ClusterStatus::Unreachable`], meant one had. A set of flat nullable
+/// fields (`cluster_status: Option<String>` and so on, each independently
+/// `None`) cannot represent that distinction: both "never checked" and
+/// "checked, unreachable, nothing to show" would read as all-`None`. One
+/// optional struct keeps the three states — never checked, checked-and-failed,
+/// checked-and-read — distinguishable at the type level.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClusterHealthView {
     /// The read's verdict. A closed set since Task 20 — see [`ClusterStatus`],
@@ -420,8 +426,8 @@ pub struct ClusterHealthView {
     /// `counts` instead. Always text already classified by the observer, never
     /// a formatted `kube::Error`.
     pub status_message: Option<String>,
-    /// Empty when [`Self::status`] is [`ClusterStatus::Unreachable`] (D-CH-3):
-    /// a failed read has nothing to report on.
+    /// Empty when [`Self::status`] is [`ClusterStatus::Unreachable`]: a failed
+    /// read has nothing to report on, so it reports no nodes.
     pub nodes: Vec<NodeSummary>,
     /// `None` means the namespace count was not read (an
     /// [`ClusterStatus::Unreachable`] status, or a read that could not list
@@ -437,17 +443,19 @@ pub struct ClusterHealthView {
 
 /// Creation request for a target environment.
 ///
-/// The kubeconfig arrives one of two ways — a credstore reference the caller
-/// already holds ([`Self::kubeconfig_credstore_ref`]) or a pasted document
-/// ([`Self::kubeconfig`]) — and exactly one of them must be present. The
-/// derived `Debug` is safe because the document is wrapped in
-/// [`CredentialMaterial`], whose own `Debug` redacts.
+/// Credentials arrive in [`Self::credentials`], keyed by the product plugin's
+/// own fields. The pre-plugin pair — a credstore reference the caller already
+/// holds ([`Self::kubeconfig_credstore_ref`]) or a pasted document
+/// ([`Self::kubeconfig`]) — is a second spelling of one entry, and at most one
+/// of the two may be present. The derived `Debug` is safe because the document
+/// is wrapped in [`CredentialMaterial`], whose own `Debug` redacts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewEnvironment {
     pub name: String,
     /// **A plain `Uuid` since Task 20b**, on Task 20a's precedent
     /// (`NewProduct::plugin_instance_id`): a productless create was already
-    /// refused at runtime by ruling F-13, and making the state
+    /// refused at runtime (a write that reaches no plugin has nowhere to put a
+    /// credential, `refuse_unclassifiable`), and making the state
     /// unrepresentable is better than validating it. The wire's `Option`
     /// survives one layer and dies at `TryFrom<CreateEnvironmentReq>`, where
     /// the message can name what to supply — which serde's "missing field"
@@ -456,12 +464,15 @@ pub struct NewEnvironment {
     pub description: Option<String>,
     /// A credstore reference the caller already holds.
     ///
-    /// **Exactly one of this and [`Self::kubeconfig`] must be supplied.**
-    /// `EnvironmentsService::create_environment` enforces that: both is a validation
-    /// error naming both fields, neither is the pre-existing
-    /// `kubeconfig_credstore_ref must not be empty` error. An empty string is
-    /// treated as "not supplied", which is what this field's required-`String`
-    /// predecessor already meant (`validate_credstore_ref` rejected `""`).
+    /// **At most one of this and [`Self::kubeconfig`] may be supplied.**
+    /// `EnvironmentsService::create_environment` enforces that: both is a
+    /// validation error naming both fields. Neither is fine when
+    /// [`Self::credentials`] carries the credential; a create with no
+    /// credential at all is refused on `credentials` (the pre-plugin
+    /// `kubeconfig_credstore_ref must not be empty` error went with the plugin
+    /// path). An empty string is treated as "not supplied", which is what this
+    /// field's required-`String` predecessor already meant
+    /// (`validate_credstore_ref` rejected `""`).
     pub kubeconfig_credstore_ref: Option<String>,
     /// A raw kubeconfig **document** pasted by an operator, as the alternative
     /// to [`Self::kubeconfig_credstore_ref`].
@@ -478,7 +489,7 @@ pub struct NewEnvironment {
     /// This is the plugin-shaped channel and the one Task 22's generated form
     /// uses; the single-credential
     /// [`Self::kubeconfig`]/[`Self::kubeconfig_credstore_ref`]
-    /// pair is still accepted so the shipped UI keeps working, and
+    /// pair is still accepted for clients that send it, and
     /// `EnvironmentsService` desugars it into one entry of this map keyed by
     /// [`sole_required_secret_key`](qa_product_sdk::descriptor::sole_required_secret_key)
     /// over the product's plugin — never by the literal `"kubeconfig"`, which
@@ -524,8 +535,6 @@ pub struct NewEnvironment {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EnvironmentPatch {
     pub name: Option<String>,
-    /// Outer `None` = leave unchanged; `Some(None)` = clear the association;
-    /// `Some(Some(id))` = set to `id`.
     /// `None` = leave the binding alone; `Some(id)` = rebind.
     ///
     /// **Two states since Task 20b, not three.** It was
@@ -790,7 +799,7 @@ mod cluster_status_tests {
         assert_eq!(view.status.as_str(), "Unreachable");
         assert!(
             view.nodes.is_empty() && view.counts.total == 0,
-            "D-CH-3: an Unreachable read reports no nodes"
+            "an Unreachable read reports no nodes"
         );
     }
 }

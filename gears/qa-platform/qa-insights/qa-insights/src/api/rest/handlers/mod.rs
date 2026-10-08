@@ -12,10 +12,9 @@
 //!
 //! * [`admin`] — the operator rebuild, Task 16.
 //! * [`collections`] — the two flat `OData` collections, Task 17.
-//! * [`dashboard`] — the dashboard aggregate (Task 18) and its coverage view
-//!   (Task 19).
-//! * [`analytics`] — the overview and its build-tests drill-down (Task 25b),
-//!   the export (Task 26), and the three plan drill-downs (Task 27).
+//! * [`dashboard`] — the dashboard aggregate and its coverage view.
+//! * [`analytics`] — the overview and its build-tests drill-down,
+//!   the export, and the three plan drill-downs.
 //! * [`saved_views`] — saved-view CRUD, Task 28.
 //! * [`settings`] — the tenant-settings surfaces, Task 32. Founded with the
 //!   JIRA pair; Task 35 extends it with the poller pair and Task 38 with the

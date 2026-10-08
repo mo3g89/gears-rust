@@ -1,7 +1,7 @@
-//! The dashboard routes — `GET /qa/v1/dashboard` (Task 18) and
-//! `GET /qa/v1/dashboard/coverage` (Task 19).
+//! The dashboard routes — `GET /qa/v1/dashboard` and
+//! `GET /qa/v1/dashboard/coverage`.
 //!
-//! # No `OData`, and that is per D7 rather than an omission
+//! # No `OData`, and that is deliberate rather than an omission
 //!
 //! `api::rest::mod`' header states it: `OData` applies to the two flat result
 //! collections and to nothing else in this gear, because those are the tables

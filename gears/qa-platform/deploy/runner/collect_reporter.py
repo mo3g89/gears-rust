@@ -71,9 +71,13 @@ def pytest_collection_finish(session):
     """Emit one count per collected file, once collection is complete.
 
     Guarded on `--collect-only` even though the entrypoint loads this plugin
-    only on that path: an operator who adds `-p collect_reporter` through
-    `QA_RUNNER_PYTEST_ARGS` on an ordinary run should get their tests run and
-    no counts, not counts for a run that is about to execute.
+    only on that path, and the guard is belt-and-braces rather than a real
+    path: `QA_RUNNER_PYTEST_ARGS` is a RESERVED variable name on every
+    writable tier and no operator override route into the runner pod's
+    environment exists (see `entrypoint.sh`'s own comment on it, which this
+    docstring contradicted until the second review, finding #66). If one is
+    ever opened, this guard is what keeps `-p collect_reporter` on an
+    ordinary run from producing counts for a run that is about to execute.
     """
     if not session.config.getoption("collectonly", default=False):
         return

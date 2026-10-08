@@ -19,6 +19,8 @@ pub mod entity;
 pub mod mapper;
 pub mod migrations;
 
+#[cfg(all(test, feature = "postgres"))]
+mod branch_cache_pg_tests;
 mod bundles_sea_repo;
 mod custom_plans_sea_repo;
 mod db;

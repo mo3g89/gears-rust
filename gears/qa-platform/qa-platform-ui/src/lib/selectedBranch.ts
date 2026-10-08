@@ -5,7 +5,7 @@ import { readMigrated } from '@/lib/storageKeys';
 // shared across the listing pages and the Run/Schedule dialogs so the chosen
 // branch is remembered everywhere. Empty string means "repository default".
 const STORAGE_KEY = 'qa.selectedBranch';
-/** The pre-Task-22 name. Read through once so nobody's branch resets. */
+/** The earlier `vhp.` name. Read through once so nobody's branch resets. */
 const LEGACY_STORAGE_KEY = 'vhp.selectedBranch';
 
 function readInitial(): string {

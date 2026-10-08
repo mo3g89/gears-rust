@@ -292,10 +292,8 @@ fn every_file_citation_in_this_subsystem_resolves() {
 /// * `../testrunner/docs/guides/run-parameters.md:37-43` — the legacy tree,
 ///   which is not in this repository. The sibling guard excludes the whole of
 ///   that tree from its own check on identical grounds.
-/// * `DECOMPOSITION.md:148`, `plans/2026-08-18-qa-insights-gear.md:330`,
-///   `exclusive-runs-and-the-queue.md:117` — documents that no longer exist
-///   here, or whose bare basename names several files in the wider repository
-///   and none in this subsystem.
+/// * Line-numbered citations of a bare document basename that names several
+///   files in the wider repository and none in this subsystem.
 ///
 /// Forcing those into heading form would mean inventing heading text for a
 /// document the author cannot open, and a citation that names the wrong

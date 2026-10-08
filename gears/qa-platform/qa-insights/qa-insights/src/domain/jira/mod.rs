@@ -16,11 +16,14 @@
 //! (`qa-runs/src/domain/runvars.rs`), but nothing populates it yet —
 //! `SKIP_TESTS_WITH_BUGS` is one of the "four things the source system sets
 //! and this cannot yet", because this gear has no config surface for them
-//! (`qa-runs/src/domain/service/dispatch_spec.rs:483`). That producer's
-//! absence is a recorded release-gate item (R74) rather than dead code:
-//! the function is the frozen wire format an external contract pins
-//! (`cpt-cf-qa-fr-runner-contract`), so it ships written and tested
-//! ahead of its caller deliberately.
+//! (`qa-runs/src/domain/service/dispatch_spec.rs:483`).
+//!
+//! **No caller exists yet.** qa-runs' launch path is the named consumer and does
+//! not call it, so a run today starts with no skip list whatever bugs are open.
+//! Nothing outside this comment tracks that. The function is kept anyway, not
+//! deleted as dead code, because the function is the frozen wire format an
+//! external contract pins (`cpt-cf-qa-fr-runner-contract`), so it ships
+//! written and tested ahead of its caller deliberately.
 //!
 //! **Task 33 is not one of them either**: its two
 //! endpoints (list the raw registry, file a bug) render `qa_insights_sdk::JiraBug`

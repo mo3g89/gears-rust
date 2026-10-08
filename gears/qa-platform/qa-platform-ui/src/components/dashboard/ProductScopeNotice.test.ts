@@ -31,7 +31,7 @@ describe('ProductScopeNotice', () => {
     expect(screen.queryByText(/3 custom plan runs counted under no product/)).not.toBeNull();
   });
 
-  // I5 (final review): the copy used to read "Custom plans span more than one
+  // The copy used to read "Custom plans span more than one
   // repository, so they cannot be attributed to the selected product" -- a
   // general claim about custom plans that the Runs list one click away
   // disproves, since `productScope.ts` does attribute them through the

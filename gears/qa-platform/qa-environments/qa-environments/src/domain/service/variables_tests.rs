@@ -16,7 +16,9 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use authz_resolver_sdk::models::{EvaluationRequest, EvaluationResponse};
+use authz_resolver_sdk::models::{
+    EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
+};
 use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use qa_environments_sdk::{NewVariable, RESERVED_VARIABLE_NAMES, Variable};
 use toolkit_db::secure::DBRunner;
@@ -42,13 +44,27 @@ use toolkit_security::PlatformSecurityContext;
 struct MockVariablesRepository {
     existing: Option<Variable>,
     find_calls: Mutex<usize>,
+    /// Scripts a lost create race: `find_by_natural_key` answers `None` on its
+    /// first call and `Some(winner)` after; `upsert` answers
+    /// `VariableNameExists` on its first call, as the repository does when a
+    /// concurrent insert of the same name committed between the probe and the
+    /// insert, and updates the winner after.
+    race_winner: Option<Variable>,
+    upsert_calls: Mutex<usize>,
 }
 
 impl MockVariablesRepository {
     fn with_existing(var: Variable) -> Self {
         Self {
             existing: Some(var),
-            find_calls: Mutex::new(0),
+            ..Self::default()
+        }
+    }
+
+    fn losing_a_create_race_to(winner: Variable) -> Self {
+        Self {
+            race_winner: Some(winner),
+            ..Self::default()
         }
     }
 
@@ -58,6 +74,10 @@ impl MockVariablesRepository {
 
     fn find_call_count(&self) -> usize {
         *self.find_calls.lock().unwrap()
+    }
+
+    fn upsert_call_count(&self) -> usize {
+        *self.upsert_calls.lock().unwrap()
     }
 }
 
@@ -90,7 +110,14 @@ impl VariablesRepository for MockVariablesRepository {
         _environment_id: Option<Uuid>,
         _name: &str,
     ) -> Result<Option<Variable>, DomainError> {
-        *self.find_calls.lock().unwrap() += 1;
+        let calls = {
+            let mut calls = self.find_calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        if let Some(winner) = &self.race_winner {
+            return Ok((calls > 1).then(|| winner.clone()));
+        }
         Ok(self.existing.clone())
     }
 
@@ -101,6 +128,22 @@ impl VariablesRepository for MockVariablesRepository {
         _tenant_id: Uuid,
         var: NewVariable,
     ) -> Result<Variable, DomainError> {
+        let call = {
+            let mut calls = self.upsert_calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        if let Some(winner) = &self.race_winner {
+            if call == 1 {
+                return Err(DomainError::VariableNameExists { name: var.name });
+            }
+            return Ok(Variable {
+                id: winner.id,
+                environment_id: var.environment_id,
+                name: var.name,
+                value: var.value,
+            });
+        }
         let id = self.existing.as_ref().map_or_else(Uuid::new_v4, |v| v.id);
         Ok(Variable {
             id,
@@ -126,11 +169,22 @@ impl VariablesRepository for MockVariablesRepository {
 #[derive(Default)]
 struct RecordingAuthZ {
     requests: Mutex<Vec<(String, Option<Uuid>)>>,
+    /// An action this PDP refuses (`decision = false`); every other action is
+    /// granted. `None` grants everything.
+    denied_action: Option<&'static str>,
 }
 
 impl RecordingAuthZ {
     fn new() -> Self {
         Self::default()
+    }
+
+    /// A caller who holds every action except `action`.
+    fn denying(action: &'static str) -> Self {
+        Self {
+            denied_action: Some(action),
+            ..Self::default()
+        }
     }
 
     fn requested(&self, action: &str, resource_id: Option<Uuid>) -> bool {
@@ -153,6 +207,12 @@ impl AuthZResolverApi for RecordingAuthZ {
             .lock()
             .unwrap()
             .push((request.action.name.clone(), request.resource.id));
+        if self.denied_action == Some(request.action.name.as_str()) {
+            return Ok(EvaluationResponse {
+                decision: false,
+                context: EvaluationResponseContext::default(),
+            });
+        }
         Ok(permissive_response(&request))
     }
 }
@@ -264,6 +324,105 @@ async fn upsert_new_row_requests_create_scope() {
     );
 }
 
+/// Two `PUT /qa/v1/variables` of one new name at the same time both succeed.
+/// The one whose insert lost to the other's re-probes, is authorized as an
+/// `UPDATE` of the winner's row, and writes its value over it. It does not
+/// answer 409 for a request whose meaning is "create or update", and it is not
+/// treated as a `CREATE`: that would let a caller who may create but not update
+/// overwrite a row.
+#[tokio::test]
+async fn an_upsert_that_loses_a_create_race_updates_the_winner_as_an_update() {
+    let tenant_id = Uuid::new_v4();
+    let winner = Variable {
+        id: Uuid::new_v4(),
+        environment_id: None,
+        name: "RACED".to_owned(),
+        value: "first".to_owned(),
+    };
+    let variables_repo = Arc::new(MockVariablesRepository::losing_a_create_race_to(
+        winner.clone(),
+    ));
+    let environments_repo = Arc::new(MockEnvironmentsRepository::none());
+    let authz = Arc::new(RecordingAuthZ::new());
+    let svc = build_service(variables_repo.clone(), environments_repo, authz.clone()).await;
+
+    let written = svc
+        .upsert(
+            &ctx(tenant_id),
+            NewVariable {
+                environment_id: None,
+                name: "RACED".to_owned(),
+                value: "second".to_owned(),
+            },
+        )
+        .await
+        .expect("the loser of a create race updates the winner's row");
+
+    assert_eq!(written.id, winner.id, "the row the other request created");
+    assert_eq!(written.value, "second", "the later write wins");
+    assert_eq!(
+        variables_repo.find_call_count(),
+        2,
+        "probed, lost, probed again"
+    );
+    assert!(
+        authz.requested(actions::CREATE, None),
+        "the first attempt was a create: {:?}",
+        authz.requests.lock().unwrap()
+    );
+    assert!(
+        authz.requested(actions::UPDATE, Some(winner.id)),
+        "the retry must be authorized as an update of the winner's row: {:?}",
+        authz.requests.lock().unwrap()
+    );
+}
+
+/// The other half of the rule above: a caller who may create variables but not
+/// update them, and whose create loses the race, is refused. The row the other
+/// request created is never written: the repository saw the one losing insert
+/// and nothing after it. A single-statement `ON CONFLICT DO UPDATE` would have
+/// overwritten it under the `CREATE` authorization.
+#[tokio::test]
+async fn a_caller_who_may_create_but_not_update_is_refused_when_its_create_loses_the_race() {
+    let tenant_id = Uuid::new_v4();
+    let winner = Variable {
+        id: Uuid::new_v4(),
+        environment_id: None,
+        name: "RACED".to_owned(),
+        value: "first".to_owned(),
+    };
+    let variables_repo = Arc::new(MockVariablesRepository::losing_a_create_race_to(
+        winner.clone(),
+    ));
+    let environments_repo = Arc::new(MockEnvironmentsRepository::none());
+    let authz = Arc::new(RecordingAuthZ::denying(actions::UPDATE));
+    let svc = build_service(variables_repo.clone(), environments_repo, authz.clone()).await;
+
+    let err = svc
+        .upsert(
+            &ctx(tenant_id),
+            NewVariable {
+                environment_id: None,
+                name: "RACED".to_owned(),
+                value: "second".to_owned(),
+            },
+        )
+        .await
+        .expect_err("a caller without UPDATE must not overwrite the winner's row");
+
+    assert!(matches!(err, DomainError::Forbidden), "got {err:?}");
+    assert_eq!(
+        variables_repo.upsert_call_count(),
+        1,
+        "only the losing insert reached the repository; the winner's row was not written"
+    );
+    assert!(
+        authz.requested(actions::UPDATE, Some(winner.id)),
+        "the refusal came from an UPDATE request on the winner's row: {:?}",
+        authz.requests.lock().unwrap()
+    );
+}
+
 /// Regression test for the cross-tenant existence oracle: a foreign
 /// `environment_id` (one the caller's environments repo can't see) must 404 from
 /// the tenancy precheck *before* the natural-key probe ever runs. If the
@@ -306,7 +465,7 @@ async fn upsert_foreign_environment_is_not_found_before_probe() {
 }
 
 // ---------------------------------------------------------------------------
-// Reserved-name refusal (Task 11b)
+// Reserved-name refusal
 // ---------------------------------------------------------------------------
 //
 // The source system refuses these names on all three environment write paths;

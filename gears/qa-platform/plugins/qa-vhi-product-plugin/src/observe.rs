@@ -261,10 +261,12 @@ pub async fn observe(env: &EnvironmentHandle<'_>) -> PluginObservation {
 /// spawns three synchronous children and polls two of them with
 /// `std::thread::sleep`, for up to 40 uncancellable seconds
 /// (`qa_connector_ssh::agent`'s own header). `observe` is awaited by
-/// `qa-environments` with no platform timeout around it, on the observation
-/// ticker *and* on `POST /environments/{id}/refresh`, so doing that on the
-/// tokio worker would stall every other task on that thread and outrun the
-/// gear's `stop_timeout`. [`SshSession::open_on_blocking_pool`] is the
+/// `qa-environments` under `observation.observe_timeout_seconds`, on the
+/// observation ticker *and* on `POST /environments/{id}/refresh`; that
+/// deadline drops the future, but it cannot interrupt a synchronous call
+/// already running on a tokio worker, so doing that work there would still
+/// stall every other task on that thread and outrun the gear's
+/// `stop_timeout`. [`SshSession::open_on_blocking_pool`] is the
 /// connector's own wrapper for exactly this, and it is what makes the two
 /// cheap pre-flight checks above worth doing first: neither costs a thread.
 async fn open_session<'a>(
@@ -299,8 +301,7 @@ struct ObserveTarget<'a> {
 }
 
 /// The environment half of an observation: the three reads `observe`
-/// performs, in order (`PRODUCT-PLUGINS-DESIGN.md` §5, cited here before
-/// the docs squash, is not in the repository any more).
+/// performs, in order.
 ///
 /// Split out of [`observe`] so it can be driven against a real `sshd` fixture
 /// without stored credential material -- [`observe`] builds its own session

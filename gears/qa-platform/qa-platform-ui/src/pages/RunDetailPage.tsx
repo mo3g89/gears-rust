@@ -61,11 +61,11 @@ export function RunDetailPage() {
   const repositoryLabel = run.repo_name || run.repo_id || null;
   const sourceRefLabel = getSourceRefLabel(run);
   const activeRun = isActiveRun(run);
-  // Task 10: a skip no longer fails a run, so a `succeeded` run may have
+  // A skip no longer fails a run, so a `succeeded` run may have
   // asserted less than the word implies. Computed once and used at both the
   // header badge and the Test Results card, rather than re-deriving it twice.
   // `run.phase` is qa-runs' lowercase state set (`runFromDto` sets it to
-  // `dto.state` "without re-casing", adapters.ts:378-383, decision X4) - not
+  // `dto.state` "without re-casing", `adapters.ts`) - not
   // Title Case, so the comparison below must match that, not `RunPhaseBadge`'s
   // (separate, pre-existing) Title-Case switch.
   const skippedCount = run.result?.skipped ?? 0;

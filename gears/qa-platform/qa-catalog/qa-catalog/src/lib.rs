@@ -43,6 +43,9 @@ pub use domain::service::SyncCache;
 /// on-disk layout they check it wrote (`tests/gix_sync_integration.rs`,
 /// `tests/multi_branch.rs`).
 pub use infra::git::GixSyncEngine;
+/// The limits `tests/gix_sync_integration.rs` constructs the engine with to
+/// drive its deadlines and byte budgets.
+pub use infra::git::SyncLimits;
 pub use infra::git::layout::{branch_workdir, host_dir};
 
 #[cfg(test)]
@@ -56,3 +59,11 @@ mod test_support;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "no_api_in_domain_tests.rs"]
 mod no_api_in_domain_tests;
+
+/// Every migration name this gear's comments cite is live, or says it was
+/// folded away. One implementation shared with the other qa gears, kept in
+/// `qa-runs` where it started; see its header.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "../../../qa-runs/qa-runs/src/migration_citations_tests.rs"]
+mod migration_citations_tests;

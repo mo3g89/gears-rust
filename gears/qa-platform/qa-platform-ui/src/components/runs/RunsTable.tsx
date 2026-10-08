@@ -111,10 +111,10 @@ export function RunsTable({
                   <div className="flex items-center gap-1.5">
                     <RunPhaseBadge phase={run.phase} />
                     {/* `run.phase` is `WorkflowRun.phase`, which `runFromDto` sets to
-                        `dto.state` "without re-casing" (adapters.ts:378-383, decision X4) -
+                        `dto.state` "without re-casing" (`adapters.ts`) -
                         qa-runs' lowercase state set, not Title Case. `RunPhaseBadge` itself
                         switches on Title Case (a separate, pre-existing defect elsewhere,
-                        not this task's to fix), but this marker's own condition must compare
+                        not fixed here), but this marker's own condition must compare
                         against the real value or it never renders. */}
                     {run.phase === 'succeeded' && !!run.result?.skipped && (
                       <SucceededWithSkipsMarker skipped={run.result.skipped} />

@@ -7,7 +7,9 @@
 //! Note what has **no** toggle: the run-queue `expired` event. Legacy gates
 //! only `queued` behind [`Model::run_queue_queued_slack_enabled`], because
 //! `expired` is "the one that stops a run disappearing silently". Its absence
-//! from this table is the port of that.
+//! from this table is the port of that. (Neither event has a producer in this
+//! gear today: no queue alert is sent, `expired` included — `DESIGN.md` §3.5,
+//! "What actually notifies".)
 
 use sea_orm::entity::prelude::*;
 use time::OffsetDateTime;

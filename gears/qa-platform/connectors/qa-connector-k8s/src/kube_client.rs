@@ -1,7 +1,7 @@
-//! Lifted from `qa-environments/src/infra/observer/kube_observer.rs`, which
-//! stays in place and stays active until Task 19 removes it. This is a copy,
-//! not a move: Phase C must not change `qa-environments`' behaviour, so both
-//! paths exist side by side until the one-way door in Phase E.
+//! Lifted from `qa-environments/src/infra/observer/kube_observer.rs`. It was a
+//! copy, not a move: Phase C must not change `qa-environments`' behaviour, so
+//! both paths existed side by side until the one-way door in Phase E. Task 19b
+//! deleted the original; this is the only copy.
 //!
 //! What changed in the copy: the VHP-specific half went the other way. The
 //! `core-install-metadata` / `vp-gateway-hostnames` / `platformVersion` rules
@@ -28,17 +28,92 @@ use std::collections::BTreeMap;
 use credstore_sdk::SecretValue;
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Node};
 use kube::api::{Api, ListParams};
+use kube::client::{ClientBuilder, DynBody};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
 use qa_product_sdk::observation::{FailureClass, HealthOutcome, HealthState, PluginFailure};
+use tower::util::MapResponseLayer;
 
-use crate::errors::{CLIENT_BUILD_FAILURE, NOT_UTF8, classify, classify_kubeconfig};
+use crate::errors::{
+    CLIENT_BUILD_FAILURE, LIST_DID_NOT_END, NOT_UTF8, TOO_MANY_NODES, classify, classify_kubeconfig,
+};
 
 /// Fixed explanation for a `ConfigMap` the API server answered about and does
 /// not have. Distinct from a *failed* read, which classifies through
 /// [`classify`] and says why the read itself did not happen.
 const CONFIGMAP_NOT_FOUND: &str =
     "the ConfigMap does not exist in that namespace (the read itself succeeded)";
+
+/// The most bytes of one API response this client buffers. kube-rs reads a
+/// whole body before parsing it (`Client::request_text`), and the API server
+/// is a tenant's: without this, the tenant decides how much this process
+/// allocates. A `ConfigMap` is at most ~1 MiB (etcd's object limit), and a
+/// page of [`LIST_PAGE_SIZE`] nodes is well under this.
+pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// Items per list request (`ListParams::limit`).
+pub const LIST_PAGE_SIZE: u32 = 250;
+/// Nodes read before a cluster is refused: upstream Kubernetes' own
+/// supported maximum cluster size.
+pub const MAX_LISTED_NODES: usize = 5_000;
+/// Namespaces counted before the count is left unknown: upstream
+/// Kubernetes' tested namespace threshold.
+pub const MAX_COUNTED_NAMESPACES: usize = 10_000;
+/// `ConfigMap`s the cluster-wide scan asks for; the caller takes the first.
+pub const MAX_SCANNED_CONFIGMAPS: u32 = 16;
+/// Per-request bounds handed to kube (its defaults are 30 s / 295 s / 295 s).
+/// `read_timeout` is per read, not per response, so it does not bound a
+/// trickling server — `qa-environments`' observation deadline does.
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// See [`CONNECT_TIMEOUT`].
+pub const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// See [`CONNECT_TIMEOUT`].
+pub const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wrap one response body in [`http_body_util::Limited`]: reading past
+/// [`MAX_RESPONSE_BYTES`] fails with `LengthLimitError`, which
+/// [`crate::errors::classify`] names. Applied by every constructor that talks
+/// to a tenant's cluster ([`KubeClient::from_kubeconfig`] and the test
+/// route table), through `tower::util::MapResponseLayer`.
+pub(crate) fn cap_response<B>(
+    response: http::Response<B>,
+) -> http::Response<http_body_util::Limited<B>> {
+    response.map(|body| http_body_util::Limited::new(body, MAX_RESPONSE_BYTES))
+}
+
+/// Every item of one list, a page of [`LIST_PAGE_SIZE`] at a time, or `None`
+/// as soon as more than `max` have been seen.
+///
+/// The item cap alone does not end a list: a server that answers empty (or
+/// short) pages, each with a fresh continue token, never pushes the count
+/// past `max`. So the number of pages is capped too, at the pages `max` items
+/// need plus one — a server that is still handing out tokens past that is
+/// not paging a list of at most `max`, and the read is a
+/// [`FailureClass::Malformed`] failure ([`LIST_DID_NOT_END`]) rather than a
+/// loop that only the observation deadline would stop.
+async fn list_bounded<K>(api: &Api<K>, max: usize) -> Result<Option<Vec<K>>, PluginFailure>
+where
+    K: Clone + k8s_openapi::serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let page_size = usize::try_from(LIST_PAGE_SIZE).unwrap_or(usize::MAX);
+    let max_pages = max.div_ceil(page_size) + 1;
+    let mut items = Vec::new();
+    let mut params = ListParams::default().limit(LIST_PAGE_SIZE);
+    for _ in 0..max_pages {
+        let page = api.list(&params).await.map_err(|error| classify(&error))?;
+        items.extend(page.items);
+        if items.len() > max {
+            return Ok(None);
+        }
+        match page.metadata.continue_ {
+            Some(token) if !token.is_empty() => params = params.continue_token(&token),
+            _ => return Ok(Some(items)),
+        }
+    }
+    Err(PluginFailure::classified(
+        FailureClass::Malformed,
+        LIST_DID_NOT_END,
+    ))
+}
 
 /// One node, as the cluster reported it.
 ///
@@ -212,10 +287,18 @@ impl KubeClient {
         let text = std::str::from_utf8(kubeconfig.as_bytes())
             .map_err(|_| PluginFailure::classified(FailureClass::Malformed, NOT_UTF8))?;
         let parsed = Kubeconfig::from_yaml(text).map_err(|error| classify_kubeconfig(&error))?;
-        let config = Config::from_custom_kubeconfig(parsed, &KubeConfigOptions::default())
+        let mut config = Config::from_custom_kubeconfig(parsed, &KubeConfigOptions::default())
             .await
             .map_err(|error| classify_kubeconfig(&error))?;
-        Client::try_from(config)
+        config.connect_timeout = Some(CONNECT_TIMEOUT);
+        config.read_timeout = Some(READ_TIMEOUT);
+        config.write_timeout = Some(WRITE_TIMEOUT);
+        ClientBuilder::try_from(config)
+            .map(|builder| {
+                builder
+                    .with_layer(&MapResponseLayer::new(cap_response::<Box<DynBody>>))
+                    .build()
+            })
             .map(Self::from_client)
             .map_err(|_| PluginFailure::classified(FailureClass::Malformed, CLIENT_BUILD_FAILURE))
     }
@@ -286,6 +369,9 @@ impl KubeClient {
     /// is the API server's, unchanged — a caller that takes the first is
     /// responsible for saying so.
     ///
+    /// At most [`MAX_SCANNED_CONFIGMAPS`], and a continue token is not
+    /// followed.
+    ///
     /// # Errors
     ///
     /// The list failing, classified through [`classify`].
@@ -299,7 +385,8 @@ impl KubeClient {
             .list(
                 &ListParams::default()
                     .labels(labels.0)
-                    .fields(&format!("metadata.name={name}")),
+                    .fields(&format!("metadata.name={name}"))
+                    .limit(MAX_SCANNED_CONFIGMAPS),
             )
             .await
             .map_err(|error| classify(&error))?;
@@ -323,28 +410,45 @@ impl KubeClient {
     /// Nodes are sorted by name, as legacy sorts them, so the rendered table
     /// is stable across ticks rather than reordering on every poll.
     ///
+    /// Both lists are read a page at a time; more than [`MAX_LISTED_NODES`]
+    /// nodes is a [`FailureClass::Malformed`] failure, more than
+    /// [`MAX_COUNTED_NAMESPACES`] namespaces leaves the count `None`, and so
+    /// does a namespace list that never ends; a node list that never ends
+    /// (more pages than [`MAX_LISTED_NODES`] items need) is `Malformed`.
+    ///
     /// # Errors
     ///
-    /// The node list failing, classified through [`classify`].
+    /// The node list failing, classified through [`classify`], or listing
+    /// more than [`MAX_LISTED_NODES`] nodes.
     pub async fn read_cluster_health(&self) -> Result<ClusterHealth, PluginFailure> {
         let nodes_api: Api<Node> = Api::all(self.client.clone());
         let namespaces_api: Api<Namespace> = Api::all(self.client.clone());
 
-        let items = nodes_api
-            .list(&ListParams::default())
-            .await
-            .map_err(|error| classify(&error))?;
+        let items =
+            list_bounded(&nodes_api, MAX_LISTED_NODES)
+                .await?
+                .ok_or(PluginFailure::classified(
+                    FailureClass::Malformed,
+                    TOO_MANY_NODES,
+                ))?;
 
-        let mut nodes: Vec<NodeSummary> = items.items.into_iter().map(node_summary).collect();
+        let mut nodes: Vec<NodeSummary> = items.into_iter().map(node_summary).collect();
         nodes.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let namespace_count = match namespaces_api.list(&ListParams::default()).await {
-            Ok(list) => u32::try_from(list.items.len()).ok(),
-            Err(error) => {
+        let namespace_count = match list_bounded(&namespaces_api, MAX_COUNTED_NAMESPACES).await {
+            Ok(Some(list)) => u32::try_from(list.len()).ok(),
+            Ok(None) => {
+                tracing::debug!(
+                    cap = MAX_COUNTED_NAMESPACES,
+                    "the cluster lists more namespaces than are counted; the count is left unknown"
+                );
+                None
+            }
+            Err(failure) => {
                 // Classified, not formatted, even though this one only reaches a
                 // log line: the rule is the rule everywhere in this crate.
                 tracing::debug!(
-                    reason = %classify(&error),
+                    reason = %failure,
                     "namespace list failed; the count is left unknown"
                 );
                 None
@@ -734,7 +838,7 @@ mod tests {
         );
     }
 
-    /// D-CH-5: a cluster read that fails must classify, never echo. The
+    /// A cluster read that fails must classify, never echo. The
     /// canary is a token in the kubeconfig — the material this whole crate
     /// exists to keep out of a published health message.
     #[tokio::test]
@@ -874,7 +978,7 @@ mod tests {
     }
 
     /// The canary this test exists for: not a kubeconfig secret, but the
-    /// same class of leak (D-CH-5) on the other read `read_cluster_health`
+    /// same class of leak (an echoed raw error) on the other read `read_cluster_health`
     /// makes. A bare JSON string is a valid document but the wrong shape for
     /// `ObjectList<Namespace>` (the same C1 shape mismatch `errors.rs`
     /// measured for kubeconfig parsing), so the client-side deserialize
@@ -885,7 +989,7 @@ mod tests {
     const NAMESPACE_LIST_CANARY: &str =
         "CANARY-namespace-list-parse-error-do-not-echo-raw-into-the-log";
 
-    /// D-CH-5, the namespace half: `read_cluster_health` must still classify a
+    /// The namespace half of the classify-never-echo rule: `read_cluster_health` must still classify a
     /// failed namespace list through [`classify`], not format the underlying
     /// error, even though the failure only ever reaches a log line and never
     /// the published [`HealthOutcome`]. Nothing at that call site stops an
@@ -1191,7 +1295,7 @@ mod tests {
         );
     }
 
-    /// D-CH-5 on the `ConfigMap` reads: a read that *fails* must classify
+    /// The classify-never-echo rule on the `ConfigMap` reads: a read that *fails* must classify
     /// through [`classify`], never format. A real refused connection rather
     /// than a synthetic error, for the same reason `errors` insists on one —
     /// `hyper_util::client::legacy::Error` has no public constructor, so the
@@ -1234,5 +1338,262 @@ mod tests {
             );
             assert_eq!(failure.class, FailureClass::Unreachable);
         }
+    }
+
+    /// A `NodeList` page of `count` nodes named `{prefix}-{i}`, pointing at
+    /// `next` when there is one. Minimal objects: the limits under test are
+    /// about item counts, not object size.
+    fn node_page(prefix: &str, count: usize, next: Option<&str>) -> Vec<u8> {
+        let items: Vec<serde_json::Value> = (0..count)
+            .map(|i| serde_json::json!({ "metadata": { "name": format!("{prefix}-{i}") } }))
+            .collect();
+        serde_json::to_vec(&serde_json::json!({
+            "kind": "NodeList", "apiVersion": "v1",
+            "metadata": { "continue": next.unwrap_or("") },
+            "items": items,
+        }))
+        .expect("serialising a fixture NodeList")
+    }
+
+    /// Same shape for namespaces.
+    fn namespace_page(prefix: &str, count: usize, next: Option<&str>) -> Vec<u8> {
+        let items: Vec<serde_json::Value> = (0..count)
+            .map(|i| serde_json::json!({ "metadata": { "name": format!("{prefix}-{i}") } }))
+            .collect();
+        serde_json::to_vec(&serde_json::json!({
+            "kind": "NamespaceList", "apiVersion": "v1",
+            "metadata": { "continue": next.unwrap_or("") },
+            "items": items,
+        }))
+        .expect("serialising a fixture NamespaceList")
+    }
+
+    /// The page index a request asks for: `continue=p{n}`, or 0 for the first.
+    fn page_index(request: &StubRequest) -> usize {
+        request
+            .query_param("continue")
+            .and_then(|token| token.strip_prefix('p'))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// A list longer than one page is read a page at a time, every request
+    /// carrying the page size, and the second carrying the server's token.
+    #[tokio::test]
+    async fn a_node_list_is_read_a_bounded_page_at_a_time() {
+        let page = usize::try_from(LIST_PAGE_SIZE).unwrap();
+        let (client, seen) = recording_client(move |request| match request.path.as_str() {
+            "/api/v1/nodes" => match page_index(request) {
+                0 => (200, node_page("first", page, Some("p1"))),
+                _ => (200, node_page("second", 3, None)),
+            },
+            "/api/v1/namespaces" => (200, namespace_page("ns", 2, None)),
+            other => panic!("unexpected request: {other}"),
+        });
+
+        let health = client
+            .read_cluster_health()
+            .await
+            .expect("two pages, under every cap");
+
+        assert_eq!(health.nodes.len(), page + 3);
+        assert_eq!(health.namespace_count, Some(2));
+        let node_requests: Vec<StubRequest> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.path == "/api/v1/nodes")
+            .cloned()
+            .collect();
+        assert_eq!(node_requests.len(), 2, "{node_requests:?}");
+        for request in &node_requests {
+            assert_eq!(
+                request.query_param("limit"),
+                Some(LIST_PAGE_SIZE.to_string().as_str())
+            );
+        }
+        assert_eq!(node_requests[1].query_param("continue"), Some("p1"));
+    }
+
+    /// One node past `MAX_LISTED_NODES` is a classified failure, not a
+    /// partial status computed from the nodes that happened to fit. Finite:
+    /// `MAX_LISTED_NODES + 1` minimal nodes, a page at a time.
+    #[tokio::test]
+    async fn a_cluster_listing_more_nodes_than_the_cap_is_a_classified_failure() {
+        let page = usize::try_from(LIST_PAGE_SIZE).unwrap();
+        let total = MAX_LISTED_NODES + 1;
+        let pages = total.div_ceil(page);
+        let client = KubeClient::from_routes(move |request| match request.path.as_str() {
+            "/api/v1/nodes" => {
+                let index = page_index(request);
+                let count = if index + 1 == pages {
+                    total - index * page
+                } else {
+                    page
+                };
+                let next = (index + 1 < pages).then(|| format!("p{}", index + 1));
+                (200, node_page(&format!("n{index}"), count, next.as_deref()))
+            }
+            other => panic!("the node cap must stop before any other read: {other}"),
+        });
+
+        let failure = client
+            .read_cluster_health()
+            .await
+            .expect_err("a node list past the cap must not be read whole");
+
+        assert_eq!(failure.class, FailureClass::Malformed);
+        assert_eq!(failure.detail, Some(crate::errors::TOO_MANY_NODES));
+    }
+
+    /// The namespace count is supplementary: past its cap it is unknown, and
+    /// the node half still answers.
+    #[tokio::test]
+    async fn a_namespace_list_past_the_cap_leaves_the_count_unknown() {
+        let page = usize::try_from(LIST_PAGE_SIZE).unwrap();
+        let total = MAX_COUNTED_NAMESPACES + 1;
+        let pages = total.div_ceil(page);
+        let client = KubeClient::from_routes(move |request| match request.path.as_str() {
+            "/api/v1/nodes" => (200, node_page("node", 1, None)),
+            "/api/v1/namespaces" => {
+                let index = page_index(request);
+                let count = if index + 1 == pages {
+                    total - index * page
+                } else {
+                    page
+                };
+                let next = (index + 1 < pages).then(|| format!("p{}", index + 1));
+                (
+                    200,
+                    namespace_page(&format!("s{index}"), count, next.as_deref()),
+                )
+            }
+            other => panic!("unexpected request: {other}"),
+        });
+
+        let health = client
+            .read_cluster_health()
+            .await
+            .expect("the node half answers");
+
+        assert_eq!(health.nodes.len(), 1);
+        assert_eq!(health.namespace_count, None);
+    }
+
+    /// The cluster-wide scan asks for at most `MAX_SCANNED_CONFIGMAPS` and
+    /// never follows a continue token: the caller takes the first match.
+    #[tokio::test]
+    async fn the_scan_asks_for_a_bounded_page_and_does_not_follow_it() {
+        let (client, seen) = recording_client(|_| (200, StubConfigMap::list_body(&[])));
+
+        client
+            .scan_configmaps(LabelSelector(VPADM_MANAGED_BY), "core-install-metadata")
+            .await
+            .expect("the stub answered 200");
+
+        let request = only_request(&seen);
+        assert_eq!(
+            request.query_param("limit"),
+            Some(MAX_SCANNED_CONFIGMAPS.to_string().as_str())
+        );
+    }
+
+    /// **The body cap is wired into the client `from_kubeconfig` builds** —
+    /// driven through a real loopback server, because a route-table client
+    /// would not prove the production constructor applies it. Finite: one
+    /// `ConfigMap` whose single value is `MAX_RESPONSE_BYTES + 1 MiB` bytes.
+    #[tokio::test]
+    async fn a_response_past_the_size_cap_is_refused_not_buffered() {
+        let oversized = "x".repeat(MAX_RESPONSE_BYTES + 1024 * 1024);
+        let body = StubConfigMap::new("virtuozzo", "core-install-metadata")
+            .with("blob", &oversized)
+            .body();
+        let server = crate::test_support::StubApiServer::start(move |_| (200, body.clone())).await;
+        let client = KubeClient::from_kubeconfig(&SecretValue::from(server.kubeconfig("token")))
+            .await
+            .expect("a valid kubeconfig for the stub server");
+
+        // Reduced to the value's size before `expect_err`, so a failure
+        // reports a number rather than printing the 9 MiB it read.
+        let failure = client
+            .find_configmap("virtuozzo", "core-install-metadata")
+            .await
+            .map(|found| {
+                found.map(|config_map| config_map.data.values().map(String::len).sum::<usize>())
+            })
+            .expect_err("a body past the cap must be refused");
+
+        assert_eq!(failure.detail, Some(crate::errors::RESPONSE_TOO_LARGE));
+        assert_eq!(failure.class, FailureClass::Malformed);
+    }
+
+    /// A route table that answers every list with an **empty** page carrying
+    /// a fresh continue token — a server that never lets a list end. Panics
+    /// past `ceiling` requests, so the fixture stays finite even if the page
+    /// cap is broken: the failure is a panic, not a loop until the deadline.
+    fn endless_empty_pages(
+        path: &'static str,
+        ceiling: usize,
+        answered: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> KubeClient {
+        KubeClient::from_routes(move |request| {
+            if request.path == path {
+                let n = answered.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                assert!(n <= ceiling, "the list was followed past {ceiling} pages");
+                let next = format!("p{n}");
+                let body = if path == "/api/v1/nodes" {
+                    node_page("none", 0, Some(&next))
+                } else {
+                    namespace_page("none", 0, Some(&next))
+                };
+                return (200, body);
+            }
+            match request.path.as_str() {
+                "/api/v1/nodes" => (200, node_page("node", 1, None)),
+                other => panic!("unexpected request: {other}"),
+            }
+        })
+    }
+
+    /// **A list that never ends is a classified failure after a bounded
+    /// number of pages.** Empty pages never push the item count past the
+    /// cap, so only the page cap stops this; it allows exactly the pages
+    /// `MAX_LISTED_NODES` items need, plus one.
+    #[tokio::test]
+    async fn a_node_list_that_never_ends_stops_at_the_page_cap() {
+        let pages = MAX_LISTED_NODES.div_ceil(usize::try_from(LIST_PAGE_SIZE).unwrap()) + 1;
+        let answered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = endless_empty_pages("/api/v1/nodes", 1_000, Arc::clone(&answered));
+
+        let failure = client
+            .read_cluster_health()
+            .await
+            .expect_err("a list that never ends must not be followed forever");
+
+        assert_eq!(failure.class, FailureClass::Malformed);
+        assert_eq!(failure.detail, Some(crate::errors::LIST_DID_NOT_END));
+        assert_eq!(
+            answered.load(std::sync::atomic::Ordering::SeqCst),
+            pages,
+            "exactly the page cap was read"
+        );
+    }
+
+    /// The namespace half of the same rule: an endless namespace list leaves
+    /// the count unknown and the node half still answers.
+    #[tokio::test]
+    async fn a_namespace_list_that_never_ends_leaves_the_count_unknown() {
+        let pages = MAX_COUNTED_NAMESPACES.div_ceil(usize::try_from(LIST_PAGE_SIZE).unwrap()) + 1;
+        let answered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = endless_empty_pages("/api/v1/namespaces", 1_000, Arc::clone(&answered));
+
+        let health = client
+            .read_cluster_health()
+            .await
+            .expect("the node half answers");
+
+        assert_eq!(health.nodes.len(), 1);
+        assert_eq!(health.namespace_count, None);
+        assert_eq!(answered.load(std::sync::atomic::Ordering::SeqCst), pages);
     }
 }

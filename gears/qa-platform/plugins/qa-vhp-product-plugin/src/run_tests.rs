@@ -10,7 +10,7 @@
 //! they are pinned further down this file:
 //!
 //! * a variable-tier value of `E2E_VHP_BASE_URL` is overridable by a run
-//!   parameter — the name is not reserved (decision D3);
+//!   parameter — the name is not reserved;
 //! * `VPADM_BASE_DOMAIN` accompanies `E2E_VHP_BASE_URL` and shares its
 //!   precedence;
 //! * an unparseable base URL still yields `E2E_VHP_BASE_URL`, suppressing only
@@ -279,7 +279,7 @@ fn a_never_observed_environment_yields_the_kubeconfig_and_nothing_else() {
 }
 
 /// **Rule 1.** `E2E_VHP_BASE_URL` is not reserved, so a run parameter of that
-/// name overrides it (decision D3).
+/// name overrides it.
 ///
 /// `runvars.rs`' `the_platform_base_url_overrides_a_platform_variable_but_not_a_parameter`
 /// (deleted by Task 18) asserted the override by running the ladder — its

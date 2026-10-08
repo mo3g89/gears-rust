@@ -38,7 +38,13 @@ pub(super) fn register_admin_routes(router: Router, openapi: &dyn OpenApiRegistr
              standing. The window is walked in pages under a fixed budget, so a window wider \
              than one page is replayed in full rather than truncated: check `complete` on the \
              response, and when it is false post `resume_from` back as `from` with the same \
-             `to` until it is true.",
+             `to` until it is true. It replays the run-completed notification too, and can \
+             therefore send Slack messages and email: a run is announced only if this \
+             deployment has never decided about it before, or if its send was attempted and \
+             failed. A run that was already sent, that finished before this deployment began \
+             notifying, or whose notification was declined at the time - the channel was off, \
+             or had no destination configured - is not announced, so enabling a channel and \
+             then rebuilding a window does not mail its history.",
         )
         .tag(API_TAG)
         .authenticated()

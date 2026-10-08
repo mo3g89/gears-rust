@@ -7,9 +7,9 @@
  * window focus would be noise. `staleTime: Infinity` says that rather than
  * leaving the default and hoping nobody notices.
  *
- * This is the single new endpoint §8 says the UI needs, and it serves both
- * halves: the environments table reads `observed_schema` (Task 21) and the
- * credential form reads `credential_schema` (Task 22).
+ * This is the single new endpoint the UI needs, and it serves both
+ * halves: the environments table reads `observed_schema` and the
+ * credential form reads `credential_schema`.
  */
 import { useQuery } from '@tanstack/react-query';
 

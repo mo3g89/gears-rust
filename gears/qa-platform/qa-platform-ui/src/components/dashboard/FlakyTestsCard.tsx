@@ -38,7 +38,7 @@ export function FlakyTestsCard({ tests }: FlakyTestsCardProps) {
           <ul className="divide-y">
             {tests.map((test, idx) => {
               // The test catalog and its detail view have no backend here, so a
-              // flaky test links to its plan (see REMOVED-SURFACES.md, Task 8a C1).
+              // flaky test links to its plan.
               const target = `/plans/${test.plan_id}`;
               return (
                 <li key={`${test.plan_id}-${test.test_name}-${idx}`} className="flex items-center justify-between gap-3 py-2">

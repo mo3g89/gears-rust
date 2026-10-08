@@ -82,8 +82,9 @@ fn schedule_columns(new: &NewSchedule) -> Result<ScheduleAM, DomainError> {
         // schedule can hold: this literal ends in `..Default::default()`, which
         // absorbs a new column **without a compile error** and would have
         // written `NULL` over a collect target's URL.
-        // `m20260818_000006_collect_target` records why the column exists on
-        // this table at all.
+        // `m20260818_000006_collect_target` (folded into `migrations::m20260813_000003_initial` by the docs squash)
+        // is where the column was added to this table; the initial migration now
+        // declares it, without that migration's argument for why.
         //
         // # The unreachable state is load-bearing, and here is what would make
         // it reachable
@@ -243,22 +244,6 @@ impl SchedulesRepository for OrmSchedulesRepository {
     ) -> Result<Option<Schedule>, DomainError> {
         let found = ScheduleEntity::find()
             .filter(by_id(id))
-            .secure()
-            .scope_with(scope)
-            .one(runner)
-            .await
-            .map_err(db_err)?;
-        found.map(schedule_to_sdk).transpose()
-    }
-
-    async fn get_by_name<C: DBRunner>(
-        &self,
-        runner: &C,
-        scope: &AccessScope,
-        name: &str,
-    ) -> Result<Option<Schedule>, DomainError> {
-        let found = ScheduleEntity::find()
-            .filter(Condition::all().add(ScheduleColumn::Name.eq(name)))
             .secure()
             .scope_with(scope)
             .one(runner)
@@ -450,7 +435,10 @@ impl SchedulesRepository for OrmSchedulesRepository {
                 }
             })
             .collect();
-        Ok(Windowed::from_overread(decoded, window_size(MAX_SCHEDULE_SCAN)))
+        Ok(Windowed::from_overread(
+            decoded,
+            window_size(MAX_SCHEDULE_SCAN),
+        ))
     }
 
     async fn claim_tick<C: DBRunner>(
@@ -720,17 +708,11 @@ mod tests {
         // what proves the columns were actually written and not just echoed.
         assert_eq!(
             repo.get(&conn, &scope(tenant), created.id).await.unwrap(),
-            Some(expected.clone())
-        );
-        assert_eq!(
-            repo.get_by_name(&conn, &scope(tenant), "nightly")
-                .await
-                .unwrap(),
             Some(expected)
         );
         assert_eq!(repo.list(&conn, &scope(tenant)).await.unwrap().len(), 1);
 
-        // Another tenant sees none of it, by id or by name.
+        // Another tenant sees none of it.
         let other = Uuid::new_v4();
         assert!(
             repo.get(&conn, &scope(other), created.id)
@@ -738,12 +720,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            repo.get_by_name(&conn, &scope(other), "nightly")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(repo.list(&conn, &scope(other)).await.unwrap().is_empty());
     }
 
     /// **The notification codec, both directions, all three columns, at three

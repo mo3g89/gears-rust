@@ -177,28 +177,35 @@ impl<T> Windowed<T> {
 /// The `LIMIT` a windowed read must issue: one row past the window, so
 /// [`Windowed::from_overread`] can tell "exactly `window` rows exist" from
 /// "at least `window + 1` do".
-pub(crate) fn overread(window: u64) -> u64 {
+pub fn overread(window: u64) -> u64 {
     window.saturating_add(1)
 }
 
 /// The same window as a `usize`, for [`Windowed::from_overread`]. Saturating
 /// rather than panicking on a 32-bit target, where the constants in this module
 /// are still far below `usize::MAX`.
-pub(crate) fn window_size(window: u64) -> usize {
+pub fn window_size(window: u64) -> usize {
     usize::try_from(window).unwrap_or(usize::MAX)
 }
 
-pub use log_line::{
-    MAX_LINE_BYTES, TRUNCATION_MARKER_MAX, WRITE_SIDE_MAX_LINE_BYTES, sanitize_line,
-    sanitize_line_for_archive, split_kubelet_timestamp,
-};
+pub use log_line::{MAX_LINE_BYTES, sanitize_line};
+// The write-side half — `sanitize_line_for_archive`, `split_kubelet_timestamp`
+// and the two caps behind them — is re-exported only when the Argo adapter that
+// reads it is compiled. Without the feature nothing outside `log_line` names
+// them, and an unconditional re-export would be an unused import in every
+// default build; finding #38's triage narrowed it rather than allowing the lint.
+#[cfg(feature = "argo")]
+pub use log_line::{sanitize_line_for_archive, split_kubelet_timestamp};
+// `TRUNCATION_MARKER_MAX` is named only by the Argo watcher's own tests.
+#[cfg(all(feature = "argo", test))]
+pub use log_line::TRUNCATION_MARKER_MAX;
 pub use queue_repo::{
     ClaimAge, ClaimRow, ExpiredRow, MAX_CLAIM_SCAN, MAX_QUEUE_READ_LIMIT, NewQueueRow,
     QueueRepository, QueueRowRecord, QueuedPlatform, RowStatus,
 };
 // `pub(crate)` at its declaration and re-exported on the same terms: only
 // `service::ingest::fan_out_log` has any use for it -- see its own doc.
-pub(crate) use log_line::ASSUMED_ARCHIVE_PREFIX_BYTES;
+pub use log_line::ASSUMED_ARCHIVE_PREFIX_BYTES;
 pub use run_logs_repo::{ArchivedLog, LogPosition, LogResume, RunLogsRepository, flatten_log_char};
 pub use runs_repo::{
     MAX_TIMEOUT_SWEEP_SCAN, MAX_WATCH_SCAN, NewRun, NewTestResult, OwnedRunId, RunResultDelta,

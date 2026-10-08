@@ -66,7 +66,7 @@ spec:
          used at all, regardless of how it is delivered to the pod: refuse
          to render with it unless the installer has explicitly said this is
          a throwaway stand. */}}
-  {{- if and (not .Values.devMode) (eq .Values.keycloak.adminPassword "admin") }}
+  {{- if and (not .Values.devMode) (eq (toString .Values.keycloak.adminPassword) "admin") }}
   {{- fail "Refusing to install with the development admin password. Set keycloak.adminPassword, or set devMode=true if this is a throwaway stand." }}
   {{- end }}
   replicas: 1
@@ -75,12 +75,36 @@ spec:
       {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "keycloak") | nindent 6 }}
   template:
     metadata:
+      annotations:
+{{/* THE REALM CHECKSUM, and the specific silence it ends.
+
+     Keycloak imports its realm only on a FIRST start against an empty
+     database. Its store here is H2 and ephemeral by design (see this file's
+     own note on that), so a RESTART is an empty database and a re-import --
+     but a changed `qa-platform-realm` Secret is not part of this pod
+     template, so nothing restarted. `helm upgrade` wrote the new realm,
+     reported success, and this pod kept serving the old one: a changed
+     `argo.workflowClientSecret` (or publicOrigin, or the devMode user
+     seeding) applied to the manifest and to nothing else. verify-k8s.sh's
+     realm check already carries "delete the Keycloak pod to make the new
+     realm take effect" as manual operator advice -- this annotation is that
+     advice made automatic.
+
+     WHAT IT COSTS: a realm change now restarts Keycloak, which ends every
+     session it holds. That is the correct trade for the same reason
+     gears-deployment.yaml took it -- the alternative is not "no restart", it
+     is "the new realm does not apply and nothing says so". A render that
+     changes no realm input produces the same hash and no restart.
+
+     `include` re-renders that template with this same root context, so the
+     hash is over exactly what the Secret will contain. */}}
+        checksum/realm: {{ include (print $.Template.BasePath "/keycloak-realm-secret.yaml") . | sha256sum }}
       labels:
         {{- include "qa-platform.selectorLabels" (dict "root" $ "component" "keycloak") | nindent 8 }}
     spec:
       containers:
         - name: keycloak
-          image: "{{ .Values.images.keycloak.repository }}:{{ .Values.images.keycloak.tag }}"
+          image: {{ include "qa-platform.image" .Values.images.keycloak | quote }}
           # `args:`, NEVER `command:`. A Kubernetes container's `command:`
           # overrides the image's ENTRYPOINT; `args:` overrides its CMD.
           # Putting `start-dev` in `command:` here would silently discard the
@@ -88,9 +112,9 @@ spec:
           # `start-dev` as a program. /opt/keycloak/bin is not on PATH, so the
           # container would never start at all.
           #   MEASURED 2026-08-29, both directions:
-          #     docker run --entrypoint start-dev quay.io/keycloak/keycloak:26.0 --import-realm
+          #     docker run --entrypoint start-dev quay.io/keycloak/keycloak:26.0.8 --import-realm
           #       -> exec: "start-dev": executable file not found in $PATH
-          #     docker run <this file's exact env> quay.io/keycloak/keycloak:26.0 start-dev --import-realm
+          #     docker run <this file's exact env> quay.io/keycloak/keycloak:26.0.8 start-dev --import-realm
           #       -> Keycloak 26.0.8 ... started in 3.809s. Listening on: http://0.0.0.0:8080
           # job-db-migrate.yaml carries the same correction for the same
           # reason; job-tenant-seed.yaml's `command:` is correct as-is,

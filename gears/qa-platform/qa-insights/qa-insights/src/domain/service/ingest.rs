@@ -66,12 +66,21 @@
 //!
 //! # The status vocabulary lives here, and nothing on this path counts
 //!
-//! [`classify`] and [`classify_all`] are the port of legacy's five-counter rule
-//! (Task 14). They are pure functions over `&str` — no repository, no `async` —
-//! and **the projection does not call them**: it stores the runner's word
-//! verbatim, exactly as legacy does, and every aggregate is a `COUNT(*) FILTER`
-//! in the query that needs it. They live here because ingest is where the
-//! status vocabulary enters the gear; the first caller is Task 18.
+//! [`classify`] is the port of legacy's five-counter rule. It is a
+//! pure function over `&str` — no repository, no `async` — and **the projection
+//! does not call it**: the projection stores the runner's word verbatim,
+//! exactly as legacy does, and every aggregate is a `COUNT(*) FILTER` in the
+//! query that needs it. It lives here because ingest is where the status
+//! vocabulary enters the gear, and its caller is
+//! `domain::service::dashboard::Counters`.
+//!
+//! A `classify_all`/`ResultCounts` pair sat beside it until finding #38's
+//! triage, folding a slice of statuses into five counters. It was deleted
+//! unused: Task 18 was forecast as its first caller and reused [`classify`]
+//! instead — the dashboard folds *weighted* `domain::repos::RunStatusCount`
+//! groups, and expanding one back into a slice would materialise the row set
+//! the aggregate exists to avoid — so the pair's only callers were ever its own
+//! tests.
 //!
 //! **Legacy has seven status classifications, not one, and they disagree.**
 //! Recorded here so a later task does not re-derive one of them from this one.
@@ -83,14 +92,14 @@
 //!   [`crate::domain::service::dashboard`] without carrying it back here. Added
 //!   in Phase A's whole-phase fix wave.
 //! * **It said "five" through Task 21a, and the KPI row below is the sixth.**
-//!   Plan ruling R5 and this header both classed the dashboard's 24-hour KPI
-//!   query as a *row-inclusion* rule only, and the paragraph under the table said
-//!   so in as many words. Task 21b's Step 0 falsified that: the query's
-//!   denominator is `status IN ('PASSED','FAILED','ERROR')`
-//!   (`dashboard.rs:329`), a partition no other row here expresses —
-//!   `classify`'s total is every row and `bucketize_status` has no denominator at
-//!   all. It is a row filter *and* a status classification, and the retracted
-//!   sentence is marked below rather than deleted.
+//!   This header classed the dashboard's 24-hour KPI query as a *row-inclusion*
+//!   rule only, and the paragraph under the table said so in as many words.
+//!   Task 21b's Step 0 falsified that: the query's denominator is
+//!   `status IN ('PASSED','FAILED','ERROR')` (`dashboard.rs:329`), a partition
+//!   no other row here expresses — `classify`'s total is every row and
+//!   `bucketize_status` has no denominator at all. It is a row filter *and* a
+//!   status classification, and the retracted sentence is marked below rather
+//!   than deleted.
 //!
 //!   **That row is used four times in legacy, not twice.** Task 21b first wrote
 //!   here that the partition "exists nowhere else in legacy", which is false and
@@ -146,12 +155,12 @@
 //!   folded after the fact was the partition alone. Neither of the two derived a
 //!   seventh rule, which is what this paragraph predicted.
 //!
-//!   (`kpi_ts` was named here until Ruling C made it identical to `effective_ts`
-//!   and deleted it, and the sentence that replaced the dangling name then
-//!   claimed both functions took a window — which `effective_ts` does not. None
-//!   of these is an intra-doc link, so nothing mechanical caught either error.
-//!   This paragraph is an instruction to another task, so it is worth re-reading
-//!   against the signatures whenever any of the three moves.)
+//!   (`kpi_ts` was named here until a later round made it identical to
+//!   `effective_ts` and deleted it, and the sentence that replaced the dangling
+//!   name then claimed both functions took a window — which `effective_ts` does
+//!   not. None of these is an intra-doc link, so nothing mechanical caught either
+//!   error. This paragraph is an instruction to another task, so it is worth
+//!   re-reading against the signatures whenever any of the three moves.)
 //!
 //! | Function | Rule | Ported by |
 //! |---|---|---|
@@ -181,13 +190,14 @@
 //! [`crate::domain::repos::ResultsRepository::effective_status_counts`]
 //! tabulates that axis.
 //!
-//! **Retracted 2026-08-21 (Task 21b's Step 0), and left visible because R5 still
-//! cites it**: this paragraph read *"A third row-inclusion rule inside the same
-//! endpoint (the 24-hour KPI window, which carries no phase restriction at all)
-//! is Task 21's and is recorded on the plan's carried item 13 rather than here,
-//! because it is a row filter rather than a status classification."* The last
-//! clause is false — see the sixth row and the second bullet above. The rule is
-//! both, and the half that is a classification belongs in this table.
+//! **Retracted 2026-08-21 (Task 21b's Step 0), and left visible so the
+//! correction stays traceable**: this paragraph read *"A third row-inclusion
+//! rule inside the same endpoint (the 24-hour KPI window, which carries no
+//! phase restriction at all) is Task 21's and is recorded on the plan's carried
+//! item 13 rather than here, because it is a row filter rather than a status
+//! classification."* The last clause is false — see the sixth row and the
+//! second bullet above. The rule is both, and the half that is a classification
+//! belongs in this table.
 //!
 //! **The third row is the trap** — it was the second before the daily fold was
 //! inserted above it, and the sentence is renumbered rather than left to point at
@@ -199,10 +209,10 @@
 //! **And the seventh row is the trap's twin**, because it agrees with
 //! [`classify`] about `SKIPPED` and with nothing about the rest: it has no
 //! `PENDING`/`RUNNING` bucket, no total, and no catch-all — an `XFAIL` stays
-//! `XFAIL` and is then counted by *neither* the build distribution's counters nor
-//! its `executed_total`. Three rows of this table therefore start
+//! `XFAIL` and is then counted by *neither* the build distribution's counters
+//! nor its `executed_total`. Three rows of this table therefore start
 //! `PASSED / FAILED+ERROR / …` and diverge only in the tail, which is the whole
-//! reason ruling R5 forbids reusing one for another's surface.
+//! reason no row of this table is reused for another row's surface.
 
 use std::sync::Arc;
 
@@ -618,7 +628,7 @@ fn project_rows(
 /// consumer, and the event path it decoded, were deleted as dead code, so
 /// the contrast no longer has a live second half; the reasoning for this
 /// function's own exhaustiveness stands on its own.)
-pub(crate) fn plan_identity(target: &RunTarget) -> (Option<Uuid>, Option<String>) {
+pub fn plan_identity(target: &RunTarget) -> (Option<Uuid>, Option<String>) {
     match target {
         RunTarget::Plan { repo_id, path } | RunTarget::Test { repo_id, path, .. } => {
             (Some(*repo_id), Some(path.clone()))
@@ -674,20 +684,6 @@ pub enum StatusBucket {
     /// In `total` and in no other counter: `XFAIL`, `XPASS`, and anything a
     /// runner starts emitting after this was written.
     Uncounted,
-}
-
-/// The five counters over one set of statuses.
-///
-/// `usize`, matching `qa_runs_sdk::RunResult` and the wire `CountsPayload`, so
-/// the three can be compared without casts.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ResultCounts {
-    pub passed: usize,
-    pub failed: usize,
-    pub skipped: usize,
-    pub in_progress: usize,
-    /// Every row, whatever its status. **Not** the sum of the four above.
-    pub total: usize,
 }
 
 /// Classify one runner status.
@@ -779,11 +775,12 @@ pub fn classify(status: &str) -> StatusBucket {
 ///
 /// # The denominator is not a third constant
 ///
-/// Legacy's flaky and quality-vector folds count over `('PASSED', 'FAILED',
-/// 'ERROR')` (`dashboard.rs:388`, `:487`) — ruling R5's sixth classification,
-/// tabulated in this module's header. That is exactly this set unioned with
-/// [`FAILED_STATUSES`], and `flaky_groups` derives it that way rather than
-/// spelling a third literal that could disagree with the two above it.
+/// Legacy's flaky and quality-vector folds count over
+/// `('PASSED', 'FAILED', 'ERROR')` (`dashboard.rs:388`, `:487`) — the sixth row
+/// of the status-classification table in this module's header. That is exactly
+/// this set unioned with [`FAILED_STATUSES`], and `flaky_groups` derives it that
+/// way rather than spelling a third literal that could disagree with the two
+/// above it.
 pub const PASSED_STATUSES: [&str; 1] = ["PASSED"];
 
 /// The statuses [`classify`] puts in [`StatusBucket::Failed`], spelled as data.
@@ -828,49 +825,6 @@ pub const PASSED_STATUSES: [&str; 1] = ["PASSED"];
 /// coupling, and it is why the test above pins the set against its legacy
 /// citation rather than against itself.
 pub const FAILED_STATUSES: [&str; 2] = ["FAILED", "ERROR"];
-
-/// Tally a set of statuses into the five counters.
-///
-/// # Still no production consumer, and Task 18 was not it
-///
-/// Nothing in the ingest path counts anything: the projection stores the
-/// runner's word verbatim and every aggregate is computed on read, which is
-/// what legacy does — its five counters are a `COUNT(*) FILTER` in the query
-/// that needs them, not a stored column. This function is the port of that
-/// rule, placed here by the plan because ingest is where the status vocabulary
-/// enters the gear.
-///
-/// **This section forecast the dashboard (Task 18) as the first caller, and that
-/// forecast was falsified.** Task 18 reuses [`classify`] directly and does not
-/// call this: its counters are folded from
-/// `domain::repos::RunStatusCount` groups, which are *weighted* — a
-/// `(status, rows)` pair per `(run, status)` group — while this takes a slice of
-/// statuses and counts one each. Feeding it a group would need the slice
-/// expanded to one entry per row, which is the row set the aggregate exists to
-/// avoid materialising. `domain::service::dashboard::Counters` is the weighted
-/// equivalent, and it delegates the vocabulary to [`classify`] so there is still
-/// exactly one fold.
-///
-/// So this remains a function whose only callers are the tests below
-/// (`ingest_tests.rs:301`, `:315`, `:350`, `:380`), and they are what make it
-/// more than a forecast. Task 21's summary counters are the next candidate;
-/// **that is a candidate and not a claim**, which is the distinction the
-/// sentence this replaced got wrong.
-#[must_use]
-pub fn classify_all<S: AsRef<str>>(statuses: &[S]) -> ResultCounts {
-    let mut counts = ResultCounts::default();
-    for status in statuses {
-        counts.total += 1;
-        match classify(status.as_ref()) {
-            StatusBucket::Passed => counts.passed += 1,
-            StatusBucket::Failed => counts.failed += 1,
-            StatusBucket::Skipped => counts.skipped += 1,
-            StatusBucket::InProgress => counts.in_progress += 1,
-            StatusBucket::Uncounted => {}
-        }
-    }
-    counts
-}
 
 #[cfg(test)]
 #[path = "ingest_tests.rs"]

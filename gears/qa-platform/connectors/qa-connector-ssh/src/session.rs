@@ -40,6 +40,32 @@ use crate::errors::SshFailure;
 /// that an observation ticker cannot be wedged by one unreachable host.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
 
+/// The most bytes of one command's stdout a session reads. The host is a
+/// tenant's; `wait_with_output` would buffer whatever it printed.
+pub const MAX_STDOUT_BYTES: u64 = 1024 * 1024;
+/// The most bytes of one command's stderr a session reads.
+pub const MAX_STDERR_BYTES: u64 = 64 * 1024;
+
+/// Read `pipe` to its end, or fail as soon as it is known to exceed `max`.
+pub(crate) async fn read_capped<R>(pipe: R, max: u64) -> Result<Vec<u8>, SshFailure>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+    let mut out = Vec::new();
+    pipe.take(max + 1)
+        .read_to_end(&mut out)
+        .await
+        .map_err(|e| SshFailure::Internal {
+            stage: "read ssh's output",
+            cause: e.to_string(),
+        })?;
+    if u64::try_from(out.len()).unwrap_or(u64::MAX) > max {
+        return Err(SshFailure::OutputTooLarge);
+    }
+    Ok(out)
+}
+
 /// Where a session connects.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SshTarget {
@@ -156,7 +182,8 @@ impl SshSession {
     /// [`SshFailure::Unreachable`] or [`SshFailure::AuthRejected`] for a
     /// transport failure (distinguished by `ssh`'s own diagnostic -- it exits
     /// 255 for both), [`SshFailure::CommandFailed`] for a non-zero remote
-    /// exit, [`SshFailure::Timeout`] past the deadline.
+    /// exit, [`SshFailure::Timeout`] past the deadline,
+    /// [`SshFailure::OutputTooLarge`] past [`MAX_STDOUT_BYTES`]/[`MAX_STDERR_BYTES`].
     pub async fn exec(&self, command: &str) -> Result<String, SshFailure> {
         self.run(command, None).await
     }
@@ -237,23 +264,39 @@ impl SshSession {
             drop(pipe);
         }
 
-        let output = match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
+        let stdout = child.stdout.take().ok_or(SshFailure::Internal {
+            stage: "open ssh's stdout",
+            cause: "the pipe was not created".to_owned(),
+        })?;
+        let stderr = child.stderr.take().ok_or(SshFailure::Internal {
+            stage: "open ssh's stderr",
+            cause: "the pipe was not created".to_owned(),
+        })?;
+        // Both pipes concurrently, so a full stderr cannot deadlock a stdout
+        // read; `try_join!` stops at the first over-cap pipe, and returning
+        // drops `child`, which `kill_on_drop` turns into a kill.
+        let conversation = async {
+            let (out, err) = tokio::try_join!(
+                read_capped(stdout, MAX_STDOUT_BYTES),
+                read_capped(stderr, MAX_STDERR_BYTES),
+            )?;
+            let status = child.wait().await.map_err(|e| SshFailure::Internal {
+                stage: "wait for ssh",
+                cause: e.to_string(),
+            })?;
+            Ok::<_, SshFailure>((status, out, err))
+        };
+        let (status, out, err) = match tokio::time::timeout(self.timeout, conversation).await {
             Err(_elapsed) => return Err(SshFailure::Timeout),
-            Ok(Err(e)) => {
-                return Err(SshFailure::Internal {
-                    stage: "wait for ssh",
-                    cause: e.to_string(),
-                });
-            }
-            Ok(Ok(output)) => output,
+            Ok(result) => result?,
         };
 
-        if output.status.success() {
-            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        if status.success() {
+            return Ok(String::from_utf8_lossy(&out).into_owned());
         }
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let stderr = String::from_utf8_lossy(&err).into_owned();
         Err(SshFailure::from_ssh_stderr(
-            output.status.code().unwrap_or(-1),
+            status.code().unwrap_or(-1),
             &stderr,
         ))
     }

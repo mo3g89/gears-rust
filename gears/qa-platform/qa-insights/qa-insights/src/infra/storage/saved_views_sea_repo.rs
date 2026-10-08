@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use crate::domain::analytics::PlanRef;
 use crate::domain::error::DomainError;
-use crate::domain::repos::{SavedViewKey, SavedViewsRepository};
+use crate::domain::repos::SavedViewsRepository;
 use crate::infra::storage::db::db_err;
 use crate::infra::storage::entity::saved_view::{self, Column as ViewColumn, Entity as ViewEntity};
 use crate::infra::storage::mapper::{plan_key, query_json_to_column, saved_view_to_sdk};
@@ -197,36 +197,6 @@ impl SavedViewsRepository for OrmSavedViewsRepository {
             .map_err(db_err)?;
         Ok(result.rows_affected > 0)
     }
-
-    /// Bound to `tenant_id` **as well as** to the scope, so it cannot be used as
-    /// a cross-tenant existence oracle: without the explicit predicate a caller
-    /// could learn whether *any* tenant's owner has a view of this name.
-    /// Symmetric with `qa-environments`' `find_platform_var`.
-    async fn find_by_natural_key<C: DBRunner>(
-        &self,
-        runner: &C,
-        scope_ctx: &AccessScope,
-        tenant_id: Uuid,
-        key: SavedViewKey<'_>,
-    ) -> Result<Option<SavedView>, DomainError> {
-        let row = ViewEntity::find()
-            .secure()
-            .scope_with(scope_ctx)
-            .filter(
-                Condition::all()
-                    .add(ViewColumn::TenantId.eq(tenant_id))
-                    .add(ViewColumn::OwnerId.eq(key.owner_id))
-                    .add(ViewColumn::Scope.eq(key.scope.as_str()))
-                    // The same derivation the writers use, which is the whole
-                    // reason `SavedViewKey` carries no `plan_key` of its own.
-                    .add(ViewColumn::PlanKey.eq(key_for_plan(key.plan)))
-                    .add(ViewColumn::Name.eq(key.name)),
-            )
-            .one(runner)
-            .await
-            .map_err(db_err)?;
-        row.map(saved_view_to_sdk).transpose()
-    }
 }
 
 #[cfg(test)]
@@ -236,7 +206,7 @@ mod tests {
 
     use crate::domain::analytics::PlanRef;
     use crate::domain::error::DomainError;
-    use crate::domain::repos::{SavedViewKey, SavedViewsRepository};
+    use crate::domain::repos::SavedViewsRepository;
     use crate::infra::storage::saved_views_sea_repo::OrmSavedViewsRepository;
     use crate::infra::storage::test_db::{inmem_db, scope};
 
@@ -255,33 +225,6 @@ mod tests {
             name: name.to_owned(),
             query_json: r#"{"version":"5.0.1"}"#.to_owned(),
         }
-    }
-
-    /// The natural-key probe for a plan-scoped view called "Shared Name", which
-    /// is the only thing
-    /// [`the_natural_key_probe_distinguishes_two_plans_at_the_same_scope`] varies.
-    async fn probe_shared_name(
-        conn: &toolkit_db::secure::DbConn<'_>,
-        ctx: &toolkit_security::AccessScope,
-        tenant: Uuid,
-        owner: Uuid,
-        plan: &PlanRef,
-    ) -> Option<Uuid> {
-        OrmSavedViewsRepository
-            .find_by_natural_key(
-                conn,
-                ctx,
-                tenant,
-                SavedViewKey {
-                    owner_id: owner,
-                    scope: SavedViewScope::Plan,
-                    plan: Some(plan),
-                    name: "Shared Name",
-                },
-            )
-            .await
-            .unwrap()
-            .map(|v| v.id)
     }
 
     fn plan_view(name: &str) -> NewSavedView {
@@ -479,62 +422,6 @@ mod tests {
         );
     }
 
-    /// **The probe must key on `plan_key`, and only two plan-scoped views can
-    /// show it.**
-    ///
-    /// Added 2026-08-20 after break-verification: deleting the `plan_key`
-    /// predicate from `find_by_natural_key` left the whole suite green.
-    /// `the_natural_key_probe_distinguishes_a_plan_scoped_view_from_a_global_one`
-    /// could not catch it, because the two rows there differ in `scope` as well,
-    /// so the `scope` predicate alone separated them. Two views at the *same*
-    /// scope on *different* plans, sharing a name, is the case where `plan_key` is
-    /// the only thing that tells them apart — and getting this wrong is the wrong
-    /// 409 the whole obligation is about, since this probe is what decides
-    /// create-versus-update.
-    #[tokio::test]
-    async fn the_natural_key_probe_distinguishes_two_plans_at_the_same_scope() {
-        let db = inmem_db().await;
-        let conn = db.conn().unwrap();
-        let tenant = Uuid::from_u128(0xA);
-        let owner = Uuid::from_u128(0xB);
-        let ctx = scope(tenant);
-
-        let on_smoke = OrmSavedViewsRepository
-            .create(&conn, &ctx, tenant, owner, plan_view("Shared Name"))
-            .await
-            .unwrap();
-        let other = PlanRef {
-            repo_id: plan().repo_id,
-            plan_path: "plans/regression/plan.yaml".to_owned(),
-        };
-        let on_regression = OrmSavedViewsRepository
-            .create(
-                &conn,
-                &ctx,
-                tenant,
-                owner,
-                NewSavedView {
-                    plan_path: Some(other.plan_path.clone()),
-                    ..plan_view("Shared Name")
-                },
-            )
-            .await
-            .expect("the same name on a different plan is a different key");
-        assert_ne!(on_smoke.id, on_regression.id);
-
-        assert_eq!(
-            probe_shared_name(&conn, &ctx, tenant, owner, &plan()).await,
-            Some(on_smoke.id),
-            "the smoke probe must find the smoke view"
-        );
-        assert_eq!(
-            probe_shared_name(&conn, &ctx, tenant, owner, &other).await,
-            Some(on_regression.id),
-            "and the regression probe the regression one; without plan_key both \
-             probes return whichever row the engine happened to order first"
-        );
-    }
-
     /// **`update` has to rewrite `plan_key`, and this is what says so.**
     ///
     /// Moving a view from global to plan-scoped and leaving the old `''` key
@@ -579,59 +466,6 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "and it must have left the global list"
-        );
-    }
-
-    /// The probe that drives the create-or-update decision has to derive
-    /// `plan_key` the same way the writers do, or it answers about a row the
-    /// write would not have produced.
-    #[tokio::test]
-    async fn the_natural_key_probe_distinguishes_a_plan_scoped_view_from_a_global_one() {
-        let db = inmem_db().await;
-        let conn = db.conn().unwrap();
-        let tenant = Uuid::from_u128(0xA);
-        let owner = Uuid::from_u128(0xB);
-        let ctx = scope(tenant);
-
-        let scoped = OrmSavedViewsRepository
-            .create(&conn, &ctx, tenant, owner, plan_view("My View"))
-            .await
-            .unwrap();
-
-        let plan = plan();
-        let found = OrmSavedViewsRepository
-            .find_by_natural_key(
-                &conn,
-                &ctx,
-                tenant,
-                SavedViewKey {
-                    owner_id: owner,
-                    scope: SavedViewScope::Plan,
-                    plan: Some(&plan),
-                    name: "My View",
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(found.map(|v| v.id), Some(scoped.id));
-
-        let global = OrmSavedViewsRepository
-            .find_by_natural_key(
-                &conn,
-                &ctx,
-                tenant,
-                SavedViewKey {
-                    owner_id: owner,
-                    scope: SavedViewScope::All,
-                    plan: None,
-                    name: "My View",
-                },
-            )
-            .await
-            .unwrap();
-        assert!(
-            global.is_none(),
-            "the plan-scoped view must not answer a global probe: {global:?}"
         );
     }
 

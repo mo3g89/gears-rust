@@ -7,8 +7,7 @@
 //! whole job is to catch a call site this crate added without an `ENFORCED`
 //! entry, so a single copy in one crate would leave the other three
 //! unguarded. Sharing the code would mean a new shared dev-dependency crate,
-//! and §12 of the review-remediation spec rules cross-gear lifting out of
-//! scope for this work.
+//! and lifting code across gears was out of scope for this work.
 //!
 //! The subsystem already settled this trade once, the same way:
 //! `no_api_in_domain_tests.rs` is duplicated across these same four crates and

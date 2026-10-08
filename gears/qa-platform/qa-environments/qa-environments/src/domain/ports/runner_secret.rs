@@ -19,12 +19,12 @@
 //! consequence in its own words: "every workflow run hangs on `FailedMount`
 //! while the rest of the stack looks healthy".
 //!
-//! Ruling **F-19** is therefore: keep the writer, delete the observation half,
+//! The decision is therefore: keep the writer, delete the observation half,
 //! and narrow ADR-0001's containment claim to what is true rather than write a
 //! containment test that passes because a production feature was deleted.
 //! Moving the writer to `qa-runs` was weighed and rejected — writing the
 //! `Secret` needs the credential *material*, and that gear currently never sees
-//! plaintext, which is a property §9 is built around.
+//! plaintext, which is a property ADR-0008 is built around.
 
 use async_trait::async_trait;
 use credstore_sdk::SecretValue;
@@ -162,7 +162,7 @@ mod tests {
         let error = NoopRunnerSecretWriter
             .ensure_runner_secret(
                 Uuid::new_v4(),
-                "credstore://ref",
+                "noop-ref",
                 &SecretValue::from("x".to_owned()),
             )
             .await

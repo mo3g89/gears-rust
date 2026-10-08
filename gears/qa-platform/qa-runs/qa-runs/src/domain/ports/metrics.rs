@@ -1,7 +1,7 @@
 //! qa-runs observability ports — typed, segregated metric-emission traits.
 //!
 //! Each trait owns one path of the catalog declared in
-//! [`crate::domain::metrics`]. One infra adapter (Task 37) implements both on a
+//! [`crate::domain::metrics`]. One infra adapter implements both on a
 //! single OpenTelemetry-backed struct; DI hands each service the trait it
 //! actually needs.
 //!
@@ -106,6 +106,24 @@ impl DispatchOutcome {
     /// Every value, for the exhaustiveness the naming and closedness tests
     /// sweep. Declared rather than derived; see [`crate::domain::metrics::COUNTERS`]
     /// for the same caveat and the same reason it is worth having.
+    ///
+    /// # Read only by the tests, and that is not dead code
+    ///
+    /// `domain` is `pub(crate)` since finding #38's triage, so a label catalog
+    /// nothing outside the exhaustiveness tests names is genuinely unreachable
+    /// and the compiler says so. The alternative — deleting it — deletes the
+    /// gate: "every value has a distinct label" and "every label is
+    /// `snake_case`" are properties *of the set*, unstatable one variant at a
+    /// time, and a variant added without being listed here is a variant no rule
+    /// checks. The same allowance and the same argument sit on
+    /// `qa-environments`' `CycleOutcome::ALL` and on
+    /// [`crate::domain::metrics::COUNTERS`].
+    #[allow(
+        dead_code,
+        reason = "read by `domain::metrics_tests`; `domain` is pub(crate), so a label \
+                  catalog with no production reader is unreachable and deleting it would \
+                  delete the exhaustiveness gate"
+    )]
     pub const ALL: [Self; 3] = [Self::Completed, Self::Refused, Self::Failed];
 
     /// The label value, as it appears in the series.
@@ -168,7 +186,9 @@ pub enum DispatchDecision {
 }
 
 impl DispatchDecision {
-    /// Every value. See [`DispatchOutcome::ALL`].
+    /// Every value. See [`DispatchOutcome::ALL`], including for why the
+    /// allowance below sits on the constant rather than on this block.
+    #[allow(dead_code, reason = "see the allowance on `DispatchOutcome::ALL`")]
     pub const ALL: [Self; 3] = [Self::Inline, Self::Queued, Self::Unqueued];
 
     /// The label value, as it appears in the series.
@@ -229,7 +249,9 @@ pub enum UnanchoredReason {
 }
 
 impl UnanchoredReason {
-    /// Every value. See [`DispatchOutcome::ALL`].
+    /// Every value. See [`DispatchOutcome::ALL`], including for why the
+    /// allowance below sits on the constant rather than on this block.
+    #[allow(dead_code, reason = "see the allowance on `DispatchOutcome::ALL`")]
     pub const ALL: [Self; 4] = [
         Self::NoFreeInstant,
         Self::NotWaitingAtFree,
@@ -283,7 +305,9 @@ pub enum IngestOutcome {
 }
 
 impl IngestOutcome {
-    /// Every value. See [`DispatchOutcome::ALL`].
+    /// Every value. See [`DispatchOutcome::ALL`], including for why the
+    /// allowance below sits on the constant rather than on this block.
+    #[allow(dead_code, reason = "see the allowance on `DispatchOutcome::ALL`")]
     pub const ALL: [Self; 5] = [
         Self::Applied,
         Self::Completed,

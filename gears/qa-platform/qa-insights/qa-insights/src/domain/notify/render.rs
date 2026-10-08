@@ -58,7 +58,6 @@
 //! (`replace_slack_links`, `:987-1014`), turned into `"label (url)"`.
 //!
 //! # One renderer, not two — and what that does to the brief's first test
-//! (R97)
 //!
 //! Legacy has two call sites that build a scheduled-run message:
 //! `preview_scheduled_run_message` (`:388-404`) and `notify_scheduled_run_status`
@@ -118,27 +117,27 @@
 //! [`urlencode_component`], ported verbatim from `:1057-1068`: every byte
 //! that is not an ASCII alphanumeric or one of `- _ . ~` becomes `%XX`.
 //!
-//! # Email rendering (R98)
+//! # Email rendering
 //!
 //! Legacy's `notify_run_completed` (`:180-355`) builds one plain-text `text`
 //! value (`:237-245`: run name, a headline word, plan/platform/product info,
 //! then a `passed/failed/skipped` line) and sends it **verbatim as both** the
-//! generic Slack alert (`:284-289`, no Block Kit — this is the
-//! non-templated path, distinct from the six-token renderer above) and the
-//! email body (`:328-329`); only the email `subject`
+//! generic Slack alert (`:284-289`, no Block Kit — this is the non-templated
+//! path, distinct from the six-token renderer above) and the email body
+//! (`:328-329`); only the email `subject`
 //! (`format!("VHP test run {} {}", run.name, headline)`, `:328`) differs
-//! between the two channels. [`render_run_completed`] ports this — `text`
-//! plays both roles, matching legacy — and, per **R99**, the subject keeps
-//! legacy's literal `"VHP test run"` too. See [`render_run_completed`]'s own
-//! doc for why. Every other word and the count/format logic
-//! (`run_completed_headline`, ported from `:191-192,222-228`) is unchanged.
+//! between the two channels. [`render_run_completed`] ports this — `text` plays
+//! both roles, matching legacy — and the subject keeps legacy's literal
+//! `"VHP test run"` too. See [`render_run_completed`]'s own doc for why. Every
+//! other word and the count/format logic (`run_completed_headline`, ported from
+//! `:191-192,222-228`) is unchanged.
 //!
-//! D10 defers only the SMTP *send* to a later task, not the rendering this
-//! task ships — see the plan's carried-items table
-//! (`cpt-cf-qa-fr-insights-notifications`, "email deferred (D10)").
+//! The SMTP *send* is `infra::notify::SmtpMailClient`'s (ADR-0011); this
+//! module only renders.
 
 use qa_insights_sdk::{NotificationConfig, ScheduledRunSlackTemplate};
 
+use crate::domain::notify::routing::RunOutcome;
 use crate::domain::ports::SlackBlock;
 
 /// A status count fold over a list of result status strings. Ported from
@@ -174,7 +173,7 @@ fn count_results(statuses: &[String]) -> ResultCounts {
 /// Everything [`render_scheduled_run`] needs about one run to fill in
 /// placeholders, as flat, already-resolved data — this module never resolves
 /// a repo or platform id to a display name, or a timestamp to display text;
-/// that is whichever task assembles this context's job (Task 38), keeping
+/// that is whichever task assembles this context's job, keeping
 /// this renderer's dependency surface to plain strings only.
 ///
 /// Field-for-field, this is legacy's `WorkflowRun` restricted to the fields
@@ -908,26 +907,57 @@ pub struct RenderedRunCompletedMessage {
 /// `"COMPLETED"` (the `total == 0` and the `total > 0, failed == 0, passed == 0`
 /// cases — no results at all, or only statuses that are neither passed nor
 /// failed, such as `"PENDING"`/`"RUNNING"` — both fall through to this arm).
-fn run_completed_headline(counts: ResultCounts) -> &'static str {
+///
+/// **The three-way choice itself moved to [`run_completed_outcome`]** when
+/// `notify_on_failure`/`notify_on_success` became routing gates (2026-09-29;
+/// `super::routing`'s header). This function is now only the naming half: the
+/// verdict an operator's outcome policy is applied to and the verdict printed
+/// in the message are the same value by construction, not by two parallel
+/// `if` chains that a later edit could drift apart.
+fn run_completed_headline(outcome: RunOutcome) -> &'static str {
+    match outcome {
+        RunOutcome::Failed => "FAILED",
+        RunOutcome::Succeeded => "SUCCEEDED",
+        RunOutcome::Indeterminate => "COMPLETED",
+    }
+}
+
+/// Classify one run's results the way its own alert headline does — the
+/// routing input for `notify_on_failure`/`notify_on_success`.
+///
+/// Lives here rather than in `super::routing` because the classification is a
+/// fold over result *status strings*, which is this module's business
+/// ([`count_results`], legacy's `count_results` at
+/// `notifications.rs:1463-1479`), and because putting it anywhere else would
+/// let the gate and the headline disagree. See [`RunOutcome`]'s own doc.
+#[must_use]
+pub fn run_completed_outcome(ctx: &RunCompletedRenderContext) -> RunOutcome {
+    outcome_of(count_results(&ctx.result_statuses))
+}
+
+/// [`run_completed_outcome`] over already-folded counts — the single
+/// three-way choice both this module's headline and `super::routing`'s
+/// outcome gate read.
+fn outcome_of(counts: ResultCounts) -> RunOutcome {
     let all_passed = counts.total > 0 && counts.failed == 0 && counts.passed > 0;
     if counts.failed > 0 {
-        "FAILED"
+        RunOutcome::Failed
     } else if all_passed {
-        "SUCCEEDED"
+        RunOutcome::Succeeded
     } else {
-        "COMPLETED"
+        RunOutcome::Indeterminate
     }
 }
 
 /// Renders `RunCompleted`'s generic (non-templated) alert — legacy's
 /// `notify_run_completed` (`notifications.rs:180-355`). See this module's
-/// header, "Email rendering (R98)", for what legacy does.
+/// header, "Email rendering", for what legacy does.
 ///
-/// **R99: the email subject keeps legacy's literal `"VHP test run"` branding,
-/// unchanged.** An earlier draft of this function rebranded it to `"QA run"`
-/// as a unilateral in-task call; the controller reverted that. The decisive
-/// reason is in-crate consistency, not the branding call itself: this crate
-/// already ships another reviewed, user-visible `"VHP"` string —
+/// **The email subject keeps legacy's literal `"VHP test run"` branding,
+/// unchanged.** An earlier draft of this function rebranded it to `"QA run"` as
+/// a unilateral in-task call; the controller reverted that. The decisive reason
+/// is in-crate consistency, not the branding call itself: this crate already
+/// ships another reviewed, user-visible `"VHP"` string —
 /// `infra::jira::oagw_client`'s JIRA issue summary,
 /// `format!("[VHP] Test Failed: {test_name}")` (`oagw_client.rs:789`), which
 /// has carried the same branding verbatim since Tasks 32-33. Rebranding only
@@ -940,7 +970,7 @@ fn run_completed_headline(counts: ResultCounts) -> &'static str {
 #[must_use]
 pub fn render_run_completed(ctx: &RunCompletedRenderContext) -> RenderedRunCompletedMessage {
     let counts = count_results(&ctx.result_statuses);
-    let headline = run_completed_headline(counts);
+    let headline = run_completed_headline(outcome_of(counts));
 
     let mut info_parts = vec![ctx.plan_id.clone()];
     if value_present(ctx.platform.as_deref()) {

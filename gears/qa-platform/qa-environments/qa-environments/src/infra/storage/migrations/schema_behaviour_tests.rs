@@ -101,7 +101,9 @@ fn environment_am(id: Uuid, tenant: Uuid, name: &str) -> environment::ActiveMode
         is_default: ActiveValue::Set(true),
         version_detect_error: ActiveValue::Set(None),
         version_detected_at: ActiveValue::Set(Some(now())),
-        credentials: ActiveValue::Set(serde_json::json!([{"key": "kubeconfig", "credstore_ref": "credstore://r"}])),
+        credentials: ActiveValue::Set(
+            serde_json::json!([{"key": "kubeconfig", "credstore_ref": "r-kubeconfig"}]),
+        ),
         observed_attrs: ActiveValue::Set(serde_json::json!({"nodes": 3})),
         config: ActiveValue::Set(serde_json::json!({"namespace": "vzt"})),
         observed_base_url: ActiveValue::Set(Some("https://example.invalid".to_owned())),

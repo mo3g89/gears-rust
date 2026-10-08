@@ -111,3 +111,10 @@ httpmock = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 futures-util = { workspace = true }
+# Captures log output so the proxy-log redaction tests can assert that no
+# request path suffix is logged. `no-env-filter`: capture regardless of the
+# emitting crate's name.
+tracing-test = { workspace = true, features = ["no-env-filter"] }
+# Bridges pingora's `log`-crate records into the captured tracing output in
+# those tests, as `libs/toolkit`'s logging bootstrap does in production.
+tracing-log = { workspace = true }

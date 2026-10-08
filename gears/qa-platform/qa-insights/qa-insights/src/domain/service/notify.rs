@@ -1,7 +1,7 @@
 //! The notification service: settings CRUD, the audit log, the test/preview
 //! surfaces, and [`Self::notify_run_completed`] — the send-once path that
 //! [`crate::domain::notify::routing`] and [`crate::domain::notify::render`]
-//! feed into. Task 38, fix round 1 (rulings R103, R104).
+//! feed into. Task 38, fix round 1.
 //!
 //! # Where this task's four legacy citations live
 //!
@@ -16,7 +16,7 @@
 //! `preview_scheduled_run_message` `:388-404`) are [`Self::send_test`] and
 //! [`Self::preview_scheduled_run`].
 //!
-//! # R104: `notify_run_completed` resolves a real run through [`RunsReader`]
+//! # `notify_run_completed` resolves a real run through [`RunsReader`]
 //!
 //! **Fix round 1 replaced a false green.** The first draft rendered
 //! [`render::RunCompletedRenderContext`] from the bare run id alone
@@ -57,43 +57,46 @@
 //! claiming or sending anything, matching this method's own
 //! never-propagates-a-failure contract.
 //!
-//! # R104's other half, closed by R105: real per-schedule settings
+//! # The other half: real per-schedule settings
 //!
 //! **Fix round 2.** `qa_runs_sdk::Run` carries `schedule_id: Option<Uuid>` and
 //! nothing else schedule-shaped; the settings themselves live on
 //! `qa_runs_sdk::Schedule`. Fix round 1 found the gap and reported it rather
-//! than silently defaulting it a second time; controller ruling R105 settled
-//! it in this same task, on the R73 precedent (a port grows in the task that
-//! consumes it) rather than deferred to Task 40's wiring pass.
+//! than silently defaulting it a second time; it was settled in this same
+//! task, because a port grows only in the task that consumes it
+//! ([`RunsReader`]'s header), rather than deferred to Task 40's wiring pass.
 //! [`RunsReader::get_schedule_notifications`] is the new port method — added
 //! here, with its adapter in `infra::clients::qa_runs` — and
 //! [`Self::notify_run_completed`] now calls it whenever `run.schedule_id` is
-//! `Some`, and applies [`no_scheduled_notifications`] when it is `None`.
+//! `Some`, passing the `Option` it answers with straight to `routing::route`.
 //!
-//! # What an absent schedule means, checked against legacy rather than
-//! # guessed
+//! # What an absent schedule means — legacy's answer, and the owner's
 //!
 //! Legacy's `notify_run_completed` gates its **entire** body on
 //! `is_scheduled_run(run)` first (`notifications.rs:193-206`): a run that is
 //! not scheduled logs `"skipped"` unconditionally and returns before any of
 //! `config.slack_enabled`, `config.email_enabled` or a per-run override is
-//! ever consulted. [`no_scheduled_notifications`] ports that exactly:
-//! `ScheduleNotificationSettings { slack_enabled: false, .. }` makes
-//! `routing::route`'s `Event::RunCompleted` arm compute `schedule_notifies =
-//! false`, which — R94a/R96's own formula, `!schedule_notifies ||
-//! config.slack_enabled` — is unconditionally `true`, so the skip is always
-//! audited, exactly as legacy's early return always logs regardless of
-//! `config.slack_enabled`'s value. The same fallback applies when
-//! `schedule_id` is `Some` but [`RunsReader::get_schedule_notifications`]
-//! answers `None` (deleted, or not visible to this context): that is
-//! "nothing to narrow with", the identical shape as no schedule at all, and
-//! routing proceeds normally from there. **An `Err` from that call is
+//! ever consulted. This method ported that exactly, by handing
+//! `routing::route` a synthetic `ScheduleNotificationSettings {
+//! slack_enabled: false, .. }` for such a run — so an **ad-hoc run notified
+//! on no channel, ever**.
+//!
+//! **The owner reversed that on 2026-09-29** (audit closure report,
+//! "OPEN-NEEDS-OWNER" #1), and the synthetic value is gone with it: the
+//! `Option` is passed as an `Option`, `None` means "nothing to narrow with"
+//! rather than "does not notify", and an ad-hoc run routes on the tenant's
+//! own settings. `domain::notify::routing`'s header carries the full ruling
+//! and why widening this way cannot make a rebuild announce history. The same
+//! `None` still covers `schedule_id` being `Some` while
+//! [`RunsReader::get_schedule_notifications`] answers `None` (deleted, or not
+//! visible to this context) — that was already "nothing to narrow with", and
+//! is now spelled the same way it reads. **An `Err` from that call is
 //! different and is not folded the same way**: it is a transport or gateway
 //! failure, not a fact about the schedule, so [`Self::notify_run_completed`]
 //! treats it exactly like a `get_run`/`list_run_test_results` failure above
 //! — logged under the pseudo-channel `"run"` with outcome `"failed"`, and
 //! the method returns before `routing::route` is ever called at all, rather
-//! than falling through to [`no_scheduled_notifications`]. Silently
+//! than falling through to `None`. Silently
 //! degrading a qa-runs outage into "this schedule doesn't notify" would hide
 //! the actual problem behind a plausible-looking skip.
 //!
@@ -105,21 +108,19 @@
 //! set precisely when a schedule launched the run, so it is the direct
 //! successor to legacy's heuristic rather than a second guess alongside it.
 //!
-//! # R103: the two egress ports move to `gear.rs`
+//! # The two egress ports are bound in `gear.rs`
 //!
-//! Task 39 ships `SlackOagwClient` and `UnsupportedMailClient`; until then,
-//! `gear.rs` builds [`Self`]'s two egress ports from its own
-//! `NeverWiredSlackClient`/`NeverWiredMailClient` stand-ins rather than this
-//! module's — controller ruling R103 moved them there: infra stand-ins
-//! belong in the file that owns infra binding (`gear.rs`'s own doc on
+//! `gear.rs` builds [`Self`]'s two egress ports — `SlackOagwClient`, and
+//! `SmtpMailClient` or `UnsupportedMailClient` — rather than this module:
+//! infra binding belongs in the file that owns it (`gear.rs`'s own doc on
 //! `ConcreteAppServices`), not private to a domain service module. This
 //! module receives them as plain `Arc<dyn SlackClient>`/`Arc<dyn MailClient>`
-//! constructor arguments and does not know or care that they are
-//! placeholders — those two [`Self::new`] parameters accept whichever
+//! constructor arguments — those two [`Self::new`] parameters accept whichever
 //! concrete adapter a caller hands them, unchanged either way.
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use authz_resolver_sdk::PolicyEnforcer;
 use qa_insights_sdk::{NotificationConfig, NotificationLogEntry};
 use qa_runs_sdk::{Run, RunTestResult, SLACK_NOTIFICATION_EVENTS, ScheduleNotificationSettings};
@@ -134,8 +135,9 @@ use crate::domain::ports::{
     MailClient, MailCredentials, MailMessage, RunsReader, SendOutcome, SlackBlock, SlackClient,
     SlackMessage, validate_credstore_ref,
 };
-use crate::domain::repos::{NewLogEntry, NotifyRepository};
+use crate::domain::repos::{NewLogEntry, NotificationClaim, NotifyRepository};
 use crate::domain::service::{DbProvider, actions, resources};
+use crate::domain::system_actor::{self, TenantBound};
 
 /// `outcome = "sent"` — a send that reached the far side.
 const OUTCOME_SENT: &str = "sent";
@@ -165,11 +167,41 @@ const OUTCOME_FAILED: &str = "failed";
 /// audit log is the only place an operator sees either.
 const OUTCOME_UNSUPPORTED_EGRESS: &str = "unsupported_egress";
 
+/// `event_type = "test"` — the audit row a settings-page test send writes.
+///
+/// One token for both [`TestSend`] shapes. The alternative was to write the
+/// caller's own event token for [`TestSend::ScheduledRun`], which reads better
+/// in isolation and is worse in the log: an operator scanning
+/// `GET /qa/v1/settings/notifications/log` after a real `run_completed` alert
+/// went missing needs to tell a genuine send from somebody pressing the button,
+/// and a row spelled `in_progress` does not say which it was. The event that
+/// was rendered goes in the row's `detail` instead.
+/// Every channel [`NotifyService::notify_run_completed`] can decide about one
+/// run — the closed set [`NotifyService::already_decided`] asks about, and the
+/// same two kinds `m20260929_000003_seed_run_completed_notification_claims`
+/// seeds. A third channel would have to be added here as well as to the two
+/// branches that claim it, which is the point of naming the set once.
+const RUN_COMPLETED_KINDS: [NotificationKind; 2] = [
+    NotificationKind::RunCompletedSlack,
+    NotificationKind::RunCompletedEmail,
+];
+
+/// The claim kind [`NotifyService::is_history`] takes so that it audits a
+/// history run **once**, not once per sweep. Deliberately not a
+/// [`NotificationKind`] and not in [`RUN_COMPLETED_KINDS`]: it is not a
+/// channel, it must never make [`NotifyService::already_decided`] answer
+/// "decided", and it must leave both channel slots free — see `is_history`'s
+/// "Ordering: before the claim, not after".
+const HISTORY_AUDIT_KIND: &str = "run_completed_history_audit";
+
+const TEST_EVENT: &str = "test";
+
 /// The settings page's generic test message, verbatim from legacy
 /// (`notifications.rs:364`).
 const GENERIC_TEST_MESSAGE: &str = "VHP Test Manager: test notification from Settings page";
 
-/// The R102 seam: [`SendOutcome`] to this audit log's `outcome` string.
+/// The send-outcome seam (`domain::ports`, "The send-outcome seam"):
+/// [`SendOutcome`] to this audit log's `outcome` string.
 ///
 /// **This is the one place that maps the variant to the string.** The two
 /// egress adapters' tests pin the variant; this crate's own tests pin the
@@ -182,7 +214,7 @@ const GENERIC_TEST_MESSAGE: &str = "VHP Test Manager: test notification from Set
 /// site: the seam is the point, and a second variant added later must not be
 /// able to reach the log without passing through here.
 #[must_use]
-pub(crate) fn outcome_str(outcome: SendOutcome) -> &'static str {
+pub fn outcome_str(outcome: SendOutcome) -> &'static str {
     match outcome {
         SendOutcome::Sent => OUTCOME_SENT,
     }
@@ -193,7 +225,7 @@ pub(crate) fn outcome_str(outcome: SendOutcome) -> &'static str {
 /// channel, [`OUTCOME_FAILED`] for everything else. See
 /// [`OUTCOME_UNSUPPORTED_EGRESS`] for why the two are not one string.
 #[must_use]
-pub(crate) fn failure_outcome_str(error: &DomainError) -> &'static str {
+pub fn failure_outcome_str(error: &DomainError) -> &'static str {
     match error {
         DomainError::UnsupportedEgress { .. } => OUTCOME_UNSUPPORTED_EGRESS,
         _ => OUTCOME_FAILED,
@@ -290,20 +322,6 @@ fn scheduled_run_event_label(token: &str) -> Option<&'static str> {
     })
 }
 
-/// The schedule settings for a run this method treats as **not** scheduled
-/// — no `schedule_id` at all, or one [`RunsReader::get_schedule_notifications`]
-/// could not resolve. See this module's header, "What an absent schedule
-/// means", for why `slack_enabled: false` is legacy's own answer
-/// (`is_scheduled_run`'s unconditional skip, `notifications.rs:193-206`)
-/// and not a guess.
-fn no_scheduled_notifications() -> ScheduleNotificationSettings {
-    ScheduleNotificationSettings {
-        slack_enabled: false,
-        slack_channel: None,
-        slack_events: Vec::new(),
-    }
-}
-
 /// A representative scheduled-run render context for the preview and
 /// scheduled-run-test surfaces — legacy's `sample_run_for_event`/
 /// `sample_results_for_event` (`notifications.rs:1503-1602`) collapsed to
@@ -347,7 +365,7 @@ fn sample_render_context() -> ScheduledRunRenderContext {
 
 /// `slack_channel`, normalized: `None` for absent or blank, matching legacy's
 /// `normalized_channel` (`notifications.rs:834-838`), now over the real
-/// schedule (R105) — a schedule's own `slack_channel` override wins,
+/// schedule — a schedule's own `slack_channel` override wins,
 /// exactly as legacy's `effective_slack_channel(&config, Some(run))`
 /// prefers `run.slack_channel` (`notifications.rs:840-847`) — falling back
 /// to the tenant-wide config channel when the schedule has none, or when
@@ -418,15 +436,16 @@ const NO_CHANNEL_ENABLED_FIELD: &str = "notification_channels";
 ///
 /// # Phase C's final review, Important 1: the column had no check at all
 ///
-/// [`SLACK_REF_FIELD`] is copied verbatim into the oagw proxy *path*
-/// (`infra::notify::slack_oagw`'s `webhook_path`), and four separate doc claims
-/// in this crate said it "is a credential-store reference, never a URL". Nothing
-/// enforced that: `hooks.slack.com/services/T…/B…/XXXX` — a Slack
-/// incoming-webhook URL, whose whole path *is* the secret — stored cleanly, and
-/// `GET /qa/v1/settings/notifications` handed it back verbatim to any holder of
-/// `qa.notification_config/get`. Ruling **R77** forecast exactly this wall:
-/// `SecretRef` is `[A-Za-z0-9_-]{1,255}` with colons explicitly prohibited, so a
-/// URL-shaped value can never resolve to a secret anyway — it can only be
+/// [`SLACK_REF_FIELD`] names the credential-store secret the Slack adapter
+/// resolves (`infra::notify::slack_oagw`, "Delivery"; until the third review
+/// pass it was copied verbatim into the oagw proxy *path* instead), and four
+/// separate doc claims in this crate said it "is a credential-store reference,
+/// never a URL". Nothing enforced that: `hooks.slack.com/services/T…/B…/XXXX` —
+/// a Slack incoming-webhook URL, whose whole path *is* the secret — stored
+/// cleanly, and `GET /qa/v1/settings/notifications` handed it back verbatim to
+/// any holder of `qa.notification_config/get`. This wall was foreseen:
+/// `SecretRef` is `[A-Za-z0-9_-]{1,255}` with colons explicitly prohibited, so
+/// a URL-shaped value can never resolve to a secret anyway — it can only be
 /// mistaken for one by a human reading the settings page.
 ///
 /// The rule is [`validate_credstore_ref`]'s, unchanged and not re-derived: the
@@ -549,10 +568,10 @@ fn plan_id_for_target(target: &qa_runs_sdk::RunTarget) -> String {
 
 /// Build [`Self::notify_run_completed`]'s render context from the real run
 /// [`RunsReader::get_run`] returned and the real rows
-/// [`RunsReader::list_run_test_results`] returned (R104).
+/// [`RunsReader::list_run_test_results`] returned.
 ///
 /// `platform` and `product_key` are `None` — this module's header,
-/// "R104: `notify_run_completed` resolves a real run", says why that is an
+/// "`notify_run_completed` resolves a real run", says why that is an
 /// honest absence and not a stand-in: `product_key` has no equivalent in
 /// this architecture, and `environment_id` is not resolved to a display name
 /// here because doing so needs [`crate::domain::ports::EnvironmentReader`],
@@ -582,7 +601,7 @@ pub struct NotifyService<N: NotifyRepository + Clone + 'static> {
     slack: Arc<dyn SlackClient>,
     mail: Arc<dyn MailClient>,
     /// The qa-runs read [`Self::notify_run_completed`] resolves a run
-    /// through (R104) — the same port [`crate::domain::service::reconcile`]
+    /// through — the same port [`crate::domain::service::reconcile`]
     /// and friends already hold.
     runs: Arc<dyn RunsReader>,
 }
@@ -629,10 +648,12 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     /// `get_or_default` does the same (`services/notifications.rs:85-89`).
     ///
     /// Passes `ctx.subject_tenant_id()` explicitly to
-    /// [`NotifyRepository::get_config`], not only the compiled scope — R86,
-    /// closed on this repository method by this task (see that method's own
-    /// doc): a scope spanning several tenants would otherwise let the
-    /// repository's `.one()` return an arbitrary in-scope tenant's settings.
+    /// [`NotifyRepository::get_config`], not only the compiled scope — the
+    /// explicit-`tenant_id` rule
+    /// ([`JiraRepository`](crate::domain::repos::JiraRepository)'s doc), closed
+    /// on this repository method by this task (see that method's own doc): a
+    /// scope spanning several tenants would otherwise let the repository's
+    /// `.one()` return an arbitrary in-scope tenant's settings.
     ///
     /// # Errors
     ///
@@ -718,10 +739,10 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     /// `.unwrap_or(100).min(500)` (`:757-761`).
     ///
     /// Passes `ctx.subject_tenant_id()` explicitly to
-    /// [`NotifyRepository::list_log`] — R106, fix round 3: a scope spanning
-    /// several tenants must not let this settings page's log read return
-    /// another in-scope tenant's rows, the way [`Self::get_config`] was
-    /// already pinned for the identical reason (R86).
+    /// [`NotifyRepository::list_log`] — the explicit-`tenant_id` rule, fix
+    /// round 3: a scope spanning several tenants must not let this settings
+    /// page's log read return another in-scope tenant's rows, the way
+    /// [`Self::get_config`] was already pinned for the identical reason.
     ///
     /// # Errors
     ///
@@ -791,8 +812,18 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     /// **Unlike [`Self::notify_run_completed`], a failure here propagates**:
     /// this is an interactive action an operator is watching, and legacy's
     /// own route surfaces the underlying error rather than swallowing it.
-    /// Never claims or logs — legacy's two test-send functions call neither
-    /// `reserve_run_notification` nor `log_notification`.
+    /// **Never claims a dedupe slot, and always logs.** Legacy's two
+    /// test-send functions call neither `reserve_run_notification` nor
+    /// `log_notification`; this port keeps only the first half. There is no
+    /// slot to spend — a test send is about no run, so there is no
+    /// `(run, kind, event)` triple to claim — but every channel it actually
+    /// attempts writes one audit row, on success and on failure alike. See
+    /// [`Self::audit_test_send`], which exists because the one surface an
+    /// operator reaches for *because something is wrong* used to leave no
+    /// trace of having been used. **This sentence said "never claims or
+    /// logs" while sitting directly above the code that logs** — the
+    /// statement was not updated when the audit landed, and the final branch
+    /// review found it (finding 4).
     ///
     /// [`TestSend::Generic`] sends over every channel the **stored** config
     /// enables, using its own fixed text (`"VHP Test Manager: test
@@ -808,6 +839,12 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     /// reference becomes a path segment of a gateway request this gear makes on
     /// the caller's behalf. See [`validate_slack_ref`].
     ///
+    /// **The send runs as the system actor, not as the caller** (DESIGN §3.5, "Egress").
+    /// The PDP authorizes the test under `ctx`; the Slack webhook and SMTP
+    /// password are then resolved under [`system_actor::for_settings_test_send`],
+    /// the identity every real send has, so a test passes only if a real send
+    /// would read the same secret.
+    ///
     /// # Errors
     ///
     /// [`DomainError::Validation`] for [`TestSend::ScheduledRun`] when the
@@ -820,18 +857,31 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     /// success for a test that sent nothing, a fresh tenant's default config
     /// being the common way to reach it.
     /// [`DomainError::UnsupportedEgress`] when [`TestSend::Generic`] is asked
-    /// to test a channel this deployment cannot send over — **the one place
-    /// [`SendOutcome::UnsupportedEgress`] surfaces as an error rather than a
-    /// log entry**, because an operator explicitly testing a channel deserves
-    /// to be told it does not work, not a silent success.
-    /// Whatever [`SlackClient::send`]/[`MailClient::send`] return as `Err`.
+    /// to test a channel this deployment cannot send over — an operator
+    /// explicitly testing a channel deserves to be told it does not work, not a
+    /// silent success. The adapter for a channel with no transport returns it
+    /// as an `Err` from `send`; `SendOutcome` itself has no such variant since
+    /// the SMTP follow-up.
+    /// Whatever [`SlackClient::send`]/[`MailClient::send`] return as `Err` — for
+    /// [`TestSend::Generic`] the first in channel order (Slack, then email), after
+    /// **every** enabled channel has been attempted and audited.
     /// [`DomainError::Forbidden`] when the PDP denies.
+    /// [`DomainError::Forbidden`] also when the caller carries the nil tenant,
+    /// before anything is sent.
     pub async fn send_test(
         &self,
         ctx: &SecurityContext,
         request: TestSend,
     ) -> Result<(), DomainError> {
         self.scope(ctx, actions::TEST).await?;
+        // The send runs as the identity a real send has, so a
+        // secret real sends cannot read (one stored with `private` sharing)
+        // fails here too. The PDP check above stays the caller's.
+        let tenant = TenantBound::new(ctx.subject_tenant_id()).ok_or_else(|| {
+            tracing::warn!("a test send was requested by a caller with no tenant; refusing");
+            DomainError::Forbidden
+        })?;
+        let send_as = system_actor::for_settings_test_send(tenant);
 
         match request {
             TestSend::Generic => {
@@ -860,11 +910,15 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                     });
                 }
 
+                // Every enabled channel is attempted and audited, whatever
+                // the one before it answered; the first failure in channel
+                // order is what the caller gets, and the log holds the rest.
+                let mut first_failure: Option<DomainError> = None;
                 if slack_will_send {
-                    let outcome = self
+                    let result = self
                         .slack
                         .send(
-                            ctx,
+                            &send_as,
                             &SlackMessage {
                                 webhook_credstore_ref: config.slack_webhook_credstore_ref.clone(),
                                 channel: effective_channel(&config, None),
@@ -872,14 +926,26 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                                 blocks: Vec::new(),
                             },
                         )
-                        .await?;
-                    debug_assert_eq!(outcome, SendOutcome::Sent);
+                        .await;
+                    // Audited before the outcome is inspected: the outcome an
+                    // operator most needs in the log is the failure.
+                    self.audit_test_send(
+                        ctx.subject_tenant_id(),
+                        "slack",
+                        "Settings-page test send",
+                        &result,
+                    )
+                    .await;
+                    match result {
+                        Ok(outcome) => debug_assert_eq!(outcome, SendOutcome::Sent),
+                        Err(error) => first_failure = first_failure.or(Some(error)),
+                    }
                 }
                 if email_will_send {
-                    let outcome = self
+                    let result = self
                         .mail
                         .send(
-                            ctx,
+                            &send_as,
                             &MailMessage {
                                 smtp_host: config.email_smtp_host.clone(),
                                 smtp_port: config.email_smtp_port,
@@ -890,10 +956,20 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                                 body: GENERIC_TEST_MESSAGE.to_owned(),
                             },
                         )
-                        .await?;
-                    debug_assert_eq!(outcome, SendOutcome::Sent);
+                        .await;
+                    self.audit_test_send(
+                        ctx.subject_tenant_id(),
+                        "email",
+                        "Settings-page test send",
+                        &result,
+                    )
+                    .await;
+                    match result {
+                        Ok(outcome) => debug_assert_eq!(outcome, SendOutcome::Sent),
+                        Err(error) => first_failure = first_failure.or(Some(error)),
+                    }
                 }
-                Ok(())
+                first_failure.map_or(Ok(()), Err)
             }
             TestSend::ScheduledRun { config, event } => {
                 if !config.slack_enabled {
@@ -912,24 +988,27 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                 }
                 // Phase C's final review, Important 1. This arm's `config` is
                 // **caller-supplied**, not the stored document, and its
-                // reference becomes the first segment of the oagw proxy path
-                // this gear builds on the caller's behalf
-                // (`infra::notify::slack_oagw`'s `webhook_path`). oagw's
-                // per-tenant upstream resolution bounds that to the tenant's
-                // own registered upstreams, so it is not an open SSRF — but it
-                // is a caller-controlled proxy path, and the sibling JIRA
-                // surface validates its reference at both the write and the
-                // adapter. Same rule, same function, applied to the override.
+                // reference names the credential-store secret the Slack
+                // adapter resolves on the caller's behalf. The lookup runs
+                // as this gear's system actor bound to the caller's tenant, as
+                // a real send does, so it can only reach this tenant's
+                // `tenant`- and `shared`-sharing secrets, and the adapter
+                // refuses any secret that is not a
+                // `https://hooks.slack.com/services/…` URL before
+                // dialling (`infra::notify::slack_oagw`, "Delivery") — so it
+                // is not an SSRF — but the sibling JIRA surface validates its
+                // reference at both the write and the adapter. Same rule, same
+                // function, applied to the override.
                 validate_slack_ref(&config.slack_webhook_credstore_ref)?;
 
                 let sample = sample_render_context();
                 let rendered = render::preview_scheduled_run(&config, &event, &sample)
                     .ok_or_else(|| invalid_event_error(&event))?;
 
-                let outcome = self
+                let result = self
                     .slack
                     .send(
-                        ctx,
+                        &send_as,
                         &SlackMessage {
                             webhook_credstore_ref: config.slack_webhook_credstore_ref.clone(),
                             channel: effective_channel(&config, None),
@@ -937,7 +1016,15 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                             blocks: rendered.blocks,
                         },
                     )
-                    .await?;
+                    .await;
+                self.audit_test_send(
+                    ctx.subject_tenant_id(),
+                    "slack",
+                    &format!("Scheduled-run test send for event '{event}'"),
+                    &result,
+                )
+                .await;
+                let outcome = result?;
                 debug_assert_eq!(outcome, SendOutcome::Sent);
                 Ok(())
             }
@@ -948,22 +1035,33 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     /// run — the send-once path over [`routing::Event::RunCompleted`].
     ///
     /// Ports legacy's generic (non-templated) alert inside
-    /// `notify_run_completed` (`manager/src/services/notifications.rs:180-355`).
-    /// See this module's header, "R104: `notify_run_completed` resolves a real
-    /// run through `RunsReader`", for the two fields this method leaves `None`
-    /// and why that is an honest absence. **That reference used to name a
-    /// section called "`notify_run_completed` does not yet resolve a real run"**
-    /// (Phase C's final review, cluster B): R104's fix round renamed the section
-    /// and inverted its claim, and this one site was missed while `:377` was
-    /// updated — so it pointed at a heading that no longer existed and asserted
-    /// the opposite of shipped behaviour.
+    /// `notify_run_completed`
+    /// (`manager/src/services/notifications.rs:180-355`). See this module's
+    /// header, "`notify_run_completed` resolves a real run through
+    /// `RunsReader`", for the two fields this method leaves `None` and why that
+    /// is an honest absence. **That reference used to name a section called
+    /// "`notify_run_completed` does not yet resolve a real run"** (Phase C's
+    /// final review, cluster B): a fix round renamed the section and inverted
+    /// its claim, and this one site was missed while `:377` was updated — so it
+    /// pointed at a heading that no longer existed and asserted the opposite of
+    /// shipped behaviour.
     ///
     /// **Never propagates a send failure** — matching legacy, and unlike
     /// [`Self::send_test`]. Every attempt (sent, skipped, failed or
     /// unsupported) is logged except the one case
-    /// [`routing::Decision::slack_skip_is_audited`] says is deliberately
-    /// silent (R94a); a failed send releases its claim (R100) before
-    /// returning `Ok(())`.
+    /// [`routing::Decision::slack_skip_is_audited`] says is deliberately silent
+    /// (`routing.rs`'s header, "Slack skips: audited or silent"), and except a
+    /// skip this method has already audited once for the same run and channel;
+    /// a failed send releases its claim before returning `Ok(())`.
+    ///
+    /// **Every channel that is not sent on is claimed anyway** — see
+    /// [`Self::decline_run_completed_channel`]. Once this method has
+    /// considered a run, `qa_run_notifications` holds a row for both of its
+    /// kinds whatever the outcome was, except for a send that was attempted
+    /// and failed (which releases) and a run declined by
+    /// [`Self::is_history`] (which is suppressed by the cutoff instead, on
+    /// every path including a rebuild, and must leave the slot free for the
+    /// operator who moves that cutoff).
     ///
     /// # Errors
     ///
@@ -977,8 +1075,17 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
         run_id: Uuid,
     ) -> Result<(), DomainError> {
         let tenant_id = ctx.subject_tenant_id();
+        let event = Event::RunCompleted;
 
-        // R104: resolve the real run before anything else. A `RunNotIngested`
+        // Before anything that costs a round trip: a run whose every channel
+        // has already been decided has no outcome left to produce, and the
+        // sweep re-projects a zero-result run on every tick for as long as it
+        // sits in the lookback window. See [`Self::already_decided`].
+        if self.already_decided(ctx, tenant_id, run_id, &event).await? {
+            return Ok(());
+        }
+
+        // Resolve the real run before anything else. A `RunNotIngested`
         // here is a normal, expected race in this gear's async-ingest
         // architecture, not a corruption — see this module's header. Any
         // other failure (a genuine qa-runs outage) is logged the same way,
@@ -1014,6 +1121,18 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                 return Ok(());
             }
         };
+        // The history cutoff, checked as soon as there is a `finished_at` to
+        // check and **before** any claim is taken — see
+        // [`Self::is_history`]. A run older than this deployment's cutoff is
+        // not notified and not claimed: claiming it would spend the slot that
+        // a genuine later send (after a rebuild, say) would need.
+        if self
+            .is_history(ctx, tenant_id, run_id, &event, run.finished_at)
+            .await?
+        {
+            return Ok(());
+        }
+
         let results = match self.runs.list_run_test_results(ctx, run_id).await {
             Ok(results) => results,
             Err(DomainError::RunNotIngested { .. }) => {
@@ -1043,16 +1162,16 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
         };
         let render_ctx = run_completed_render_context(&run, &results);
 
-        // R105: resolve the run's real schedule settings. `None` here — no
+        // Resolve the run's real schedule settings. `None` here — no
         // `schedule_id`, or one that could not be resolved — is not a
-        // failure; it is legacy's own "not a scheduled run" answer, ported
-        // by `no_scheduled_notifications` — see this module's header, "What
-        // an absent schedule means".
+        // failure and no longer a silence either: it is "nothing to narrow
+        // with", and routing proceeds on the tenant's settings alone. See
+        // this module's header, "What an absent schedule means".
         let schedule = match run.schedule_id {
-            None => no_scheduled_notifications(),
+            None => None,
             Some(schedule_id) => match self.runs.get_schedule_notifications(ctx, schedule_id).await
             {
-                Ok(settings) => settings.unwrap_or_else(no_scheduled_notifications),
+                Ok(settings) => settings,
                 Err(error) => {
                     self.log(
                         tenant_id,
@@ -1069,8 +1188,12 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
         };
 
         let config = self.get_config(ctx).await?;
-        let event = Event::RunCompleted;
-        let decision = routing::route(&config, &event, &schedule);
+        // The verdict this run's own alert will print, and the input
+        // `notify_on_failure`/`notify_on_success` are policies over — one
+        // classification, so the gate and the headline cannot disagree
+        // (`domain::notify::routing::RunOutcome`).
+        let outcome = render::run_completed_outcome(&render_ctx);
+        let decision = routing::route(&config, &event, schedule.as_ref(), outcome);
         // The event's dedupe-key spelling, shared by every claim and log
         // write below so a claim and its log row always agree about which
         // event they are about. The `kind` argument does not affect this
@@ -1088,31 +1211,53 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                 kind: NotificationKind::RunCompletedSlack,
                 channel: RunCompletedChannel::Slack {
                     webhook_credstore_ref: config.slack_webhook_credstore_ref.clone(),
-                    channel: effective_channel(&config, Some(&schedule)),
+                    channel: effective_channel(&config, schedule.as_ref()),
                 },
                 render_ctx: &render_ctx,
             })
             .await?;
-        } else if !decision.sends_slack() && decision.slack_skip_is_audited() {
-            self.log(
-                tenant_id,
-                Some(run_id),
-                "slack",
-                &event_token,
-                OUTCOME_SKIPPED,
-                "Routing decided this event does not send over Slack",
-            )
-            .await;
+        } else {
+            // Nothing was attempted over Slack: routing declined, or it wanted
+            // to send and the webhook reference is empty. Either way the
+            // decision is recorded in `qa_run_notifications` — see
+            // [`Self::decline_run_completed_channel`] — so a later rebuild
+            // cannot mistake "never considered" for "never sent" and announce
+            // it (final review, finding 1).
+            let first_time = self
+                .decline_run_completed_channel(
+                    ctx,
+                    tenant_id,
+                    run_id,
+                    &event,
+                    NotificationKind::RunCompletedSlack,
+                )
+                .await?;
+            // The audit row is a separate question from the claim, and only
+            // this half keeps legacy's two silent cases: an unaudited routing
+            // skip
+            // (`!decision.sends_slack() && !decision.slack_skip_is_audited()`),
+            // and routing wanting to send while the webhook reference is empty
+            // (`decision.sends_slack() && !slack_capable(&config)`) — legacy's
+            // three Slack arms all require
+            // `config.slack_enabled && !webhook.is_empty()`
+            // (`notifications.rs:264,279,314`), so an empty webhook reaches
+            // none of them and logs nothing, independent of what
+            // `slack_skip_is_audited` would otherwise say (Important 1, fix
+            // round 3). `first_time` adds the third: the *same* skip seen again
+            // on the next sweep tick is not a second event to audit (final
+            // review, finding 6).
+            if first_time && !decision.sends_slack() && decision.slack_skip_is_audited() {
+                self.log(
+                    tenant_id,
+                    Some(run_id),
+                    "slack",
+                    &event_token,
+                    OUTCOME_SKIPPED,
+                    "Routing decided this event does not send over Slack",
+                )
+                .await;
+            }
         }
-        // Two silent cases, both matching legacy exactly rather than one:
-        // an unaudited routing skip (R94a — `!decision.sends_slack() &&
-        // !decision.slack_skip_is_audited()`), and routing wanting to send
-        // while the webhook reference is empty (`decision.sends_slack() &&
-        // !slack_capable(&config)`) — legacy's three Slack arms all require
-        // `config.slack_enabled && !webhook.is_empty()`
-        // (`notifications.rs:264,279,314`), so an empty webhook reaches none
-        // of them and logs nothing, independent of what `slack_skip_is_audited`
-        // would otherwise say (Important 1, fix round 3).
 
         if decision.sends_email() && email_capable(&config) {
             self.send_run_completed_channel(RunCompletedChannelSend {
@@ -1131,23 +1276,193 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                 render_ctx: &render_ctx,
             })
             .await?;
+        } else {
+            // The email side of the same record. Its claim is a different
+            // slot (`NotificationKind::RunCompletedEmail`), so declining email
+            // never spends Slack's, and turning email on later behaves
+            // exactly as turning Slack on later does.
+            self.decline_run_completed_channel(
+                ctx,
+                tenant_id,
+                run_id,
+                &event,
+                NotificationKind::RunCompletedEmail,
+            )
+            .await?;
         }
-        // No `else` and no audited-skip case for email ever, capability
-        // gate included: legacy's email branch has no `else` at all — see
+        // No audited-skip case for email ever, capability gate included:
+        // legacy's email branch has no `else` at all — see
         // `domain::notify::render`'s "Email rendering" section and this
         // module's own header for the citation.
 
         Ok(())
     }
 
+    /// Whether every run-completed channel for this run has already been
+    /// decided — both kinds hold a claim — so there is nothing this pass can
+    /// produce.
+    ///
+    /// # Why this read exists — final review, finding 6
+    ///
+    /// [`Self::notify_run_completed`] costs two cross-gear reads (`get_run`,
+    /// `list_run_test_results`), a third for the schedule, a settings read and
+    /// up to two claim inserts before it can conclude anything. The reconcile
+    /// sweep re-projects a run with **zero** result rows on every tick for as
+    /// long as it sits in the lookback window — 12 times an hour at the
+    /// defaults, and forever on a tenant whose sweep has wedged on a gap (a run
+    /// that cannot be projected, which pins the watermark until an operator
+    /// intervenes). Every one of those
+    /// passes used to repeat all of that work and append another audit row
+    /// saying what the previous pass already said.
+    ///
+    /// Once both kinds are claimed, no configuration change and no later pass
+    /// can make this method do anything (that is finding 1's decision, stated
+    /// in [`Self::decline_run_completed_channel`]), so the cheapest correct
+    /// answer is to stop here.
+    ///
+    /// # This is not the dedupe check, and must not become one
+    ///
+    /// The send-once protocol is still the claim *insert* and nothing else —
+    /// [`NotifyRepository::claim_notification`]'s own doc says why a
+    /// read-then-insert cannot express it. This read is an optimisation whose
+    /// only failure mode is losing a race and doing the redundant work anyway:
+    /// a pass that reads "not yet decided" still goes on to claim, and the
+    /// insert is what decides.
+    ///
+    /// # The three states that are deliberately *not* short-circuited
+    ///
+    /// * **A released claim.** A failed send deletes its row, so that channel
+    ///   reads as undecided and the next pass re-attempts it — which is the
+    ///   whole of the recovery path in
+    ///   [`Self::release_claim_ignoring_failure`].
+    /// * **A history run.** [`Self::is_history`] declines without claiming a
+    ///   channel's slot, on purpose, so such a run is re-read on every pass
+    ///   that reaches it (it takes only [`HISTORY_AUDIT_KIND`], so that the
+    ///   re-read is not also a re-audit). The
+    ///   cutoff is cheap and the alternative would spend the slot an operator
+    ///   moving the cutoff needs.
+    /// * **A half-decided run** — one kind claimed, the other not. Reachable
+    ///   when two replicas race, and the remaining channel is still owed its
+    ///   decision.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::Forbidden`] when the PDP denies, and any repository
+    /// failure reading the claims. A failure here must not be swallowed into
+    /// "not decided": that would re-send on every sweep for as long as the
+    /// database was unwell, which is the failure direction this whole area
+    /// avoids everywhere else.
+    async fn already_decided(
+        &self,
+        ctx: &SecurityContext,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        event: &Event,
+    ) -> Result<bool, DomainError> {
+        // A read, so `actions::GET` — the action
+        // `send_run_completed_channel`'s own doc reserves `UPDATE` for is the
+        // one that writes.
+        let access = self.scope(ctx, actions::GET).await?;
+        let conn = self.db.conn()?;
+        // Either kind produces the same event token; see the same note at the
+        // one call site in `notify_run_completed`.
+        let event_token = routing::dedupe_key(run_id, RUN_COMPLETED_KINDS[0], event).event;
+        let held = self
+            .repo
+            .claimed_kinds(&conn, &access, tenant_id, run_id, &event_token)
+            .await?;
+        Ok(RUN_COMPLETED_KINDS
+            .iter()
+            .all(|kind| held.iter().any(|claimed| claimed == kind.as_str())))
+    }
+
+    /// Record that this run's `kind` channel was considered and **not** sent
+    /// on, by taking its claim slot without sending anything. Answers whether
+    /// this call is the one that recorded it, so a caller can audit the
+    /// decision exactly once.
+    ///
+    /// # Why a decline claims at all — final review, finding 1
+    ///
+    /// `qa_run_notifications` is described everywhere in this gear as "the
+    /// record of what has been notified", and
+    /// [`Self::notify_run_completed`] used to write a row only when a send
+    /// actually succeeded. Every other outcome — routing declined, the
+    /// channel had no destination configured — left the table saying nothing
+    /// about the run at all, which two callers then read differently. A sweep
+    /// does not care, because `already_ingested` stops it re-projecting the
+    /// run. [`ReconcileService::rebuild`](crate::domain::service::reconcile::ReconcileService::rebuild)
+    /// has no such diff: it re-projects **every** run in the operator's
+    /// window, reaches this path again, and — with the channel turned on in
+    /// the meantime — announced every run that had previously been declined,
+    /// up to a full rebuild budget of them in one call. A claim taken here
+    /// closes that: the second consideration of the run finds the slot held
+    /// and says "already decided" rather than "never seen".
+    ///
+    /// # A claim and an audit row are different things, and only one of them
+    /// # is silent
+    ///
+    /// The silent skip ([`routing::Decision::slack_skip_is_audited`] is
+    /// `false`) is a statement about `qa_notification_log` and nothing else:
+    /// the default state would put a row on every run and bury the rows that
+    /// matter in a log with no retention sweep. It is not a statement that
+    /// the decision was not made. So the claim is taken on **every** decline,
+    /// audited or silent, and only the log write stays conditional —
+    /// otherwise the one state the silent skip covers (a schedule that
+    /// notifies, on a tenant whose `slack_enabled` is off) would be the
+    /// largest hole left in exactly the scenario finding 1 describes, which
+    /// is an operator turning that switch on.
+    ///
+    /// # What this deliberately gives up
+    ///
+    /// **A channel enabled after the fact never announces the runs that were
+    /// declined while it was off**, by rebuild or by anything else. That is
+    /// the intended behaviour, not a residue: enabling a channel is not a
+    /// request to be told about every run that finished before it was
+    /// enabled, and the alternative — the shipped behaviour this replaces —
+    /// is a mail-out of a window's worth of history on the next repair a
+    /// operator runs. `DESIGN.md` §3.9 states it for operators, and
+    /// `POST /qa/v1/insights/rebuild`'s own description repeats it where an
+    /// API consumer will read it.
+    ///
+    /// The one thing a rebuild *does* still re-attempt is a send that was tried
+    /// and failed, because [`Self::send_run_completed_channel`] releases that
+    /// claim — see its own comment, and
+    /// [`Self::release_claim_ignoring_failure`], for what recovery is.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::Forbidden`] when the PDP denies, and any repository
+    /// failure taking the claim — the same two the send path propagates, for
+    /// the same reason: a broken database is not swallowed the way a broken
+    /// egress is.
+    async fn decline_run_completed_channel(
+        &self,
+        ctx: &SecurityContext,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        event: &Event,
+        kind: NotificationKind,
+    ) -> Result<bool, DomainError> {
+        // `actions::UPDATE`, for the reason `send_run_completed_channel`'s own
+        // doc gives at length: `claim_notification` is an `INSERT`, and a
+        // read-only grant must not authorize it.
+        let access = self.scope(ctx, actions::UPDATE).await?;
+        let conn = self.db.conn()?;
+        let key = routing::dedupe_key(run_id, kind, event);
+        let claim = key.into_claim(OffsetDateTime::now_utc());
+        self.repo
+            .claim_notification(&conn, &access, tenant_id, claim)
+            .await
+    }
+
     /// Claim, render, send and log one channel of [`Self::notify_run_completed`].
     ///
-    /// Shared by the Slack and mail arms so the claim/send/log/release
-    /// sequence exists in exactly one place; `job.channel` carries the one
-    /// thing that differs. Bundled into [`RunCompletedChannelSend`] rather
-    /// than seven bare parameters purely because `clippy::too_many_arguments`
-    /// (7) says so once R104 added `render_ctx` as an eighth — every field
-    /// here already existed as a parameter before that.
+    /// Shared by the Slack and mail arms so the claim/send/log/release sequence
+    /// exists in exactly one place; `job.channel` carries the one thing that
+    /// differs. Bundled into [`RunCompletedChannelSend`] rather than seven bare
+    /// parameters purely because `clippy::too_many_arguments` (7) says so once
+    /// fix round 1 added `render_ctx` as an eighth — every field here already
+    /// existed as a parameter before that.
     ///
     /// # Authorized under `actions::UPDATE`, not `actions::GET` — Phase C's
     /// # final review, Important 2
@@ -1170,11 +1485,17 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     /// "may write this tenant's notification state", so no operator has to
     /// learn a fourth verb for a resource with three.
     ///
-    /// **Reachability today is nil** — `notify_run_completed` still has no
-    /// producer (release-gate item R111) — which is why this was Important
-    /// rather than Critical. It is fixed now anyway, on Task 39's own ruling: a
-    /// port signature defect found before wiring is a signature change; found
-    /// after wiring it is an incident.
+    /// **This path has a production caller now**, and the action above is what
+    /// authorizes it. When the review that raised this found it, nothing called
+    /// [`Self::notify_run_completed`] at all — an open item then — so the wrong
+    /// grant was Important rather than Critical, and it was fixed then anyway,
+    /// by Task 39: a port signature defect found before wiring is a signature
+    /// change; found after wiring it is an incident. The caller is
+    /// [`ReconcileService::reproject`](crate::domain::service::reconcile::ReconcileService::reproject),
+    /// through [`RunCompletionNotifier`], and it runs as the reconcile sweep's
+    /// or the operator rebuild's system actor — see that method's
+    /// "Notification, after the commit" section, and this module's
+    /// [`RunCompletionNotifier`] for the grant that actor must hold.
     ///
     /// The action change does not touch the six-outcome claim lifecycle below.
     /// It changes which grant authorizes the path, not how many arms it has.
@@ -1229,15 +1550,25 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                 .await;
             }
             Err(error) => {
-                // R100: release so a retry is not permanently suppressed.
-                // Fix round 3, Important 3: the release's own failure is
-                // swallowed rather than propagated — legacy's identical
+                // Release the claim, so the slot is free for another attempt.
+                // **Nothing in the sweep makes that attempt** — see
+                // `Self::release_claim_ignoring_failure` for what recovery
+                // actually is, which is an operator rebuild, and for why this
+                // comment no longer says "so a retry is not permanently
+                // suppressed" without naming who retries (final review, finding
+                // 2). A timeout is the one failure whose delivery is unknown —
+                // the far side may have accepted the message before the bound
+                // fired. Releasing anyway makes delivery at-least-once when the
+                // outcome is ambiguous (DESIGN §3.5, "Egress"): a repeat beats
+                // a notification silently lost. Fix round 3, Important 3: the
+                // release's own failure is swallowed rather than propagated —
+                // legacy's identical
                 // `let _ = self.release_run_notification(...)`
-                // (`notifications.rs:515-517`), then logs, then returns. A
-                // bare `?` here would skip the `OUTCOME_FAILED` log write
-                // immediately below for the one case it exists to record —
-                // a send failure — breaking both "never propagates" and
-                // "every attempt is logged" in one step.
+                // (`notifications.rs:515-517`), then logs, then returns. A bare
+                // `?` here would skip the `OUTCOME_FAILED` log write
+                // immediately below for the one case it exists to record — a
+                // send failure — breaking both "never propagates" and "every
+                // attempt is logged" in one step.
                 self.release_claim_ignoring_failure(&conn, &access, tenant_id, run_id, &key)
                     .await;
                 self.log(
@@ -1268,6 +1599,29 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     /// until the SMTP follow-up removed `SendOutcome::UnsupportedEgress`; both
     /// did exactly this, which is why they folded into one without changing
     /// what happens to the claim.
+    ///
+    /// # What the released slot is for — final review, finding 2
+    ///
+    /// Releasing frees the slot for another attempt. **It does not cause
+    /// one**, and no part of the sweep does either:
+    /// [`ReconcileService`](crate::domain::service::reconcile::ReconcileService)'s
+    /// `consume_page` re-projects only runs absent from `already_ingested`,
+    /// which is derived from `qa_test_results`, so a run that projected at
+    /// least one result row is never revisited and
+    /// [`Self::notify_run_completed`] is never called for it again. Exactly
+    /// two classes get a second attempt without an operator: a run with
+    /// genuinely **zero** result rows, which the diff never suppresses, and a
+    /// run reached by `POST /qa/v1/insights/rebuild`.
+    ///
+    /// So the recovery for a transient Slack or SMTP outage is a rebuild over
+    /// the affected window, and finding 1's claim-on-decline is what makes
+    /// that safe to run: a rebuild now re-attempts the sends whose claims were
+    /// released and announces nothing that was already decided. `DESIGN.md`
+    /// §3.5 "Egress" says this where an operator reads it, and the endpoint's
+    /// own description repeats it. An automatic retry would need durable
+    /// per-attempt state (an attempt count, a next-attempt instant) that this
+    /// schema does not have; it is recorded as absent rather than implied by a
+    /// comment.
     async fn release_claim_ignoring_failure(
         &self,
         conn: &toolkit_db::secure::DbConn<'_>,
@@ -1293,9 +1647,189 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
                 %run_id,
                 kind = key.kind.as_str(),
                 event = key.event.as_str(),
-                "failed to release a notification claim that was never sent; a retry will stay suppressed until this is fixed",
+                "failed to release a notification claim that was never sent; until this row is \
+                 deleted, a rebuild of this window will skip the run instead of re-attempting \
+                 its notification",
             );
         }
+    }
+
+    /// Whether `finished_at` is before this deployment's notification cutoff —
+    /// that is, whether this run is history rather than news.
+    ///
+    /// # Why this exists, in one measurement
+    ///
+    /// `m20260929_000003_seed_run_completed_notification_claims` was supposed
+    /// to be the whole answer: a claim row per already-projected run, so every
+    /// run the gear had ingested reads as already-sent. It is not sufficient,
+    /// and the reason is that it can only name runs with rows in
+    /// `qa_test_results`. Measured on the dev stand, 2026-09-29: 1231 distinct
+    /// run ids in `qa_test_results` against 2326 finished runs in qa-runs —
+    /// **1095 finished runs with no result rows at all**, none of them
+    /// claimable by that seed, every one of them re-projected on every sweep
+    /// (`domain::service::reconcile`'s header: a run with genuinely zero
+    /// results is never "already ingested"), and each worth two notifications.
+    ///
+    /// A cutoff does not ask which runs were ingested. It asks when this
+    /// deployment started notifying and declines everything older, which
+    /// closes that class and every other one shaped like it without depending
+    /// on any table being a faithful census.
+    ///
+    /// # Ordering: before the claim, not after
+    ///
+    /// A history run must leave both channel slots untouched. Claiming and then
+    /// declining to send would burn the slot, so a later *legitimate* send for
+    /// that run — an operator rebuilding a window they want re-announced —
+    /// would find it taken and skip. Declining first leaves the run exactly as
+    /// it was.
+    ///
+    /// # The two `false` answers, and why neither is `true`
+    ///
+    /// * **No cutoff row.** Unreachable on a migrated database (the migration
+    ///   creates the table and writes the row in one `up()`), and read as
+    ///   "notify everything" — the behaviour the gear had before the cutoff
+    ///   existed. A missing row must not be able to switch the feature off
+    ///   silently; a notifier that has stopped sending is the harder outage to
+    ///   notice, because nothing errors.
+    /// * **A run with no `finished_at`.** The port promises never to produce
+    ///   one from a finished-run listing, and `reconcile`'s `consume_page`
+    ///   stops the sweep if it ever does. Reaching here with `None` means the
+    ///   instant is unknown, not that it is old, so this declines to call it
+    ///   history and lets the claim decide — which is send-once either way.
+    ///
+    /// A **failure** to read the cutoff is neither: it propagates. "The
+    /// database cannot say where history ends" must not be read as "there is
+    /// no history", which would notify the whole lookback window on the next
+    /// sweep.
+    ///
+    /// # Audited once per run, not once per sweep
+    ///
+    /// A zero-result history run is re-projected on every sweep tick for as
+    /// long as it sits in the lookback window, and [`Self::already_decided`]
+    /// does not stop it (it asks about the two channel slots, which this path
+    /// leaves free on purpose). Each pass used to append the same `skipped`
+    /// row, so `qa_notification_log` — which has no retention sweep — grew by
+    /// one row per tick per such run. The row is now written only by the pass
+    /// that wins a claim of its own, [`HISTORY_AUDIT_KIND`]: the same insert-
+    /// is-the-answer protocol as a send, so two replicas racing still write
+    /// one row, and a slot that is not a channel's, so neither channel is
+    /// spent and an operator who moves the cutoff still gets the send.
+    ///
+    /// **The claim is taken before the audit row is written, and the row is
+    /// best-effort** ([`Self::log`] swallows a write failure into a warning). So
+    /// a failed log write loses that run's history row for good: the next pass
+    /// loses the claim and writes nothing. That is accepted because the row is
+    /// audit-only — nothing is sent or withheld on it.
+    ///
+    /// **A history run now needs the PDP's `UPDATE` scope**, like a channel
+    /// send, because the audit claim is an insert under it. Before the claim
+    /// existed, declining a history run needed only the cutoff read.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::Database`] from the cutoff read or the audit claim, and
+    /// [`DomainError::Forbidden`] when the PDP denies the claim's `UPDATE`.
+    async fn is_history(
+        &self,
+        ctx: &SecurityContext,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        event: &Event,
+        finished_at: Option<OffsetDateTime>,
+    ) -> Result<bool, DomainError> {
+        let conn = self.db.conn()?;
+        let Some(cutoff) = self.repo.run_completed_cutoff(&conn).await? else {
+            return Ok(false);
+        };
+        let Some(finished_at) = finished_at else {
+            return Ok(false);
+        };
+        if finished_at >= cutoff {
+            return Ok(false);
+        }
+
+        // `actions::UPDATE`: the claim is an `INSERT`, for
+        // `decline_run_completed_channel`'s reason. One slot per run and
+        // event, under a kind no channel uses.
+        let access = self.scope(ctx, actions::UPDATE).await?;
+        let first = self
+            .repo
+            .claim_notification(
+                &conn,
+                &access,
+                tenant_id,
+                NotificationClaim {
+                    run_id,
+                    kind: HISTORY_AUDIT_KIND.to_owned(),
+                    // The run-completed event token, via `dedupe_key` for the
+                    // same reason `already_decided` goes through it.
+                    event: routing::dedupe_key(run_id, RUN_COMPLETED_KINDS[0], event).event,
+                    // When the decision was recorded; nothing was sent.
+                    sent_at: OffsetDateTime::now_utc(),
+                },
+            )
+            .await?;
+        if !first {
+            return Ok(true);
+        }
+
+        self.log(
+            tenant_id,
+            Some(run_id),
+            "run",
+            "run_completed",
+            OUTCOME_SKIPPED,
+            &format!(
+                "The run finished at {finished_at}, before this deployment began notifying at \
+                 {cutoff}; it is history and was not announced"
+            ),
+        )
+        .await;
+        Ok(true)
+    }
+
+    /// Audit one test send — **on both outcomes**.
+    ///
+    /// # Why this exists
+    ///
+    /// [`Self::notify_run_completed`] audits every attempt it makes and
+    /// [`Self::send_test`] audited none, so the one surface an operator
+    /// reaches for *because something is wrong* left no trace of having been
+    /// used. `GET /qa/v1/settings/notifications/log` is the only place an
+    /// operator sees that Slack or SMTP is broken (DESIGN 3.5 "Egress", and
+    /// the initial migration's own note on `qa_notification_log`); a test send
+    /// that failed and logged nothing is precisely the event that surface is
+    /// for.
+    ///
+    /// # What it does not audit
+    ///
+    /// The refusals [`Self::send_test`] makes *before* reaching a port — no
+    /// channel enabled and configured, an unusable webhook reference, an event
+    /// token outside the closed set — write no row. Nothing was attempted, so
+    /// there is no attempt to record, and they reach the caller as a
+    /// `Validation` naming the field to fix rather than as a failure of a
+    /// channel. The audit log's `outcome` vocabulary
+    /// ([`OUTCOME_SENT`]/[`OUTCOME_FAILED`]/[`OUTCOME_SKIPPED`]/[`OUTCOME_UNSUPPORTED_EGRESS`])
+    /// has no word for "the request was malformed" and should not grow one.
+    ///
+    /// `run_id` is `None`: a test send is about no run. `NewLogEntry::run_id`
+    /// is already `Option` for exactly this shape —
+    /// `a_log_entry_may_belong_to_no_run` pins it at the repository.
+    async fn audit_test_send(
+        &self,
+        tenant_id: Uuid,
+        channel: &str,
+        detail: &str,
+        result: &Result<SendOutcome, DomainError>,
+    ) {
+        // The same two mappings the run-completed path uses, so a `failed` row
+        // written here and one written there mean the same thing.
+        let (outcome, detail) = match result {
+            Ok(sent) => (outcome_str(*sent), detail.to_owned()),
+            Err(error) => (failure_outcome_str(error), error.to_string()),
+        };
+        self.log(tenant_id, None, channel, TEST_EVENT, outcome, &detail)
+            .await;
     }
 
     /// Write one audit entry, swallowing a write failure into a `tracing::warn!`
@@ -1341,6 +1875,72 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
         {
             tracing::warn!(%error, "failed to write the notification log");
         }
+    }
+}
+
+/// The one thing a run's terminal transition needs from this service: "this
+/// run finished; notify whoever the tenant's settings say to notify".
+///
+/// # Why a trait, when there is one implementation
+///
+/// [`crate::domain::service::reconcile::ReconcileService`] is the caller, and
+/// it is generic over two repositories already (`R`, `W`). Holding a
+/// [`NotifyService<N>`] directly would give it a third parameter that exists
+/// only to name the notification repository — a type it never mentions, over a
+/// table it never touches — and would push that parameter through
+/// `crate::domain::service::AppServices` and every test fixture. The trait is
+/// object-safe, so the reconciler holds one `Arc<dyn RunCompletionNotifier>`
+/// and stays `ReconcileService<R, W>`.
+///
+/// The second thing it buys is the one this task's tests needed: a double that
+/// counts calls. `a_sweep_notifies_each_newly_projected_run_once` asserts on
+/// that count rather than on a log line, which is the difference between
+/// "the producer exists" and "a producer-shaped message was formatted".
+///
+/// # The grant the caller must hold
+///
+/// [`NotifyService::notify_run_completed`] reads the tenant's settings under
+/// `qa.notification_config/get` and claims, releases and audits under
+/// `qa.notification_config/update` (see
+/// `NotifyService::send_run_completed_channel`). The reconcile sweep and the
+/// operator rebuild both reach it under a **tenant-bound** system actor
+/// ([`crate::domain::system_actor::SystemActorSite::context`]), never the
+/// nil-tenant enumeration context — which is what makes the PDP answer at all:
+/// this stack's `static-authz-plugin` denies outright on a nil tenant
+/// (`gears/system/authz-resolver/plugins/static-authz-plugin`, `Service::evaluate`)
+/// and otherwise grants every action with an `owner_tenant_id IN [tenant]`
+/// clamp. So no new deployment grant is required for this caller; a deployment
+/// that swaps in a real PDP needs both actions on `qa.notification_config` for
+/// the qa-insights system actor.
+#[async_trait]
+pub trait RunCompletionNotifier: Send + Sync {
+    /// Send (or skip, or fail-and-log) one run's completion notifications.
+    ///
+    /// **Idempotent by construction.** The claim table's unique index on
+    /// `(tenant_id, run_id, notification_kind, event_type)` is the record of
+    /// what has been notified, so a second call for a run already notified
+    /// sends nothing — see [`NotifyService::notify_run_completed`].
+    ///
+    /// # Errors
+    ///
+    /// Never a *send* failure: those are audited and swallowed. A PDP denial
+    /// or a repository failure does propagate, because there is nowhere to log
+    /// it.
+    async fn notify_run_completed(
+        &self,
+        ctx: &SecurityContext,
+        run_id: Uuid,
+    ) -> Result<(), DomainError>;
+}
+
+#[async_trait]
+impl<N: NotifyRepository + Clone + 'static> RunCompletionNotifier for NotifyService<N> {
+    async fn notify_run_completed(
+        &self,
+        ctx: &SecurityContext,
+        run_id: Uuid,
+    ) -> Result<(), DomainError> {
+        NotifyService::notify_run_completed(self, ctx, run_id).await
     }
 }
 

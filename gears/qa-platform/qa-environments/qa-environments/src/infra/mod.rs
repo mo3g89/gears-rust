@@ -14,7 +14,7 @@ pub mod storage;
 /// writer.
 ///
 /// Behind the non-default `runner-secret` cargo feature — renamed from
-/// `platform-observation` by ruling F-19, because after Task 19 it gates a
+/// `platform-observation` by Task 19b, because after Task 19 it gates a
 /// `Secret` writer and nothing observational, and a feature named for work it
 /// no longer does is this branch's signature defect in cargo form. See
 /// ADR-0001's Amendments section, which records this adapter and confirms

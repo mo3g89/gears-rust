@@ -34,7 +34,7 @@ interface SavedFilterItem {
 const OPERATORS = ['=', '!=', '~', '!~', '>', '>=', '<', '<=', 'in', 'not in', ':'];
 const KEYWORDS = ['AND', 'OR'];
 const SAVED_FILTERS_STORAGE_PREFIX = 'qa:fql:saved:';
-/** The pre-Task-22 prefix. Migrated wholesale on first read: these are values
+/** The earlier `vhp:` prefix. Migrated wholesale on first read: these are values
  *  a user typed, not values the server can send again. */
 const LEGACY_SAVED_FILTERS_STORAGE_PREFIX = 'vhp:fql:saved:';
 

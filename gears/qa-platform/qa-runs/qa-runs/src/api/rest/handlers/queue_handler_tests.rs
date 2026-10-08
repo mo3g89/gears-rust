@@ -67,7 +67,6 @@ async fn every_queue_handler_attributes_a_denial_to_the_queue_entry() {
             Extension(Arc::clone(&services)),
             Query(QueueQuery {
                 environment_id: None,
-                limit: None,
                 legacy_platform_id: None,
             }),
             OData(ODataQuery::new()),

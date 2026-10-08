@@ -97,7 +97,7 @@
 //! surface a user reads. Its decision is a real fork, not a chore:
 //!
 //! 1. Order in its own SQL. Task 27's endpoints are aggregates with legacy
-//!    parameters (D7), not `OData` collections, so nothing forces them through
+//!    parameters, not `OData` collections, so nothing forces them through
 //!    the pager and `NULLS LAST` is expressible directly. The collection's gap
 //!    then stays open **permanently** and should be restated here as such.
 //! 2. Add the index and the guarded orderable key, which closes it for both.
@@ -139,18 +139,19 @@
 //! So the honest rule is in two parts:
 //!
 //! 1. **Every field here is at least an index member**, and every field that is
-//!    only a member becomes a prefix as soon as the caller supplies the column
-//!    in front of it — `test_file` for `test_name`, `run_id` for the case
-//!    table's `test_file`. Those are the realistic queries (a file's history; a
-//!    run's cases for one file), and every legacy read of these tables that
-//!    returns *rows* rather than an aggregate filters on exactly those columns:
+//!    only a member becomes a prefix as soon as the caller supplies the column in
+//!    front of it — `test_file` for `test_name`, `run_id` for the case table's
+//!    `test_file`. Those are the realistic queries (a file's history; a run's
+//!    cases for one file), and every legacy read of these tables that returns
+//!    *rows* rather than an aggregate filters on exactly those columns:
 //!    `WHERE rr.workflow_name = $1` joined on `run_id`
 //!    (`manager/src/routes/runs.rs:150-153`), `WHERE tr.test_file = $1`
 //!    (`manager/src/routes/tests.rs:313-315`), and — for the case table —
 //!    `WHERE rr.workflow_name = ANY($1)` joined on `run_id`
 //!    (`manager/src/routes/analytics.rs:1316-1319`). Legacy has no filterable
 //!    listing of either table and no paging over them at all, which is why the
-//!    surface below ports no legacy rule; it is what D7 decided.
+//!    surface below ports no legacy rule; `OData` applying only to the two flat
+//!    result collections is this gear's own decision (`api::rest`'s header).
 //! 2. **A member-only filter is a range scan over one tenant's slice of that
 //!    index, not a seek** — bounded by the tenant, not by the predicate. That is
 //!    a real cost and it is accepted rather than hidden: dropping `test_name`

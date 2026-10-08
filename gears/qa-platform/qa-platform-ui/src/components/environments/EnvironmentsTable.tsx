@@ -26,12 +26,11 @@ interface EnvironmentsTableProps {
 /**
  * The "Status" column is back. It was removed because `version_detect_error` and
  * `version_detected_at` were columns nothing in this deployment ever set, so every row
- * read a permanent "Unknown" — a "not yet" that was really a "never" (REMOVED-SURFACES.md,
- * Task 8a, C3). The environment-observation cycle now writes both
+ * read a permanent "Unknown" — a "not yet" that was really a "never". The environment-observation cycle now writes both
  * (`qa-environments/src/infra/storage/environments_sea_repo.rs`' `record_observation`), so the column
  * reports a real measurement.
  *
- * It is the **plugin's health verdict** since Task 19: `health_state` and its classified
+ * It is the **plugin's health verdict**: `health_state` and its classified
  * `health_detail`, which replaced the five `cluster_*` columns. `healthLabel` falls back to
  * the reachability/detection label for an environment whose verdict is still `unknown`,
  * and `healthDotClass` uses the same fallback, so the dot and the text never disagree.

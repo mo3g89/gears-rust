@@ -148,8 +148,8 @@ map $arg_access_token $sse_authorization {
 #
 # The bridge above maps `?access_token=<jwt>` onto an `Authorization` header
 # because `EventSource` cannot set headers and the gears read a credential only
-# from `AUTHORIZATION`. That transport is by design (CONTRACT-DIFF 12.5). What
-# was not by design is nginx's default `combined` format writing the whole
+# from `AUTHORIZATION`. That transport is by design (it is the only way an `EventSource`
+# can carry a credential). What was not by design is nginx's default `combined` format writing the whole
 # request line -- token included -- to stdout, which in the Helm deployment goes
 # wherever the cluster ships container logs. Measured at 60 such lines while
 # this file's own comment above (now `THE COST`, at what was :80-86) was first
@@ -355,8 +355,8 @@ server {
 
         # Legacy's timeouts, kept. An SSE connection is idle between events,
         # and nginx's default proxy_read_timeout is 60s. That default is not
-        # *currently* fatal -- the gear sends a keep-alive every 30s (Task 11's
-        # report, `sse.rs:94`) -- but it leaves the connection's survival
+        # *currently* fatal -- the gear sends a keep-alive every 30s
+        # (`sse.rs:94`) -- but it leaves the connection's survival
         # depending on a gear-side interval this file cannot see, and a run
         # that emits nothing for over a minute is entirely normal. 3600s
         # removes that coupling.

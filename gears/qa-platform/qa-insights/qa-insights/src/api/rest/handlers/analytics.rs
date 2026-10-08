@@ -1,5 +1,5 @@
 //! The analytics overview, its build-tests drill-down, its export (Task 25b,
-//! Task 26) and the three plan drill-downs (Task 27).
+//! Task 26) and the three plan drill-downs.
 //!
 //! **Two statements each** — one delegation and one conversion — and what is
 //! *not* here is the point: no scope, no clamping of the two day counts, no

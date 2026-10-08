@@ -41,7 +41,7 @@ use crate::infra::proxy::{actions, resources};
 use super::headers;
 use super::pingora_proxy::{
     H_ENDPOINT_HOST, H_ENDPOINT_PORT, H_ENDPOINT_SCHEME, H_INSTANCE_URI, H_RESOLVED_ADDR,
-    H_UPSTREAM_ID, PingoraProxy,
+    H_ROUTE_PATH, H_UPSTREAM_ALIAS, H_UPSTREAM_ID, PingoraProxy,
 };
 use super::{request_builder, session_bridge};
 
@@ -809,6 +809,14 @@ impl DataPlaneService for DataPlaneServiceImpl {
         if let Ok(v) = HeaderValue::from_str(&instance_uri) {
             outbound_headers.insert(H_INSTANCE_URI, v);
         }
+        // What the proxy logs name instead of the request path — see
+        // `pingora_proxy`'s "Request logs" section.
+        if let Ok(v) = HeaderValue::from_str(&upstream.alias) {
+            outbound_headers.insert(H_UPSTREAM_ALIAS, v);
+        }
+        if let Ok(v) = HeaderValue::from_str(route_path) {
+            outbound_headers.insert(H_ROUTE_PATH, v);
+        }
         if let Some(addr) = selected.resolved_addr
             && let Ok(v) = HeaderValue::from_str(&addr.to_string())
         {
@@ -936,7 +944,10 @@ impl DataPlaneServiceImpl {
         )
         .await
         .map_err(|_| DomainError::RequestTimeout {
-            detail: format!("WebSocket upgrade to {url} timed out after {upgrade_timeout:?}"),
+            detail: format!(
+                "WebSocket upgrade to {} timed out after {upgrade_timeout:?}",
+                url_origin(url)
+            ),
             instance: instance_uri.to_string(),
         })?
         .map_err(|e| DomainError::DownstreamError {
@@ -1133,7 +1144,10 @@ impl DataPlaneServiceImpl {
                 result = resp_future => {
                     let (status, resp_headers, resp_body_stream) = result
                         .map_err(|_| DomainError::RequestTimeout {
-                            detail: format!("request to {url} timed out after {timeout:?}"),
+                            detail: format!(
+                                "request to {} timed out after {timeout:?}",
+                                url_origin(url)
+                            ),
                             instance: instance_uri.to_string(),
                         })?
                         .map_err(|e| DomainError::DownstreamError {
@@ -1174,7 +1188,10 @@ impl DataPlaneServiceImpl {
                 tokio::time::timeout(timeout, session_bridge::parse_response_stream(client_io))
                     .await
                     .map_err(|_| DomainError::RequestTimeout {
-                        detail: format!("request to {url} timed out after {timeout:?}"),
+                        detail: format!(
+                            "request to {} timed out after {timeout:?}",
+                            url_origin(url)
+                        ),
                         instance: instance_uri.to_string(),
                     })?
                     .map_err(|e| DomainError::DownstreamError {
@@ -1629,6 +1646,20 @@ async fn execute_transform_responses(
     *resp_headers = headers::vec_to_header_map(&header_map);
 }
 
+/// `scheme://authority` of an upstream URL — its path and query dropped.
+///
+/// For error details that name the upstream. A request's path suffix can be a
+/// credential (a Slack incoming webhook's secret is its path), and the whole URL
+/// used to be formatted into timeout details; the origin is what an operator
+/// needs to know which upstream timed out.
+fn url_origin(url: &str) -> &str {
+    let after_scheme = url.find("://").map_or(0, |at| at + 3);
+    match url[after_scheme..].find(['/', '?', '#']) {
+        Some(end) => &url[..after_scheme + end],
+        None => url,
+    }
+}
+
 /// Per-request plugin pipeline state shared across the streaming and buffered
 /// response paths.
 struct ResponsePipelineCtx<'a> {
@@ -1787,6 +1818,25 @@ mod tests {
     use crate::domain::services::{EndpointSelector, SelectionError};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
+
+    /// Timeout details name the upstream's origin, never the request path —
+    /// a path suffix can be a credential (a Slack incoming webhook's is).
+    #[test]
+    fn url_origin_drops_the_path_and_query() {
+        assert_eq!(
+            url_origin("https://hooks.slack.com:443/services/T/B/SENTINEL?x=1"),
+            "https://hooks.slack.com:443"
+        );
+        assert_eq!(
+            url_origin("http://api.example.com?q=SENTINEL"),
+            "http://api.example.com"
+        );
+        assert_eq!(
+            url_origin("https://api.example.com"),
+            "https://api.example.com"
+        );
+        assert!(!url_origin("wss://h/SENTINEL#f").contains("SENTINEL"));
+    }
 
     #[test]
     fn normalize_collapses_double_slashes() {

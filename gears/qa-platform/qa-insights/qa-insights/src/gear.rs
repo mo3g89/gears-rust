@@ -284,7 +284,7 @@ impl Cadence {
 /// now reads alongside the universe's static ones; `OrmJiraRepository` is Task
 /// 32's fifth, for the two JIRA configuration singletons.
 /// `OrmNotifyRepository` is Task 38's sixth, for the notification
-/// settings/log/dedupe surface — added in fix round 1 (ruling R103), which
+/// settings/log/dedupe surface — added in fix round 1, which
 /// moved it here from a first draft that named the concrete type inside
 /// `domain::service` itself rather than touch this alias.
 pub(crate) type ConcreteAppServices = AppServices<
@@ -351,7 +351,7 @@ pub(crate) type ConcreteAppServices = AppServices<
 ///   [`crate::infra::jira::OagwJiraClient`]; Task 39's Slack adapter reads the
 ///   same client from the same lookup. This bullet forecast "Tasks 34, 38",
 ///   which were the task numbers the plan then gave those two adapters.
-/// * `cluster` — leader election for the three tickers (Task 40).
+/// * `cluster` — leader election for the three tickers.
 ///
 /// **Each token is verified against the registered gear name.** The macro
 /// derives the runtime name by replacing underscores with hyphens
@@ -501,18 +501,25 @@ impl Gear for QaInsights {
         // commit); `infra::jira::OagwJiraClient` is the adapter over it.
         //
         // Task 39's Slack egress resolves the *same* client from this same
-        // lookup rather than adding a second.
+        // lookup rather than adding a second — it proxies through oagw once it
+        // has resolved and validated the tenant's webhook URL itself.
         let oagw = ctx
             .client_hub()
             .get::<dyn ServiceGatewayClientV1>()
             .map_err(|e| anyhow::anyhow!("failed to get oagw client: {e}"))?;
 
         // The fifth `deps` client, wired by **the SMTP follow-up** — and the
-        // first credential this gear resolves for itself. Every other secret it
-        // touches is a reference oagw fetches and injects on its behalf; SMTP
-        // cannot go through oagw at all (ADR-0011), so
-        // `infra::notify::SmtpMailClient` reads the relay password here, under
-        // the sending tenant's own context.
+        // client behind the only two credentials this gear resolves for
+        // itself. Every other secret it touches (JIRA's token) is a reference
+        // oagw fetches and injects on its behalf. SMTP cannot go through oagw
+        // at all (ADR-0011), so `infra::notify::SmtpMailClient` reads the relay
+        // password through this client; and a Slack webhook's credential is
+        // its URL path, which oagw cannot inject, so
+        // `infra::notify::SlackOagwClient` reads the webhook URL through it
+        // too (ADR-0011's 2026-09-30 amendment). Both resolve under the
+        // `ctx` they are handed: the qa-insights system actor bound to the
+        // sending tenant, on the automatic path and the settings test send
+        // alike (DESIGN §3.5, "Egress").
         //
         // **Resolved unconditionally, even when no SMTP host is allow-listed.**
         // A `ClientHub` lookup that only happens on some deployments is a boot
@@ -599,19 +606,19 @@ impl Gear for QaInsights {
                 // `NeverWiredSlackClient` stand-in, whose whole doc was about
                 // being replaced here.
                 //
-                // **R107 — this does not mean Slack notifications are
-                // delivered.** `infra::notify::slack_oagw`'s module doc,
-                // "Finding B", carries the argument: a Slack webhook's secret is
-                // its URL *path*, oagw's plugins inject only headers, and this
-                // gear declares no `credstore-sdk` and so cannot resolve the
-                // reference itself. Binding the adapter is what this task owes;
-                // the credential problem is an open release-gate item whose two
-                // candidate fixes are both cross-gear. What binding it changes is
-                // *which* of Task 38's six claim outcomes a send reaches — a
-                // failed send that releases the claim and writes an
-                // `OUTCOME_FAILED` audit row, instead of `UnsupportedEgress` —
-                // not how many outcomes there are.
-                slack_client: Arc::new(SlackOagwClient::new(oagw)) as Arc<dyn SlackClient>,
+                // **And it delivers** (the third review pass closed what had
+                // been an open item, ADR-0011's amendment of 2026-09-30): a
+                // Slack webhook's secret is its URL *path*, which oagw's
+                // header-only auth plugins cannot inject, so the adapter
+                // resolves the tenant's secret through credstore itself — the
+                // same client `mail_client` below receives, cloned here because
+                // that call takes it by value — validates it is a
+                // `https://hooks.slack.com/services/…` URL, and proxies it
+                // through a per-tenant no-auth oagw upstream.
+                // `infra::notify::slack_oagw`'s module header carries the
+                // delivery path and the redaction rule.
+                slack_client: Arc::new(SlackOagwClient::new(oagw, Arc::clone(&credstore)))
+                    as Arc<dyn SlackClient>,
                 // **The SMTP follow-up's**, and the one binding in this block
                 // that is a *choice* rather than a construction — see
                 // [`mail_client`].
@@ -620,7 +627,14 @@ impl Gear for QaInsights {
                 // config into the service, so nothing re-reads a knob per
                 // request.
                 reconcile_lookback: reconcile_lookback(cfg.reconcile_lookback_seconds),
-                reconcile_page_size: cfg.reconcile_page_size,
+                // **Bounded here and nowhere in `serve`.** The accessor warns
+                // when it lowers, so it is called once, at `init`, exactly as
+                // `Cadence::collect` calls the collect floor's; the resolved
+                // `u32` is what the service holds. See
+                // `config::QaInsightsConfig::effective_reconcile_page_size`
+                // for the finding (#121) and
+                // `domain::ports::MAX_FINISHED_RUNS_PAGE` for the cap.
+                reconcile_page_size: cfg.effective_reconcile_page_size(),
                 // Task 29's: the collect branch a request's own `branch` falls
                 // back to. See `ServiceDeps::default_collect_branch`'s doc.
                 default_collect_branch: cfg.default_collect_branch.clone(),
@@ -652,21 +666,18 @@ impl Gear for QaInsights {
 
         // **Task 40's**, and the last `// wired in Task N` gap to close: the
         // skip-list provider qa-runs' launch path reads
-        // (`qa_insights_sdk::client::QaInsightsClientV1::skip_list_for`). Task 34
-        // built the adapter and left it unregistered here, under R70, for the
-        // same reason `domain::local_client`'s own header gives.
+        // (`qa_insights_sdk::client::QaInsightsClientV1::skip_list_for`). Task
+        // 34 built the adapter and left it unregistered here, for the reason
+        // `domain::local_client`'s own header gives.
         //
         // Registered **after** `self.runtime.set`, matching qa-runs'
         // `QaRunsLocalClient` registration order, so a caller that resolves this
         // client the instant it appears cannot reach a gear whose runtime is
         // still unset.
         //
-        // **R74: registering the provider is not the same as it being called.**
-        // No task in this plan wires qa-runs' launch path to *invoke*
-        // `skip_list_for`, so at the end of Phase C the skip list is
-        // servable-and-unserved and `SKIP_TESTS_WITH_BUGS` stays
-        // reserved-with-no-producer in `qa-runs/src/domain/params.rs:101`. That
-        // is a recorded release-gate item, not an omission here.
+        // Registering the provider is not the same as it being called: nothing
+        // in qa-runs' launch path calls `skip_list_for` yet (`domain::jira`'s
+        // header, "No caller exists yet").
         ctx.client_hub()
             .register::<dyn QaInsightsClientV1>(Arc::new(QaInsightsLocalClient::new(Arc::clone(
                 &services.jira,
@@ -676,11 +687,6 @@ impl Gear for QaInsights {
     }
 }
 
-/// The largest lookback this gear will honour: ten years.
-///
-/// # Why a ceiling exists at all
-///
-/// `reconcile_lookback_seconds` is a `u64` and the sweep computes
 /// The [`MailClient`] this deployment gets, and why it is a choice.
 ///
 /// `smtp_allowed_hosts` empty — the default, and the state of every deployment
@@ -728,6 +734,11 @@ fn mail_client(
     )) as Arc<dyn MailClient>
 }
 
+/// The largest lookback this gear will honour: ten years.
+///
+/// # Why a ceiling exists at all
+///
+/// `reconcile_lookback_seconds` is a `u64` and the sweep computes
 /// `watermark - lookback`. `OffsetDateTime`'s `Sub` **panics** on overflow, and
 /// the type only spans years -9999 to 9999, so a config carrying `u64::MAX` — a
 /// typo, a unit confusion, a templating accident — would take the process down
@@ -1188,10 +1199,10 @@ const WEDGED_PASSES_BEFORE_ERROR: u32 = 3;
 /// `Copy` so [`report_reconcile_outcome`] can read the previous value out of
 /// the map before it takes the mutable borrow that updates it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct TenantProgress {
+pub(crate) struct TenantProgress {
     /// Consecutive passes that did not move this tenant's projection forward,
     /// by either failure mode. Reset to zero by a pass that did.
-    stalled_passes: u32,
+    pub(crate) stalled_passes: u32,
     /// [`ReconcileOutcome::watermark_at`] as of the last pass that reported
     /// one, so the next pass can tell "the mark stands still" from "the mark
     /// moved".
@@ -1200,7 +1211,43 @@ struct TenantProgress {
     /// pass zeroes [`Self::stalled_passes`] rather than removing the whole
     /// entry as the old `u32` map did: forgetting the mark would blind the next
     /// pass, and the outage's passes all looked clean.
-    watermark_at: Option<OffsetDateTime>,
+    pub(crate) watermark_at: Option<OffsetDateTime>,
+    /// The highest [`ReconcileOutcome::sweep_cursor_at`] this ticker has seen
+    /// since [`Self::watermark_at`] last changed, or `None` when the last pass
+    /// reported no cursor.
+    ///
+    /// What lets [`stall_of`] tell a draining tenant from a wedged one — see
+    /// its doc, "A rising cursor is progress". A *high-water* rather than the
+    /// previous pass' cursor, because two replicas sharing one cursor row can
+    /// make a ticker see it alternate between two positions, and "ahead of the
+    /// previous pass" would read every other pass of that as progress.
+    /// Maintained by [`Self::observe`] and nowhere else.
+    pub(crate) cursor_high_water: Option<OffsetDateTime>,
+}
+
+impl TenantProgress {
+    /// Record what one `Ok` pass observed, for the next pass' [`stall_of`].
+    ///
+    /// The mark is taken as reported. The cursor high-water restarts from this
+    /// pass' cursor when the mark moved (a new mark is a new baseline: the
+    /// drain it measured has passed it) or when this pass reported no cursor
+    /// (the drain is over, or never began); otherwise it keeps the higher of
+    /// the two. `Option`'s ordering puts `None` below every `Some`, so a first
+    /// cursor under a standing mark counts as a rise.
+    ///
+    /// A method rather than two lines inside [`report_reconcile_outcome`] so
+    /// that `domain::service::reconcile::reconcile_tests` can drive the ladder
+    /// on real sweep outcomes, per replica, with the rule the ticker uses
+    /// rather than a copy of it.
+    pub(crate) fn observe(&mut self, outcome: &ReconcileOutcome) {
+        let same_mark = self.watermark_at == outcome.watermark_at;
+        self.cursor_high_water = match outcome.sweep_cursor_at {
+            None => None,
+            cursor if same_mark => cursor.max(self.cursor_high_water),
+            cursor => cursor,
+        };
+        self.watermark_at = outcome.watermark_at;
+    }
 }
 
 /// The ticker's per-tenant history for one leadership term.
@@ -1315,24 +1362,29 @@ async fn reconcile_pass(
         if cancel.is_cancelled() {
             return;
         }
-        match services.reconcile.reconcile_once(tenant).await {
-            Ok(outcome) => report_reconcile_outcome(tenant, &outcome, wedged),
-            Err(error) => warn!(
-                tenant_id = %tenant.get(),
-                %error,
-                "qa-insights reconcile pass failed for this tenant; the others still run"
-            ),
-        }
+        // **One reporter for both arms.** The `Err` arm answered with a bare
+        // `warn!` of its own until finding #123: a tenant whose sweep failed
+        // every pass logged one `WARN` per tick and could never reach the
+        // `ERROR` that `WEDGED_PASSES_BEFORE_ERROR` exists to raise, because
+        // the function that counts passes was only ever called on success.
+        // A failed sweep is a pass that did not move this tenant forward, and
+        // it is counted as one. The others still run either way — nothing
+        // here returns early on a failure.
+        let result = services.reconcile.reconcile_once(tenant).await;
+        report_reconcile_outcome(tenant, result.as_ref(), wedged);
     }
 }
 
 /// Why a pass counts as one that did not move this tenant's projection forward.
 ///
-/// Two spellings of the same operator-visible fact — the mark is where it was —
-/// kept apart because the remedy differs and because one of them is a *named
-/// run* an operator can go and look at.
+/// Three spellings of the same operator-visible fact — the mark is where it
+/// was — kept apart because the remedy differs in each case: one names a *run*
+/// an operator can go and look at, one names a window to replay, and one names
+/// a collaborator that is down. [`Self::SweepFailed`] is the third, added with
+/// finding #123: before it, the one way a pass could fail outright was the one
+/// way it could not be counted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Stall {
+pub(crate) enum Stall {
     /// A run would not backfill. The sweep stopped short of it deliberately and
     /// nothing that finished later will be projected until it can be.
     Gap,
@@ -1342,6 +1394,16 @@ enum Stall {
     /// **This is the 2026-09-18 outage's shape**, and it is the one no signal
     /// in this process reported for three days.
     MarkStandingStill,
+    /// The sweep returned an error: qa-runs could not be listed, or this gear's
+    /// own watermark could not be read or written.
+    ///
+    /// A third spelling rather than folding into [`Self::Gap`], because the
+    /// remedy differs again — there is no run to go and look at, and a rebuild
+    /// will fail for the same reason the sweep did. It counts toward the same
+    /// escalation all the same: the operator-visible fact is still that this
+    /// tenant's projection has stopped moving, and finding #123 is that this
+    /// arm alone used to be unable to say so above `WARN`.
+    SweepFailed,
 }
 
 impl Stall {
@@ -1353,6 +1415,7 @@ impl Stall {
             Self::MarkStandingStill => {
                 "a watermark that did not move while the sweep had not caught up"
             }
+            Self::SweepFailed => "a sweep that could not complete",
         }
     }
 }
@@ -1384,27 +1447,100 @@ impl Stall {
 /// exactly when the walk stopped with more to read. A quiet tenant's walk ends
 /// on a short page and is caught up; the outage's walk ended on a saturated
 /// page it could not step past and was not.
-fn stall_of(outcome: &ReconcileOutcome, previous: Option<TenantProgress>) -> Option<Stall> {
+///
+/// # A rising cursor is progress — finding #122's residual B
+///
+/// `ReconcileService::sweep` persists a within-window resume cursor, so a
+/// lookback window wider than one pass' page budget **drains** across
+/// consecutive ticks. Every tick of that drain is real progress and none of it
+/// need move the mark, because the runs being consumed sit behind it. Until
+/// this rule, such a tenant tripped `Stall::MarkStandingStill` while perfectly
+/// healthy once the drain needed more than [`WEDGED_PASSES_BEFORE_ERROR`]
+/// ticks.
+///
+/// So a pass with an unchanged mark is **not** a stall when its
+/// [`ReconcileOutcome::sweep_cursor_at`] stands past
+/// [`TenantProgress::cursor_high_water`] — the highest cursor this ticker has
+/// seen since the mark last moved ([`TenantProgress::observe`] keeps it).
+///
+/// **This idea was recorded here as rejected, twice, and the reasons were
+/// real.** The stored cursor is shared state — two replicas write one row, so
+/// it can move because the *other* replica moved it, and two replicas can make
+/// it alternate between two positions. And a pass-local "did I advance past
+/// where I started" is `true` on every pass of a genuine wedge in which each
+/// pass does real work. What ships answers both:
+///
+/// * The comparison is across **one ticker's own consecutive outcomes**, not
+///   within a pass, so a replica that re-walks the same ground every pass
+///   writes the same cursor every pass and reads as standing still. That is
+///   the wedge `reconcile_tests::a_replica_wedge_on_mixed_lookbacks_still_escalates`
+///   builds from real sweeps and drives through this function per replica.
+/// * It is **high-watered**, so an oscillation between two positions counts as
+///   progress at most once and then stalls (`tests::two_replicas_oscillating_cursors_still_escalate`).
+///   The cursor is bounded by the mark it stands behind, so under one mark it
+///   can only rise a finite number of times before the drain either catches
+///   up — `caught_up` then takes the pass out of this arm — or stops rising.
+///
+/// **Known false positive, accepted:** the high-water compares instants, not
+/// the whole `(finished_at, id)` key. A tie group wider than one pass' budget
+/// — more than `MAX_PAGES_PER_SWEEP * page_size` runs sharing one
+/// `finished_at` — leaves `sweep_cursor_at` unchanged across passes while the
+/// cursor's run id advances, so a healthy drain through such a group reads as
+/// a stall for as long as it lasts. That is the loud direction, and the
+/// 2026-09-18 burst's widest group was 54 runs against a budget of 10,000; the
+/// id stays off the outcome rather than widening this comparison for it.
+pub(crate) fn stall_of(
+    outcome: &ReconcileOutcome,
+    previous: Option<TenantProgress>,
+) -> Option<Stall> {
     if outcome.stopped_at_gap {
         return Some(Stall::Gap);
     }
     // `previous` is `None` on the first pass of a leadership term: one
     // observation is not two, and "consecutive" needs two. That costs one tick
     // of latency after a restart and nothing else.
-    let standing_still = previous.is_some_and(|prev| prev.watermark_at == outcome.watermark_at)
-        && !outcome.caught_up
+    let standing_still = previous.is_some_and(|prev| {
+        let mark_unmoved = prev.watermark_at == outcome.watermark_at;
+        // A rising cursor under a standing mark is a drain making progress;
+        // see "A rising cursor is progress" above. `None` orders below every
+        // `Some`.
+        let cursor_rose = outcome.sweep_cursor_at > prev.cursor_high_water;
+        mark_unmoved && !cursor_rose
+    }) && !outcome.caught_up
         && outcome.scanned > 0;
     standing_still.then_some(Stall::MarkStandingStill)
 }
 
-/// Log one tenant's sweep, escalating a tenant whose projection has not moved
-/// forward for [`WEDGED_PASSES_BEFORE_ERROR`] consecutive passes.
+/// Log one tenant's sweep — **however it ended** — escalating a tenant whose
+/// projection has not moved forward for [`WEDGED_PASSES_BEFORE_ERROR`]
+/// consecutive passes.
 ///
 /// Split out of [`reconcile_pass`] because it is where the obligation lives and
 /// because it is the only part of the pass with a decision in it — see
 /// [`QaInsights::reconcile_ticker`]'s doc for the whole argument, including what
 /// the alternatives to a per-term map were and why they were rejected, and
 /// [`stall_of`] for what now counts as not moving forward.
+///
+/// # It takes the whole `Result`, and that is finding #123's second half
+///
+/// [`reconcile_pass`] used to match the sweep's `Result` itself and hand only
+/// the `Ok` here, answering the `Err` with a bare `warn!`. A tenant whose
+/// sweep failed on every pass therefore produced one `WARN` per tick and never
+/// an `ERROR`, however long it lasted — the *one* arm that reports an outright
+/// failure was the one arm that could not escalate, because escalating lives
+/// here and nothing called it.
+///
+/// A `Result` parameter rather than a sibling `report_reconcile_failure` makes
+/// that structural: there is one call site, one counter and one pair of
+/// `tracing` expansions, so a future arm cannot quietly acquire its own
+/// reporting. [`tests::every_arm_of_the_reconcile_pass_goes_through_the_one_reporter`]
+/// is what holds the call site to it.
+///
+/// **A failure does not record a mark.** An `Err` carries no observation, so
+/// [`TenantProgress::watermark_at`] keeps whatever the last pass that actually
+/// read one put there; writing `None` would make the next successful pass look
+/// like movement regardless of what the row holds, which is precisely the
+/// mistake `watermark_advanced_to` was deleted for.
 #[allow(
     clippy::cognitive_complexity,
     reason = "inflated by the three `tracing` macros, which are the whole function: a clean pass, \
@@ -1416,25 +1552,43 @@ fn stall_of(outcome: &ReconcileOutcome, previous: Option<TenantProgress>) -> Opt
 )]
 fn report_reconcile_outcome(
     tenant: TenantBound,
-    outcome: &ReconcileOutcome,
+    result: Result<&ReconcileOutcome, &DomainError>,
     progress: &mut ProgressByTenant,
 ) {
     // Copied out before the mutable borrow below, which is why
     // `TenantProgress` is `Copy`.
     let previous = progress.get(&tenant.get()).copied();
-    let stall = stall_of(outcome, previous);
+    let stall = match result {
+        Ok(outcome) => stall_of(outcome, previous),
+        // No `stall_of` call, and no outcome to give it: a sweep that returned
+        // an error did not finish, so the mark stands wherever the pages it
+        // did complete left it and the walk has more to read by construction.
+        // That is a stall on both of `stall_of`'s own tests, arrived at
+        // without having to invent an outcome to satisfy them.
+        Err(_) => Some(Stall::SweepFailed),
+    };
+    let outcome = result.ok();
 
     let entry = progress.entry(tenant.get()).or_default();
-    // **Unconditionally, including on a clean pass.** The next pass' comparison
-    // is only as good as this record, and every pass of the outage was clean by
-    // the old reading.
-    entry.watermark_at = outcome.watermark_at;
+    // **Unconditionally, including on a clean pass** — but only when there was
+    // a pass to observe. The next pass' comparison is only as good as this
+    // record, and every pass of the outage was clean by the old reading; an
+    // `Err` observed nothing, so it leaves the record alone rather than
+    // replacing it with a `None` the next pass would read as movement.
+    if let Some(outcome) = outcome {
+        entry.observe(outcome);
+    }
 
     let Some(stall) = stall else {
         // A pass that moved forward clears the count, so the escalation below
         // means "consecutive" and not "ever". The entry itself stays, for the
         // mark it carries.
         entry.stalled_passes = 0;
+        // Unreachable with `None`: the `Err` arm above always stalls, so a
+        // clean pass is an `Ok` pass. `unwrap_or_default` rather than an
+        // `expect`, because a panic in a log line is a worse answer than a row
+        // of zeroes.
+        let outcome = outcome.copied().unwrap_or_default();
         debug!(
             tenant_id = %tenant.get(),
             scanned = outcome.scanned,
@@ -1442,6 +1596,7 @@ fn report_reconcile_outcome(
             result_rows_written = outcome.result_rows_written,
             caught_up = outcome.caught_up,
             watermark_at = ?outcome.watermark_at,
+            sweep_cursor_at = ?outcome.sweep_cursor_at,
             "qa-insights reconcile pass"
         );
         return;
@@ -1449,29 +1604,43 @@ fn report_reconcile_outcome(
 
     entry.stalled_passes += 1;
     let passes = entry.stalled_passes;
+    // The mark this tenant is *known* to stand at, which for a failed pass is
+    // the last one a pass actually observed rather than nothing at all.
+    let watermark_at = outcome.map_or(entry.watermark_at, |outcome| outcome.watermark_at);
+    // `Debug` on the `Option`, for the reason `stopped_at_run` already carries:
+    // a `None` rendered through `Display` is an empty string, and an empty
+    // string is indistinguishable from a missing field in a structured sink.
+    let error = result.err();
     if passes >= WEDGED_PASSES_BEFORE_ERROR {
         error!(
             tenant_id = %tenant.get(),
             stalled_on = stall.as_str(),
-            stopped_at_run = ?outcome.stopped_at_run,
-            watermark_at = ?outcome.watermark_at,
+            error = ?error,
+            stopped_at_run = ?outcome.and_then(|outcome| outcome.stopped_at_run),
+            watermark_at = ?watermark_at,
+            sweep_cursor_at = ?outcome.and_then(|outcome| outcome.sweep_cursor_at),
             consecutive_wedged_passes = passes,
             "qa-insights reconciler has not advanced this tenant's watermark for several \
              consecutive passes: its projection is FROZEN at the reported instant and no run \
              finishing after it is being backfilled. Replay a narrow window with POST \
              /qa/v1/insights/rebuild; if a run is named, and the replay fails too, that run \
-             needs a look in qa-runs"
+             needs a look in qa-runs; if an error is reported, qa-runs or this gear's own \
+             database is what needs the look; if no run and no error is named, check that \
+             every replica runs the same reconcile_lookback_seconds (replicas on different \
+             lookbacks can wedge each other, and a rebuild does not clear that)"
         );
     } else {
         warn!(
             tenant_id = %tenant.get(),
             stalled_on = stall.as_str(),
-            stopped_at_run = ?outcome.stopped_at_run,
-            watermark_at = ?outcome.watermark_at,
+            error = ?error,
+            stopped_at_run = ?outcome.and_then(|outcome| outcome.stopped_at_run),
+            watermark_at = ?watermark_at,
+            sweep_cursor_at = ?outcome.and_then(|outcome| outcome.sweep_cursor_at),
             consecutive_wedged_passes = passes,
-            scanned = outcome.scanned,
-            backfilled = outcome.backfilled,
-            result_rows_written = outcome.result_rows_written,
+            scanned = outcome.map(|outcome| outcome.scanned),
+            backfilled = outcome.map(|outcome| outcome.backfilled),
+            result_rows_written = outcome.map(|outcome| outcome.result_rows_written),
             "qa-insights reconciler did not move this tenant's watermark on this pass, so \
              nothing that finished after it is projected for this tenant until it does"
         );
@@ -1731,16 +1900,18 @@ mod tests {
     //! — the registration that can panic at startup.
     //!
     //! `NeverWiredSlackClient`/`NeverWiredMailClient` and their two tests lived
-    //! here from Task 38's fix round 1 (R103) until **Task 40 replaced both
+    //! here from Task 38's fix round 1 until **Task 40 replaced both
     //! stand-ins with the real adapters** and removed them. Their never-errors
     //! contract did not go untested with them: it is `infra::notify`'s, where
     //! `UnsupportedMailClient` and `SlackOagwClient` each carry their own tests.
 
     use super::{
-        Cadence, MAX_LOOKBACK_SECONDS, ProgressByTenant, WEDGED_PASSES_BEFORE_ERROR, prune_wedged,
-        reconcile_lookback, report_reconcile_outcome,
+        Cadence, MAX_LOOKBACK_SECONDS, ProgressByTenant, Stall, TenantProgress,
+        WEDGED_PASSES_BEFORE_ERROR, prune_wedged, reconcile_lookback, report_reconcile_outcome,
+        stall_of,
     };
     use crate::config::{MIN_COLLECT_INTERVAL_SECONDS, QaInsightsConfig};
+    use crate::domain::error::DomainError;
     use crate::domain::service::reconcile::ReconcileOutcome;
     use crate::domain::system_actor::TenantBound;
     use time::{Duration, OffsetDateTime};
@@ -1815,6 +1986,8 @@ mod tests {
             resume_from: None,
             stopped_at_gap: false,
             stopped_at_run: None,
+            // The stand's wedge predates the resume cursor; there was none.
+            sweep_cursor_at: None,
         }
     }
 
@@ -1891,11 +2064,11 @@ mod tests {
         let mut wedged = ProgressByTenant::new();
 
         for expected in 1..=WEDGED_PASSES_BEFORE_ERROR {
-            report_reconcile_outcome(bound(TENANT_A), &wedged_outcome(), &mut wedged);
+            report_reconcile_outcome(bound(TENANT_A), Ok(&wedged_outcome()), &mut wedged);
             assert_eq!(passes(&wedged, TENANT_A), Some(expected));
         }
 
-        report_reconcile_outcome(bound(TENANT_A), &clean_outcome(), &mut wedged);
+        report_reconcile_outcome(bound(TENANT_A), Ok(&clean_outcome()), &mut wedged);
         assert_eq!(
             passes(&wedged, TENANT_A),
             Some(0),
@@ -1925,7 +2098,7 @@ mod tests {
     fn a_watermark_that_never_moves_escalates_even_though_no_pass_reports_a_gap() {
         let mut progress = ProgressByTenant::new();
 
-        report_reconcile_outcome(bound(TENANT_A), &stalled_outcome(), &mut progress);
+        report_reconcile_outcome(bound(TENANT_A), Ok(&stalled_outcome()), &mut progress);
         assert_eq!(
             passes(&progress, TENANT_A),
             Some(0),
@@ -1933,7 +2106,7 @@ mod tests {
         );
 
         for expected in 1..=WEDGED_PASSES_BEFORE_ERROR {
-            report_reconcile_outcome(bound(TENANT_A), &stalled_outcome(), &mut progress);
+            report_reconcile_outcome(bound(TENANT_A), Ok(&stalled_outcome()), &mut progress);
             assert_eq!(
                 passes(&progress, TENANT_A),
                 Some(expected),
@@ -1964,7 +2137,7 @@ mod tests {
                 watermark_at: Some(OffsetDateTime::UNIX_EPOCH + Duration::hours(hour)),
                 ..stalled_outcome()
             };
-            report_reconcile_outcome(bound(TENANT_A), &outcome, &mut progress);
+            report_reconcile_outcome(bound(TENANT_A), Ok(&outcome), &mut progress);
         }
 
         assert_eq!(
@@ -1972,6 +2145,140 @@ mod tests {
             Some(0),
             "each pass left the mark further forward than it found it, which is the sweep \
              working, not stalling"
+        );
+    }
+
+    /// A stalled-shape outcome whose resume cursor stands `minute` minutes
+    /// past 02:00, behind `stalled_outcome()`'s mark at 03:00 as a real cursor
+    /// always is. The mark is that outcome's, so every one of these passes
+    /// leaves the mark where it found it.
+    fn draining_at(minute: i64) -> ReconcileOutcome {
+        ReconcileOutcome {
+            sweep_cursor_at: Some(
+                OffsetDateTime::UNIX_EPOCH + Duration::hours(2) + Duration::minutes(minute),
+            ),
+            ..stalled_outcome()
+        }
+    }
+
+    /// **A healthy drain does not escalate** — finding #122's residual B.
+    ///
+    /// A lookback window wider than one pass' budget drains across ticks via
+    /// the resume cursor with the mark unmoved (the runs are behind it) and
+    /// `caught_up` false. Until this fix `stall_of` could not tell that from a
+    /// wedge and escalated a tenant that needed more than
+    /// [`WEDGED_PASSES_BEFORE_ERROR`] ticks to drain. Now a pass whose cursor
+    /// stands past the highest cursor this ticker has seen under the same mark
+    /// is progress.
+    #[test]
+    fn a_cursor_moving_forward_under_an_unmoved_mark_is_not_a_stall() {
+        let mut progress = ProgressByTenant::new();
+
+        for minute in 1..=3 {
+            report_reconcile_outcome(bound(TENANT_A), Ok(&draining_at(minute)), &mut progress);
+        }
+
+        assert_eq!(
+            passes(&progress, TENANT_A),
+            Some(0),
+            "every pass left the cursor past the last one, under an unmoved mark: a drain, \
+             not a wedge"
+        );
+    }
+
+    /// **Two replicas writing one cursor row cannot make an oscillation read as
+    /// progress**, and this is why the comparison is against a *high-water*
+    /// rather than the previous pass.
+    ///
+    /// Under `NoopLeaderElector` two replicas share the row, so a ticker can
+    /// see the cursor alternate between two positions. "Ahead of the previous
+    /// pass" would call every other pass progress and reset the ladder forever;
+    /// "ahead of the highest seen under this mark" stops rising after the first
+    /// pass, and the ladder climbs.
+    #[test]
+    fn two_replicas_oscillating_cursors_still_escalate() {
+        let mut progress = ProgressByTenant::new();
+
+        for minute in [5, 2, 5, 2] {
+            report_reconcile_outcome(bound(TENANT_A), Ok(&draining_at(minute)), &mut progress);
+        }
+
+        assert_eq!(
+            passes(&progress, TENANT_A),
+            Some(WEDGED_PASSES_BEFORE_ERROR),
+            "after the first pass the high-water stands at 02:05 and never rises again, so \
+             the next three passes are stalls and the third reaches the ERROR"
+        );
+    }
+
+    /// **A cursor that does not move is a wedge**, the other side of the drain
+    /// test above: without this, "a cursor counts as progress" would be
+    /// satisfied by a detector that ignored the mark whenever a cursor exists.
+    ///
+    /// The first pass records; the next three are stalls, and the third of
+    /// those is the ERROR — the same one-tick latency
+    /// `a_watermark_that_never_moves_escalates_even_though_no_pass_reports_a_gap`
+    /// documents.
+    #[test]
+    fn a_constant_cursor_under_an_unmoved_mark_escalates() {
+        let mut progress = ProgressByTenant::new();
+
+        report_reconcile_outcome(bound(TENANT_A), Ok(&draining_at(7)), &mut progress);
+        assert_eq!(
+            passes(&progress, TENANT_A),
+            Some(0),
+            "the first pass records"
+        );
+        for expected in 1..=WEDGED_PASSES_BEFORE_ERROR {
+            report_reconcile_outcome(bound(TENANT_A), Ok(&draining_at(7)), &mut progress);
+            assert_eq!(passes(&progress, TENANT_A), Some(expected));
+        }
+    }
+
+    /// **The resume cursor's high-water is an input to [`stall_of`]**, and this
+    /// is the line that goes red if it is ever taken out again.
+    ///
+    /// This test was `the_resume_cursor_is_not_an_input_to_stall_of` and
+    /// asserted the opposite: that the cursor must stay out of the decision,
+    /// because the shared row can be moved by another replica and a pass-local
+    /// "did I advance" is `true` on every pass of a real wedge. Both objections
+    /// still stand and neither applies to what ships: the comparison is between
+    /// one ticker's own consecutive outcomes, against the *highest* cursor seen
+    /// under the current mark, so an oscillation stops counting after one pass
+    /// (`two_replicas_oscillating_cursors_still_escalate`), and a replica wedge
+    /// leaves each replica's cursor constant
+    /// (`domain::service::reconcile::reconcile_tests::a_replica_wedge_on_mixed_lookbacks_still_escalates`).
+    ///
+    /// Outcomes differing in **nothing but** the cursor, against one
+    /// `previous` whose high-water is 02:00.
+    #[test]
+    fn the_resume_cursor_high_water_is_an_input_to_stall_of() {
+        let previous = TenantProgress {
+            stalled_passes: 1,
+            watermark_at: stalled_outcome().watermark_at,
+            cursor_high_water: draining_at(0).sweep_cursor_at,
+        };
+
+        assert_eq!(
+            stall_of(&draining_at(0), Some(previous)),
+            Some(Stall::MarkStandingStill),
+            "a cursor level with the high-water is no progress"
+        );
+        assert_eq!(
+            stall_of(&draining_at(1), Some(previous)),
+            None,
+            "a cursor past the high-water under an unmoved mark is a drain making progress"
+        );
+        assert_eq!(
+            stall_of(
+                &ReconcileOutcome {
+                    sweep_cursor_at: None,
+                    ..stalled_outcome()
+                },
+                Some(previous)
+            ),
+            Some(Stall::MarkStandingStill),
+            "and no cursor at all is no progress either: `None` orders below every `Some`"
         );
     }
 
@@ -2005,10 +2312,12 @@ mod tests {
             resume_from: None,
             stopped_at_gap: false,
             stopped_at_run: None,
+            // A caught-up pass erases the cursor, so there is none to report.
+            sweep_cursor_at: None,
         };
 
         for _ in 0..(WEDGED_PASSES_BEFORE_ERROR * 4) {
-            report_reconcile_outcome(bound(TENANT_A), &idle, &mut progress);
+            report_reconcile_outcome(bound(TENANT_A), Ok(&idle), &mut progress);
         }
 
         assert_eq!(
@@ -2039,9 +2348,9 @@ mod tests {
         let listed = [bound(TENANT_A)];
 
         prune_wedged(&mut wedged, Some(&listed));
-        report_reconcile_outcome(bound(TENANT_A), &wedged_outcome(), &mut wedged);
+        report_reconcile_outcome(bound(TENANT_A), Ok(&wedged_outcome()), &mut wedged);
         prune_wedged(&mut wedged, Some(&listed));
-        report_reconcile_outcome(bound(TENANT_A), &wedged_outcome(), &mut wedged);
+        report_reconcile_outcome(bound(TENANT_A), Ok(&wedged_outcome()), &mut wedged);
         assert_eq!(passes(&wedged, TENANT_A), Some(2), "two wedged passes");
 
         // The pass whose enumeration was refused. It prunes nothing and reports
@@ -2054,7 +2363,7 @@ mod tests {
         );
 
         prune_wedged(&mut wedged, Some(&listed));
-        report_reconcile_outcome(bound(TENANT_A), &wedged_outcome(), &mut wedged);
+        report_reconcile_outcome(bound(TENANT_A), Ok(&wedged_outcome()), &mut wedged);
         assert_eq!(
             passes(&wedged, TENANT_A),
             Some(WEDGED_PASSES_BEFORE_ERROR),
@@ -2068,8 +2377,8 @@ mod tests {
     #[test]
     fn a_tenant_the_directory_no_longer_lists_is_pruned() {
         let mut wedged = ProgressByTenant::new();
-        report_reconcile_outcome(bound(TENANT_A), &wedged_outcome(), &mut wedged);
-        report_reconcile_outcome(bound(TENANT_B), &wedged_outcome(), &mut wedged);
+        report_reconcile_outcome(bound(TENANT_A), Ok(&wedged_outcome()), &mut wedged);
+        report_reconcile_outcome(bound(TENANT_B), Ok(&wedged_outcome()), &mut wedged);
 
         prune_wedged(&mut wedged, Some(&[bound(TENANT_B)]));
 
@@ -2101,6 +2410,107 @@ mod tests {
             cadence.interval_seconds, MIN_COLLECT_INTERVAL_SECONDS,
             "the raw 1 must never reach serve"
         );
+    }
+
+    /// **#123's second half: a failed sweep escalates like any other stall.**
+    ///
+    /// `reconcile_pass` handled a sweep `Err` with a bare `warn!` that never
+    /// reached [`report_reconcile_outcome`], so a tenant whose sweep failed on
+    /// every pass — a qa-runs outage, a database that will not serve the
+    /// watermark — produced a `WARN` per tick and **never** an `ERROR`, for
+    /// any duration. The one arm that could not escalate was the arm that
+    /// reports an outright failure.
+    ///
+    /// Routing it through the same reporter makes it count on the same
+    /// [`WEDGED_PASSES_BEFORE_ERROR`] schedule as a wedge: the mark is not
+    /// moving and the operator needs to know, and *why* it is not moving is a
+    /// field on the line rather than a different path through the code.
+    #[test]
+    fn a_failed_sweep_counts_up_and_escalates_like_any_other_stall() {
+        let mut progress = ProgressByTenant::new();
+        let error = DomainError::Internal("qa-runs is unreachable".to_owned());
+
+        for expected in 1..=WEDGED_PASSES_BEFORE_ERROR {
+            report_reconcile_outcome(bound(TENANT_A), Err(&error), &mut progress);
+            assert_eq!(
+                passes(&progress, TENANT_A),
+                Some(expected),
+                "a failed sweep is a pass that did not move this tenant forward"
+            );
+        }
+    }
+
+    /// A failed sweep must not overwrite the mark the last **successful** pass
+    /// recorded.
+    ///
+    /// The `Err` carries no outcome, so there is no observation to record; a
+    /// reporter that wrote `None` there would make the next successful pass
+    /// look like progress whatever the row actually holds, which is the exact
+    /// class of mistake `watermark_advanced_to` was removed for.
+    #[test]
+    fn a_failed_sweep_leaves_the_last_observed_mark_alone() {
+        let mut progress = ProgressByTenant::new();
+        let observed = ReconcileOutcome {
+            scanned: 1,
+            watermark_at: Some(OffsetDateTime::UNIX_EPOCH + Duration::hours(9)),
+            caught_up: true,
+            ..ReconcileOutcome::default()
+        };
+        report_reconcile_outcome(bound(TENANT_A), Ok(&observed), &mut progress);
+
+        let error = DomainError::Internal("qa-runs is unreachable".to_owned());
+        report_reconcile_outcome(bound(TENANT_A), Err(&error), &mut progress);
+
+        assert_eq!(
+            progress.get(&TENANT_A).map(|p| p.watermark_at),
+            Some(observed.watermark_at),
+            "a pass that observed nothing must not claim the mark is unknown"
+        );
+    }
+
+    /// **No `Err` arm of the reconcile pass may report on its own.**
+    ///
+    /// The behaviour tests above drive [`report_reconcile_outcome`] directly,
+    /// which is the only way to reach it without a database, a `ClientHub` and
+    /// five resolved cross-gear clients. What they cannot see is whether
+    /// [`reconcile_pass`] still *calls* it on both arms — and a `warn!`
+    /// written straight into that match is exactly how this finding happened
+    /// the first time. Same source-scan reason, and same comment-stripping,
+    /// as [`init_installs_one_metrics_adapter_into_both_ports`].
+    #[test]
+    fn every_arm_of_the_reconcile_pass_goes_through_the_one_reporter() {
+        let body = reconcile_pass_source();
+        let code: String = body
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            code.matches("report_reconcile_outcome(").count(),
+            1,
+            "both arms must reach the reporter through one call, not two that can drift: {code}"
+        );
+        assert!(
+            !code.contains("warn!"),
+            "a warn! here is a failure that reports itself and therefore never escalates, which is finding #123: {code}"
+        );
+    }
+
+    /// `reconcile_pass`'s own source, isolated for the assertion above.
+    ///
+    /// [`init_source`]'s shape at module level: it ends at the first line that
+    /// is exactly a closing brace in column one, which for a free function is
+    /// its own.
+    fn reconcile_pass_source() -> &'static str {
+        let src = include_str!("gear.rs");
+        let start = src
+            .find("\nasync fn reconcile_pass(")
+            .expect("gear.rs declares reconcile_pass");
+        let tail = &src[start..];
+        let end = tail
+            .find("\n}\n")
+            .expect("reconcile_pass's body is closed at column one");
+        &tail[..end]
     }
 
     /// `Gear::init`'s own source, isolated so a wiring assertion can be made

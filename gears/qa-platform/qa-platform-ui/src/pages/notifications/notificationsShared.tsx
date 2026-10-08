@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { RefreshCw } from 'lucide-react';
+import { Loader2, RefreshCw, Save } from 'lucide-react';
 import type {
   NotificationLogEntry,
   NotificationsConfig,
@@ -11,6 +11,8 @@ import type {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import {
   Table,
   TableBody,
@@ -86,7 +88,7 @@ export const DEFAULT_SCHEDULED_TEMPLATES: ScheduledRunSlackTemplatesConfig = {
 };
 
 export const DEFAULT_FORM: NotificationsConfig = {
-  slack_webhook_url: '',
+  slack_webhook_credstore_ref: '',
   slack_channel: '',
   manager_ui_base_url: '',
   slack_enabled: true,
@@ -290,6 +292,93 @@ function outcomeBadgeVariant(outcome: string): 'default' | 'secondary' | 'destru
     default:
       return 'outline';
   }
+}
+
+/**
+ * Which finished runs are announced at all, on every channel.
+ *
+ * `notify_on_failure` and `notify_on_success` were stored, round-tripped and
+ * read by nothing until 2026-09-29, when the owner ruled them live
+ * (`qa-insights`' `domain::notify::routing`). They had no control here because
+ * they did nothing; they need one now, because the stored default is failures
+ * only and without a switch a tenant could not ask for anything else.
+ *
+ * It lives above the Slack and Email tabs rather than on either, because it
+ * gates both: a run the policy declines is announced on no channel. It saves
+ * the same whole document both tabs save.
+ */
+export function RunOutcomePolicySection({
+  form,
+  isSaving,
+  onSave,
+  setForm,
+}: {
+  form: NotificationsConfig;
+  isSaving: boolean;
+  onSave: () => void;
+  setForm: Dispatch<SetStateAction<NotificationsConfig>>;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-lg">Run Completion Policy</CardTitle>
+        <CardDescription>
+          Which finished runs are announced, over Slack and email alike. A run that neither passed
+          nor failed — one with no results, only skipped results, or any other non-pass, non-fail
+          status — is announced while either switch is on. With both off, nothing is announced on
+          any channel.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center justify-between gap-4 rounded-md border p-4">
+          <div className="space-y-1">
+            <Label htmlFor="notif-on-failure" className="text-base">
+              Notify on failure
+            </Label>
+            <p className="text-sm text-muted-foreground">
+              Announce a run whose results include a failure or an error.
+            </p>
+          </div>
+          <Switch
+            id="notif-on-failure"
+            checked={form.notify_on_failure}
+            onCheckedChange={(checked) =>
+              setForm((current) => ({ ...current, notify_on_failure: checked }))
+            }
+          />
+        </div>
+
+        <div className="flex items-center justify-between gap-4 rounded-md border p-4">
+          <div className="space-y-1">
+            <Label htmlFor="notif-on-success" className="text-base">
+              Notify on success
+            </Label>
+            <p className="text-sm text-muted-foreground">
+              Announce a run with at least one passed result and none failed or errored (skipped results are allowed). Off by default.
+            </p>
+          </div>
+          <Switch
+            id="notif-on-success"
+            checked={form.notify_on_success}
+            onCheckedChange={(checked) =>
+              setForm((current) => ({ ...current, notify_on_success: checked }))
+            }
+          />
+        </div>
+
+        <div className="flex justify-end">
+          <Button onClick={onSave} disabled={isSaving}>
+            {isSaving ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="mr-2 h-4 w-4" />
+            )}
+            Save Run Completion Policy
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 export function NotificationLogSection({

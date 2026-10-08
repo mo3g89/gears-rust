@@ -1,4 +1,5 @@
-//! [`MailClient`] over a real SMTP relay — the adapter that closes D10.
+//! [`MailClient`] over a real SMTP relay — the adapter that closes the
+//! original design's deferral of the SMTP socket (ADR-0011).
 //!
 //! # Why this one does not go through `oagw`, when every other egress does
 //!
@@ -35,8 +36,9 @@
 //!
 //! * `AsyncSmtpTransportBuilder::timeout` bounds `lettre`'s own TCP connect and
 //!   each individual command read (`transport/smtp/client/async_net.rs`).
-//! * `tokio::time::timeout` wraps the whole `send`, which is what bounds the
-//!   *conversation*: a relay that answers every command in nine seconds
+//! * `tokio::time::timeout` wraps the password lookup and the whole `send`,
+//!   which is what bounds the *conversation* (and a credential store that
+//!   never answers): a relay that answers every command in nine seconds
 //!   violates no per-command bound and still takes a minute to refuse a
 //!   message.
 //!
@@ -71,17 +73,31 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use credstore_sdk::{CredStoreClientV1, SecretRef};
+use credstore_sdk::{CredStoreClientV1, CredStoreError, SecretRef};
 use lettre::message::Mailbox;
 use lettre::transport::smtp::AsyncSmtpTransport;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncTransport as _, Message, Tokio1Executor};
 use toolkit_security::SecurityContext;
 
-use crate::domain::error::DomainError;
-use crate::domain::ports::{
-    CREDSTORE_REF_SCHEME, MailClient, MailCredentials, MailMessage, SendOutcome,
-};
+use super::UNREADABLE_SECRET_HINT;
+use crate::domain::error::{DomainError, EgressFailure};
+use crate::domain::ports::{MailClient, MailCredentials, MailMessage, SendOutcome};
+
+/// The channel name every [`DomainError::UpstreamEgress`] from this adapter
+/// carries — the same string `domain::service::notify` writes into the audit
+/// log's `channel` column for this port.
+const CHANNEL: &str = "email";
+
+/// The SMTP reply codes that mean "your credentials were refused", from RFC
+/// 4954 §6 (`530`, `534`, `535`, `538`) and its one transient shape (`454`).
+///
+/// Enumerated rather than matched on the `5`/`3` severity-and-category pair,
+/// which would also swallow `531`, `532`, `533` and `537` — codes RFC 4954
+/// does not define — into "authentication". A code this list does not name is
+/// reported as [`EgressFailure::Rejected`] with the relay's own text, which is
+/// the honest answer for a refusal this adapter cannot name.
+const AUTH_FAILURE_CODES: [u16; 5] = [454, 530, 534, 535, 538];
 
 /// The `NotificationConfigDto`/`qa_notification_config` field each refusal
 /// names, so an operator is told which box on the settings page to fix rather
@@ -95,7 +111,7 @@ const REF_FIELD: &str = "email_smtp_credstore_ref";
 /// there are two ways a submission relay is reached and no third one this
 /// adapter will speak.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TlsMode {
+pub enum TlsMode {
     /// TLS before the first byte (RFC 8314 §3.3). Port 465 only.
     Implicit,
     /// Clear connect, then a **required** `STARTTLS` upgrade.
@@ -103,7 +119,7 @@ pub(crate) enum TlsMode {
 }
 
 /// The port that means implicit TLS, and the only one.
-pub(crate) const IMPLICIT_TLS_PORT: u16 = 465;
+pub const IMPLICIT_TLS_PORT: u16 = 465;
 
 /// The TLS mode for `port`.
 ///
@@ -111,7 +127,7 @@ pub(crate) const IMPLICIT_TLS_PORT: u16 = 465;
 /// this is the whole of the security decision this adapter makes on its own,
 /// and it should be readable and falsifiable without building a transport.
 #[must_use]
-pub(crate) const fn tls_mode_for(port: u16) -> TlsMode {
+pub const fn tls_mode_for(port: u16) -> TlsMode {
     if port == IMPLICIT_TLS_PORT {
         TlsMode::Implicit
     } else {
@@ -204,12 +220,15 @@ impl SmtpMailClient {
             .any(|allowed| allowed.eq_ignore_ascii_case(host))
     }
 
-    /// The relay password, resolved under the **sending tenant's** context.
+    /// The relay password, resolved under the `ctx` it is handed — the
+    /// qa-insights system actor bound to the sending tenant, on the automatic
+    /// path and the settings test send alike.
     ///
     /// `ctx` is why [`MailClient::send`] takes one at all: credstore resolution
-    /// is tenant-scoped, and an adapter that passed `SecurityContext::anonymous`
-    /// here could only ever read the nil tenant's secrets — which is the
-    /// mistake `SlackClient` made and ruling R108 corrected.
+    /// is tenant-scoped, and an adapter that passed
+    /// `SecurityContext::anonymous` here could only ever read the nil tenant's
+    /// secrets — which is the mistake `SlackClient` made and its fix round 1
+    /// corrected.
     ///
     /// The value is returned as a `String` and lives until the transport is
     /// dropped. That is plaintext credential material inside this process,
@@ -229,26 +248,37 @@ impl SmtpMailClient {
             message: format!("the SMTP credential could not be resolved: {why}"),
         };
 
-        let name = reference
-            .strip_prefix(CREDSTORE_REF_SCHEME)
-            .unwrap_or(reference);
-        let key = SecretRef::new(name)
+        let key = SecretRef::new(reference)
             .map_err(|_| invalid("it is not a syntactically valid credential-store reference"))?;
 
-        let found = self.credstore.get(ctx, &key).await.map_err(|e| {
-            DomainError::Internal(format!("the credential store refused the SMTP secret: {e}"))
-        })?;
-        // `Ok(None)` is credstore's single anti-enumeration 404 surface: it
-        // means "no such secret, or not yours", and the two are deliberately
-        // indistinguishable. A `Validation` rather than an `Internal`, because
-        // the thing to change is the reference on the settings page.
-        let secret = found.ok_or_else(|| {
-            invalid("no secret of that name is readable by this tenant; check the reference")
-        })?;
+        // `Ok(None)` is credstore's single anti-enumeration surface ("no such
+        // secret, or not yours"); a client reporting it as `NotFound`, or a
+        // missing read permission as `AccessDenied`, gets the same answer —
+        // `SlackOagwClient::webhook`'s rule.
+        let found = match self.credstore.get(ctx, &key).await {
+            Ok(found) => found,
+            Err(CredStoreError::NotFound | CredStoreError::AccessDenied) => None,
+            Err(e) => {
+                return Err(DomainError::Internal(format!(
+                    "the credential store refused the SMTP secret: {e}"
+                )));
+            }
+        };
+        // A `Validation` rather than an `Internal`, because the thing to
+        // change is the reference, or the secret's sharing, on the settings
+        // page.
+        //
+        // One answer for a miss and for a secret that is not UTF-8: a second
+        // text would tell the caller the name exists, over a store the system
+        // actor reads more widely than the caller does.
+        let unreadable = || {
+            invalid(&format!(
+                "no readable secret of that name holds an SMTP password; {UNREADABLE_SECRET_HINT}"
+            ))
+        };
+        let secret = found.ok_or_else(unreadable)?;
 
-        String::from_utf8(secret.value.as_bytes().to_vec()).map_err(|_| {
-            invalid("the stored secret is not valid UTF-8 and cannot be an SMTP password")
-        })
+        String::from_utf8(secret.value.as_bytes().to_vec()).map_err(|_| unreadable())
     }
 
     /// The `lettre` transport for one send.
@@ -372,47 +402,119 @@ impl MailClient for SmtpMailClient {
             });
         }
 
-        let credentials = match &message.credentials {
-            Some(MailCredentials {
-                username,
-                password_credstore_ref,
-            }) => Some(Credentials::new(
-                username.clone(),
-                self.password(ctx, password_credstore_ref).await?,
-            )),
-            None => None,
-        };
-
-        let email = build_message(message)?;
-        let transport = self.transport(host, message.smtp_port, credentials)?;
-
-        // The conversation bound, distinct from the per-command bound handed to
-        // the builder above — see this module's header.
-        let response = tokio::time::timeout(self.timeout, transport.send(email))
-            .await
-            .map_err(|_| {
-                DomainError::Internal(format!(
-                    "the SMTP send to {host} did not complete within {:?}",
-                    self.timeout
-                ))
-            })?
-            .map_err(|e| {
-                // ADR-0008's one sanctioned exception: text the remote sent
-                // back is not derived from our credential material, and
-                // suppressing it leaves an operator debugging blind. `lettre`'s
-                // `Error` renders the relay's own refusal and never the
-                // credentials it was given.
-                DomainError::Internal(format!("the SMTP relay {host} refused the message: {e}"))
-            })?;
+        // One bound over the password lookup and the conversation: a
+        // credential store that never answers must not stall the caller any
+        // more than a relay that never greets. The per-command bound handed
+        // to the builder is separate — see this module's header. A
+        // `Validation` from the lookup still comes out unchanged through the
+        // inner `?`.
+        let response = tokio::time::timeout(self.timeout, async {
+            let credentials = match &message.credentials {
+                Some(MailCredentials {
+                    username,
+                    password_credstore_ref,
+                }) => Some(Credentials::new(
+                    username.clone(),
+                    self.password(ctx, password_credstore_ref).await?,
+                )),
+                None => None,
+            };
+            let email = build_message(message)?;
+            let transport = self.transport(host, message.smtp_port, credentials)?;
+            Ok::<_, DomainError>(transport.send(email).await)
+        })
+        .await
+        .map_err(|_| {
+            upstream(
+                host,
+                EgressFailure::Timeout,
+                format!("no reply within {:?}", self.timeout),
+            )
+        })??
+        .map_err(|e| {
+            // ADR-0008's one sanctioned exception: text the remote sent
+            // back is not derived from our credential material, and
+            // suppressing it leaves an operator debugging blind. `lettre`'s
+            // `Error` renders the relay's own refusal and never the
+            // credentials it was given.
+            upstream(host, classify(&e), e.to_string())
+        })?;
 
         if response.is_positive() {
             Ok(SendOutcome::Sent)
         } else {
-            Err(DomainError::Internal(format!(
-                "the SMTP relay {host} answered {:?}",
-                response.code()
-            )))
+            // Near-unreachable: `lettre` already turns a negative final reply
+            // into an `Err` above. Kept, and classified as a refusal rather
+            // than as an internal fault, because the relay answering something
+            // this adapter did not expect is still the relay's answer.
+            Err(upstream(
+                host,
+                EgressFailure::Rejected,
+                format!("answered {:?}", response.code()),
+            ))
         }
+    }
+}
+
+/// One [`DomainError::UpstreamEgress`], so the four construction sites cannot
+/// disagree about the channel name.
+fn upstream(host: &str, failure: EgressFailure, detail: String) -> DomainError {
+    DomainError::UpstreamEgress {
+        channel: CHANNEL.to_owned(),
+        endpoint: host.to_owned(),
+        failure,
+        detail,
+    }
+}
+
+/// Which [`EgressFailure`] a `lettre` send error is.
+///
+/// # The order of the arms is the classification
+///
+/// 1. **A timeout wins over everything.** `lettre`'s own per-command bound
+///    (`AsyncSmtpTransportBuilder::timeout`) surfaces as an `io::ErrorKind::TimedOut`
+///    somewhere down the source chain, which is what `Error::is_timeout` walks
+///    for. That error also has no status code, so testing it after the status
+///    arm would work too — but it would fold a bounded relay into "could not
+///    be reached", which is a different problem with a different fix.
+///
+///    **This arm and [`SmtpMailClient::send`]'s own `tokio::time::timeout` are
+///    racing for the same failure, deliberately.** Both bounds are
+///    [`SmtpMailClient::timeout`], so against a relay that accepts the
+///    connection and never greets, either may fire first — the outer one
+///    builds [`EgressFailure::Timeout`] directly and this arm builds the same
+///    value, which is what makes `a_silent_relay_fails_within_the_timeout`
+///    deterministic. A reader checking which path a given run took will find
+///    it is usually the outer one; the arm is not dead code, it is the other
+///    half of a coin flip.
+/// 2. **A status code means the relay spoke.** `Error::status` is `Some` only
+///    for a transient (`4xx`) or permanent (`5xx`) *reply*, so its presence is
+///    exactly the "there was a conversation and it ended in a refusal" case.
+///    [`AUTH_FAILURE_CODES`] splits the credential refusals out of that.
+/// 3. **Everything else never got a reply to classify** — `Kind::Connection`,
+///    `Kind::Network`, `Kind::Tls`, and the two shapes that are neither a
+///    conversation nor a connection (`Kind::Client`, `Kind::Response`). The
+///    last two are folded in knowingly: they are "this client could not make
+///    sense of the exchange", which is nearer to "no usable conversation
+///    happened" than to any of the other three, and `lettre` constructs
+///    neither from anything an operator can act on differently.
+fn classify(error: &lettre::transport::smtp::Error) -> EgressFailure {
+    if error.is_timeout() {
+        return EgressFailure::Timeout;
+    }
+    match error.status() {
+        Some(code) => {
+            // `lettre` ships `impl From<Code> for u16`, which recomposes the
+            // three digits — so the comparison is against the number an
+            // operator reads in the relay's transcript, not a tuple.
+            let numeric = u16::from(code);
+            if AUTH_FAILURE_CODES.contains(&numeric) {
+                EgressFailure::Authentication
+            } else {
+                EgressFailure::Rejected
+            }
+        }
+        None => EgressFailure::Unreachable,
     }
 }
 

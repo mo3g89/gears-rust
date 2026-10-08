@@ -16,7 +16,7 @@ interface PhaseStyle {
 // `phase` is qa-runs' own lowercase `RunState` set — `created | queued |
 // dispatching | running | succeeded | failed | canceled | timed_out | expired
 // | error` (`RunState::as_str`, qa-runs-sdk/src/models.rs:271-284) — passed
-// through by `runFromDto` "without re-casing" (`adapters.ts`, decision X4).
+// through by `runFromDto` "without re-casing" (`adapters.ts`).
 // These cases used to compare against the Title-Case Argo phases legacy sent,
 // so every real run fell through to `default` and never showed its intended
 // colour. `'Pending'` and `'Skipped'` are left as-is below: neither is a value

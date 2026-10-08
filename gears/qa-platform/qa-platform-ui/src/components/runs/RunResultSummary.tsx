@@ -6,8 +6,7 @@ import { cn } from '@/lib/utils';
  * `total/passed/in_progress/failed/skipped/xfail/xpass`, each dimmed to muted
  * when zero, with the full breakdown in a tooltip. Copied from
  * `SchedulesTable.tsx`'s "Latest" column (and the same palette
- * `RecentRunsStrip.tsx` uses for its bar segments), not invented here — Task
- * 10 asked for the run list and run detail to show `skipped` "using the
+ * `RecentRunsStrip.tsx` uses for its bar segments), not invented here — the run list and run detail show `skipped` "using the
  * existing UI's own idiom", and this is it.
  *
  * **`xfail` and `xpass` are each rendered only when non-zero.** Both are rare,
@@ -64,7 +63,7 @@ export function RunResultSummary({
 }
 
 /**
- * The marker Task 10 requires: "succeeded, 68 skipped" must not read as a
+ * The marker that is required: "succeeded, 68 skipped" must not read as a
  * clean pass. `derive_terminal_state` stopped downgrading a `Succeeded`
  * outcome for a non-zero skip count (product owner decision, 2026-08-28), so
  * this badge is the only place that fact is still visible next to the
@@ -79,7 +78,7 @@ export function RunResultSummary({
  * dispatching | running | succeeded | failed | canceled | timed_out | expired |
  * error`. Both callers get it right (`RunsTable.tsx`, `RunDetailPage.tsx`);
  * this comment used to spell it `'Succeeded'`, which is the exact mistake that
- * produced Task 10's Critical, left standing in the doc that tells the next
+ * once produced a wrong comparison, left standing in the doc that tells the next
  * person what to write.
  */
 export function SucceededWithSkipsMarker({ skipped }: { skipped: number }) {

@@ -20,15 +20,15 @@
 //! five that matter, and the next task to add a read would not be told to
 //! think about it.
 //!
-//! # R105 — a port grows in the task that consumes it
+//! # A port grows only in the task that consumes it
 //!
 //! `get_schedule_notifications` was added by Task 38 itself, in its own fix
-//! round, rather than deferred to Task 40's wiring pass. Controller ruling
-//! R105 names the precedent this follows: Task 35's `RunsLauncher::launch_test`
-//! and `EnvironmentReader::default_branch` both grew in the task that consumed
-//! them, each with its adapter and its own test, attached to their only
-//! caller. Task 38 is `route()`'s only caller in this crate, so it is the
-//! task with a routing test anywhere near a schedule-settings read.
+//! round, rather than deferred to Task 40's wiring pass. The precedent it
+//! follows: Task 35's `RunsLauncher::launch_test` and
+//! `EnvironmentReader::default_branch` both grew in the task that consumed
+//! them, each with its adapter and its own test, attached to their only caller.
+//! Task 38 is `route()`'s only caller in this crate, so it is the task with a
+//! routing test anywhere near a schedule-settings read.
 //!
 //! Naming exactly the reads this gear performs also makes the cross-gear
 //! surface greppable: `RunsReader` is the complete list of what qa-insights
@@ -76,6 +76,40 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
+
+/// The most runs one [`RunsReader::list_runs_finished_since`] can return,
+/// **whatever `limit` asks for**.
+///
+/// # This is a fact about the far side, not a preference of this gear's
+///
+/// qa-runs clamps the window it serves this listing from:
+/// `runs_sea_repo::sweep_limit` is `u64::from(requested).min(PAGE_LIMITS.max)`
+/// and `PAGE_LIMITS.max` is 500 (`qa-runs/src/infra/storage/db.rs`). A caller
+/// that asks for more gets 500 rows and **no indication that it was cut**.
+///
+/// # Why a caller has to know the number
+///
+/// `ReconcileService::sweep` decides "there is more to read" by comparing the
+/// page it got against the page it asked for. Asking for more than this and
+/// reading a full-and-truncated page as a short one is exactly how a walk
+/// concludes it has caught up while the far side is still holding runs — the
+/// silent shape that froze this gear's projection for three days on
+/// 2026-09-18. `crate::config::QaInsightsConfig::effective_reconcile_page_size`
+/// and `ReconcileService::new` both bound a configured page against this
+/// constant so that comparison can never be made against a number qa-runs will
+/// not honour.
+///
+/// # It is duplicated, and it cannot not be
+///
+/// `qa-runs`' `PAGE_LIMITS` lives in a `pub(crate)` module, so no import is
+/// possible — the same argument, in the same words, that
+/// `crate::infra::storage::db::PAGE_LIMITS` records for its own copy of the
+/// pair. This one is stated here rather than borrowed from that copy because
+/// this is a property of the **port**, not of this gear's own `OData`
+/// collections, and a domain module must not read `infra`.
+/// `tests::the_port_page_cap_matches_qa_runs` below pins the literal and names
+/// the line to check it against.
+pub const MAX_FINISHED_RUNS_PAGE: u32 = 500;
 
 /// The reads qa-insights performs against qa-runs.
 #[async_trait]
@@ -215,11 +249,16 @@ pub trait RunsReader: Send + Sync {
         limit: u32,
     ) -> Result<Vec<Run>, DomainError>;
 
-    /// The per-schedule notification settings for `schedule_id` — the three
-    /// fields `domain::notify::routing::route` needs
-    /// (`ScheduleNotificationSettings::slack_enabled`, `::slack_channel`,
-    /// `::slack_events`), read off `qa_runs_sdk::Schedule` over
-    /// `QaRunsClientV1::get_schedule` (`qa-runs-sdk/src/client.rs:156`).
+    /// The per-schedule notification settings for `schedule_id`, read off
+    /// `qa_runs_sdk::Schedule` over `QaRunsClientV1::get_schedule`
+    /// (`qa-runs-sdk/src/client.rs:156`).
+    ///
+    /// Two of the three fields are consumed: `ScheduleNotificationSettings::slack_enabled`
+    /// by `domain::notify::routing::route`, and `::slack_channel` by the channel
+    /// override in `NotifyService`. **`::slack_events` is carried and read by
+    /// nothing** since the owner deleted the `ScheduledRun` routing arm that
+    /// consulted it: the per-schedule event allow-list is still stored, validated
+    /// and editable in qa-runs, and has no effect on any notification.
     ///
     /// Task 38's only caller,
     /// [`crate::domain::service::notify::NotifyService::notify_run_completed`],
@@ -251,4 +290,27 @@ pub trait RunsReader: Send + Sync {
         ctx: &SecurityContext,
         schedule_id: Uuid,
     ) -> Result<Option<ScheduleNotificationSettings>, DomainError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MAX_FINISHED_RUNS_PAGE;
+
+    /// The literal **is** the contract here, not a restatement of the constant:
+    /// the other side lives in qa-runs, where `PAGE_LIMITS` is `pub(crate)` and
+    /// so unreachable from this crate without widening qa-runs' surface.
+    /// [`MAX_FINISHED_RUNS_PAGE`] is a **copy** of
+    /// a number the compiler cannot check against its source: qa-runs' own
+    /// `PAGE_LIMITS.max` (`qa-runs/src/infra/storage/db.rs`), applied to this
+    /// listing by `runs_sea_repo::sweep_limit`
+    /// (`qa-runs/src/infra/storage/runs_sea_repo.rs`, whose
+    /// `the_sweep_limit_is_clamped_to_the_page_ceiling_and_zero_stays_zero`
+    /// pins the same number on that side).
+    ///
+    /// A divergence is then a review question rather than an invisible page
+    /// that the sweep reads as short.
+    #[test]
+    fn the_port_page_cap_matches_qa_runs() {
+        assert_eq!(MAX_FINISHED_RUNS_PAGE, 500);
+    }
 }

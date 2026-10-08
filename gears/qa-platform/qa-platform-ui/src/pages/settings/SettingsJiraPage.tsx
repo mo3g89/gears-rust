@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import type { JiraConfig, JiraPollerConfig } from '@/api/types';
+import { CREDSTORE_REF_PLACEHOLDERS } from '@/lib/credstoreRef';
 
 export function SettingsJiraPage() {
   const { data, isLoading } = useJiraConfig();
@@ -125,14 +126,17 @@ export function SettingsJiraPage() {
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="jira-api-token">API Token</Label>
+            <Label htmlFor="jira-api-token">API token credential reference</Label>
             <Input
               id="jira-api-token"
-              type="password"
               value={form.api_token}
               onChange={(e) => setForm({ ...form, api_token: e.target.value })}
-              placeholder="Enter JIRA API token"
+              placeholder={CREDSTORE_REF_PLACEHOLDERS.jiraApiToken}
             />
+            <p className="text-xs text-muted-foreground">
+              The name of a credential-store secret holding base64(email:api_token) — never the
+              token itself. Letters, digits, underscores and dashes only.
+            </p>
           </div>
           <Button onClick={save} disabled={update.isPending}>
             {update.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Save className="h-4 w-4 mr-2" />}

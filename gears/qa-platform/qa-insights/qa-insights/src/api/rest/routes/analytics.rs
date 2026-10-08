@@ -1,8 +1,8 @@
 //! The analytics routes — `GET /qa/v1/analytics/overview`,
-//! `GET /qa/v1/analytics/build-tests` (Task 25b) and
-//! `GET /qa/v1/analytics/export` (Task 26).
+//! `GET /qa/v1/analytics/build-tests` and
+//! `GET /qa/v1/analytics/export`.
 //!
-//! # Both, and in one commit, which is controller ruling R10
+//! # Both, and in one commit
 //!
 //! Task 24 shipped the build-tests folds
 //! (`domain::analytics::aggregates::build_last_run_build_distribution` and
@@ -13,7 +13,7 @@
 //! lands here beside the overview's, over the same service and the same
 //! `AccessScope`.
 //!
-//! # No `OData`, per D7
+//! # No `OData`
 //!
 //! `api::rest::mod`' header states it: `OData` applies to the two flat result
 //! collections and to nothing else in this gear. Both operations here answer
@@ -38,7 +38,7 @@
 //! all four are behaviour rather than shape: an unknown `product_id` is an empty
 //! overview rather than a 404, `case_expected` mixes an exact per-file collect
 //! count with a static fallback rather than needing a collect job to be
-//! non-zero (Task 29), the group chart
+//! non-zero, the group chart
 //! and the Quality Vector totals are **not** narrowed by `group_by`, and the read
 //! is windowed to the wider of the two day counts so the counters outside the
 //! charts move with them. The same duplication `routes::dashboard`' header

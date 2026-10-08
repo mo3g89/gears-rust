@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: "{{ .Values.images.postgres.repository }}:{{ .Values.images.postgres.tag }}"
+          image: {{ include "qa-platform.image" .Values.images.postgres | quote }}
           ports:
             - name: postgres
               containerPort: 5432

@@ -474,7 +474,7 @@ async fn a_signature_does_not_verify_for_a_different_repository() {
     assert!(matches!(err, DomainError::Forbidden), "{err:?}");
 }
 
-/// Task 7: the collect signing key is derived per tenant from
+/// The collect signing key is derived per tenant from
 /// `collect_report_signing_secret` via HKDF, rather than every tenant's tag
 /// being `HMAC(root_secret, payload)` under the one root secret directly.
 ///

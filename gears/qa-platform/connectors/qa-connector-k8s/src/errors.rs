@@ -1,7 +1,9 @@
-//! Lifted from `qa-environments/src/infra/observer/errors.rs`, which stays in
-//! place and stays active until Task 19 removes it. This is a copy, not a
-//! move: Phase C must not change `qa-environments`' behaviour, so both paths
-//! exist side by side until the one-way door in Phase E.
+//! Lifted from `qa-environments/src/infra/observer/errors.rs`. It was a copy,
+//! not a move: Phase C must not change `qa-environments`' behaviour, so both
+//! paths existed side by side until the one-way door in Phase E. Task 19b
+//! deleted the observation half of the original and kept what the gear's
+//! runner-`Secret` writer needs as `qa-environments/src/infra/runner_secret_errors.rs`,
+//! which classifies with its own copy of the same fixed texts.
 //!
 //! What changed in the copy, and only this: the classification table's arms
 //! return [`qa_product_sdk::observation::PluginFailure`] instead of a bare
@@ -214,6 +216,19 @@ pub(crate) const INFER_FAILURE: &str = "no Kubernetes configuration could be inf
      is unset or unusable, and there is no readable ~/.kube/config. Set \
      `qa-environments.argo.kubeconfig_path` to a kubeconfig for the Argo cluster";
 
+/// Fixed explanation for a response body past `kube_client::MAX_RESPONSE_BYTES`.
+pub(crate) const RESPONSE_TOO_LARGE: &str = "the API server's answer was larger than this \
+     observation reads (8 MiB), so it was refused unread";
+
+/// Fixed explanation for a list that kept handing out continue tokens past
+/// the pages its item cap could need (`kube_client::list_bounded`).
+pub(crate) const LIST_DID_NOT_END: &str = "the API server kept paging a list past the number \
+     of pages this observation reads, so the list was abandoned rather than followed further";
+
+/// Fixed explanation for a node list past `kube_client::MAX_LISTED_NODES`.
+pub(crate) const TOO_MANY_NODES: &str = "the cluster lists more nodes (over 5000) than \
+     Kubernetes supports, so its health was not computed from a partial list";
+
 /// Fixed explanation for `kubeconfig` material that is not even text.
 pub(crate) const NOT_UTF8: &str = "kubeconfig is not valid UTF-8";
 
@@ -267,6 +282,18 @@ fn causes<'a>(
 /// given failure "should" produce.
 fn is_tls_certificate_failure(error: &kube::Error) -> bool {
     causes(error).any(|cause| cause.downcast_ref::<rustls::Error>().is_some())
+}
+
+/// Whether `error`'s cause chain contains the
+/// [`http_body_util::LengthLimitError`] the response cap
+/// (`kube_client::cap_response`) raises when a body passes
+/// `kube_client::MAX_RESPONSE_BYTES`.
+fn is_oversized_response(error: &kube::Error) -> bool {
+    causes(error).any(|cause| {
+        cause
+            .downcast_ref::<http_body_util::LengthLimitError>()
+            .is_some()
+    })
 }
 
 /// Whether `error`'s cause chain contains a
@@ -366,6 +393,11 @@ pub fn classify(error: &kube::Error) -> PluginFailure {
         kube::Error::Api(status) => {
             PluginFailure::classified(class_for_status(status.code), API_REFUSED)
                 .with_remote_message(status.message.clone())
+        }
+        // First after `Api`: an oversize body is not a transport failure and
+        // must not fall into the catch-all below.
+        other if is_oversized_response(other) => {
+            PluginFailure::classified(FailureClass::Malformed, RESPONSE_TOO_LARGE)
         }
         other if is_tls_certificate_failure(other) => {
             PluginFailure::classified(FailureClass::Unreachable, TLS_CERTIFICATE_FAILURE)

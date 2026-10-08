@@ -9,6 +9,9 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[package.metadata.cargo-shear]
+ignored = ["testcontainers", "testcontainers-modules"]
+
 [dependencies]
 qa-catalog-sdk = { path = "../qa-catalog-sdk" }
 # The plugin contract: `QaProductRegistry` resolves and hands out
@@ -43,11 +46,11 @@ sea-orm-migration = { workspace = true }
 # `plugin_instance_id` a caller supplies, and `GtsSchema::TYPE_ID` in the
 # migration's id-composition test.
 gts = { workspace = true }
-# Task 13: the product-plugin catalogue is enumerated from the GTS instance
+# The product-plugin catalogue is enumerated from the GTS instance
 # registry, because `ClientHub` has no enumeration API. SDK only -- qa-catalog
 # takes no `types_registry` *gear* dep, so a deployment without that gear still
-# boots and fails only at this one endpoint (design 4.2's own principle: a
-# missing plugin must not take down healthy gears).
+# boots and fails only at this one endpoint (a missing plugin must not take
+# down healthy gears).
 types-registry-sdk = { workspace = true }
 
 # The metric instruments `infra::metrics::QaCatalogMetricsMeter` holds, and the
@@ -99,6 +102,11 @@ tokio-util = { workspace = true }
 # `qa-vhi-product-plugin` needs the same technique, and the host-key policy the
 # module owns has to stay expressed in exactly one place.
 qa-connector-ssh = { path = "../../connectors/qa-connector-ssh" }
+# Only under `--features postgres`; see `[features]` for why these sit here and
+# not in `[dev-dependencies]` (Cargo has no optional dev-dependencies, and the
+# feature names them via `dep:`). Same placement as qa-insights and qa-runs.
+testcontainers = { workspace = true, optional = true }
+testcontainers-modules = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The in-memory metric pipeline `infra::metrics::probe` builds: an adapter test
@@ -120,3 +128,10 @@ types-registry-sdk = { workspace = true, features = ["test-util"] }
 # binary on PATH). Disabled by default so plain `cargo test` stays hermetic;
 # enable with `--features integration`.
 integration = []
+# Gates the real-Postgres tier (Docker required; `test_support::pg_db` starts one
+# container per test). The unit tier is in-memory SQLite, which serializes every
+# writer, so two branch-cache writes of one repository cannot overlap there with
+# a fix or without one. `infra::storage::branch_cache_pg_tests` is the only test
+# that can falsify the idempotent branch-cache write (DESIGN §3.3). Run with `make test-qa-catalog-pg`
+# (`cargo nextest run -p qa-catalog --features postgres --lib`).
+postgres = ["dep:testcontainers", "dep:testcontainers-modules"]

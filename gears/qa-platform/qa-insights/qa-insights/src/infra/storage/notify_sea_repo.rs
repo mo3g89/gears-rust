@@ -70,6 +70,7 @@ use crate::infra::storage::db::db_err;
 use crate::infra::storage::entity::notification_config::{
     self, Column as ConfigColumn, Entity as ConfigEntity,
 };
+use crate::infra::storage::entity::notification_cutoff::Entity as CutoffEntity;
 use crate::infra::storage::entity::notification_log::{
     self, Column as LogColumn, Entity as LogEntity,
 };
@@ -79,6 +80,19 @@ use crate::infra::storage::entity::run_notification::{
 use crate::infra::storage::mapper::{
     notification_config_to_sdk, notification_log_to_sdk, slack_templates_to_json,
 };
+
+/// The cutoff row's primary key, and the tenant it carries.
+///
+/// Both are constants of
+/// `m20260929_000004_run_completed_notification_cutoff`, repeated here rather
+/// than imported: that module is a `mod` private to
+/// `infra::storage::migrations`, and, more to the point, a migration and its
+/// reader must be able to be edited independently — the duplication is what
+/// `the_repository_reads_the_row_the_migration_wrote` exists to police.
+const CUTOFF_ROW_ID: Uuid = uuid::uuid!("00000000-0000-cf04-0001-6375746f6666");
+/// The nil tenant the deployment-wide cutoff row carries — see
+/// `infra::storage::entity::notification_cutoff`'s header.
+const DEPLOYMENT_WIDE_TENANT: Uuid = Uuid::nil();
 
 /// ORM-based implementation of the `NotifyRepository` trait.
 #[derive(Clone, Default)]
@@ -167,24 +181,86 @@ impl NotifyRepository for OrmNotifyRepository {
         }
     }
 
-    /// R100/R86: deletes exactly the one claim row that shares `tenant_id`,
-    /// `run_id`, `notification_kind` and `event_type` — every column
-    /// [`claim_conflict_target`] names, so a release always targets the same
-    /// slot a claim would have inserted into. `tenant_id` is an explicit
-    /// `Condition` predicate alongside `.secure().scope_with(scope)`, not the
-    /// scope alone: R86's own paragraph is that a scope over
-    /// `owner_tenant_id` may legitimately span several tenants
-    /// (`ScopeFilter::In`, `ScopeFilter::InTenantSubtree`), so a delete
-    /// scoped only by the compiled scope could remove another in-scope
-    /// tenant's claim on the same run id.
+    /// Every claim row this tenant holds for `(run_id, event)`, as its
+    /// `notification_kind` string.
     ///
-    /// **Fix round 3, Important 4.** `validate_tenant_in_scope` is called
-    /// first, matching `claim_notification`, `get_config` and `save_config`
-    /// in this same file — the review found this the one `tenant_id`-taking
-    /// method here without it. Review confirmed no cross-tenant delete was
-    /// possible even without the guard (`SecureDeleteMany::scope_with` ANDs
-    /// the compiled scope into the statement), so this closes the
-    /// fail-fast-and-consistency gap R86 asks for, not a live data leak.
+    /// Bounded by the unique index `idx_qa_run_notifications_claim` at one row
+    /// per kind, so the unbounded `.all()` here can return at most as many
+    /// rows as there are kinds — three, for the run-completed event: the two
+    /// channel kinds and `NotifyService::is_history`'s
+    /// `run_completed_history_audit`, which is not a channel and which
+    /// `already_decided` ignores.
+    async fn claimed_kinds<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        event: &str,
+    ) -> Result<Vec<String>, DomainError> {
+        validate_tenant_in_scope(tenant_id, scope).map_err(db_err)?;
+        let rows = ClaimEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(ClaimColumn::TenantId.eq(tenant_id))
+                    .add(ClaimColumn::RunId.eq(run_id))
+                    .add(ClaimColumn::EventType.eq(event)),
+            )
+            .all(runner)
+            .await
+            .map_err(db_err)?;
+        Ok(rows.into_iter().map(|row| row.notification_kind).collect())
+    }
+
+    /// One row, by primary key, under the nil tenant's scope.
+    ///
+    /// `find_by_id` rather than a `.one()` over the table: the row's id is a
+    /// constant the migration chose
+    /// (`m20260929_000004_run_completed_notification_cutoff`'s `CUTOFF_ROW_ID`),
+    /// so there is nothing to order by and nothing an unpinned read could pick
+    /// the wrong one of. The explicit-`tenant_id` rule's hazard — a `.one()`
+    /// under a scope spanning several tenants returning an arbitrary row — does
+    /// not arise for a lookup by primary key.
+    ///
+    /// **The id is spelled here as well as in the migration**, and that
+    /// duplication is deliberate for the reason the seed migration's kind
+    /// strings are duplicated: a migration must keep reading and writing the
+    /// same row however the code above it is renamed.
+    /// `the_repository_reads_the_row_the_migration_wrote` is what keeps the
+    /// two spellings in step.
+    async fn run_completed_cutoff<C: DBRunner>(
+        &self,
+        runner: &C,
+    ) -> Result<Option<OffsetDateTime>, DomainError> {
+        let row = CutoffEntity::find_by_id(CUTOFF_ROW_ID)
+            .secure()
+            .scope_with(&AccessScope::for_tenant(DEPLOYMENT_WIDE_TENANT))
+            .one(runner)
+            .await
+            .map_err(db_err)?;
+        Ok(row.map(|r| r.cutoff_at))
+    }
+
+    /// Deletes exactly the one claim row that shares `tenant_id`, `run_id`,
+    /// `notification_kind` and `event_type` — every column
+    /// [`claim_conflict_target`] names, so a release always targets the same slot
+    /// a claim would have inserted into. `tenant_id` is an explicit `Condition`
+    /// predicate alongside `.secure().scope_with(scope)`, not the scope alone:
+    /// the explicit-`tenant_id` rule's own paragraph is that a scope over
+    /// `owner_tenant_id` may legitimately span several tenants
+    /// (`ScopeFilter::In`, `ScopeFilter::InTenantSubtree`), so a delete scoped
+    /// only by the compiled scope could remove another in-scope tenant's claim on
+    /// the same run id.
+    ///
+    /// **Fix round 3, Important 4.** `validate_tenant_in_scope` is called first,
+    /// matching `claim_notification`, `get_config` and `save_config` in this same
+    /// file — the review found this the one `tenant_id`-taking method here
+    /// without it. Review confirmed no cross-tenant delete was possible even
+    /// without the guard (`SecureDeleteMany::scope_with` ANDs the compiled scope
+    /// into the statement), so this closes the fail-fast-and-consistency gap the
+    /// explicit-`tenant_id` rule asks for, not a live data leak.
     async fn release_notification<C: DBRunner>(
         &self,
         runner: &C,
@@ -391,6 +467,40 @@ mod tests {
         }
     }
 
+    /// **The reader and the migration agree about which row this is.**
+    ///
+    /// `CUTOFF_ROW_ID` and the nil tenant are spelled twice — once in
+    /// `m20260929_000004_run_completed_notification_cutoff`, which writes the
+    /// row, and once above, which reads it. That duplication is deliberate (a
+    /// migration must not be coupled to the code that later reads it), so it
+    /// needs a guard, and this is it.
+    ///
+    /// **The drift it catches is silent in the worst direction.** A reader
+    /// looking for an id the migration never wrote gets `Ok(None)`, which
+    /// `NotifyService::is_history` reads as "no cutoff — notify everything".
+    /// So a one-character divergence does not error, does not log, and turns
+    /// the history guard off: the next sweep after an upgrade announces every
+    /// zero-result run the deployment has ever had. Verified by mutation —
+    /// changing the final digit of the reader's id turns 40 tests in this
+    /// crate red, this one among them.
+    #[tokio::test]
+    async fn the_repository_reads_the_row_the_migration_wrote() {
+        let db = inmem_db().await;
+        let conn = db.conn().unwrap();
+
+        let cutoff = OrmNotifyRepository
+            .run_completed_cutoff(&conn)
+            .await
+            .expect("the read must not fail");
+
+        assert!(
+            cutoff.is_some(),
+            "a migrated database always has the cutoff row; `None` here means this reader and \
+             m20260929_000004 disagree about the row's id or its tenant, which silently \
+             disables the history guard"
+        );
+    }
+
     /// **The insert *is* the dedupe answer.**
     ///
     /// Two instances racing on the same finished run both see no claim row, both
@@ -428,7 +538,7 @@ mod tests {
         );
     }
 
-    /// **R100: a released claim can be re-taken.**
+    /// **A released claim can be re-taken.**
     ///
     /// The property `NotifyRepository::release_notification`'s own doc
     /// describes: a failed send is retryable by construction, unlike a
@@ -465,8 +575,8 @@ mod tests {
         );
     }
 
-    /// R86: releasing under one tenant's scope must not delete another
-    /// tenant's claim on the same run id and slot.
+    /// The explicit-`tenant_id` rule: releasing under one tenant's scope must not
+    /// delete another tenant's claim on the same run id and slot.
     #[tokio::test]
     async fn releasing_a_claim_does_not_touch_another_tenants_claim() {
         let db = inmem_db().await;
@@ -834,6 +944,76 @@ mod tests {
         );
     }
 
+    /// `claimed_kinds` reports exactly the kinds claimed for one `(run, event)` —
+    /// and never another tenant's, which is the explicit-`tenant_id` rule's
+    /// hazard on a read that a caller turns into a "nothing more to do" decision.
+    ///
+    /// The event narrowing is asserted too: a claim on a *different* event for
+    /// the same run must not make a caller think this event is decided.
+    #[tokio::test]
+    async fn claimed_kinds_reports_this_tenants_claims_for_this_event_only() {
+        let db = inmem_db().await;
+        let conn = db.conn().unwrap();
+        let mine = Uuid::from_u128(0xA);
+        let theirs = Uuid::from_u128(0x0B);
+        let run = Uuid::from_u128(0x20);
+
+        OrmNotifyRepository
+            .claim_notification(
+                &conn,
+                &scope(mine),
+                mine,
+                claim(run, "run_completed_slack", "run_completed"),
+            )
+            .await
+            .unwrap();
+        OrmNotifyRepository
+            .claim_notification(
+                &conn,
+                &scope(mine),
+                mine,
+                claim(run, "run_completed_email", "expired"),
+            )
+            .await
+            .unwrap();
+        OrmNotifyRepository
+            .claim_notification(
+                &conn,
+                &scope(theirs),
+                theirs,
+                claim(run, "run_completed_email", "run_completed"),
+            )
+            .await
+            .unwrap();
+
+        let mut held = OrmNotifyRepository
+            .claimed_kinds(&conn, &scope(mine), mine, run, "run_completed")
+            .await
+            .unwrap();
+        held.sort();
+        assert_eq!(
+            held,
+            vec!["run_completed_slack".to_owned()],
+            "only this tenant's claim on this event: another tenant's claim on the same run, \
+             and this tenant's claim on another event, must both be invisible here"
+        );
+
+        assert!(
+            OrmNotifyRepository
+                .claimed_kinds(
+                    &conn,
+                    &scope(mine),
+                    mine,
+                    Uuid::from_u128(0x21),
+                    "run_completed"
+                )
+                .await
+                .unwrap()
+                .is_empty(),
+            "a run with no claims reports none"
+        );
+    }
+
     /// The audit trail comes back newest first, which is legacy's
     /// `ORDER BY created_at DESC LIMIT $1` (`notifications.rs:618-635`).
     ///
@@ -964,7 +1144,7 @@ mod tests {
             footer: Some("{{footer}}".to_owned()),
         };
         let config = NotificationConfig {
-            slack_webhook_credstore_ref: "cred://slack-hook".to_owned(),
+            slack_webhook_credstore_ref: "slack-hook".to_owned(),
             slack_channel: "#qa".to_owned(),
             manager_ui_base_url: "https://qa.example".to_owned(),
             slack_enabled: true,

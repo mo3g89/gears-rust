@@ -5,4 +5,4 @@
 mod gix_sync;
 pub mod layout;
 
-pub use gix_sync::GixSyncEngine;
+pub use gix_sync::{GixSyncEngine, SyncLimits};

@@ -42,3 +42,11 @@ mod test_support;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "no_api_in_domain_tests.rs"]
 mod no_api_in_domain_tests;
+
+/// Every migration name this gear's comments cite is live, or says it was
+/// folded away. One implementation shared with the other qa gears, kept in
+/// `qa-runs` where it started; see its header.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "../../../qa-runs/qa-runs/src/migration_citations_tests.rs"]
+mod migration_citations_tests;

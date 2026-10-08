@@ -38,8 +38,10 @@
 //! below, which executes the statement against a real `SQLite` connection
 //! rather than only rendering it.
 //!
-//! None of the three dialects' `NULL`-handling difference between `concat()`
-//! and `||` matters here: `qa_run_logs.text` is `NOT NULL DEFAULT ''`
+//! None of the three builders' `NULL`-handling difference between `concat()`
+//! and `||` matters here — three because that is what was rendered against
+//! above, not because this gear has three dialects; it declares `POSTGRES_UP`
+//! and `SQLITE_UP` and no `MYSQL_UP`: `qa_run_logs.text` is `NOT NULL DEFAULT ''`
 //! (`migrations::m20260813_000003_initial`, `CREATE TABLE ... qa_run_logs`;
 //! declared there under `m20260831_000008_run_logs` before that migration
 //! was squashed into this one), so this statement only ever runs against a
@@ -343,8 +345,8 @@ mod tests {
         Uuid::from_u128(n)
     }
 
-    /// Two appends concatenate. **This is the property the flush depends on**
-    /// (spec §4.4): the concatenation happens in the statement, so a flush
+    /// Two appends concatenate. **This is the property the flush depends
+    /// on**: the concatenation happens in the statement, so a flush
     /// costs the new text and not the whole log.
     #[tokio::test]
     async fn a_second_append_concatenates_rather_than_replacing() {

@@ -183,12 +183,18 @@ spec:
                   name: qa-platform-postgres
                   key: POSTGRES_PASSWORD
             - name: RUST_LOG
-              value: {{ .Values.gears.logLevel | quote }}
+              value: {{ include "qa-platform.rustLog" . | quote }}
           volumeMounts:
             - name: config
               mountPath: /etc/cf-gears
               readOnly: true
       volumes:
+        # qa-platform-gears-migrate-config, NOT qa-platform-gears-config: the
+        # same rendered config with both HMAC roots emptied
+        # (gears-config-secret.yaml's last document). `migrate` runs pre_init
+        # and the DB migrations only, never a gear's init, so it never reads
+        # either root and this pod has no business holding them. Same file
+        # name, same /etc/cf-gears path, same entrypoint.sh render.
         - name: config
-          configMap:
-            name: qa-platform-gears-config
+          secret:
+            secretName: qa-platform-gears-migrate-config

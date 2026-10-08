@@ -67,6 +67,10 @@ const REMOTE_AUTH_REJECTED: &str = "a command on the host refused this environme
                                     registered with; the remote's own message is carried beside \
                                     this one";
 const INTERNAL: &str = "the SSH transport failed locally; the gear's log names the stage";
+/// A remote command printed past `session::MAX_STDOUT_BYTES` or
+/// `session::MAX_STDERR_BYTES`.
+const OUTPUT_TOO_LARGE: &str = "a command on the host printed more than this observation reads \
+     (1 MiB of output, 64 KiB of errors), so it was stopped";
 /// The refusal `SshSession::exec_with_secret_env` makes before it spawns
 /// anything. `Malformed`, for the same reason [`ENCRYPTED_KEY`] is: the bytes
 /// were read and are unusable *as stored*, and the fix is to the credential.
@@ -105,6 +109,8 @@ pub enum SshFailure {
     Timeout,
     /// The command ran and exited non-zero. `stderr` is the remote's text.
     CommandFailed { status: i32, stderr: String },
+    /// The remote command printed more than the session reads.
+    OutputTooLarge,
     /// Local I/O or process failure. `cause` never contains a child's stderr.
     Internal { stage: &'static str, cause: String },
 }
@@ -149,6 +155,7 @@ impl fmt::Display for SshFailure {
             Self::Unreachable { cause } => write!(f, "ssh could not reach the host: {cause}"),
             Self::AuthRejected => f.write_str(AUTH_REJECTED),
             Self::Timeout => f.write_str(TIMED_OUT),
+            Self::OutputTooLarge => f.write_str(OUTPUT_TOO_LARGE),
             Self::CommandFailed { status, stderr } => {
                 write!(f, "the remote command exited {status}: {stderr}")
             }
@@ -189,10 +196,8 @@ pub fn classify(failure: &SshFailure) -> PluginFailure {
         SshFailure::Timeout => PluginFailure::classified(FailureClass::Timeout, TIMED_OUT),
         // Reached, ran, and refused. `qa-connector-k8s` calls the same
         // situation `AuthRejected` on a 401/403, and this classification
-        // was asked for by name on the `vinfra` step in
-        // `PRODUCT-PLUGINS-DESIGN.md` §5, which is not in the repository
-        // any more (its successor,
-        // `gears/qa-platform/docs/features/product-plugins.md`, states the
+        // was asked for by name on the `vinfra` step
+        // (`gears/qa-platform/docs/features/product-plugins.md` states the
         // product-agnostic contract and does not go down to this plugin's
         // own commands); anything else non-zero
         // stays `Internal`, which is the honest reading of "a command we
@@ -204,6 +209,12 @@ pub fn classify(failure: &SshFailure) -> PluginFailure {
                 (FailureClass::Internal, COMMAND_FAILED)
             };
             PluginFailure::classified(class, detail).with_remote_message(stderr.clone())
+        }
+        // `Malformed`: the host answered, and the answer is not something this
+        // observation can use — the same reading `qa-connector-k8s` gives an
+        // oversize API response.
+        SshFailure::OutputTooLarge => {
+            PluginFailure::classified(FailureClass::Malformed, OUTPUT_TOO_LARGE)
         }
         SshFailure::Internal { .. } => PluginFailure::classified(FailureClass::Internal, INTERNAL),
     }

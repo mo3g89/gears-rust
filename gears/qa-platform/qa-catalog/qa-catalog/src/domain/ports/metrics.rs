@@ -206,8 +206,8 @@ impl From<&DomainError> for PluginResolutionOutcome {
     ///
     /// The remaining split is the one `api::rest::error` already makes: the
     /// failure side is exactly the variants that module renders as a 5xx —
-    /// `CredStore`, `Storage`, `Database`, `Internal`, and `SyncFailed`'s 503 —
-    /// whose text, in that module's own words, originates in a driver, in
+    /// `CredStore`, `Storage`, `Database`, `Internal`, and `SyncFailed`'s 503
+    /// (and `CredentialRejected`'s 400 is a refusal) — whose text, in that module's own words, originates in a driver, in
     /// credstore, or in this gear's internals. That group is already this
     /// gear's answer to *whose failure was this*, so it is reused rather than
     /// re-decided, and
@@ -226,18 +226,21 @@ impl From<&DomainError> for PluginResolutionOutcome {
             | DomainError::Storage(_)
             | DomainError::Database { .. }
             | DomainError::Internal(_)
-            | DomainError::SyncFailed { .. } => Self::Failed,
+            | DomainError::SyncFailed { .. }
+            | DomainError::RemoteTimedOut { .. } => Self::Failed,
             DomainError::NotFound { .. }
             | DomainError::PlanYamlInvalid { .. }
             | DomainError::PlanNotFound { .. }
             | DomainError::FileNotFound { .. }
             | DomainError::RepoNotSynced { .. }
+            | DomainError::BranchNotFound { .. }
             | DomainError::Validation { .. }
             | DomainError::RepositoryNameExists { .. }
             | DomainError::CustomPlanNameExists { .. }
             | DomainError::ProductNameExists { .. }
             | DomainError::SshKeyNameExists { .. }
-            | DomainError::BranchCacheConflict { .. }
+            | DomainError::CredentialRejected { .. }
+            | DomainError::SyncBudgetExceeded { .. }
             | DomainError::Forbidden => Self::Refused,
         }
     }

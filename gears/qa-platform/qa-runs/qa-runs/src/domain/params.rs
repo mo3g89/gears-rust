@@ -89,16 +89,18 @@ use qa_runs_sdk::RunParameter;
 /// (`manager/src/routes/settings.rs:15-27`), name for name and in the same
 /// order, and exactly what `cpt-cf-qa-fr-runs-params` enumerates.
 ///
-/// SECURITY NOTE — inherited parity, verified 2026-08-13 (plan decision D3).
-/// This list deliberately does **not** cover the runner's result-callback URL
-/// (the source system's `VHP_PROGRESS_URL`, `manager/src/services/argo.rs:438-441`)
-/// or `E2E_VHP_BASE_URL` (`argo.rs:493-496`), and the source system's parameter
+/// SECURITY NOTE — inherited parity, verified 2026-08-13: `E2E_VHP_BASE_URL` is
+/// deliberately overridable by a run parameter. This list deliberately does
+/// **not** cover the runner's result-callback URL (the source system's
+/// `VHP_PROGRESS_URL`, `manager/src/services/argo.rs:438-441`) or
+/// `E2E_VHP_BASE_URL` (`argo.rs:493-496`), and the source system's parameter
 /// merge is a retain-then-push (`argo.rs:246-262`, reused verbatim for
 /// parameters at `:267-272`), so a launch parameter of either name **replaces**
 /// the platform-supplied value there. That exposure is carried forward on
 /// purpose: the goal is to preserve the source system's behavior and adapt only
 /// the architecture. Closing it is a deliberate divergence and belongs in the
-/// PRD amendment block for `cpt-cf-qa-fr-runs-params`, not in a quiet edit here.
+/// PRD amendment block for `cpt-cf-qa-fr-runs-params`, not in a quiet edit
+/// here.
 ///
 /// **This list is pinned to a constant in another crate** (added 2026-08-13 by
 /// Task 11b, and recorded here because the paragraph above is exactly where a
@@ -124,13 +126,11 @@ use qa_runs_sdk::RunParameter;
 /// the floor, and `a_plugin_that_reserves_nothing_still_cannot_take_test_files`
 /// is what says so.
 ///
-/// `PRODUCT-PLUGINS-DESIGN.md` §7 once claimed that floor included
-/// `COLLECT_ONLY` and the collect/progress URLs; it never did. That document
-/// is not in the repository any more, and its successor,
-/// `docs/features/product-plugins.md`, does not enumerate reserved names at
-/// all, so this array and the SECURITY NOTE above are the floor's only
-/// authoritative source now. Closing the gap is a PRD amendment rather than
-/// an edit to this array (whole-branch review E-20/E-22, ruling F-23).
+/// An earlier design document once claimed that floor included
+/// `COLLECT_ONLY` and the collect/progress URLs; it never did.
+/// PRD §5.4 "Run Orchestration" lists the floor, and
+/// `the_prd_lists_exactly_the_reserved_floor` keeps the list equal to this
+/// array.
 ///
 /// # A twelfth name, added by WS2 Task 3: not a legacy port
 ///
@@ -181,7 +181,7 @@ pub const MAX_PARAMETERS: usize = 50;
 /// launch cannot bloat it, and failing early gives a clearer message than the
 /// orchestrator rejecting an oversized object would.
 ///
-/// **Correction to plan decision D3, which called the two size caps
+/// **Correction to the plan, which called the two size caps
 /// "undocumented".** They are documented, in the frozen user-facing guide's
 /// rules table (`../testrunner/docs/guides/run-parameters.md:41-42`). What that
 /// table says is "At most **128** characters", while the code measures
@@ -361,8 +361,8 @@ pub fn normalize(parameters: Vec<RunParameter>) -> Vec<RunParameter> {
 /// # Errors
 /// [`ParamError`] naming the offending parameter.
 pub fn validate(parameters: &[RunParameter], contract: &RunVarContract) -> Result<(), ParamError> {
-    // The floor, unioned with whatever this run's product plugin adds
-    // (**D8**). `union_with_floor` is what makes "a plugin may add and may not
+    // The floor, unioned with whatever this run's product plugin adds.
+    // `union_with_floor` is what makes "a plugin may add and may not
     // remove" structural rather than a rule this function has to remember:
     // there is no way to ask it for the contract's set alone.
     let reserved = contract.union_with_floor(&RESERVED_NAMES);
@@ -531,10 +531,10 @@ mod tests {
 
     /// Exactly these twelve, written as a literal so this test is not its own
     /// oracle. Pins the list itself so a future addition is a deliberate spec
-    /// amendment rather than a quiet edit (decision D3).
+    /// amendment rather than a quiet edit.
     ///
     /// The floor used to be exactly the eleven legacy names ported from the
-    /// source system. `QA_RUNNER_PYTEST_ARGS` (WS2 Task 3) is the first name
+    /// source system. `QA_RUNNER_PYTEST_ARGS` is the first name
     /// added since: not a legacy port but a platform reservation, because it
     /// expands unquoted into pytest's own argv and a launch parameter of that
     /// name could drop failing tests while the run still exited zero. See
@@ -747,7 +747,7 @@ mod tests {
         );
     }
     // -----------------------------------------------------------------------
-    // The union with a product plugin's contract (Task 18)
+    // The union with a product plugin's contract
     // -----------------------------------------------------------------------
 
     fn contract(names: &[&str]) -> RunVarContract {
@@ -760,7 +760,8 @@ mod tests {
     /// refuses `TEST_FILES`, because `union_with_floor` unions — there is no
     /// way to ask it for the contract's set alone.
     ///
-    /// This is the property decision **D8** rests on: a plugin that could
+    /// This is the property the reserved-name floor rests on — a plugin can
+    /// add reserved names but never remove one: a plugin that could
     /// un-reserve a name could let a run parameter overwrite the bundle URL,
     /// the file list, or the credential reference `RunEnv::new`'s precedence
     /// argument depends on.
@@ -800,5 +801,37 @@ mod tests {
     #[test]
     fn a_name_neither_side_reserves_is_accepted() {
         assert!(validate(&[p("FEATURE_FLAG", "on")], &contract(&["OTHER"])).is_ok());
+    }
+
+    /// PRD §5.4 "Run Orchestration" lists the platform's reserved floor, and the
+    /// list is exactly [`RESERVED_NAMES`].
+    ///
+    /// The floor was documented nowhere outside this file, so a plugin author
+    /// reading the VHP feature doc took "reserves two on top of the platform's own
+    /// set" at its word when both names were already in it. The PRD now carries
+    /// the list; this keeps the two equal in both directions. Only the paragraph
+    /// that starts `**The reserved floor.**` is read, and only its backticked
+    /// all-caps tokens, so prose around it may name other identifiers freely.
+    #[test]
+    fn the_prd_lists_exactly_the_reserved_floor() {
+        use std::collections::BTreeSet;
+
+        let prd_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/PRD.md");
+        let prd = std::fs::read_to_string(&prd_path).expect("PRD.md is readable");
+        let start = prd
+            .find("**The reserved floor.**")
+            .expect("PRD section 5.4 carries a paragraph that starts `**The reserved floor.**`");
+        let paragraph = prd[start..].split("\n\n").next().expect("a paragraph");
+        let listed: BTreeSet<&str> = paragraph
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|t| {
+                !t.is_empty()
+                    && t.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            })
+            .collect();
+        let floor: BTreeSet<&str> = RESERVED_NAMES.into_iter().collect();
+        assert_eq!(listed, floor, "PRD section 5.4 \"The reserved floor\" and RESERVED_NAMES disagree");
     }
 }

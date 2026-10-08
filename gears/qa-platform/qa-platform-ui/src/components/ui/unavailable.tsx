@@ -18,7 +18,7 @@ import { cn } from '@/lib/utils';
  *
  * Do not use this to label a control that still accepts input and still sends it:
  * where the input itself is the misrepresentation the affordance is removed, not
- * labelled (see `REMOVED-SURFACES.md`).
+ * labelled.
  */
 export function UnavailableNotice({
   title,

@@ -46,7 +46,6 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Node};
-use kube::Client;
 use kube::core::{ListMeta, ObjectList, ObjectMeta, Status, TypeMeta};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -320,6 +319,9 @@ impl KubeClient {
     /// what it was asked (an `Arc<Mutex<Vec<StubRequest>>>` captured by the
     /// closure) sees every request the reads made.
     ///
+    /// The response cap production clients carry is applied here too, so a
+    /// route-table test sees the same bound.
+    ///
     /// # Panics
     ///
     /// If `routes` returns a status code that is not a valid HTTP status, or
@@ -357,7 +359,13 @@ impl KubeClient {
                 Ok::<_, std::convert::Infallible>(response)
             }
         });
-        Self::from_client(Client::new(service, "default"))
+        Self::from_client(
+            kube::client::ClientBuilder::new(service, "default")
+                .with_layer(&tower::util::MapResponseLayer::new(
+                    crate::kube_client::cap_response::<kube::client::Body>,
+                ))
+                .build(),
+        )
     }
 }
 

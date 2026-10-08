@@ -4,12 +4,12 @@
 //!
 //! An environment's kubeconfig can arrive two ways: as a credstore **reference**
 //! the caller already holds, or as a pasted **document**
-//! ([`CredentialMaterial`]). A kubeconfig's `users[].user.client-key-data` is
-//! a client private key, so a pasted document is treated exactly as
-//! `qa-catalog` treats a pasted SSH private key
+//! ([`CredentialMaterial`]). A kubeconfig's `users[].user.client-key-data` is a
+//! client private key, so a pasted document is treated exactly as `qa-catalog`
+//! treats a pasted SSH private key
 //! (`qa-catalog/src/domain/service/ssh_keys.rs`): it goes to credstore
 //! **first**, and only the generated reference reaches
-//! `qa_environments.kubeconfig_credstore_ref`.
+//! `qa_environments.credentials`.
 //!
 //! **The invariant is that the material never leaves the gear — not that it
 //! is never read.** [`Self::observe_environment`] is the first read path that
@@ -67,14 +67,15 @@ use crate::domain::system_actor;
 use authz_resolver_sdk::PolicyEnforcer;
 use qa_product_sdk::QaProductPluginV1;
 // `sole_required_secret_key` moved into the SDK at Task 18, because `qa-runs`
-// needs the identical derivation for `prepare_run_access` and two private
-// copies of one rule is the coupling class this branch keeps finding. Every
-// test in this module that called the local function still calls this one.
-// The plugin contract's `ObservationOutcome`/`HealthOutcome` collide by name
-// with this gear's own (`crate::domain::ports`), which this file also uses --
-// `NoopRunnerSecretWriter`'s outcome, and the doubles in the tests. Different types with
-// different shapes: the local `Failed` carries a `String`, the SDK's a
-// `PluginFailure`. Aliased rather than shadowing, so no match arm in this file
+// then needed the identical derivation for `prepare_run_access` (until Task 19
+// removed that unkeyed fallback) and two private copies of one rule is the
+// coupling class this branch keeps finding. Every test in this module that
+// called the local function still calls this one. The plugin contract's
+// `ObservationOutcome`/`HealthOutcome` collide by name with this gear's own
+// (`crate::domain::ports`), which this file also uses --
+// `NoopRunnerSecretWriter`'s outcome, and the doubles in the tests. Different
+// types with different shapes: the local `Failed` carries a `String`, the SDK's
+// a `PluginFailure`. Aliased rather than shadowing, so no match arm in this file
 // is ambiguous to a reader.
 use qa_product_sdk::observation::{
     FailureClass, HealthOutcome as PluginHealthOutcome,
@@ -135,7 +136,7 @@ pub(super) const GENERATED_CREDENTIAL_REF_PREFIX: &str = "qa-environments-creden
 // one of" unrepresentable rather than validated, and the second is
 // `credentials::StoredCredentials`, which carries the minted and superseded
 // references as lists. Keeping either alongside the new path would have split
-// secret ownership across two mechanisms (ruling F-8).
+// secret ownership across two mechanisms.
 
 /// Maximum `default_branch` length, **in characters**, matching both
 /// `qa_environments.default_branch VARCHAR(512)` and the
@@ -161,13 +162,12 @@ pub struct EnvironmentsService<P: EnvironmentsRepository, L: LeasesRepository> {
     leases_repo: Arc<L>,
     credstore: Arc<dyn CredStoreClientV1>,
     /// D4's runner-`Secret` writer, and **only** that: an environment is
-    /// observed through its product's plugin
-    /// ([`Self::observe_through_plugin`]), and Task 19 deleted the observation
-    /// half of the old port outright. What survives is
-    /// [`RunnerSecretWriter::ensure_runner_secret`], called from create,
-    /// from update and from the ticker's self-heal — see ruling F-19 for why
-    /// deleting this half too would have left every workflow run hanging on
-    /// `FailedMount`.
+    /// observed through its product's plugin ([`Self::observe_through_plugin`]),
+    /// and Task 19 deleted the observation half of the old port outright. What
+    /// survives is [`RunnerSecretWriter::ensure_runner_secret`], called from
+    /// create, from update and from the ticker's self-heal — see
+    /// `domain::ports::runner_secret`'s header for why deleting this half too
+    /// would have left every workflow run hanging on `FailedMount`.
     observer: Arc<dyn RunnerSecretWriter>,
     /// Turns an environment's product into the plugin that observes it.
     /// Resolved lazily from the `ClientHub` per call — see
@@ -200,6 +200,9 @@ pub struct EnvironmentsService<P: EnvironmentsRepository, L: LeasesRepository> {
     /// from the same object.
     metrics_silenced: AtomicBool,
     policy_enforcer: PolicyEnforcer,
+    /// The platform's bound on one `observe` call —
+    /// `ObservationConfig::effective_observe_timeout`.
+    observe_timeout: std::time::Duration,
 }
 
 /// What a caller is told when an environment's kubeconfig cannot be resolved.
@@ -226,19 +229,33 @@ pub struct EnvironmentsService<P: EnvironmentsRepository, L: LeasesRepository> {
 /// material. It says what an operator can act on without naming the secret.
 const KUBECONFIG_UNRESOLVED: &str = "this environment's kubeconfig could not be read from the credential store, so no \
      observation was attempted: the stored reference names no secret, or the credential \
-     store refused the read. Re-save the environment with its kubeconfig to provision it.";
+     store refused the read. qa-environments reads it as its system actor in the tenant that \
+     owns the environment, never as the user who stored it, so only a secret readable by the \
+     system actor in the owning tenant is found: store it there with `tenant` sharing (a \
+     `private` secret is readable by its owner only, and one stored in another tenant is not \
+     visible at all), or `shared` from a parent tenant. Re-save the environment with its \
+     kubeconfig to provision it.";
 
-/// What an environment is told when its product's plugin declares no single
-/// required secret field for the one legacy credential reference to bind to.
+/// What an environment records when its plugin's `observe` outlived
+/// `qa-environments.observation.observe_timeout_seconds`. Fixed text, for
+/// `KUBECONFIG_UNRESOLVED`'s reason.
+const OBSERVE_TIMED_OUT: &str = "the product plugin did not finish observing this environment \
+     within qa-environments.observation.observe_timeout_seconds, so the attempt was abandoned: \
+     the target is not answering, or is answering too slowly";
+
+/// What a write is told when it submits the pre-plugin
+/// `kubeconfig`/`kubeconfig_credstore_ref` pair and the product's plugin
+/// declares no single required secret field for it to bind to
+/// (`credentials::desugar_legacy_credential_pair`). Guessing a key would store
+/// the credential under the wrong name, so the write is refused before
+/// anything reaches credstore or the row.
 ///
 /// Unreachable for a product whose plugin declares exactly one required secret
-/// (every plugin in this tree today), and for any environment whose
-/// `credentials` column is populated. See
-/// [`EnvironmentsService::resolve_credential_slots`] for why guessing is worse
-/// than saying so.
-const LEGACY_CREDENTIAL_UNBINDABLE: &str = "this environment still holds its credential reference in the pre-plugin column, and its \
-     product's plugin does not declare exactly one required secret field for that reference to \
-     belong to. Re-save the environment's credentials so each one is stored under its own key.";
+/// (every plugin in this tree today).
+const LEGACY_CREDENTIAL_UNBINDABLE: &str = "the legacy `kubeconfig`/`kubeconfig_credstore_ref` field cannot be stored for this \
+     environment: its product's plugin does not declare exactly one required secret field for it \
+     to be stored under, so nothing was written. Submit it under `credentials` instead, keyed by \
+     the plugin's own credential field.";
 
 impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// `metrics` is `None` for every construction site that does not measure
@@ -252,9 +269,9 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         clippy::too_many_arguments,
         reason = "one argument per collaborator this service holds (the db provider, two \
                   repositories, credstore, the runner-Secret writer, the product-plugin port, \
-                  the metrics port and the enforcer). The DI container's own constructor \
-                  carries the same allowance for the same reason, and this one has exactly \
-                  one caller (`AppServices::new`)."
+                  the metrics port and the enforcer) plus the observation deadline. The DI \
+                  container's own constructor carries the same allowance for the same reason, \
+                  and this one has exactly one caller (`AppServices::new`)."
     )]
     pub fn new(
         db: Arc<DbProvider>,
@@ -266,6 +283,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         metrics: Option<Arc<dyn ObservationMetrics>>,
         plugin_metrics: Option<Arc<dyn PluginMetrics>>,
         policy_enforcer: PolicyEnforcer,
+        observe_timeout: std::time::Duration,
     ) -> Self {
         Self {
             db,
@@ -278,6 +296,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             plugin_metrics: plugin_metrics.unwrap_or_else(|| Arc::new(NoopMetrics)),
             metrics_silenced: AtomicBool::new(false),
             policy_enforcer,
+            observe_timeout,
         }
     }
 }
@@ -381,7 +400,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         // The submissions are resolved above and **must not travel any further
         // towards the repository layer** — `CredentialSubmission::Material` is
         // plaintext. `PersistedCredentials` is what goes on; it has no arm
-        // that can hold material (ruling F-9).
+        // that can hold material.
         let new = NewEnvironment {
             kubeconfig: None,
             credentials: BTreeMap::new(),
@@ -425,7 +444,9 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                 // `FailedMount` window D4 exists to eliminate. Logged and
                 // swallowed - see `materialise_runner_secret`'s doc for why a
                 // failure here must not undo the create.
-                self.materialise_runner_secret(ctx, &environment, "create")
+                // The row was just created under `tenant_id`, so that is its
+                // owning tenant.
+                self.materialise_runner_secret(ctx, tenant_id, &environment, "create")
                     .await;
                 Ok(environment)
             }
@@ -474,7 +495,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             Self::validate_name(name)?;
         }
         // Fold the pre-plugin pair into the plugin-shaped map, so exactly one
-        // mechanism handles n >= 1 credentials from here on (ruling F-8). The
+        // mechanism handles n >= 1 credentials from here on. The
         // pair's own rules are preserved verbatim by
         // `desugar_legacy_credential_pair`, including the two that were
         // measured: an empty `kubeconfig_credstore_ref` counts as **not
@@ -515,13 +536,22 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         //
         // `stored` is `Some` exactly when the patch replaced at least one
         // credential — the condition both cleanups and the D4 write below read.
+        // The tenant the environment's credential is read in, for the runner
+        // `Secret` write below: the row's own tenant, which no update changes.
+        // Read before anything is written, so a fault here fails the request
+        // with nothing written.
+        let owner_tenant = self
+            .repo
+            .owner_tenant(&conn, &scope, id)
+            .await?
+            .ok_or(DomainError::EnvironmentNotFound { id })?;
         let stored = self
             .resolve_patch_credentials(ctx, &scope, &conn, id, &patch)
             .await?;
         let replaced_credential = stored.is_some();
 
         // The submissions must not travel any further towards the repository
-        // layer; only `PersistedCredentials` goes on (ruling F-9).
+        // layer; only `PersistedCredentials` goes on.
         let patch = EnvironmentPatch {
             kubeconfig: None,
             credentials: BTreeMap::new(),
@@ -538,10 +568,10 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         // otherwise a patch that moves an environment and makes it default in one call
         // would clear the defaults of the product it is leaving.
         //
-        // `Some(None)` (the patch clears the product association) and a stored
-        // `None` both leave nothing to clear. A default flag on a product-less
-        // environment is inert rather than rejected: resolution filters candidates by
-        // `product_id`, so such a row is never a candidate for anything.
+        // Both sources always name a product: `EnvironmentPatch::product_id` is
+        // `Option<Uuid>` (absent = keep the stored one) and the stored
+        // `Environment::product_id` is a plain `Uuid` (`NOT NULL` since Task 20b),
+        // so there is always exactly one product whose defaults to clear.
         if patch.is_default == Some(true) {
             let product_id = match patch.product_id {
                 Some(explicit) => explicit,
@@ -599,7 +629,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         // changes neither the `Secret`'s name (derived from the credstore
         // reference) nor its contents, so there is nothing to converge.
         if replaced_credential {
-            self.materialise_runner_secret(ctx, &updated, "update")
+            self.materialise_runner_secret(ctx, owner_tenant, &updated, "update")
                 .await;
         }
 
@@ -646,13 +676,12 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         // 18b and this method was left 1-ary, so the first plugin declaring
         // two secret fields orphaned one on every delete. It has no live
         // effect today — every plugin in this tree declares one — but the code
-        // path is generic, and after Task 19 drops the legacy column a 1-ary
+        // path is generic, and since Task 19 dropped the legacy column a 1-ary
         // delete would clean up **nothing at all**.
         //
-        // The same preference the two readers apply: the plugin-shaped column
-        // when it is populated, the pre-plugin one as the fallback. No plugin
-        // **The legacy fallback went with the column** (ruling F-2, Task 19):
-        // `credentials` is the only source now, and `m20260903_000012` gave
+        // **The legacy fallback went with the column** (Task 19):
+        // `credentials` is the only source now, and `m20260903_000012` (folded
+        // into `migrations::m20260812_000001_initial` by the docs squash) gave
         // every row that had a legacy reference an entry in it. A row with an
         // empty `credentials` owns nothing this gear minted, so there is
         // nothing to forget.
@@ -709,12 +738,15 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// # What *is* an `Err`
     ///
     /// The environment not existing (`DomainError::EnvironmentNotFound`, → 404),
-    /// the caller lacking access, or — the case new to this method — the
-    /// stored `kubeconfig_credstore_ref` failing to resolve back to material
-    /// through credstore. That last one is this gear's own bookkeeping
-    /// failing (a dangling or unreadable reference), not a fact about the
-    /// environment's cluster, so it propagates as a genuine `DomainError` rather
-    /// than being folded into the `ObservationOutcome` an operator reads.
+    /// the caller lacking access, and this gear's own storage failing (the
+    /// database connection, the row read, the observation write). Nothing else.
+    ///
+    /// In particular a stored credential reference that does not resolve back
+    /// to material through credstore is **not** an `Err`: it is recorded on the
+    /// row as [`KUBECONFIG_UNRESOLVED`] and returned in the `Ok` row, as is a
+    /// product plugin that cannot be resolved (`PluginUnavailable::detail`).
+    /// Both are facts an operator has to read on the environment, for the
+    /// reason [`Self::observe_through_plugin`]'s doc gives.
     pub async fn observe_environment(
         &self,
         ctx: &SecurityContext,
@@ -777,8 +809,17 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             .get(&conn, &scope, id)
             .await?
             .ok_or(DomainError::EnvironmentNotFound { id })?;
+        // The tenant the credential is read in: the environment's own, the one
+        // the observation cycle binds to, whichever tenant `ctx` belongs to.
+        let owner_tenant = self
+            .repo
+            .owner_tenant(&conn, &scope, id)
+            .await?
+            .ok_or(DomainError::EnvironmentNotFound { id })?;
 
-        let observation = self.observe_through_plugin(ctx, &environment).await;
+        let observation = self
+            .observe_through_plugin(ctx, owner_tenant, &environment)
+            .await;
 
         // Read here, from the value the plugin returned, and not from the row
         // written below: `record_observation`'s merge rules deliberately keep
@@ -813,26 +854,29 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     ///
     /// # Every upstream failure is a recorded observation, not an error
     ///
-    /// Four things can go wrong before the plugin is ever called: the
-    /// environment names no product, the product names no resolvable plugin,
-    /// no resolver is registered at all, or a credential cannot be read back
-    /// out of credstore. **All four return `Ok`**, with a `Failed`
-    /// environment half carrying fixed text and `NotAttempted` health.
+    /// Three things can go wrong before the plugin is ever called: the product
+    /// names no resolvable plugin, no resolver is registered at all, or a
+    /// credential cannot be read back out of credstore (a fourth, the
+    /// environment naming no product, is unrepresentable since Task 20b). **All
+    /// three return `Ok`**, with a `Failed` environment half carrying fixed text
+    /// and `NotAttempted` health.
     ///
-    /// That is not leniency, it is a measured lesson. Before the kubeconfig
-    /// case was handled this way, an environment whose kubeconfig could not be
+    /// That is not leniency, it is a measured lesson. Before the kubeconfig case
+    /// was handled this way, an environment whose kubeconfig could not be
     /// resolved failed *upstream* of the observer, so `record_observation` was
     /// never reached and NOTHING was written: the UI read "not yet observed"
     /// forever while the real reason repeated in the log every ticker cycle.
     /// Seven of eight environments sat in exactly that state on the remote on
-    /// 2026-08-29 (cluster-health spec section 8). A row that says why it is
-    /// blank is the whole point of persisting a failure as a *value*.
+    /// 2026-08-29. A row that says why it is blank is the whole point of
+    /// persisting a failure as a *value*.
     ///
-    /// `NotAttempted` rather than a failed health read, in all four cases, for
+    /// `NotAttempted` rather than a failed health read, in all three cases, for
     /// the reason `HealthOutcome::NotAttempted`'s own doc gives: a failed
-    /// health read persists `cluster_status = "Unreachable"` — a claim that
-    /// somebody's target could not be reached — and nothing here contacted
-    /// anything to be entitled to it.
+    /// health read persists a `health_checked_at` beside `health_state =
+    /// unknown` and the failure's detail — a claim that somebody tried to
+    /// reach the target and could not — and nothing here contacted anything
+    /// to be entitled to it. (Before Task 19 the same read also wrote the
+    /// legacy `cluster_status = "Unreachable"`.)
     ///
     /// `#[instrument]` skips nothing on purpose — there is nothing to skip:
     /// neither the credstore response nor the plugin's return value is ever
@@ -844,9 +888,14 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// One sample per round trip on
     /// [`crate::domain::metrics::QA_ENVIRONMENTS_PLUGIN_CALL`] and its duration
     /// histogram, labelled by what the plugin answered. The span is the
-    /// `observe` call alone — the four exits above it emit nothing, because
+    /// `observe` call alone — the three exits above it emit nothing, because
     /// nothing was called, which is what makes that family's total the number
     /// of times this deployment really talked to a plugin.
+    ///
+    /// And bounded: past `observe_timeout` the future is dropped — kube reads
+    /// are cancelled, VHI's `ssh` child is killed (`kill_on_drop`), and a VHI
+    /// agent start already on the blocking pool finishes on its own (≤ 40 s)
+    /// and is reaped by its `Drop` — and the call is counted as a `Timeout`.
     ///
     /// It is **nested inside** the per-environment observation duration
     /// [`Self::observe_environment_classified`] records, not parallel to it.
@@ -856,23 +905,22 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     async fn observe_through_plugin(
         &self,
         ctx: &SecurityContext,
+        owner_tenant: Uuid,
         environment: &Environment,
     ) -> ObservationWrite {
-        // `NoProduct` is no longer reachable from a row: Task 20b made the
-        // column `NOT NULL`. The variant stays on `PluginUnavailable` because
-        // the port's own contract still declares it, and qa-catalog's resolver
-        // can still answer it.
+        // A row always names a product (`product_id` is `NOT NULL` since Task
+        // 20b), so there is no "names no product" case to resolve.
         let product_id = environment.product_id;
 
         let plugin = match self.product_plugins.plugin_for(ctx, product_id).await {
             Ok(plugin) => plugin,
-            // The port has already logged which of its three causes this was;
+            // The port has already logged which of its two causes this was;
             // this gear persists the fixed text.
             Err(unavailable) => return Self::not_observed(unavailable.detail()),
         };
 
         let slots = match self
-            .resolve_credential_slots(ctx, environment, &plugin)
+            .resolve_credential_slots(owner_tenant, environment, &plugin)
             .await
         {
             Ok(slots) => slots,
@@ -887,10 +935,11 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             (!environment.observed_attrs.is_empty()).then_some(&environment.observed_attrs);
         let handle = EnvironmentHandle {
             slots: &slots,
-            // Verbatim, per ruling D-9. Synthesising this from the variables
-            // table would put one product's variable name in the gear whose
-            // whole purpose is to stop naming that product; the one-time
-            // backfill in `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash) is
+            // Verbatim. Synthesising this from the variables table would put one
+            // product's variable name in the gear whose whole purpose is to stop
+            // naming that product; the one-time backfill in
+            // `m20260903_000011_environment_plugin_columns` (folded into
+            // `migrations::m20260812_000001_initial` by the docs squash) is
             // where that mapping lives instead.
             config: &environment.config,
             observed,
@@ -916,7 +965,23 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         // VHP plugin's detect is timing out" and "qa-environments is slow" were
         // the same series.
         let started = Instant::now();
-        let observation = plugin.observe(&handle).await;
+        let observation = match tokio::time::timeout(self.observe_timeout, plugin.observe(&handle))
+            .await
+        {
+            Ok(observation) => observation,
+            Err(_elapsed) => {
+                warn!(
+                    environment_id = %environment.id,
+                    timeout = ?self.observe_timeout,
+                    "a product plugin's observe outlived the platform's deadline; recording a timeout",
+                );
+                let failure = PluginFailure::classified(FailureClass::Timeout, OBSERVE_TIMED_OUT);
+                PluginObservation {
+                    environment: PluginObservationOutcome::Failed(failure.clone()),
+                    health: PluginHealthOutcome::Failed(failure),
+                }
+            }
+        };
         let elapsed = started.elapsed();
 
         // Read off the value the plugin returned, before anything projects or
@@ -957,60 +1022,34 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// [`CredentialSlot::resolved`], not `reference_only`: `observe` is the
     /// one method the contract expects to be handed plaintext, because
     /// reaching a target means authenticating to it. Dispatch is the opposite
-    /// case and uses `reference_only` (Task 18).
+    /// case and uses `reference_only`.
     ///
-    /// # Two sources, and the plugin-shaped one wins (ruling F-2)
+    /// # One source: `Environment::credentials`
     ///
-    /// `Environment::credentials` — the plugin-shaped column
-    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash) added — is **preferred
-    /// when non-empty**, and the pre-plugin `kubeconfig_credstore_ref` is the
-    /// fallback when it is empty. Which is which changed at Task 18b, and the
-    /// reason it was the other way round until then is worth keeping, because
-    /// it is what the fallback is still for.
+    /// Until Task 18b the plugin-shaped column
+    /// (`m20260903_000011_environment_plugin_columns`, folded into
+    /// `migrations::m20260812_000001_initial` by the docs squash) was a
+    /// one-time snapshot with **no writer**: it was filled from the pre-plugin
+    /// `kubeconfig_credstore_ref` for every row that existed, `create` left it
+    /// empty, and `update` left it alone. So for an environment whose
+    /// kubeconfig had been replaced since, it named a **superseded** reference
+    /// — one this gear may have deleted from credstore outright, if it minted
+    /// it (`forget_owned_secret`). Reading it would have given a plugin either
+    /// a hard failure that never self-heals or, worse, *stale material*: the
+    /// exact failure decision D4 exists to prevent. That is why this read
+    /// preferred the legacy column until then.
     ///
-    /// Before Task 18b that column was a one-time snapshot with **no writer**:
-    /// `m20260903_000011` filled it from `kubeconfig_credstore_ref` for every
-    /// row that existed, `create` left it empty, and `update` left it alone.
-    /// So for an environment whose kubeconfig had been replaced since the
-    /// migration ran it named a **superseded** reference — one this gear may
-    /// have deleted from credstore outright, if it minted it
-    /// (`forget_owned_secret`). Reading it would have given a plugin either a
-    /// hard failure that never self-heals or, worse, *stale material*: the
-    /// exact failure decision D4 exists to prevent.
-    ///
-    /// Task 18b gave it a writer. Every create and every credential-bearing
-    /// update now maintains it through the product's own plugin
-    /// (`credentials::store_submitted_credentials`), so for any row written
-    /// since, it is current by construction — and it is the only one of the
-    /// two that can hold more than one credential.
-    ///
-    /// **The fallback still matters, and only for rows written before Task
-    /// 18b**: those still carry `credentials = []` and a live legacy
-    /// reference. Task 19 re-derives the column from the legacy one — as an
-    /// unconditional overwrite, which is what repairs a *stale* snapshot as
-    /// well as an empty one — and then drops both the column and this
-    /// fallback.
-    ///
-    /// # Where the key comes from, on the fallback path
-    ///
-    /// The legacy column holds a reference and no key, and a plugin looks its
-    /// credentials up *by* key. The key is therefore taken from the plugin
-    /// itself: the sole field it declares both required and secret. For a
-    /// Kubernetes-shaped product that resolves to `kubeconfig`; for the first
-    /// product with two required secrets it resolves to nothing, and the
-    /// environment records that it cannot be observed rather than guessing
-    /// which of the two the single legacy column meant. Deriving it beats a
-    /// literal for a second reason as well: a plugin that renames its
-    /// credential field renames the slot in the same release, with nothing in
-    /// this gear to update.
-    ///
-    /// On the preferred path the key is stored beside the reference, so no
-    /// derivation is needed and a plugin with *two* required secrets is
-    /// resolvable — which is why [`LEGACY_CREDENTIAL_UNBINDABLE`] is now
-    /// unreachable for a row with a populated `credentials`. That sentence was
-    /// in this constant's doc before Task 18b and was false when written,
-    /// because nothing read the column; Task 18b made it true rather than
-    /// deleting it.
+    /// Task 18b gave the column a writer: every create and every
+    /// credential-bearing update maintains it through the product's own plugin
+    /// (`credentials::store_submitted_credentials`), so it is current by
+    /// construction and can hold more than one credential. Task 19 populated it
+    /// for every row that had a legacy reference (`m20260903_000012`, folded
+    /// into the same initial migration) and dropped the legacy column together
+    /// with this method's fallback to it, which had keyed the single unkeyed
+    /// reference by the plugin's sole required secret. Every reference is now
+    /// stored beside its key, so no derivation is needed and a plugin with two
+    /// required secrets is resolvable; the ambiguous pre-plugin shape is
+    /// refused at the write instead ([`LEGACY_CREDENTIAL_UNBINDABLE`]).
     ///
     /// # Errors
     ///
@@ -1020,18 +1059,16 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// path to the material.
     pub(super) async fn resolve_credential_slots(
         &self,
-        ctx: &SecurityContext,
+        owner_tenant: Uuid,
         environment: &Environment,
         plugin: &Arc<dyn QaProductPluginV1>,
     ) -> Result<Vec<CredentialSlot>, &'static str> {
-        // The preferred source carries its own keys and may carry several
-        // credentials; the fallback carries one reference and no key, so the
-        // plugin has to supply that. See the doc above for why the preference
-        // is this way round since Task 18b.
         // **One source since Task 19.** The legacy column and this method's
-        // fallback to it were dropped together (ruling F-2); `credentials` is
+        // fallback to it were dropped together; `credentials` is
         // where an environment's credential references live, and
-        // `m20260903_000012` populated it for every row that had one.
+        // `m20260903_000012` (folded into
+        // `migrations::m20260812_000001_initial` by the docs squash) populated
+        // it for every row that had one.
         let _ = plugin;
         let stored: Vec<(String, String)> = environment
             .credentials
@@ -1048,7 +1085,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             // reports a product-level failure for what is really a credstore
             // problem an operator can fix.
             let material = self
-                .fetch_credential_material(ctx, Some(environment.id), &credstore_ref)
+                .fetch_credential_material(owner_tenant, Some(environment.id), &credstore_ref)
                 .await
                 .map_err(|error| {
                     // `debug!`, not `warn!`: the ticker's own loop already logs
@@ -1073,15 +1110,14 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// Shared by [`Self::resolve_credential_slots`] and D4's `Secret` write
     /// ([`Self::materialise_runner_secret`], reached from create, from update
     /// and from the ticker's self-heal), which needs the same material for
-    /// [`RunnerSecretWriter::ensure_runner_secret`]. It is a second
-    /// credstore round trip rather than a shared one, which is an acceptable
-    /// cost on a create/update request and on a step that otherwise runs on a
-    /// multi-minute cadence.
-    /// `environment_id` appears only in these two `Internal` messages, so a
-    /// `None` costs the operator the row id and nothing else. **Both call
+    /// [`RunnerSecretWriter::ensure_runner_secret`]. It is a second credstore
+    /// round trip rather than a shared one, which is an acceptable cost on a
+    /// create/update request and on a step that otherwise runs on a multi-minute
+    /// cadence. `environment_id` appears only in these two `Internal` messages,
+    /// so a `None` costs the operator the row id and nothing else. **Both call
     /// sites pass `Some`**: Task 18b briefly had a third that read a submitted
-    /// reference on a create, and ruling F-4's reversal deleted it — the write
-    /// path resolves no credential material at all.
+    /// reference on a create, and a later reversal deleted it — the write path
+    /// resolves no credential material at all.
     ///
     /// # Both messages name the reference, and every caller must know it
     ///
@@ -1091,9 +1127,18 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// errors verbatim to a response**: the observation path maps them to
     /// `KUBECONFIG_UNRESOLVED`, and Task 18b's write path maps them to fixed
     /// validation text.
+    ///
+    /// # Who reads the secret
+    ///
+    /// Read as the system actor, never as the caller
+    /// ([`system_actor::for_credential_read`]), bound to `owner_tenant`, the
+    /// tenant that owns the environment. That is the identity and the tenant
+    /// the observation cycle reads as, so a request cannot succeed on a secret
+    /// the cycle cannot read. Every caller was authorized under its own
+    /// context before reaching here.
     pub(super) async fn fetch_credential_material(
         &self,
-        ctx: &SecurityContext,
+        owner_tenant: Uuid,
         environment_id: Option<Uuid>,
         credstore_ref: &str,
     ) -> Result<SecretValue, DomainError> {
@@ -1107,7 +1152,13 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
 
         let response = self
             .credstore
-            .get(ctx, &secret_ref)
+            // As the system actor every path reads as (see
+            // `system_actor::for_credential_read`), bound to the tenant that
+            // owns the environment; the caller authorized, it does not read.
+            .get(
+                &system_actor::for_credential_read(owner_tenant),
+                &secret_ref,
+            )
             .await
             .map_err(map_credstore_error)?
             .ok_or_else(|| {
@@ -1410,7 +1461,8 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             // Closing it is one more family with its own two-valued outcome and
             // one emission around this call; it needs no new call site and no
             // change to anything here.
-            self.self_heal_runner_secrets(&ctx, &environment).await;
+            self.self_heal_runner_secrets(&ctx, tenant_id, &environment)
+                .await;
         }
 
         (report, CycleOutcome::Completed)
@@ -1427,9 +1479,19 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// body reads as what it is (`observe`, then `self-heal`), and so the
     /// `origin` tag every log line carries is written once here rather than
     /// spelled at the call site.
-    async fn self_heal_runner_secrets(&self, ctx: &SecurityContext, environment: &Environment) {
-        self.materialise_runner_secret(ctx, environment, "observation cycle self-heal")
-            .await;
+    async fn self_heal_runner_secrets(
+        &self,
+        ctx: &SecurityContext,
+        owner_tenant: Uuid,
+        environment: &Environment,
+    ) {
+        self.materialise_runner_secret(
+            ctx,
+            owner_tenant,
+            environment,
+            "observation cycle self-heal",
+        )
+        .await;
     }
 
     /// Resolve the material for a runner `Secret`, logging and returning
@@ -1455,13 +1517,13 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// that does belongs beside this split, not inlined back into the loop.
     async fn runner_secret_material(
         &self,
-        ctx: &SecurityContext,
+        owner_tenant: Uuid,
         environment: &Environment,
         credstore_ref: &str,
         origin: &'static str,
     ) -> Option<credstore_sdk::SecretValue> {
         match self
-            .fetch_credential_material(ctx, Some(environment.id), credstore_ref)
+            .fetch_credential_material(owner_tenant, Some(environment.id), credstore_ref)
             .await
         {
             Ok(material) => Some(material),
@@ -1492,7 +1554,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     ///
     /// # Called from all three places, deliberately
     ///
-    /// The design (§4.6) says "on create, on update, and as a self-heal", and
+    /// The `Secret` is written on create, on update, and as a self-heal, and
     /// until 2026-08-28 only the self-heal existed: the final whole-branch
     /// review found the create/update half had been described in the plan
     /// (Task 6, Step 3) but never assigned to a task. The consequence was
@@ -1578,6 +1640,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     async fn materialise_runner_secret(
         &self,
         ctx: &SecurityContext,
+        owner_tenant: Uuid,
         environment: &Environment,
         origin: &'static str,
     ) {
@@ -1596,7 +1659,9 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         // belongs to this one environment, which has exactly one tenant, and
         // `ctx` is the tenant-bound context this method's every caller
         // (create, update, the observation ticker's self-heal) already holds
-        // for exactly this environment.
+        // for exactly this environment. The material itself is read in
+        // `owner_tenant`, the environment's own tenant, as the system actor
+        // (`fetch_credential_material`).
         let tenant_id = ctx.subject_tenant_id();
 
         let mut claimed: std::collections::BTreeMap<String, String> =
@@ -1621,8 +1686,14 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                 continue;
             }
             claimed.insert(name, credstore_ref.clone());
-            self.write_one_runner_secret(ctx, tenant_id, environment, &credstore_ref, origin)
-                .await;
+            self.write_one_runner_secret(
+                owner_tenant,
+                tenant_id,
+                environment,
+                &credstore_ref,
+                origin,
+            )
+            .await;
         }
     }
 
@@ -1638,14 +1709,14 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// the failing paths cannot reach the loop at all.
     async fn write_one_runner_secret(
         &self,
-        ctx: &SecurityContext,
+        owner_tenant: Uuid,
         tenant_id: Uuid,
         environment: &Environment,
         credstore_ref: &str,
         origin: &'static str,
     ) {
         let Some(material) = self
-            .runner_secret_material(ctx, environment, credstore_ref, origin)
+            .runner_secret_material(owner_tenant, environment, credstore_ref, origin)
             .await
         else {
             return;
@@ -1668,19 +1739,18 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     }
 
     // `resolve_kubeconfig_source` and `store_kubeconfig_source` were removed
-    // by Task 18b. `credentials::store_legacy_pair` is what folds the
-    // pre-plugin pair into one reference now, and it is reached only on the
-    // productless branch; every other path goes through the plugin. See the
-    // note where `KubeconfigSource` used to be.
+    // by Task 18b, and the productless `credentials::store_legacy_pair` that
+    // replaced them went with Task 20b. The pre-plugin pair is folded by
+    // `credentials::desugar_legacy_credential_pair` and goes through the
+    // plugin like every other credential.
 
     /// The "both supplied" rejection. Names **both** fields, because the
     /// caller has to know which one to drop and `DomainError::Validation`
     /// carries only a single `field`.
     ///
-    /// Still reachable after Task 18b, from
-    /// `credentials::desugar_legacy_credential_pair` and from
-    /// `credentials::store_legacy_pair`: the pre-plugin pair is still accepted
-    /// on the wire, so its own rules are still enforced, verbatim.
+    /// Still reachable, from `credentials::desugar_legacy_credential_pair`: the
+    /// pre-plugin pair is still accepted on the wire, so its own rules are
+    /// still enforced, verbatim.
     pub(super) fn both_kubeconfig_fields_error() -> DomainError {
         DomainError::Validation {
             field: "kubeconfig".to_owned(),
@@ -1746,7 +1816,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// `generated` is the ownership test, not a convenience flag: only a
     /// reference this gear minted (either prefix — see
     /// [`credentials::is_generated_ref`]) is ours to remove. A
-    /// caller-supplied reference such as `credstore://team-a/prod-cluster` may
+    /// caller-supplied reference such as `team-a-prod-cluster` may
     /// name a secret shared with other environments or other systems entirely, so
     /// deleting it on our own initiative would destroy someone else's
     /// credential. `create_ssh_key` needs no such test because its references
@@ -1811,11 +1881,13 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// landing in `qa_runs.test_version VARCHAR(512)`. So an override wider than
     /// 512 would be accepted here and then break **every launch that used it**,
     /// on an insert this gear never sees.
-    /// `m20260814_000006_platform_default_branch` (folded into `migrations::m20260812_000001_initial` by the docs squash) declares this column
-    /// `VARCHAR(512)` for the same reason, and its module doc records why the
-    /// sink's width is the anchor. (An earlier version of both used 255,
-    /// justified by a claimed `qa_environments` "convention" that does not exist:
-    /// `description` is `TEXT` and `kubeconfig_credstore_ref` is `VARCHAR(1024)`.)
+    /// `m20260814_000006_platform_default_branch` (folded into
+    /// `migrations::m20260812_000001_initial` by the docs squash) declares this
+    /// column `VARCHAR(512)` for the same reason, and its module doc records why
+    /// the sink's width is the anchor. (An earlier version of both used 255,
+    /// justified by a claimed `qa_environments` "convention" that does not
+    /// exist: `description` is `TEXT` and `kubeconfig_credstore_ref`, until Task
+    /// 19 dropped it, was `VARCHAR(1024)`.)
     ///
     /// **Characters, not bytes** — `MAX_DEFAULT_BRANCH_CHARS` is compared against
     /// `chars().count()`, because `VARCHAR(512)` counts characters on both server
@@ -1889,14 +1961,38 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         })
     }
 
-    fn validate_credstore_ref(value: &str) -> Result<(), DomainError> {
+    /// Refuse, at write, a credential reference the credential store cannot
+    /// resolve. The rule is [`SecretRef::new`]'s own -- `[a-zA-Z0-9_-]`, 1 to
+    /// 255 bytes, no colons or slashes -- because that is the constructor
+    /// [`Self::fetch_credential_material`] runs at use, so a spelling refused
+    /// here is exactly one that would have failed there.
+    ///
+    /// The same rule and the same category as qa-insights'
+    /// `validate_credstore_ref` and qa-catalog's reference checks:
+    /// `SecretRef::new`'s syntax with no scheme prefix, refused as
+    /// `DomainError::Validation` naming `field`, hence a 400. It is a *syntax*
+    /// check only: naming a reference nobody has provisioned yet stays legal,
+    /// by design (`KUBECONFIG_UNRESOLVED`).
+    ///
+    /// `field` is the wire field the operator typed the value into.
+    pub(super) fn validate_credstore_ref(field: &str, value: &str) -> Result<(), DomainError> {
         if value.is_empty() {
             return Err(DomainError::Validation {
-                field: "kubeconfig_credstore_ref".to_owned(),
+                field: field.to_owned(),
                 message: "must not be empty".to_owned(),
             });
         }
-        Ok(())
+        SecretRef::new(value.to_owned())
+            .map(|_| ())
+            .map_err(|_| DomainError::Validation {
+                field: field.to_owned(),
+                message: "the credential-store reference is not one the credential store can \
+                      resolve: a reference is a name of letters, digits, underscores and \
+                      dashes only, at most 255 characters, such as `kc-staging`; slashes and \
+                      colons are rejected, so a URL-shaped value such as \
+                      `credstore://kc/staging` is not a reference"
+                    .to_owned(),
+            })
     }
 }
 

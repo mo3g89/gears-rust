@@ -13,13 +13,15 @@
 //! factory per legitimate call site, each logging a `tracing` line under a
 //! shared target so an audit sink can enumerate the sites.
 //!
-//! # One factory per site, and there are six sites
+//! # One factory per site, and there are seven sites
 //!
 //! qa-runs declares twelve (`grep -c '^pub fn for_'
 //! qa-runs/src/domain/system_actor.rs`, measured 2026-08-25 — an earlier
 //! revision of this line said six, and fix round 1's count sweep caught it).
-//! This declares six, one per flow that reaches a sibling gear (qa-runs,
-//! qa-catalog, qa-environments or JIRA-over-oagw) without a caller of its own:
+//! This declares seven: six for the flows that reach a sibling gear (qa-runs,
+//! qa-catalog, qa-environments or JIRA-over-oagw) without a caller of its own,
+//! and one for the settings test send, which has a caller but must not read
+//! the notification secrets as that caller:
 //!
 //! | Factory | `site` | The flow |
 //! |---|---|---|
@@ -29,6 +31,7 @@
 //! | [`for_jira_poll`] | `jira_poll` | the JIRA poller ticker's pass over one tenant's open bugs, Task 40 |
 //! | [`for_collect_cycle`] | `collect_cycle` | the collect ticker's hourly cycle for one tenant, Task 40 |
 //! | [`for_ticker_enumeration`] | `ticker_enumeration` | the one cross-tenant read all three tickers start from, Task 40 |
+//! | [`for_settings_test_send`] | `settings_test_send` | the settings page's test send, so it reads secrets as real sends do |
 //!
 //! **This section said "four sites" through Task 39 and "seven sites" from
 //! Task 40 until a seventh, `for_event_ingest`, was deleted.** That factory
@@ -42,7 +45,7 @@
 //! than one arm at all.
 //!
 //! **The names are the audit trail**, which is why there is no shared
-//! `for_background()`: it would make six different flows indistinguishable in
+//! `for_background()`: it would make seven different flows indistinguishable in
 //! the one log line that exists to tell them apart.
 //!
 //! The rebuild's asymmetry is deliberate and unchanged: its *listing* runs under
@@ -109,9 +112,9 @@
 //!
 //! So there is exactly one: [`for_ticker_enumeration`]. It reads one column of
 //! one table and writes nothing, and every read and write past a tenant being
-//! discovered is issued under one of the five tenant-bound factories, minted
+//! discovered is issued under one of the tenant-bound factories, minted
 //! from that discovered tenant. That split is not a convention this module
-//! hopes for: the five take a [`TenantBound`], which cannot be constructed
+//! hopes for: every other factory takes a [`TenantBound`], which cannot be constructed
 //! from nil, so a ticker cannot accidentally act under the enumeration's
 //! authority.
 //!
@@ -287,6 +290,23 @@ pub fn for_collect_cycle(tenant: TenantBound) -> SecurityContext {
     build_inner(tenant)
 }
 
+/// The settings test send's context, for the credential-store reads and the
+/// gateway calls of `POST /qa/v1/settings/notifications/test`.
+///
+/// **Not the caller's own identity, on purpose.** A real send resolves the
+/// Slack webhook and the SMTP password as this gear's system actor (through
+/// [`SystemActorSite::context`]); a test sent as the user would read the
+/// secret the user can see, and a secret stored with `private` sharing — which
+/// only its owner can read — would pass the test and fail every real send. The
+/// test is authorized as the caller first (`NotifyService::send_test` asks the
+/// PDP under the caller's `ctx`); only the send itself runs as this actor,
+/// bound to the caller's tenant.
+#[must_use]
+pub fn for_settings_test_send(tenant: TenantBound) -> SecurityContext {
+    log_site("settings_test_send", tenant.get());
+    build_inner(tenant)
+}
+
 /// The tickers' tenant-enumeration context: **nil tenant, cross-tenant, reads
 /// only**.
 ///
@@ -307,15 +327,16 @@ pub fn for_collect_cycle(tenant: TenantBound) -> SecurityContext {
 ///
 /// **It reads one thing and writes nothing.**
 /// [`TenantDirectory`](crate::domain::service::tenants::TenantDirectory) is its
-/// only caller and `ResultsRepository::tenants_with_results` its only read.
-/// Every read and write that follows a tenant being discovered is issued under
+/// only caller and `ResultsRepository::tenants_with_results` its only read. Every
+/// read and write that follows a tenant being discovered is issued under
 /// [`for_reconcile_sweep`], [`for_jira_poll`] or [`for_collect_cycle`], minted
 /// from *that* tenant — which is what keeps the discovered tenant and the acting
-/// tenant provably the same value, and is why those three take a
-/// [`TenantBound`] rather than a `Uuid`. Using this context for anything past
-/// the enumeration would hand a ticker a scope that spans every tenant, which is
-/// the defect class this crate has found six times (R86) in its most damaging
-/// possible location.
+/// tenant provably the same value, and is why those three take a [`TenantBound`]
+/// rather than a `Uuid`. Using this context for anything past the enumeration
+/// would hand a ticker a scope that spans every tenant, which is the defect class
+/// this crate has found six times (the explicit-`tenant_id` rule,
+/// [`JiraRepository`](crate::domain::repos::JiraRepository)'s doc) in its most
+/// damaging possible location.
 ///
 /// **This context is minted for its audit line and is never handed to the
 /// PDP.** `TenantDirectory` calls this factory only so the `tracing::info!` in
@@ -400,7 +421,8 @@ impl SystemActorSite {
 mod tests {
     use super::{
         QA_INSIGHTS_SYSTEM_ACTOR_UUID, SystemActorSite, TenantBound, for_collect_cycle,
-        for_collect_report, for_jira_poll, for_ticker_enumeration,
+        for_collect_report, for_jira_poll, for_reconcile_sweep, for_settings_test_send,
+        for_ticker_enumeration,
     };
     use uuid::Uuid;
 
@@ -482,6 +504,21 @@ mod tests {
             assert_eq!(ctx.subject_tenant_id(), tenant, "{name}");
             assert_eq!(ctx.subject_id(), QA_INSIGHTS_SYSTEM_ACTOR_UUID, "{name}");
         }
+    }
+
+    /// The settings test send exists to fail exactly where a real send fails, so
+    /// its actor must be indistinguishable from the real send's **to credstore**:
+    /// same subject id, same subject type, same tenant. Only the audit `site`
+    /// differs.
+    #[test]
+    fn the_settings_test_send_actor_is_the_real_sends_identity() {
+        let bound = TenantBound::new(Uuid::from_u128(0x77)).expect("non-nil");
+        let test = for_settings_test_send(bound);
+        let real = for_reconcile_sweep(bound);
+
+        assert_eq!(test.subject_id(), real.subject_id());
+        assert_eq!(test.subject_type(), real.subject_type());
+        assert_eq!(test.subject_tenant_id(), real.subject_tenant_id());
     }
 
     /// **The one factory in this module that is deliberately not tenant-bound.**

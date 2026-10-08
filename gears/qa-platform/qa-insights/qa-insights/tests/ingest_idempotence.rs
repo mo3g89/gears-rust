@@ -1023,7 +1023,7 @@ async fn boot(results: &[(&str, &str, &str)], enable_tickers: bool) -> BootedGea
         .expect("in-memory sqlite connects");
         toolkit_db::migration_runner::run_migrations_for_testing(
             &db,
-            qa_insights::infra::storage::migrations::Migrator::migrations(),
+            qa_insights::Migrator::migrations(),
         )
         .await
         .expect("the qa-insights migrations apply");

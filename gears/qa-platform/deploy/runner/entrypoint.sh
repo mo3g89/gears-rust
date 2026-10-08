@@ -300,16 +300,24 @@ echo "runner: pytest $(python3 -m pytest --version 2>&1 | head -n1) cwd=$(pwd)"
 # failure here (`|| true` around its own reporter), which is how a deployment
 # can run a collect cycle hourly for days with an unset
 # `collect_report_base_url` and see nothing about it anywhere.
-# Args: bundle-relative test file, case count. Exit status: 0 iff accepted.
+# Args: bundle-relative test file, case count. Reads VHP_COLLECT_URL from the
+# environment. Exit status: 0 iff accepted.
 report_collect() {
-    python3 - "$VHP_COLLECT_URL" "$1" "$2" <<'PY'
+    python3 - "$1" "$2" <<'PY'
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
 
-url, test_file, count = sys.argv[1], sys.argv[2], int(sys.argv[3])
+# THE URL COMES FROM THE ENVIRONMENT, NOT argv: its `sig` query parameter is
+# the HMAC tag that authorises the write, and an argument is readable through
+# `ps`/proc for the life of this process. VHP_COLLECT_URL is in this pod's
+# environment already (the Argo adapter sets it), so reading it here exposes
+# nothing new. check_deploy_secrets_not_in_argv.sh is the guard.
+url = os.environ["VHP_COLLECT_URL"]
+test_file, count = sys.argv[1], int(sys.argv[2])
 # `CollectCountReq` (`qa-insights/.../api/rest/dto.rs:2263`): exactly these two
 # fields, and the same payload legacy's reporter sends. `branch`, `tenant_id`
 # and the `sig` that authorises the write all ride the URL's query string,
@@ -376,7 +384,13 @@ if [[ "${COLLECT_ONLY:-false}" == "true" ]]; then
     if [[ -z "${VHP_COLLECT_URL:-}" ]]; then
         echo "runner: VHP_COLLECT_URL is unset -- counts will be logged below and reported to nobody." >&2
     elif [[ "$VHP_COLLECT_URL" != http://* && "$VHP_COLLECT_URL" != https://* ]]; then
-        echo "runner: VHP_COLLECT_URL='$VHP_COLLECT_URL' has no scheme or host, so no count can be reported. Set qa-insights' collect_report_base_url to an origin a workflow pod can reach the gears on -- the same value qa-runs' argo.bundle_base_url carries." >&2
+        # Its query string carries the HMAC `sig`, and this line lands in the
+        # pod log the run view renders: redacted the way TEST_BUNDLE_URL is.
+        collect_url_state="$VHP_COLLECT_URL"
+        if [[ "$collect_url_state" == *\?* ]]; then
+            collect_url_state="${collect_url_state%%\?*}?<redacted>"
+        fi
+        echo "runner: VHP_COLLECT_URL='$collect_url_state' has no scheme or host, so no count can be reported. Set qa-insights' collect_report_base_url to an origin a workflow pod can reach the gears on -- the same value qa-runs' argo.bundle_base_url carries." >&2
         VHP_COLLECT_URL=""
     fi
 
@@ -487,11 +501,22 @@ fi
 # this process's own environment -- pathname expansion is still disabled
 # (`set -f` / `set +f`) around the unquoted expansion regardless, so a bare
 # `*` or `?` in it cannot pick up stray files from the current directory.
+#
+# `-v` IS KEPT AND THE OPERATOR'S WORDS FOLLOW IT (second review, finding
+# #66; fixed in code 2026-10-07). The assignment used to REPLACE
+# `-v`, so a QA_RUNNER_PYTEST_ARGS of `-x` silently dropped the per-test
+# lines a human reads in the archived log. pytest counts `-v` and `-q`
+# against each other, so an operator who wants pytest's default verbosity
+# passes `-q`. Nothing that parses this log depends on verbosity: the adapter
+# reads `pytest_markers`' anchored `=== TEST_CASE: ... ===` lines, which
+# `pytest_runtest_logreport` emits at any level. Word splitting does not honour
+# quotes -- `-k "a or b"` becomes four words -- which is the price of the
+# unquoted expansion below. test_runner_pytest_args.sh is the guard.
 declare -a EXTRA=(-v)
 if [[ -n "${QA_RUNNER_PYTEST_ARGS:-}" ]]; then
     # shellcheck disable=SC2206  # word splitting is the point here
     set -f
-    EXTRA=(${QA_RUNNER_PYTEST_ARGS})
+    EXTRA=(-v ${QA_RUNNER_PYTEST_ARGS})
     set +f
 fi
 

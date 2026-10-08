@@ -34,12 +34,6 @@ pub trait QaProductPluginV1: Send + Sync {
     // Dispatch (qa-runs) — the runner contract
     fn runner(&self, observed: Option<&ObservedAttrs>) -> RunnerSpec;
     fn env_contract(&self) -> RunVarContract;
-
-    // Health (defaulted — override only if the product has a cheaper probe
-    // than a full observation)
-    async fn health_check(&self) -> Result<HealthState, PluginFailure> {
-        Ok(HealthState::Ok)
-    }
 }
 ```
 
@@ -87,11 +81,6 @@ what to launch.
 Returns the run-variable names this plugin reserves beyond the platform's own floor. The names the
 plugin *owns* are not declared here — they are whatever `prepare_run_access` actually returns in
 `RunAccess::env`.
-
-### `health_check`
-
-Defaulted — a plugin only overrides it if the product has a cheaper liveness probe than a full
-observation.
 
 ## Registration and resolution
 

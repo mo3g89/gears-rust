@@ -64,15 +64,14 @@
 //!
 //! # The status fold reuses `ingest::classify`, and that was verified
 //!
-//! Plan ruling R5 requires this to be checked rather than assumed, because legacy
-//! has **seven** disagreeing status classifications and
-//! [`crate::domain::service::ingest`]'s header tabulates them. (R5 and that table
-//! both said "four" until Phase A's whole-phase review: the fifth is the daily
-//! fold three paragraphs down, which Task 18 measured here and did not carry back
-//! to the index every Phase B task is pointed at. The **sixth** is the KPI
-//! denominator this module's own `kpi_of` implements — Task 21b's finding, which
-//! this paragraph did not carry back either until Task 22's fix round.) Checked,
-//! row by row:
+//! This is checked rather than assumed, because legacy has **seven** disagreeing
+//! status classifications and [`crate::domain::service::ingest`]'s header
+//! tabulates them. (That table said "four" until Phase A's whole-phase review:
+//! the fifth is the daily fold three paragraphs down, which Task 18 measured here
+//! and did not carry back to the index every Phase B task is pointed at. The
+//! **sixth** is the KPI denominator this module's own `kpi_of` implements — Task
+//! 21b's finding, which this paragraph did not carry back either until Task 22's
+//! fix round.) Checked, row by row:
 //!
 //! | | dashboard (`dashboard.rs:170-173`) | five counters (`plans.rs:188-192`), i.e. [`classify`] |
 //! |---|---|---|
@@ -88,7 +87,7 @@
 //! `Uncounted` — which is exactly what the dashboard's SQL does with a `PENDING`
 //! row: it lands in `COUNT(tr.id)` and in none of the three filters.
 //!
-//! **The trap R5 names is a different function.** `bucketize_status`
+//! **The trap that table names is a different function.** `bucketize_status`
 //! (`manager/src/routes/analytics.rs:1940-1946`) buckets everything outside
 //! `PASSED`/`FAILED`/`ERROR` to `NOT_RUN`, so a `SKIPPED` row is `NOT_RUN` there
 //! and `StatusBucket::Skipped` here. That one belongs to Tasks 20/21/24 and must
@@ -101,11 +100,11 @@
 //!
 //! # The 24-hour KPI is a fourth reading, and its *denominator* is the new part
 //!
-//! Task 21b, and checked under R5 exactly as the fold above was. Its two
-//! counters are the daily trend's — `PASSED` alone and `FAILED` with `ERROR`
+//! Task 21b, and checked against that table exactly as the fold above was. Its
+//! two counters are the daily trend's — `PASSED` alone and `FAILED` with `ERROR`
 //! folded in — so nothing new there. Its **denominator** is
 //! `status IN ('PASSED','FAILED','ERROR')` (`:329`), which is a partition no
-//! other row of R5's table expresses:
+//! other row of that table expresses:
 //!
 //! | | numerator | denominator |
 //! |---|---|---|
@@ -125,15 +124,15 @@
 //! This section said it "exists nowhere else in legacy"; it is at `:329` and
 //! `:337` here, and at `:388` (flaky) and `:487` (quality vectors) — the two
 //! folds behind `flaky_tests` and `quality_vectors_pass_rate`. Corrected in Task
-//! 21b's fix round, and `crate::domain::service::ingest`'s R5 table carries the
-//! consequence: **whichever task lands each of those two reads inherits this row
-//! rather than deriving a seventh.** Task 23 was named for both and shipped
-//! neither — it built the *analytics* folds of those names, a different grain and
-//! a different partition. **Task 23b landed `:388` and Task 25a `:487`**, both of
-//! them as [`PASSED_STATUSES`]/[`FAILED_STATUSES`] in SQL rather than through
-//! [`kpi_of`], and neither derived a seventh rule.
-//! (This sentence read "Task 23 reuses `kpi_of`" until Task 23's own fix round,
-//! which is the same forward-looking-claim-about-unshipped-work defect that task
+//! 21b's fix round, and `crate::domain::service::ingest`'s status-classification
+//! table carries the consequence: **whichever task lands each of those two reads
+//! inherits this row rather than deriving a seventh.** Task 23 was named for both
+//! and shipped neither — it built the *analytics* folds of those names, a
+//! different grain and a different partition. **Task 23b landed `:388` and Task
+//! 25a `:487`**, both of them as [`PASSED_STATUSES`]/[`FAILED_STATUSES`] in SQL
+//! rather than through [`kpi_of`], and neither derived a seventh rule. (This
+//! sentence read "Task 23 reuses `kpi_of`" until Task 23's own fix round, which
+//! is the same forward-looking-claim-about-unshipped-work defect that task
 //! escalated one file over; it then said `quality_vectors_pass_rate` "is Task
 //! 25's, together with the production `CatalogReader` adapter it cannot be
 //! computed without", which was right about both and is now history rather than a
@@ -179,10 +178,10 @@
 //!   second and its fix round added `run_created_at` for the first —
 //!   `qa_insights_sdk::TestResultRecord::run_created_at` carries the column and
 //!   `infra::storage::results_sea_repo`'s `effective_ts` the expression. (That
-//!   was `kpi_ts` until Ruling C folded the two expressions back into one; the
-//!   dangling name survived a round because it is not an intra-doc link.) Task
-//!   23's two folds window on the same expression, so they inherit the column
-//!   too, and the analytics reads share it as of Ruling C.
+//!   was `kpi_ts` until a later round folded the two expressions back into one;
+//!   the dangling name survived a round because it is not an intra-doc link.)
+//!   Task 23's two folds window on the same expression, so they inherit the
+//!   column too, and the analytics reads share it as of that round.
 //!
 //! # The clock is this process's, where legacy's is the database's
 //!
@@ -251,9 +250,8 @@
 //! results. There is no cross-gear read that can answer that: `list_runs`' limit
 //! is mandatory precisely so no caller can materialise every run ever executed
 //! (`qa-runs-sdk/src/client.rs:42-46`), so a total taken from the listing would
-//! silently be `min(total, `[`RUN_PAGE`]`)`. The plan's own mapping row says the
-//! run counts are read *locally*
-//! (`plans/2026-08-18-qa-insights-gear.md:330`), and
+//! silently be `min(total, `[`RUN_PAGE`]`)`. The design reads the
+//! run counts *locally*, and
 //! `ResultsRepository::count_ingested_runs` is the local quantity that is exact:
 //! runs whose results are ingested. A run whose results have not landed yet is
 //! missing, which `cpt-cf-qa-principle-async-insights` makes a normal transient
@@ -302,11 +300,12 @@
 //! not zero because they were measured as zero:
 //!
 //! * `total_plans` needs a qa-catalog plan listing; `total_schedules` a qa-runs
-//!   schedule listing. Neither is on any port in this gear, and plan ruling R3
-//!   forbids adding a port method no test here exercises. **Both are genuinely
+//!   schedule listing. Neither is on any port in this gear, and a port grows only
+//!   in the task that consumes it (`domain::ports::runs_reader`'s header), so no
+//!   port method is added that no test here exercises. **Both are genuinely
 //!   unowned** — no task in the plan claims them, and neither does
-//!   `environments_summary`, which is qa-environments' data behind a port that does
-//!   not exist (legacy fans out a health *check* per platform,
+//!   `environments_summary`, which is qa-environments' data behind a port that
+//!   does not exist (legacy fans out a health *check* per platform,
 //!   `manager/src/routes/dashboard.rs:421-460`). **Task 25a's
 //!   [`crate::domain::ports::EnvironmentReader`] is not that port** and does not
 //!   shorten this list: it resolves an id to a *name*, which is what the
@@ -584,7 +583,7 @@ where
     /// `ConstraintsRequiredButAbsent` (`PolicyEnforcer::access_scope` always
     /// requires constraints; `authz-resolver-sdk/src/pep/compiler.rs:84-86`) — and
     /// when **either** sibling refuses the subject: qa-runs on the run listing,
-    /// or **qa-catalog on the universe read** (Task 25a).
+    /// or **qa-catalog on the universe read**.
     ///
     /// [`DomainError::Internal`] when the qa-runs listing **or the qa-catalog
     /// universe read** fails. Neither is laundered into an empty dashboard: the
@@ -793,8 +792,8 @@ where
             )
             .await?;
 
-        // Ruling R5's sixth classification per **file**, over the same two
-        // constants and for the same reason `flaky_groups` takes them:
+        // The status-classification table's sixth row per **file**, over the same
+        // two constants and for the same reason `flaky_groups` takes them:
         // `dashboard::kpi_of` reduces a whole window to one pair of numbers, and
         // this needs the same partition per group. `repo_ids` here is what makes
         // `quality_vectors_pass_rate` narrow with the rest of the payload — the
@@ -1277,7 +1276,8 @@ struct Kpi {
 ///
 /// So a `SKIPPED`, `PENDING`, `RUNNING`, `XFAIL` or `XPASS` row inside the window
 /// is in none of the three counters, and in particular is **not** in the
-/// denominator. That is the trap plan ruling R5 is about, and it is why
+/// denominator. That is the trap the status-classification table in
+/// `domain::service::ingest`'s header is about, and it is why
 /// [`Counters::total`] is deliberately unused here:
 ///
 /// | | numerator | denominator |

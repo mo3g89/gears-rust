@@ -359,7 +359,9 @@ async fn plugin_for_reports_the_id_of_an_unregistered_plugin() {
 //   first use — `products_tests`'
 //   `creating_a_product_with_an_unregistered_plugin_is_refused`;
 // * the *database* refuses a NULL —
-//   `m20260903_000004`'s `after_the_migration_a_product_cannot_omit_its_plugin`.
+//   `m20260903_000004`'s `after_the_migration_a_product_cannot_omit_its_plugin`
+//   (that migration was folded into `migrations::m20260812_000002_initial` by
+//   the docs squash).
 //
 // `DomainError::ProductPluginUnavailable::instance_id` is a `String`, not an
 // `Option`. An earlier version of this comment kept the `Option` on the

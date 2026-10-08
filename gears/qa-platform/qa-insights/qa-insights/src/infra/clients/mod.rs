@@ -25,10 +25,10 @@
 //! sibling's vocabulary and this gear's, holding no logic of its own.
 //!
 //! * [`qa_runs`] — [`QaRunsReader`], the [`RunsReader`](crate::domain::ports::RunsReader)
-//!   adapter over `qa_runs_sdk::QaRunsClientV1` (Task 16).
+//!   adapter over `qa_runs_sdk::QaRunsClientV1`.
 //! * [`qa_catalog`] — [`QaCatalogReader`], the
 //!   [`CatalogReader`](crate::domain::ports::CatalogReader) adapter over
-//!   `qa_catalog_sdk::QaCatalogClientV1` (**Task 25a**).
+//!   `qa_catalog_sdk::QaCatalogClientV1`.
 //! * [`qa_environments`] — [`QaEnvironmentsReader`], the
 //!   [`EnvironmentReader`](crate::domain::ports::EnvironmentReader) adapter over
 //!   `qa_environments_sdk::QaEnvironmentsClientV1` (**Task 25a**, first called

@@ -425,8 +425,8 @@ impl Gear for QaRuns {
                 // Lazy, per dispatch: an eager hub lookup here would make this
                 // gear fail to BOOT in a deployment whose qa-catalog
                 // initialises later or is absent, where the honest failure is
-                // one run's dispatch saying so. See
-                // `infra::product_plugin`'s header and ruling D-14.
+                // one run's dispatch saying so. See `infra::product_plugin`'s
+                // header.
                 product_plugins: Arc::new(HubProductPluginResolver::new(ctx.client_hub())),
                 executor,
                 logs: logs.publisher(),
@@ -826,12 +826,15 @@ impl QaRuns {
     /// so **the guarantee holds with every replica evaluating every schedule**.
     /// That ordering is what makes the guarantee testable without an elector:
     /// `domain::service::schedules_tests` drives two services against one store
-    /// with no elector in sight, and exactly one run comes out. PRD §6's
-    /// `cpt-cf-qa-nfr-scheduler-exactly-once` states the requirement and its
-    /// five documented skip vectors; it names no verification method of its
-    /// own — the phrase this comment used to attribute to "PRD §5.2" (which is
-    /// the test catalog, not schedules) was this crate's own paraphrase, not a
-    /// quotation, and is stated as such now.
+    /// with no elector in sight, and exactly one run comes out. PRD §6
+    /// "Non-Functional Requirements" states
+    /// `cpt-cf-qa-nfr-scheduler-exactly-once`, its five documented skip vectors
+    /// and its verification method: `schedules_tests.rs`'s multi-instance tests,
+    /// which drive two service instances against one store with no leader
+    /// elector and assert exactly one run comes out. (This comment used to say
+    /// the PRD names no verification method, and to attribute a phrase to "PRD
+    /// §5.2", which is the test catalog, not schedules; both were this crate's
+    /// own paraphrase, not a quotation.)
     ///
     /// What the gate buys is the same thing it buys the dispatcher — one replica
     /// doing the work instead of N, so the fleet-wide enumeration
@@ -1614,8 +1617,8 @@ mod tests {
     }
 
     /// **The dispatcher tick is what covers the terminal paths
-    /// `IngestService::finish` does not** — D-RLP-4's central claim, and
-    /// nothing else on this branch asserted the call site exists.
+    /// `IngestService::finish` does not** — the claim the tick was added for,
+    /// and nothing else on this branch asserted the call site exists.
     ///
     /// A source scan for the same reason [`init_builds_exactly_one_log_broadcaster`]
     /// is one: the tick body needs a database, a `ClientHub`, four resolved

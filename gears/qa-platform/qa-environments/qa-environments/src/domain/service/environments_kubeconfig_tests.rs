@@ -84,7 +84,7 @@ const GENERATED_PREFIX: &str = "qa-environments-credential-";
 ///
 /// They did not, and that was review finding **I-1**. Task 18b folded the
 /// pre-plugin `kubeconfig`/`kubeconfig_credstore_ref` pair into the
-/// plugin-driven path (ruling F-8) and claimed **this file passing unmodified
+/// plugin-driven path and claimed **this file passing unmodified
 /// was the evidence the fold preserved the pair's rules**. It was not: every
 /// fixture here set `product_id: None`, so every test took the *productless*
 /// branch — `store_unclassified_credential` → `store_legacy_pair`, a second
@@ -98,8 +98,7 @@ const GENERATED_PREFIX: &str = "qa-environments-credential-";
 /// pair's rules asserted against the code that serves a real deployment, where
 /// every environment has a product.
 ///
-/// The productless branch keeps its own coverage in
-/// `environments_credentials_tests`.
+/// The productless branch is gone since Task 20b (`product_id` is `NOT NULL`).
 fn product() -> Uuid {
     Uuid::from_u128(0x9001)
 }
@@ -120,7 +119,7 @@ fn detection() -> qa_product_sdk::observation::PluginObservation {
 }
 
 /// Services with a real credstore double **and** a VHP-shaped plugin, so the
-/// pre-plugin pair travels the fold rather than the productless branch.
+/// pre-plugin pair travels the fold, as it does in a real deployment.
 fn services_with(
     db: toolkit_db::Db,
     credstore: Arc<RecordingCredStore>,
@@ -271,14 +270,11 @@ async fn a_supplied_reference_still_works_and_writes_nothing_to_credstore() {
 
     let created = services
         .environments
-        .create_environment(
-            &ctx(tenant),
-            by_reference("prod", "credstore://team-a/prod"),
-        )
+        .create_environment(&ctx(tenant), by_reference("prod", "team-a-prod"))
         .await
         .unwrap();
 
-    assert_eq!(sole_ref(&created), "credstore://team-a/prod");
+    assert_eq!(sole_ref(&created), "team-a-prod");
     assert_eq!(
         credstore.len(),
         0,
@@ -297,7 +293,7 @@ async fn supplying_both_a_reference_and_a_document_is_a_validation_error_naming_
 
     let new = NewEnvironment {
         credentials: std::collections::BTreeMap::new(),
-        kubeconfig_credstore_ref: Some("credstore://team-a/prod".to_owned()),
+        kubeconfig_credstore_ref: Some("team-a-prod".to_owned()),
         ..pasted("prod", KUBECONFIG)
     };
     let err = services
@@ -597,7 +593,7 @@ async fn updating_to_a_new_reference_still_works() {
 
     let created = services
         .environments
-        .create_environment(&ctx(tenant), by_reference("prod", "credstore://old"))
+        .create_environment(&ctx(tenant), by_reference("prod", "old-ref"))
         .await
         .unwrap();
 
@@ -607,22 +603,107 @@ async fn updating_to_a_new_reference_still_works() {
             &ctx(tenant),
             created.id,
             EnvironmentPatch {
-                kubeconfig_credstore_ref: Some("credstore://new".to_owned()),
+                kubeconfig_credstore_ref: Some("new-ref".to_owned()),
                 ..EnvironmentPatch::default()
             },
         )
         .await
         .unwrap();
 
-    assert_eq!(sole_ref(&updated), "credstore://new");
+    assert_eq!(sole_ref(&updated), "new-ref");
     assert_eq!(credstore.len(), 0);
+}
+
+/// **A reference the credential store cannot resolve is refused at write**, with
+/// a 400 (`DomainError::Validation`) naming the field and saying what a valid
+/// reference looks like -- the answer qa-insights' JIRA config already gives to
+/// the same shape. Before, this create answered 201 and the failure surfaced at
+/// first use, long after the operator left the form.
+///
+/// `credstore://kc/staging` is the spelling an operator guesses from the
+/// scheme-looking prefix; the second case is a bare colon-free value that is
+/// still out of charset, so the assertion is on the rule and not on one string.
+#[tokio::test]
+async fn a_url_shaped_reference_is_refused_at_create_naming_the_field() {
+    for bad in ["credstore://kc/staging", "has space", "kc/staging"] {
+        let credstore = Arc::new(RecordingCredStore::new());
+        let services = services_with(inmem_db().await, credstore.clone());
+        let tenant = Uuid::new_v4();
+
+        let err = services
+            .environments
+            .create_environment(&ctx(tenant), by_reference("prod", bad))
+            .await
+            .expect_err("an unresolvable reference must be refused at write");
+
+        let DomainError::Validation { field, message } = &err else {
+            panic!("`{bad}`: expected a validation error (400), got {err:?}");
+        };
+        assert_eq!(field, "kubeconfig_credstore_ref", "`{bad}`");
+        assert!(
+            message.contains("letters, digits, underscores and dashes")
+                && message.contains("kc-staging"),
+            "`{bad}`: the message must say what a valid reference looks like, got {message}"
+        );
+        assert!(
+            services
+                .environments
+                .list_environments(&ctx(tenant), &ODataQuery::default())
+                .await
+                .unwrap()
+                .items
+                .is_empty(),
+            "`{bad}`: a refused create must store nothing"
+        );
+    }
+}
+
+/// The update path is the second write path for the same field. Seeded with a
+/// valid reference so the refusal is the patch's own, and the stored reference
+/// is asserted untouched.
+#[tokio::test]
+async fn a_url_shaped_reference_is_refused_at_update_and_the_stored_one_survives() {
+    let credstore = Arc::new(RecordingCredStore::new());
+    let services = services_with(inmem_db().await, credstore.clone());
+    let tenant = Uuid::new_v4();
+
+    let created = services
+        .environments
+        .create_environment(&ctx(tenant), by_reference("prod", "old-ref"))
+        .await
+        .unwrap();
+
+    let err = services
+        .environments
+        .update_environment(
+            &ctx(tenant),
+            created.id,
+            EnvironmentPatch {
+                kubeconfig_credstore_ref: Some("credstore://kc/staging".to_owned()),
+                ..EnvironmentPatch::default()
+            },
+        )
+        .await
+        .expect_err("an unresolvable reference must be refused at update");
+
+    let DomainError::Validation { field, .. } = &err else {
+        panic!("expected a validation error (400), got {err:?}");
+    };
+    assert_eq!(field, "kubeconfig_credstore_ref");
+
+    let fetched = services
+        .environments
+        .get_environment(&ctx(tenant), created.id)
+        .await
+        .unwrap();
+    assert_eq!(sole_ref(&fetched), "old-ref");
 }
 
 /// `PATCH`ing a **reference** over a gear-generated one must not orphan the
 /// generated secret.
 ///
 /// This starts from a *pasted* environment deliberately.
-/// `updating_to_a_new_reference_still_works` starts from `credstore://old`,
+/// `updating_to_a_new_reference_still_works` starts from `old-ref`,
 /// which was never gear-generated and has no secret behind it at all, so it
 /// passes against code that cleans up nothing. Measured before the fix: the row
 /// held `team-a-prod-cluster` while credstore still held
@@ -781,10 +862,11 @@ async fn an_empty_reference_alongside_a_paste_is_a_paste_on_update_as_on_create(
 ///
 /// "Empty means not supplied" is the create reading, and on create not-supplied
 /// is the required-field error. On update it would mean "leave the kubeconfig
-/// alone" — but the caller *named* the field, and `Some("")` reaching the
-/// repository writes `''` into `kubeconfig_credstore_ref NOT NULL`, i.e. blanks
-/// a live environment's only pointer to its credentials. So the field is rejected
-/// rather than silently ignored.
+/// alone" — but the caller *named* the field. Before Task 19, `Some("")`
+/// reaching the repository wrote `''` into the `kubeconfig_credstore_ref NOT
+/// NULL` column, blanking a live environment's only pointer to its
+/// credentials. The column is gone; the field is still rejected rather than
+/// silently ignored, so a caller that names it is told it is empty.
 #[tokio::test]
 async fn an_empty_reference_alone_on_update_is_still_rejected() {
     let credstore = Arc::new(RecordingCredStore::new());
@@ -842,7 +924,7 @@ async fn supplying_both_on_update_is_a_validation_error_naming_both() {
             &ctx(tenant),
             created.id,
             EnvironmentPatch {
-                kubeconfig_credstore_ref: Some("credstore://new".to_owned()),
+                kubeconfig_credstore_ref: Some("new-ref".to_owned()),
                 kubeconfig: Some(CredentialMaterial::new(ROTATED_KUBECONFIG.to_owned())),
                 ..EnvironmentPatch::default()
             },

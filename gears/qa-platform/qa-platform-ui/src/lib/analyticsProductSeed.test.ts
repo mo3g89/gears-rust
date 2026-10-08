@@ -22,7 +22,7 @@ describe('initialAnalyticsProductId', () => {
 });
 
 // ---------------------------------------------------------------------------
-// I4 (final review): spec D3 says Analytics *is wired to* the switcher, and
+// The product-scoping rule says Analytics *is wired to* the switcher, and
 // that is the property the human partner chose. It was only ever seeded from
 // it: `useState`'s initializer runs once, and `ProductSwitcher` mutates a
 // module store without navigating or remounting, so switching product while on

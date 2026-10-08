@@ -23,7 +23,7 @@ import { RunTestDialog } from '@/components/tests/RunTestDialog';
 // `phase` is qa-runs' own lowercase `RunState` set (`created | queued |
 // dispatching | running | succeeded | failed | canceled | timed_out | expired
 // | error` — `RunState::as_str`, qa-runs-sdk/src/models.rs:271-284), passed
-// through unchanged by `runFromDto` (decision X4). `'Pending'` and `'Skipped'`
+// through unchanged by `runFromDto`. `'Pending'` and `'Skipped'`
 // are left as literal, unmatchable placeholders: this gear's `RunState` has no
 // such variant, so there is no real lowercase value to switch them to — see
 // the fix report for this file.

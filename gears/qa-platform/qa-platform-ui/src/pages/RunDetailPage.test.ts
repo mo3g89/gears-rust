@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 //
-// Task 10 review, finding 1 (Critical): `succeededWithSkips` compared
+// `succeededWithSkips` compared
 // `run.phase` against `'Succeeded'`, but `WorkflowRun.phase` is qa-runs'
 // lowercase state set (`runFromDto` sets it to `dto.state` "without
-// re-casing", `adapters.ts:378-383`, decision X4). The header marker and the
+// re-casing", `adapters.ts`). The header marker and the
 // Test Results card's callout were both dead code for any real run. This
 // suite renders the actual page against a mocked API client with a
 // lowercase-`'succeeded'`, non-zero-`skipped` fixture and asserts both are
@@ -95,7 +95,7 @@ function mockApiFor(detail: unknown) {
       return { items: [], total: 0, total_pages: 1 } as never;
     }
     if (path === '/environments') {
-      // A page since review finding #55, empty here.
+      // A page, empty here.
       return { items: [], page_info: { limit: 200, next_cursor: null, prev_cursor: null } } as never;
     }
     throw new Error(`unexpected apiGet(${path}) in this test`);

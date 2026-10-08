@@ -498,10 +498,11 @@ fn the_run_duration_is_legacys_two_formats() {
 /// legacy's `total_24h` (`manager/src/routes/dashboard.rs:328-331`,
 /// `status IN ('PASSED','FAILED','ERROR')`), not `COUNT(tr.id)`.
 ///
-/// This is the R5 trap for this task and the mutation this test exists for:
+/// This is the status-classification trap for this task
+/// (`domain::service::ingest`'s header) and the mutation this test exists for:
 /// [`super::kpi_of`] reuses [`super::Counters`], which also computes
-/// `Counters::total` over **every** row, and `total` is the wrong denominator. The
-/// fixture makes the two answers far apart — six skipped and in-progress rows
+/// `Counters::total` over **every** row, and `total` is the wrong denominator.
+/// The fixture makes the two answers far apart — six skipped and in-progress rows
 /// against four counted ones — so `passed / total` gives `0.3` (3 of 10 rows)
 /// where the rule gives `0.75` (3 of 4). Both are plausible pass rates on a
 /// chart, which is why this is asserted rather than reasoned about. (This doc
@@ -607,7 +608,7 @@ fn a_failure_card_carries_every_column_of_its_row() {
 ///   rows this KPI rule exists to include, so the count would say "3 failures"
 ///   over a list showing three cards with no time — and reaching for the row's
 ///   own `created_at` gives a plausible but wrong instant, which is the column
-///   this task shipped before Ruling A and the reason
+///   this task shipped before `run_created_at` was added, and the reason
 ///   `qa_test_results.run_created_at` exists. [`failed_row`] makes `created_at`
 ///   the *latest* of the three so that mutation is visible rather than merely
 ///   untested.
@@ -2511,7 +2512,7 @@ async fn the_dashboard_reports_the_seven_day_quality_vector_pass_rates() {
             ("test_b", plan, "PASSED"),
             ("test_b", plan, "PASSED"),
             // Neither of these is in any counter, the denominator included —
-            // ruling R5's sixth classification.
+            // the status-classification table's sixth row.
             ("test_b", plan, "SKIPPED"),
             ("test_b", plan, "RUNNING"),
             ("test_c", plan, "PASSED"),
@@ -2832,7 +2833,7 @@ fn status_rows(status: &str, rows: u64) -> StatusRowCount {
 /// for the card's `finished_at` is distinguishable: `run_created_at` (09:15) <
 /// `run_finished_at` (11:30) < `created_at` (14:45). The card must read the first
 /// two and never the third, so the `COALESCE` fallback is observable rather than
-/// a tautology and the row-vs-run mix-up Ruling A closed cannot pass.
+/// a tautology and the row-vs-run mix-up `run_created_at` closed cannot pass.
 fn failed_row() -> TestResultRecord {
     TestResultRecord {
         id: Uuid::from_u128(0xF1),

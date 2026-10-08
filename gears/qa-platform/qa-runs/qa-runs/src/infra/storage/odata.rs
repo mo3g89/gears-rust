@@ -48,7 +48,7 @@ pub enum RunFilterField {
     /// the Rust variant names.
     State,
     RunKind,
-    /// Renamed from `PlatformId` (ruling G-3): the `OData` `$filter`/
+    /// Renamed from `PlatformId`: the `OData` `$filter`/
     /// `$orderby` field name is now `environment_id`, matching both the REST
     /// DTO field of the same concept
     /// ([`RunDto::environment_id`](crate::api::rest::dto::RunDto::environment_id))
@@ -157,7 +157,7 @@ impl ODataFieldMapping<RunFilterField> for RunODataMapper {
 /// Filterable, sortable and cursor-capable fields of the run queue.
 ///
 /// `environment_id` is here as well as being a first-class query parameter on
-/// the endpoint — the same name, on purpose (ruling G-3), but not the same
+/// the endpoint — the same name, on purpose, but not the same
 /// mechanism: this is not redundancy. The guide's own remedy for a distorted
 /// `queue_position` is *the environment-filtered call*, so the endpoint keeps a
 /// plain parameter that a caller cannot get wrong (no `OData` syntax to
@@ -167,7 +167,7 @@ impl ODataFieldMapping<RunFilterField> for RunODataMapper {
 pub enum QueueFilterField {
     Id,
     RunId,
-    /// Renamed from `PlatformId` (ruling G-3), matching
+    /// Renamed from `PlatformId`, matching
     /// [`RunFilterField::EnvironmentId`] and `QueueColumn::EnvironmentId`
     /// ([`QueueODataMapper::map_field`] below) — variant, wire name and
     /// `Column` **variant** name all agree, and so does the **physical
@@ -369,7 +369,7 @@ mod tests {
     }
 
     /// **The `$filter`/`$orderby` wire name is `environment_id`, on both
-    /// collections, not `environment_id`.** Ruling G-3: the `OData` field used to
+    /// collections, not `platform_id`.** The `OData` field used to
     /// diverge from the REST field of the same concept deliberately; that
     /// divergence is gone, and this is the test that would catch it coming
     /// back, either by a literal reverting or by a `#[serde]`-style rename
@@ -381,14 +381,14 @@ mod tests {
             !RunFilterField::FIELDS
                 .iter()
                 .any(|f| f.name() == "platform_id"),
-            "no RunFilterField may advertise the pre-G-3 wire name"
+            "no RunFilterField may advertise the pre-rename wire name"
         );
         assert_eq!(QueueFilterField::EnvironmentId.name(), "environment_id");
         assert!(
             !QueueFilterField::FIELDS
                 .iter()
                 .any(|f| f.name() == "platform_id"),
-            "no QueueFilterField may advertise the pre-G-3 wire name"
+            "no QueueFilterField may advertise the pre-rename wire name"
         );
 
         // Minor-2 of the Task 25 review: the assertions above are about

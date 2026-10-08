@@ -14,7 +14,7 @@
 # Usage:
 #   cargo run --bin cf-gears-example-server --features qa-platform,oidc-authn,static-authz,tenant-resolver-rg,static-credstore -- --config gears/qa-platform/config/qa-platform-stack.yaml run
 #
-# `oidc-authn`, not `static-authn`: Phase C (Task 13) replaced the
+# `oidc-authn`, not `static-authn`: Phase C replaced the
 # static-authn-plugin block below with oidc-authn-plugin and set
 # `auth_disabled: false`. The feature is new -- `oidc-authn` did not exist in
 # apps/cf-gears-example-server/Cargo.toml before that task, even though the
@@ -23,9 +23,9 @@
 # Run this way and the IdP has to be reachable at the `discovery_url` in the
 # oidc-authn-plugin block, which names the host `keycloak`; anywhere that name
 # does not resolve, the value has to be rewritten. The Helm chart does exactly
-# that -- see deploy/helm/qa-platform/templates/gears-config-configmap.yaml.
+# that -- see deploy/helm/qa-platform/templates/gears-config-secret.yaml.
 #
-# `tenant-resolver-rg`, not `single-tenant`: Phase C (Task 14) replaced
+# `tenant-resolver-rg`, not `single-tenant`: Phase C replaced
 # single-tenant-tr-plugin with rg-tr-plugin. That command line ALSO needs a
 # tenant-typed group already present in the `resource_group` database, or the
 # boot aborts in oagw's post_init before anything listens -- see the
@@ -77,10 +77,13 @@ logging:
     console_level: debug
     file: "logs/sql.log"
     file_level: debug
+  # info, not debug: the api-gateway's debug lines name every request path it
+  # routes, and the Slack webhook path is a credential (see
+  # deploy/helm/tests/check_log_level_redaction.py).
   api-gateway:
-    console_level: debug
+    console_level: info
     file: "logs/api.log"
-    file_level: debug
+    file_level: info
   qa_environments:
     console_level: debug
     file: "logs/qa-environments.log"
@@ -114,7 +117,7 @@ gears:
           rps: 1000
           burst: 200
           in_flight: 64
-      # Auth is ON. Phase C (Task 13) flipped this from `true` and replaced
+      # Auth is ON. Phase C flipped this from `true` and replaced
       # the static-authn-plugin block below with oidc-authn-plugin; every
       # request to a `.authenticated()` route now needs a real Keycloak JWT.
       #
@@ -569,7 +572,7 @@ gears:
       # THE ARGO BLOCK IS NOT WRITTEN HERE, AND THE ANCHOR BELOW IS WHY.
       # `qa-environments.argo.kubeconfig_path` names the kubeconfig this gear
       # uses to write each platform's runner `Secret` into the ARGO cluster
-      # (decision D4) -- a different cluster from any platform's own. Its path
+      # -- a different cluster from any platform's own. Its path
       # is a per-deployment fact, and this file is baked into the image, so it
       # cannot be edited per deployment. Committing a path here would point
       # every non-argo stack at a file that is not mounted.
@@ -579,11 +582,13 @@ gears:
       # exactly as it does for qa-runs twenty lines down. In-cluster that
       # fragment comes from the ConfigMap
       # `deploy/helm/qa-platform/templates/gears-argo-configmaps.yaml` renders
-      # -- which deliberately omits `kubeconfig_path`, because a pod has a
-      # projected ServiceAccount token instead. Read that file's header.
+      # -- which sets `kubeconfig_path` to a kubeconfig for the dedicated
+      # `qa-platform-secret-writer` ServiceAccount, because the pod's own
+      # `qa-platform-gears` account holds no `secrets` grant in the Argo
+      # namespace (finding #94). Read that file's header.
       #
       # WITHOUT IT, D4 IS INERT AND SILENT: `kubeconfig_path` defaults to
-      # `None`, `secret_writer::argo_client` falls back to `Config::infer()`,
+      # `None`, `runner_secret_writer::argo_client` falls back to `Config::infer()`,
       # and inside this container there is no service-account token, no
       # $KUBECONFIG and no ~/.kube/config -- so every Secret write fails, every
       # cycle, forever, while observation (which uses each platform's OWN
@@ -628,7 +633,7 @@ gears:
       # the gears log one WARN at boot naming this setting.
       #
       # The literal below is a DEV FIXTURE. The Helm chart's
-      # gears-config-configmap.yaml rewrites it -- to
+      # gears-config-secret.yaml rewrites it -- to
       # `.Values.bundleDownloadSigningSecret`, or to a per-render random when
       # that is unset -- and FAILS THE RENDER if this exact string stops
       # appearing here, so renaming it without updating that template is a
@@ -686,12 +691,11 @@ gears:
     # elevates the tenant enumeration behind all three itself, through
     # `domain::elevated::enumeration_scope` (`src/domain/elevated.rs`).
     #
-    # WARNING, carried from the qa-insights plan's release-gate items: starting
-    # the jira-poller ticker under the default `NoopLeaderElector` makes EVERY
-    # replica a leader, and its auto-rerun is bounded only by a local write --
-    # "a race, not a lock", in that gear's own words. A single replica is safe,
-    # which is what the chart deploys. Do not raise the gears replica count
-    # above 1 without deciding that.
+    # WARNING: starting the jira-poller ticker under the default
+    # `NoopLeaderElector` makes EVERY replica a leader, and its auto-rerun is
+    # bounded only by a local write -- "a race, not a lock", in that gear's own
+    # words. A single replica is safe, which is what the chart deploys. Do not
+    # raise the gears replica count above 1 without deciding that.
     config:
       enable_tickers: true
       reconcile_interval_seconds: 300
@@ -715,7 +719,7 @@ gears:
       # as shipped. The Helm chart replaces BOTH -- a workflow pod cannot reach
       # a loopback address, and a committed secret is not a secret -- and
       # fails the render if either string stops appearing here
-      # (`deploy/helm/qa-platform/templates/gears-config-configmap.yaml`).
+      # (`deploy/helm/qa-platform/templates/gears-config-secret.yaml`).
       collect_report_base_url: "http://127.0.0.1:8087"
       collect_report_signing_secret: "dev-collect-report-signing-secret"
       # WHETHER THIS DEPLOYMENT MAY SEND EMAIL AT ALL, and to which relays.
@@ -835,7 +839,7 @@ opentelemetry:
       kind: otlp_grpc
       endpoint: "http://127.0.0.1:4317"
     # The pull half. `bind_addr` is rewritten from `.Values.gears.metricsPort`
-    # by gears-config-configmap.yaml, and `enabled` from
+    # by gears-config-secret.yaml, and `enabled` from
     # `.Values.opentelemetry.metrics.scrape.enabled` -- both transforms are
     # `fail`-guarded, so an edit here that breaks their sentinels stops the
     # render rather than silently shipping this file's literals.

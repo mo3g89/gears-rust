@@ -1,6 +1,6 @@
 //! Infrastructure layer: storage, cross-gear clients, and the egress adapters.
 //!
-//! * `storage` — the schema and its migrations (Task 10); `SeaORM` entities
+//! * `storage` — the schema and its migrations; `SeaORM` entities
 //!   and repositories, Tasks 11-12. Carries the table an ingest path used to
 //!   own, `qa_ingest_watermarks` — see
 //!   `storage::migrations::m20260818_000001_initial`'s header (that table
@@ -36,8 +36,9 @@
 //!
 //! * `notify` — the outbound Slack and email adapters behind
 //!   [`SlackClient`](crate::domain::ports::SlackClient) and
-//!   [`MailClient`](crate::domain::ports::MailClient), over `oagw` and D10's
-//!   inert answer respectively. Task 39.
+//!   [`MailClient`](crate::domain::ports::MailClient): Slack over `oagw`, and
+//!   email over a direct SMTP relay or, with SMTP egress not enabled,
+//!   `UnsupportedMailClient`'s refusal (ADR-0011). Task 39.
 
 pub mod clients;
 pub mod clock;

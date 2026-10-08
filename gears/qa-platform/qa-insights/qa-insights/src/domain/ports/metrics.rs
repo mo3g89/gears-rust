@@ -95,6 +95,12 @@ fn is_this_gears_own_failure(error: &DomainError) -> bool {
         | DomainError::JiraNotConfigured
         | DomainError::BugNotFound { .. }
         | DomainError::UnsupportedEgress { .. }
+        // The relay is upstream of this gear. Its refusal, its silence and its
+        // absence are all facts about the far side or about the tenant's own
+        // settings, which is why the API boundary renders this as a 503 rather
+        // than through `opaque_internal` — and why a deployment whose SMTP
+        // relay is down must not read as *this gear* failing.
+        | DomainError::UpstreamEgress { .. }
         | DomainError::Validation { .. }
         | DomainError::Forbidden => false,
     }
@@ -133,6 +139,21 @@ impl CollectOutcome {
     /// sweep. Declared rather than derived; see
     /// [`crate::domain::metrics::COUNTERS`] for the same caveat and the same
     /// reason it is worth having.
+    ///
+    /// # Read only by the tests, and that is not dead code
+    ///
+    /// `domain` is `pub(crate)` since finding #38's triage, so a label catalog
+    /// nothing outside the exhaustiveness tests names is genuinely unreachable
+    /// and the compiler says so. Deleting it would delete the gate: "every
+    /// value has a distinct label" is a property *of the set*, unstatable one
+    /// variant at a time. `qa-environments`' `CycleOutcome::ALL` carries the
+    /// same allowance for the same reason.
+    #[allow(
+        dead_code,
+        reason = "read by `domain::metrics_tests`; `domain` is pub(crate), so a label \
+                  catalog with no production reader is unreachable and deleting it would \
+                  delete the exhaustiveness gate"
+    )]
     pub const ALL: [Self; 3] = [Self::Completed, Self::Refused, Self::Failed];
 
     /// The label value, as it appears in the series.
@@ -210,7 +231,9 @@ pub enum CollectReportOutcome {
 }
 
 impl CollectReportOutcome {
-    /// Every value. See [`CollectOutcome::ALL`].
+    /// Every value. See [`CollectOutcome::ALL`], including for why the
+    /// allowance below sits on the constant rather than on this block.
+    #[allow(dead_code, reason = "see the allowance on `CollectOutcome::ALL`")]
     pub const ALL: [Self; 6] = [
         Self::Recorded,
         Self::SecretUnconfigured,
@@ -266,7 +289,9 @@ pub enum JiraPollOutcome {
 }
 
 impl JiraPollOutcome {
-    /// Every value. See [`CollectOutcome::ALL`].
+    /// Every value. See [`CollectOutcome::ALL`], including for why the
+    /// allowance below sits on the constant rather than on this block.
+    #[allow(dead_code, reason = "see the allowance on `CollectOutcome::ALL`")]
     pub const ALL: [Self; 4] = [Self::Completed, Self::Skipped, Self::Refused, Self::Failed];
 
     /// The label value, as it appears in the series.
@@ -305,7 +330,7 @@ impl From<&DomainError> for JiraPollOutcome {
 ///
 /// | Step | Failure value |
 /// | --- | --- |
-/// | `checked_status` — the JIRA status call | [`Self::StatusCheckFailed`] |
+/// | `checked_status` — the JIRA status call | [`Self::StatusCheckFailed`], or [`Self::StatusCheckRefused`] for JIRA's credential refusal |
 /// | `mark_resolved` — the local resolve write | [`Self::ResolveWriteFailed`] |
 /// | `maybe_rerun` — the plan's latest version | [`Self::PlanVersionUnreadable`] |
 /// | `resolve_branch` — the platform's default branch | [`Self::BranchUnresolved`] |
@@ -349,9 +374,15 @@ pub enum JiraBugOutcome {
     Resolved,
     /// The JIRA status call failed, so this bug was skipped for this pass.
     /// **The one failure here that is retried**: the bug is still open, so the
-    /// next pass checks it again. A rising rate is a JIRA outage or a
-    /// credential problem, not a lost rerun.
+    /// next pass checks it again. A rising rate is JIRA or the gateway being
+    /// unreachable or slow; a refused credential is [`Self::StatusCheckRefused`].
     StatusCheckFailed,
+    /// The JIRA status call was refused by JIRA itself — `401`/`403`, the
+    /// secret behind `api_token_credstore_ref` — so this bug was skipped for
+    /// this pass. Retried like [`Self::StatusCheckFailed`], but it will keep
+    /// failing until an operator fixes the credential, which is why it is
+    /// counted apart from an outage.
+    StatusCheckRefused,
     /// JIRA reports the bug done and the local resolve write failed. See this
     /// type's header for why this value takes precedence over anything the
     /// rerun chain then reported, and why it is the storm precursor.
@@ -377,11 +408,14 @@ pub enum JiraBugOutcome {
 }
 
 impl JiraBugOutcome {
-    /// Every value. See [`CollectOutcome::ALL`].
-    pub const ALL: [Self; 8] = [
+    /// Every value. See [`CollectOutcome::ALL`], including for why the
+    /// allowance below sits on the constant rather than on this block.
+    #[allow(dead_code, reason = "see the allowance on `CollectOutcome::ALL`")]
+    pub const ALL: [Self; 9] = [
         Self::Unresolved,
         Self::Resolved,
         Self::StatusCheckFailed,
+        Self::StatusCheckRefused,
         Self::ResolveWriteFailed,
         Self::PlanVersionUnreadable,
         Self::BranchUnresolved,
@@ -396,6 +430,7 @@ impl JiraBugOutcome {
             Self::Unresolved => "unresolved",
             Self::Resolved => "resolved",
             Self::StatusCheckFailed => "status_check_failed",
+            Self::StatusCheckRefused => "status_check_refused",
             Self::ResolveWriteFailed => "resolve_write_failed",
             Self::PlanVersionUnreadable => "plan_version_unreadable",
             Self::BranchUnresolved => "branch_unresolved",
@@ -498,4 +533,60 @@ impl JiraPollMetrics for NoopMetrics {
     fn poll_pass(&self, _outcome: JiraPollOutcome, _duration: Duration) {}
     fn bug(&self, _outcome: JiraBugOutcome) {}
     fn auto_rerun(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One test per outcome enum, one shape: a wildcard-free `match` gives each
+    /// variant an index, so a new variant fails to compile here, and the
+    /// assertions fail when `ALL` omits a variant or lists one twice.
+    macro_rules! all_lists_every_variant {
+        ($test:ident, $ty:ident, $($variant:ident => $index:expr,)+) => {
+            #[test]
+            fn $test() {
+                fn index(value: $ty) -> usize {
+                    match value {
+                        $($ty::$variant => $index,)+
+                    }
+                }
+                let arms = [$($index),+].len();
+                assert_eq!(
+                    $ty::ALL.len(),
+                    arms,
+                    "{}::ALL does not list every variant",
+                    stringify!($ty)
+                );
+                let mut seen: Vec<usize> = $ty::ALL.iter().map(|v| index(*v)).collect();
+                seen.sort_unstable();
+                assert_eq!(
+                    seen,
+                    (0..arms).collect::<Vec<_>>(),
+                    "{}::ALL lists a variant twice or omits one",
+                    stringify!($ty)
+                );
+            }
+        };
+    }
+
+    all_lists_every_variant!(
+        collect_outcome_all_lists_every_variant, CollectOutcome,
+        Completed => 0, Refused => 1, Failed => 2,
+    );
+    all_lists_every_variant!(
+        collect_report_outcome_all_lists_every_variant, CollectReportOutcome,
+        Recorded => 0, SecretUnconfigured => 1, SignatureMalformed => 2, SignatureInvalid => 3,
+        Invalid => 4, Failed => 5,
+    );
+    all_lists_every_variant!(
+        jira_poll_outcome_all_lists_every_variant, JiraPollOutcome,
+        Completed => 0, Skipped => 1, Refused => 2, Failed => 3,
+    );
+    all_lists_every_variant!(
+        jira_bug_outcome_all_lists_every_variant, JiraBugOutcome,
+        Unresolved => 0, Resolved => 1, StatusCheckFailed => 2, StatusCheckRefused => 3,
+        ResolveWriteFailed => 4, PlanVersionUnreadable => 5, BranchUnresolved => 6,
+        TestFileUnresolved => 7, LaunchFailed => 8,
+    );
 }

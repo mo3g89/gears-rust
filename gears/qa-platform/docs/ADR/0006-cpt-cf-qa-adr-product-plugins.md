@@ -45,7 +45,11 @@ is the whole of what the platform knows about any product:
 | `prepare_run_access` | what does a run need to reach it |
 | `runner` | what image and command does a run of this product launch |
 | `env_contract` | what run-variable names does this plugin reserve |
-| `health_check` (defaulted) | is the plugin itself alive, independent of any environment |
+
+A `health_check` method stood in this table until the second review (finding #113). It was
+deleted from `QaProductPluginV1` with the rest of the never-called surface: nothing in the
+subsystem ever invoked it, and a plugin's liveness is what `observe` already reports for the
+environment that matters. The trait has **seven** methods.
 
 A plugin is a gear. It registers in `ClientHub` under `ClientScope::gts_id(&instance_id)`, and
 `qa_products.plugin_instance_id` holds that id, so any gear resolves a product's behaviour by

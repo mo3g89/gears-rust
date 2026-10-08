@@ -30,14 +30,12 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use super::JiraPollerService;
-use crate::domain::error::DomainError;
+use crate::domain::error::{DomainError, EgressFailure};
 use crate::domain::metrics::{
     QA_INSIGHTS_JIRA_BUG, QA_INSIGHTS_JIRA_POLL, QA_INSIGHTS_JIRA_POLL_DURATION,
     QA_INSIGHTS_JIRA_RERUN,
 };
-use crate::domain::ports::jira_client::{
-    IssueRef, JiraClient, JiraIssue, NewIssue, StatusCategory,
-};
+use crate::domain::ports::jira_client::{IssueRef, JiraClient, NewIssue, StatusCategory};
 use crate::domain::ports::metrics::{JiraBugOutcome, JiraPollMetrics, JiraPollOutcome};
 use crate::domain::ports::{CatalogReader, EnvironmentReader, RunsLauncher};
 use crate::domain::repos::{JiraRepository, NewTestResult, ResultsRepository};
@@ -147,8 +145,8 @@ impl Rendezvous {
 ///
 /// Only [`JiraClient::check_status`] is implemented: this task's poller is
 /// documented (`domain::service::jira`'s header) to call exactly that one
-/// method, never [`JiraClient::create_or_find_issue`] or
-/// [`JiraClient::get_issue`] — a poller does not file bugs.
+/// method, never [`JiraClient::create_or_find_issue`] — a poller does not file
+/// bugs.
 struct FakeJiraStatus {
     category: StatusCategory,
     asked: Mutex<Vec<String>>,
@@ -164,6 +162,8 @@ struct FakeJiraStatus {
     /// pass whose every check failed and a pass whose every bug was still
     /// open, and therefore nothing to write a test against.
     fail_checks: AtomicBool,
+    /// When set, every `check_status` answers JIRA's credential refusal.
+    refuse_checks: AtomicBool,
 }
 
 impl FakeJiraStatus {
@@ -172,6 +172,12 @@ impl FakeJiraStatus {
     /// which error it was, it logs whatever it got and skips the bug.
     fn fail_status_checks(&self) {
         self.fail_checks.store(true, AtomicOrdering::SeqCst);
+    }
+
+    /// Make every subsequent `check_status` answer JIRA's credential refusal,
+    /// the class the poller counts apart from an outage.
+    fn refuse_status_checks(&self) {
+        self.refuse_checks.store(true, AtomicOrdering::SeqCst);
     }
 }
 
@@ -196,19 +202,18 @@ impl JiraClient for FakeJiraStatus {
             rendezvous.arrive().await;
         }
         self.asked.lock().unwrap().push(jira_key.to_owned());
+        if self.refuse_checks.load(AtomicOrdering::SeqCst) {
+            return Err(DomainError::UpstreamEgress {
+                channel: "jira".to_owned(),
+                endpoint: "jira.example.com".to_owned(),
+                failure: EgressFailure::Authentication,
+                detail: "failed to get JIRA issue: the instance answered HTTP 401".to_owned(),
+            });
+        }
         if self.fail_checks.load(AtomicOrdering::SeqCst) {
             return Err(DomainError::Internal("JIRA is unreachable".to_owned()));
         }
         Ok(self.category.clone())
-    }
-
-    async fn get_issue(
-        &self,
-        _ctx: &SecurityContext,
-        _config: &JiraConfig,
-        _jira_key: &str,
-    ) -> Result<JiraIssue, DomainError> {
-        unimplemented!("nothing in this task calls it")
     }
 }
 
@@ -230,10 +235,8 @@ struct RecordedLaunch {
     repo_id: Uuid,
     plan_path: String,
     test_file: String,
-    #[expect(
-        dead_code,
-        reason = "carried for completeness; no test in this file reads it"
-    )]
+    /// Read by `the_branch_is_resolved_once_and_reused_for_lookup_and_launch`:
+    /// the rerun must target the environment the bug was filed against.
     environment_id: Option<Uuid>,
     branch: Option<String>,
     bypassed_admission: bool,
@@ -378,7 +381,7 @@ fn stored_jira_config() -> JiraConfigInput {
         url: "https://jira.example.com".to_owned(),
         project_key: "VHP".to_owned(),
         email: "qa@example.com".to_owned(),
-        api_token_credstore_ref: "cred://qa-jira-api-token".to_owned(),
+        api_token_credstore_ref: "qa-jira-api-token".to_owned(),
         issue_type: Some("Bug".to_owned()),
         enabled: true,
     }
@@ -443,6 +446,7 @@ async fn build_on(
         asked: Mutex::new(Vec::new()),
         rendezvous,
         fail_checks: AtomicBool::new(false),
+        refuse_checks: AtomicBool::new(false),
     });
     let jira_service = Arc::new(JiraService::new(
         Arc::clone(&db),
@@ -647,13 +651,14 @@ impl Fixture {
 // ---------------------------------------------------------------------------
 
 /// A resolved bug (`app_version = OLD_VERSION`) with no build recorded for its
-/// plan at all — `latest_version_for_plan` answers `None`, so D8's gate never
-/// sees a new build.
+/// plan at all — `latest_version_for_plan` answers `None`, so the new-build
+/// gate (`JiraPollerService::maybe_rerun`) never sees a new build.
 ///
-/// **A matching catalog entry is registered anyway**, on purpose: if D8's
-/// gate were ever bypassed, this fixture must be able to reach a real
-/// launch, or a defect that dropped the gate entirely would pass this test
-/// by accident (no catalog entry) rather than because D8 actually stopped it.
+/// **A matching catalog entry is registered anyway**, on purpose: if the
+/// new-build gate were ever bypassed, this fixture must be able to reach a real
+/// launch, or a defect that dropped the gate entirely would pass this test by
+/// accident (no catalog entry) rather than because the gate actually stopped
+/// it.
 async fn fixture_with_resolved_bug_and_no_new_build() -> Fixture {
     let f = build().await;
     f.file_bug("T1", Some(OLD_VERSION), None).await;
@@ -668,9 +673,9 @@ async fn fixture_with_resolved_bug_and_no_new_build() -> Fixture {
 /// **A new build and a matching catalog entry are registered too**, for
 /// [`fixture_with_resolved_bug_and_no_new_build`]'s own reason: this fixture
 /// must be able to reach a real launch if the switch were ignored, so that
-/// `a_bug_resolves_even_when_auto_rerun_is_off`'s `launches() == 0` is
-/// evidence the switch worked, not evidence D8 or the catalog happened to
-/// block it for an unrelated reason.
+/// `a_bug_resolves_even_when_auto_rerun_is_off`'s `launches() == 0` is evidence
+/// the switch worked, not evidence the new-build gate or the catalog happened
+/// to block it for an unrelated reason.
 async fn fixture_with_resolved_bug_auto_rerun_off() -> Fixture {
     let f = build().await;
     f.jira_service
@@ -768,9 +773,10 @@ impl Fixture {
 // The brief's four tests, verbatim
 // ---------------------------------------------------------------------------
 
-/// D8: resolution alone is not enough. `manager/src/services/jira_poller.rs:65-70`
-/// requires a new build too — otherwise every resolved bug reruns against the
-/// same build that failed, which proves nothing and costs a platform slot.
+/// The new-build gate: resolution alone is not enough.
+/// `manager/src/services/jira_poller.rs:65-70` requires a new build too —
+/// otherwise every resolved bug reruns against the same build that failed,
+/// which proves nothing and costs a platform slot.
 #[tokio::test]
 async fn a_resolved_bug_without_a_new_build_does_not_rerun() {
     let f = fixture_with_resolved_bug_and_no_new_build().await;
@@ -803,7 +809,7 @@ async fn an_auto_rerun_goes_through_the_normal_launch_path() {
     assert_eq!(launch.test_file, "tests/t1.py");
 }
 
-/// Task 2: `plan_path` is repository-relative, so a query gated only on
+/// `plan_path` is repository-relative, so a query gated only on
 /// `(tenant_id, plan_path)` — `latest_version_for_plan` dropping
 /// `bug.repo_id`, prior to this task's fix — cannot tell two repositories of
 /// one tenant that both declare [`UNIVERSE_TEST_PLAN_PATH`] apart. One poll
@@ -910,6 +916,11 @@ async fn the_branch_is_resolved_once_and_reused_for_lookup_and_launch() {
     );
     assert_eq!(launch.repo_id, UNIVERSE_TEST_REPO_ID);
     assert_eq!(launch.plan_path, UNIVERSE_TEST_PLAN_PATH);
+    assert_eq!(
+        launch.environment_id,
+        Some(f.environment_id),
+        "the rerun targets the environment the bug was filed against"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,10 +1012,9 @@ const OTHER_TENANT: Uuid = Uuid::from_u128(0x0B);
 ///
 /// The grant is [`TwoTenantAuthZ`] — the shape
 /// `system_actor::for_jira_poll(TENANT)` gets from a real
-/// `ScopeFilter::InTenantSubtree` policy, and the shape R112a would grant. The
-/// only open bug in the database belongs to [`OTHER_TENANT`]; [`TENANT`] has
-/// none of its own, so every effect this test can observe is an effect on
-/// someone else's row.
+/// `ScopeFilter::InTenantSubtree` policy. The only open bug in the database
+/// belongs to [`OTHER_TENANT`]; [`TENANT`] has none of its own, so every effect
+/// this test can observe is an effect on someone else's row.
 ///
 /// The other three pieces exist so that the **broken** version reaches a real
 /// launch rather than being stopped by something incidental:
@@ -1013,10 +1023,11 @@ const OTHER_TENANT: Uuid = Uuid::from_u128(0x0B);
 ///   reachable.
 /// * The new build is recorded under [`TENANT`], not [`OTHER_TENANT`] — which
 ///   is exactly what makes this realistic rather than contrived:
-///   `latest_version_for_plan` *is* tenant-pinned (R86, Task 35), so D8's
-///   new-build gate for the foreign bug was answered from **this** tenant's
-///   run history. A build recorded under `OTHER_TENANT` would have been
-///   invisible and the gate would have closed for the wrong reason.
+///   `latest_version_for_plan` *is* tenant-pinned (the explicit-`tenant_id`
+///   rule, Task 35), so the new-build gate for the foreign bug was answered
+///   from **this** tenant's run history. A build recorded under `OTHER_TENANT`
+///   would have been invisible and the gate would have closed for the wrong
+///   reason.
 /// * A catalog entry matching the bug's `test_name` on the resolved branch, so
 ///   `find_plan_test_file` succeeds and `launch_test` is the next step.
 ///
@@ -1086,7 +1097,7 @@ async fn a_pass_does_not_touch_another_tenants_open_bug() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 26: leadership, on the tier that can falsify it
+// Leadership, on the tier that can falsify it
 // ---------------------------------------------------------------------------
 
 /// Two replicas of this gear over one database, each with its own connection
@@ -1448,7 +1459,7 @@ async fn an_open_bug_and_a_resolved_one_are_counted_apart() {
 /// This is the finding the family exists for, and it is swept rather than
 /// sampled. `domain::service::jira_poller`'s header states that every per-bug
 /// failure is logged and skipped and never becomes a pass error — so the pass
-/// answers `Ok(())` in all six arms below, and **the per-bug counter is the
+/// answers `Ok(())` in all seven arms below, and **the per-bug counter is the
 /// only place any of them is observable at all**. A pass that silently dropped
 /// forty bugs was, before this, indistinguishable from a clean one.
 ///
@@ -1462,6 +1473,13 @@ async fn every_swallowed_per_bug_failure_is_counted_under_its_own_class() {
     f.file_bug("T1", Some(OLD_VERSION), None).await;
     f.jira_client.fail_status_checks();
     assert_bug_outcome(&f, "status_check_failed").await;
+
+    // 1b. The JIRA status call refused by JIRA itself: the credential, not an
+    //     outage, and counted apart so an alert can tell the two.
+    let f = build().await;
+    f.file_bug("T1", Some(OLD_VERSION), None).await;
+    f.jira_client.refuse_status_checks();
+    assert_bug_outcome(&f, "status_check_refused").await;
 
     // 2. The local resolve write, denied at exactly (qa.jira_bug, update) so
     //    the listing above it still works.
@@ -1511,6 +1529,103 @@ async fn every_swallowed_per_bug_failure_is_counted_under_its_own_class() {
     let f = fixture_with_resolved_bug_and_new_build().await;
     f.launcher.fail_test_launches();
     assert_bug_outcome(&f, "launch_failed").await;
+}
+
+/// A buffer a thread-local `tracing` subscriber writes this test's log lines
+/// into. `#[tokio::test]`'s current-thread runtime keeps every `.await` of the
+/// pass on the thread the guard was installed on.
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+
+    fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+
+    fn lines_with(&self, level: &str, needle: &str) -> usize {
+        self.text()
+            .lines()
+            .filter(|line| line.contains(level) && line.contains(needle))
+            .count()
+    }
+}
+
+struct CapturedLogsWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogsWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogsWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogsWriter(Arc::clone(&self.0))
+    }
+}
+
+/// **A refused credential is one error per pass, not one per open bug.**
+///
+/// Every bug of the tenant is refused alike, so an `error!` per bug turned one
+/// bad secret into as many error lines as there are open bugs, every pass. The
+/// first refusal of a pass is the error; the rest of that pass are warnings.
+/// Every bug is still asked and still counted as `status_check_refused`, and
+/// the next pass logs its first refusal as an error again.
+#[tokio::test]
+async fn a_refused_credential_is_logged_as_an_error_once_per_pass() {
+    let f = build().await;
+    for (key, test) in [("QA-101", "T1"), ("QA-102", "T2"), ("QA-103", "T3")] {
+        f.file_bug_with_key(key, test, Some(OLD_VERSION)).await;
+    }
+    f.jira_client.refuse_status_checks();
+
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let refused = "refused this deployment's credential";
+    let again = "refused this deployment's credential again";
+    for pass in 1..=2 {
+        logs.clear();
+        f.service
+            .poll_once(&f.ctx)
+            .await
+            .expect("a refused bug never fails the pass");
+        assert_eq!(
+            logs.lines_with("ERROR", refused),
+            1,
+            "pass {pass}: one error line for the refusal; the log was:\n{}",
+            logs.text()
+        );
+        assert_eq!(
+            logs.lines_with("WARN", again),
+            2,
+            "pass {pass}: the other two refusals are warnings; the log was:\n{}",
+            logs.text()
+        );
+    }
+    assert_eq!(
+        f.metrics
+            .collect()
+            .counter_with(QA_INSIGHTS_JIRA_BUG, &[("outcome", "status_check_refused")]),
+        6,
+        "every bug of both passes is still asked and counted"
+    );
 }
 
 /// Run one pass and assert its single bug was counted under `outcome`, and
@@ -1593,7 +1708,11 @@ async fn an_auto_rerun_is_counted_as_a_launch_whether_or_not_it_was_accepted() {
         .poll_once(&no_rerun.ctx)
         .await
         .expect("the pass runs");
-    assert_eq!(no_rerun.launcher.launches(), 0, "premise: D8 stopped it");
+    assert_eq!(
+        no_rerun.launcher.launches(),
+        0,
+        "premise: the new-build gate stopped it"
+    );
     assert_eq!(
         no_rerun.metrics.collect().counter(QA_INSIGHTS_JIRA_RERUN),
         0,

@@ -29,7 +29,12 @@ pub mod archive;
 mod broadcast;
 
 pub use archive::RunLogArchive;
-pub use broadcast::{
-    DEFAULT_LOG_CHANNEL_CAPACITY, LogSubscription, MAX_RETAINED_RUNS, MAX_SUBSCRIBERS_PER_RUN,
-    RunLogBroadcaster, gap_marker,
-};
+pub use broadcast::{DEFAULT_LOG_CHANNEL_CAPACITY, MAX_SUBSCRIBERS_PER_RUN, RunLogBroadcaster};
+// `LogSubscription` and `gap_marker` are named by nothing outside this module
+// — the first is reachable through [`RunLogBroadcaster`]'s return types, the
+// second only from `broadcast`'s own tests — so neither is re-exported any
+// more. `MAX_RETAINED_RUNS` is read by `api::rest::handlers::runs`' tests and
+// by nothing else, hence the `cfg`. Narrowed rather than allowed when finding
+// #38's triage made `infra` crate-internal.
+#[cfg(test)]
+pub use broadcast::MAX_RETAINED_RUNS;

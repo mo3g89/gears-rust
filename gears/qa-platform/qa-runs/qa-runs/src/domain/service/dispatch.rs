@@ -1019,7 +1019,10 @@ where
     /// The text written to `qa_runs.error` goes through
     /// [`DomainError::recorded_text`], because that column is served verbatim
     /// by `GET /runs/{id}`, and a [`DomainError::Database`] or
-    /// [`DomainError::Catalog`] cause carries another system's raw text.
+    /// [`DomainError::Catalog`] cause carries another system's raw text. A
+    /// [`DomainError::CatalogRefused`] records a fixed sentence by category, because
+    /// the catalog's sentence can carry the repository's `sync_error` and the
+    /// column's readers need no `TEST_REPO/GET`.
     #[allow(
         clippy::cognitive_complexity,
         reason = "inflated by the `tracing` macros in each error arm: every step this \
@@ -1036,12 +1039,12 @@ where
         cause: &DomainError,
     ) {
         let finished_at = OffsetDateTime::now_utc();
-        if !cause.disclosable() {
+        if !cause.records_verbatim() {
             warn!(
                 run_id = %run.id,
                 cause = %cause,
-                "the submit failed for a reason the caller is not entitled to see; the run \
-                 records an opaque message and this line carries the detail",
+                "the submit failed for a reason the run row does not record verbatim; this \
+                 line carries the detail",
             );
         }
         let recorded = cause.recorded_text();
@@ -1144,8 +1147,8 @@ where
     /// `infra::metrics::DURATION_BUCKETS`'s doc.
     ///
     /// The release-notification wake DESIGN originally prescribed is **not built**,
-    /// and that is a tracked follow-up rather than an omission
-    /// (DECOMPOSITION 2.3's follow-up register): the ticker is leader-elected and
+    /// and that is a known follow-up rather than an omission:
+    /// the ticker is leader-elected and
     /// this lock registry is process-local, so a lease released on one replica has
     /// to wake the leader on another, which needs a broker event or a database
     /// signal rather than an in-process notify. This method is written to be
@@ -2193,7 +2196,7 @@ where
     /// The run row is **not** transitioned here. Reconciliation knows the
     /// execution is over but not how it ended, and
     /// `domain::state_machine::derive_terminal_state` needs an
-    /// `ExecutorOutcome` plus the ingested counts to answer that. Ingest (Task 15)
+    /// `ExecutorOutcome` plus the ingested counts to answer that. Ingest
     /// owns the run's terminal state; this pass owns the platform.
     async fn release_claim(
         &self,

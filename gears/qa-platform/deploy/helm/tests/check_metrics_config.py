@@ -26,19 +26,21 @@ failure this module catches is the four copies of its number drifting apart.
 
 # What "arriving" means here, in three links
 
-  1. The ConfigMap `qa-platform-gears-config` carries a `qa-platform-stack.yaml`
-     key whose contents PARSE AS YAML and contain the `opentelemetry` block with
-     the fields the toolkit's `OpenTelemetryConfig` declares. Parsing matters:
-     `OpenTelemetryConfig` is `#[serde(deny_unknown_fields)]`, so a
-     misspelt key is a boot failure rather than a silently ignored line, and
-     `gears-config-configmap.yaml` reaches this block by STRING REPLACEMENT --
-     a transform that lands its replacement at the wrong indentation produces a
-     file that still renders and no longer loads.
-  2. The gears Deployment mounts that ConfigMap at the directory holding the
+  1. The Secret `qa-platform-gears-config` (a ConfigMap until 2026-09-29 --
+     it carries both HMAC roots, see check_signing_secret_placement.py) carries
+     a `qa-platform-stack.yaml` key whose contents PARSE AS YAML and contain the
+     `opentelemetry` block with the fields the toolkit's `OpenTelemetryConfig`
+     declares. Parsing matters: `OpenTelemetryConfig` is
+     `#[serde(deny_unknown_fields)]`, so a misspelt key is a boot failure rather
+     than a silently ignored line, and `gears-config-secret.yaml` reaches this
+     block by STRING REPLACEMENT -- a transform that lands its replacement at
+     the wrong indentation produces a file that still renders and no longer
+     loads.
+  2. The gears Deployment mounts that Secret at the directory holding the
      config file ENTRYPOINT.SH reads -- `/etc/cf-gears/qa-platform-stack.yaml`,
      named in full both by entrypoint.sh's `GEARS_CONFIG_FILE` default and by
      the Dockerfile's `CMD --config`, and overridden by neither the Deployment
-     nor this chart. A correct ConfigMap that no container mounts is the same
+     nor this chart. A correct Secret that no container mounts is the same
      defect one step along.
 
      **The server itself reads a different file**, and the distinction matters
@@ -48,7 +50,7 @@ failure this module catches is the four copies of its number drifting apart.
      rewrites the `--config` argument to that path and execs. So this mount is
      the INPUT to the render, and `deploy/remote/verify-k8s.sh`'s step 17 reads
      the rendered output. What this test can hold is the chart's half: the
-     ConfigMap arrives at the path the render reads from.
+     config object arrives at the path the render reads from.
   3. Both states render: default-off unchanged from the committed file, and
      enabled-on with the operator's own collector address. The pair is the
      test -- a template that hard-coded `enabled: true` would pass an
@@ -100,14 +102,16 @@ import yaml
 
 CHART = pathlib.Path(__file__).resolve().parent.parent / "qa-platform"
 ORIGIN = "https://example-metrics-test.invalid"
-CONFIGMAP = "qa-platform-gears-config"
+# A Secret since 2026-09-29, not a ConfigMap: it carries both HMAC roots.
+# See gears-config-secret.yaml and check_signing_secret_placement.py.
+CONFIG_OBJECT = "qa-platform-gears-config"
 CONFIG_KEY = "qa-platform-stack.yaml"
 # The DIRECTORY entrypoint.sh renders the config FROM. Both paths that name the
 # file name it in full: entrypoint.sh's
 # `GEARS_CONFIG_FILE:-/etc/cf-gears/qa-platform-stack.yaml` and
 # qa-platform.Dockerfile's CMD `--config /etc/cf-gears/qa-platform-stack.yaml`.
 # Neither is a directory, and neither is overridden by gears-deployment.yaml --
-# so this is the dirname the ConfigMap volume has to land on for the template
+# so this is the dirname the Secret volume has to land on for the template
 # entrypoint.sh reads to be this release's copy rather than the one baked into
 # the image. (The server is then handed the RENDERED file under
 # /var/lib/cf-gears; see this module's docstring, link 2.)
@@ -148,12 +152,18 @@ def render(*extra):
     out = subprocess.run(
         ["helm", "template", "qa-platform", str(CHART),
          "--namespace", "qa-platform", "--set", f"publicOrigin={ORIGIN}",
-         # keycloak.adminPassword has no default (WS3 Task 3) -- any value
+         # keycloak.adminPassword has no default -- any value
          # that is not the literal "admin" satisfies the render.
          "--set", "keycloak.adminPassword=guard-fixture-not-a-real-password",
+         # argo.workflowClientSecret is `required` too (2026-09-29): it is the
+         # qa-platform-workflow client's confidential secret and the chart
+         # refuses the committed dev literal outside devMode. Any other value
+         # renders; check_realm_secrecy.py owns both of those assertions.
+         "--set", "argo.workflowClientSecret=guard-fixture-not-a-real-workflow-secret",  # nosec: test fixture only
+         "--set", "postgres.password=guard-fixture-not-a-real-db-password",  # nosec: test fixture only
          # Both signing secrets have no default either (2026-09-21): the
          # per-render `randAlphaNum` fallback became a pod roll on every
-         # upgrade once the gears Deployment started hashing the ConfigMap.
+         # upgrade once the gears Deployment started hashing that object.
          "--set", "bundleDownloadSigningSecret=guard-fixture-not-a-real-bundle-key",
          "--set", "collectReportSigningSecret=guard-fixture-not-a-real-collect-key",
          *extra],
@@ -165,21 +175,21 @@ def render(*extra):
 
 def gears_config(docs):
     """The `opentelemetry` block as the gears will actually parse it."""
-    cm = [d for d in docs
-          if d["kind"] == "ConfigMap" and d["metadata"]["name"] == CONFIGMAP]
-    if not cm:
-        return None, f"no ConfigMap named {CONFIGMAP} was rendered"
-    body = cm[0].get("data", {}).get(CONFIG_KEY)
+    objs = [d for d in docs
+            if d["kind"] == "Secret" and d["metadata"]["name"] == CONFIG_OBJECT]
+    if not objs:
+        return None, f"no Secret named {CONFIG_OBJECT} was rendered"
+    body = objs[0].get("stringData", {}).get(CONFIG_KEY)
     if body is None:
-        return None, f"ConfigMap {CONFIGMAP} carries no {CONFIG_KEY} key"
+        return None, f"Secret {CONFIG_OBJECT} carries no {CONFIG_KEY} key"
     try:
         parsed = yaml.safe_load(body)
     except yaml.YAMLError as exc:
-        return None, (f"{CONFIGMAP}'s {CONFIG_KEY} is not valid YAML, so the gears "
+        return None, (f"{CONFIG_OBJECT}'s {CONFIG_KEY} is not valid YAML, so the gears "
                       f"would refuse to boot: {exc}")
     otel = parsed.get("opentelemetry")
     if otel is None:
-        return None, (f"{CONFIGMAP}'s {CONFIG_KEY} carries no `opentelemetry` block. "
+        return None, (f"{CONFIG_OBJECT}'s {CONFIG_KEY} carries no `opentelemetry` block. "
                       "Nothing else decides whether the 22 metric families leave the "
                       "process, so every series in docs/DESIGN.md 3.11 is unreachable "
                       "and the gears report no error about it.")
@@ -214,7 +224,7 @@ def check_default(failures):
         mine.append(
             "FAIL (default render): opentelemetry.metrics.exporter must carry a "
             f"kind and an endpoint, got {exporter!r}. Without them the transform "
-            "in gears-config-configmap.yaml has no sentinel to rewrite.")
+            "in gears-config-secret.yaml has no sentinel to rewrite.")
     if (otel.get("resource") or {}).get("service_name") != "qa-platform":
         mine.append(
             "FAIL (default render): opentelemetry.resource.service_name is "
@@ -250,7 +260,7 @@ def check_enabled(failures):
         mine.append(
             "FAIL (enabled render): opentelemetry.metrics.enabled is "
             f"{metrics.get('enabled')!r} after --set enabled=true. The transform "
-            "in gears-config-configmap.yaml silently did not fire; the gears would "
+            "in gears-config-secret.yaml silently did not fire; the gears would "
             "come up with the built-in no-op meter provider while helm reported "
             "success.")
     if (metrics.get("exporter") or {}).get("endpoint") != COLLECTOR:
@@ -299,10 +309,11 @@ def check_mount(failures):
         return
     spec = deploys[0]["spec"]["template"]["spec"]
     volume = next((v for v in spec.get("volumes", [])
-                   if (v.get("configMap") or {}).get("name") == CONFIGMAP), None)
+                   if (v.get("secret") or {}).get("secretName") == CONFIG_OBJECT),
+                  None)
     if volume is None:
         failures.append(
-            f"FAIL: the gears Deployment mounts no volume from {CONFIGMAP}. The "
+            f"FAIL: the gears Deployment mounts no volume from {CONFIG_OBJECT}. The "
             "config the metrics block lives in never reaches the process.")
         return
     container = spec["containers"][0]
@@ -310,7 +321,7 @@ def check_mount(failures):
                   if m.get("name") == volume["name"]), None)
     if mount is None or mount.get("mountPath") != CONFIG_MOUNT:
         failures.append(
-            f"FAIL: {CONFIGMAP} is a volume but is not mounted at {CONFIG_MOUNT} "
+            f"FAIL: {CONFIG_OBJECT} is a volume but is not mounted at {CONFIG_MOUNT} "
             f"(got {mount!r}). entrypoint.sh renders from "
             f"{CONFIG_MOUNT}/{CONFIG_KEY} -- its GEARS_CONFIG_FILE "
             "default and the Dockerfile's CMD --config both name that file, and "
@@ -319,7 +330,7 @@ def check_mount(failures):
             "image instead, and the server would be handed whatever metrics "
             "setting was committed rather than the one this release asked for.")
         return
-    print(f"PASS: the gears container mounts {CONFIGMAP} at {CONFIG_MOUNT}, "
+    print(f"PASS: the gears container mounts {CONFIG_OBJECT} at {CONFIG_MOUNT}, "
           f"the directory holding the {CONFIG_MOUNT}/{CONFIG_KEY} entrypoint.sh "
           "renders the server's config from")
 
@@ -409,11 +420,11 @@ def scrape_invariants(docs, port):
     """
     found = {}
 
-    cm = [d for d in docs
-          if d["kind"] == "ConfigMap" and d["metadata"]["name"] == CONFIGMAP]
+    objs = [d for d in docs
+            if d["kind"] == "Secret" and d["metadata"]["name"] == CONFIG_OBJECT]
     scrape = None
-    if cm:
-        body = cm[0].get("data", {}).get(CONFIG_KEY)
+    if objs:
+        body = objs[0].get("stringData", {}).get(CONFIG_KEY)
         if body:
             metrics = (yaml.safe_load(body).get("opentelemetry") or {}).get("metrics") or {}
             scrape = metrics.get("scrape")
@@ -514,7 +525,7 @@ def check_scrape(failures):
     # THE DRIFT CASE. The port is one number in four places -- config bind_addr,
     # containerPort, Service targetPort's backing port, and the annotation.
     # Three of them read .Values.gears.metricsPort directly; the fourth is a
-    # string replacement in gears-config-configmap.yaml, which is the one that
+    # string replacement in gears-config-secret.yaml, which is the one that
     # can silently no-op. A pod that advertises 9999 and listens on 9464 is a
     # scrape target that answers `connection refused` forever, with no error on
     # this side of it.
@@ -530,7 +541,7 @@ def check_scrape(failures):
                 "FAIL (moved-port render): the gears' config binds "
                 f"{(got['config'] or {}).get('bind_addr')!r}, expected "
                 f"{want_bind!r}. The fifth transform in "
-                "gears-config-configmap.yaml silently did not fire, so the "
+                "gears-config-secret.yaml silently did not fire, so the "
                 "process listens on the committed port while the Deployment, "
                 "the Service and the annotation all advertise the one the "
                 "operator asked for.")

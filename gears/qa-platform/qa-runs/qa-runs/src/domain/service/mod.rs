@@ -5,8 +5,8 @@
 //! submodules mirror the repository layer:
 //!
 //! - `launch` — launch validation, branch resolution, repository grouping,
-//!   exclusivity resolution, and the six-step launch contract (parity spec
-//!   §3.4). Task 13.
+//!   exclusivity resolution, and the six launch rules (`launch`'s module
+//!   doc). Task 13.
 //! - `admission` / `dispatch` — the per-platform admission lock and the
 //!   dispatcher tick. Task 14.
 //! - `ingest` / `runs` — result ingestion, cancel, re-run, queue operator
@@ -82,13 +82,13 @@ pub mod authz_surface;
 /// 14 and 15 name [`Admission`](launch::Admission) and the two seam traits, and
 /// a `pub(crate) use` of a name *this* module never mentions is an unused
 /// import until the task that needs it lands.
-pub(crate) mod launch;
+pub mod launch;
 
-pub(crate) mod admission;
-pub(crate) mod dispatch;
+pub mod admission;
+pub mod dispatch;
 /// The run -> `RunSpec` half of dispatch — see that module's header for why the
 /// tick and the translation live in two files and the tick was not split.
-pub(crate) mod dispatch_spec;
+pub mod dispatch_spec;
 /// Result ingestion.
 ///
 /// **The module-scope `#[allow(dead_code)]` is gone**, and its removal is the
@@ -98,12 +98,12 @@ pub(crate) mod dispatch_spec;
 /// into `ingest`, so every one of them is reachable from a non-test build and
 /// the lint is live again. Restoring the attribute would restore exactly the
 /// blindness that let the gap survive the whole of Phase A.
-pub(crate) mod ingest;
-pub(crate) mod runs;
+pub mod ingest;
+pub mod runs;
 /// Schedule CRUD and the exactly-once firing tick. Phase B, Task 19.
-pub(crate) mod schedules;
+pub mod schedules;
 /// What drives [`ingest`] — see that module's header for what was missing.
-pub(crate) mod watch;
+pub mod watch;
 
 /// Tenant isolation against a real database, rather than against doubles that
 /// choose to honour the scope they are handed.
@@ -112,7 +112,7 @@ pub(crate) mod watch;
 mod tenant_scoping_tests;
 
 #[cfg(test)]
-pub(crate) mod test_support;
+pub mod test_support;
 
 #[cfg(test)]
 mod resources_tests;
@@ -310,7 +310,7 @@ pub trait LogArchive: Send + Sync {
 /// `transaction(...)` closure runs repository calls (which return
 /// `DomainError`) as-is and any `Err` rolls the transaction back while
 /// preserving the domain variant instead of flattening it to a database error.
-pub(crate) type DbProvider = DBProvider<DomainError>;
+pub type DbProvider = DBProvider<DomainError>;
 
 /// The `SERIALIZABLE`-only provider wrapper.
 ///
@@ -436,7 +436,7 @@ pub(in crate::domain::service) fn emit(silenced: &AtomicBool, record: impl FnOnc
 /// carries the reason the descriptor cannot supply the string itself. Cited by
 /// name rather than by line: nothing validates a `:N` in this repository, and
 /// this citation had already drifted twice as a line range.
-pub(crate) mod resources {
+pub mod resources {
     use super::ResourceType;
     use toolkit_gts::gts_id;
     use toolkit_security::pep_properties;
@@ -599,7 +599,7 @@ pub(crate) mod resources {
 /// `qa.queue_entry`/{`get`,`list`,`dispatch`} for the tick to do anything at
 /// all. See `service::dispatch`'s header on what happens when it does not have
 /// them.
-pub(crate) mod actions {
+pub mod actions {
     pub const CREATE: &str = "create";
     pub const GET: &str = "get";
     pub const LIST: &str = "list";
@@ -722,7 +722,7 @@ pub(crate) mod actions {
 /// [`crate::domain::queue::depth_limit`], `global_cap_status` and `expiry_cutoff`
 /// already implement. Nothing here re-interprets `0`; the pure helpers do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct QueueLimits {
+pub struct QueueLimits {
     /// `queue_max_depth`, enforced per (access scope, platform) rather than per
     /// platform — see [`crate::domain::error::DomainError::QueueFull`].
     /// `0` = unlimited.
@@ -735,7 +735,7 @@ pub(crate) struct QueueLimits {
 
 /// Everything [`AppServices::new`] needs beyond the repositories: shared
 /// infrastructure handles plus the typed config values the services enforce.
-pub(crate) struct ServiceDeps {
+pub struct ServiceDeps {
     pub(crate) db: Arc<DbProvider>,
     pub(crate) authz: Arc<dyn AuthZResolverApi>,
     pub(crate) catalog: Arc<dyn QaCatalogClientV1>,
@@ -903,7 +903,7 @@ pub(crate) struct ServiceDeps {
 /// being admitted concurrently observes the row stop being `queued`; built over
 /// a second registry it would serialise against nothing, and the failure would
 /// again be invisible to every test inside either module.
-pub(crate) struct AppServices<R, Q, S>
+pub struct AppServices<R, Q, S>
 where
     R: RunsRepository,
     Q: crate::domain::repos::QueueRepository,

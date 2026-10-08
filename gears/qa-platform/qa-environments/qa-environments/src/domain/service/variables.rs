@@ -322,6 +322,11 @@ impl<V: VariablesRepository, P: EnvironmentsRepository> VariablesService<V, P> {
 
     /// Insert or update a variable. `var.environment_id == None` targets the
     /// pipeline (global) table; `Some(_)` targets a specific environment.
+    ///
+    /// Two concurrent upserts of one name both succeed and the later write
+    /// wins: the one whose insert loses re-probes and updates the winner's row
+    /// under an `UPDATE` authorization. `VariableNameExists` (409) is left only
+    /// for a row created and deleted again within one request.
     #[instrument(skip(self, ctx, var), fields(name = %var.name))]
     pub async fn upsert(
         &self,
@@ -393,7 +398,43 @@ impl<V: VariablesRepository, P: EnvironmentsRepository> VariablesService<V, P> {
             .access_scope(ctx, &resources::VARIABLE, action, resource_id)
             .await?;
 
-        let variable = self.repo.upsert(&conn, &scope, tenant_id, var).await?;
+        let variable = match self
+            .repo
+            .upsert(&conn, &scope, tenant_id, var.clone())
+            .await
+        {
+            // Lost a create race: a concurrent upsert of this name inserted it
+            // between our probe and our insert (the repository reports that
+            // unique violation as `VariableNameExists`). The request means
+            // "create or update", so it becomes an update of that row --
+            // authorized as one, on that row's id, never under the CREATE
+            // scope above. Once only: a second loss would need the row created,
+            // deleted and created again inside one request, and that answers
+            // 409 so the caller can retry.
+            Err(DomainError::VariableNameExists { .. }) if existing.is_none() => {
+                let winner = self
+                    .repo
+                    .find_by_natural_key(
+                        &conn,
+                        &probe_scope,
+                        tenant_id,
+                        var.environment_id,
+                        &var.name,
+                    )
+                    .await?
+                    .ok_or_else(|| DomainError::VariableNameExists {
+                        name: var.name.clone(),
+                    })?;
+                let update_scope = self
+                    .policy_enforcer
+                    .access_scope(ctx, &resources::VARIABLE, actions::UPDATE, Some(winner.id))
+                    .await?;
+                self.repo
+                    .upsert(&conn, &update_scope, tenant_id, var)
+                    .await?
+            }
+            other => other?,
+        };
 
         info!("Successfully upserted variable with id={}", variable.id);
         Ok(variable)

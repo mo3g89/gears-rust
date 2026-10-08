@@ -56,7 +56,7 @@ pub(super) const MAX_PLUGIN_INSTANCE_ID_LEN: usize = 512;
 ///
 /// `None` is accepted: the column is nullable through the expand half of the
 /// expand/contract pair, and an update passing `None` leaves the product's
-/// current binding **unchanged** rather than unbinding it (ruling D-18 — a
+/// current binding **unchanged** rather than unbinding it (a
 /// normal UI edit cannot send the field, so full-replace semantics silently
 /// unbound every product it touched).
 ///
@@ -84,7 +84,7 @@ pub(super) fn validate_plugin_instance_id(value: Option<&str>) -> Result<(), Dom
         return Err(invalid(
             // **Not "omit the field to leave it unbound"**, which is what
             // this said and which is advice that silently does nothing:
-            // omitting it returns 200 with the binding intact (ruling D-18).
+            // omitting it returns 200 with the binding intact.
             // Corrected at the Phase E review, finding FW-4.
             //
             // And not the *update*-only advice it became either: since Task

@@ -33,16 +33,16 @@ use crate::gear::ConcreteAppServices;
 /// `environment_id` is a plain query parameter as well as being filterable via
 /// `OData` (as `$filter=environment_id eq ...`, see
 /// [`QueueFilterField::EnvironmentId`](crate::infra::storage::odata::QueueFilterField::EnvironmentId)
-/// — the two share a name as of ruling G-3, but remain two mechanisms; see
-/// [`QueueQuery::environment_id`]). The frozen guide's remedy for a
-/// `queue_position` distorted by a narrow window is *the environment-filtered
-/// call*, and a remedy that requires knowing `OData` syntax is not much of a
-/// remedy. The parameter is the one an operator reaches for; the `OData`
-/// field serves everything else.
+/// — the two share a name since the `OData` field was renamed to match, but
+/// remain two mechanisms; see [`QueueQuery::environment_id`]). The frozen
+/// guide's remedy for a `queue_position` distorted by a narrow window is *the
+/// environment-filtered call*, and a remedy that requires knowing `OData`
+/// syntax is not much of a remedy. The parameter is the one an operator reaches
+/// for; the `OData` field serves everything else.
 ///
-/// The legacy `limit` parameter is accepted and clamped for the same reason -
-/// the guide specifies it, and callers ported from the source system send it -
-/// but `$top` is what a new caller should use. See [`QueueQuery`].
+/// The page size is the `OData` extractor's, as on every other collection:
+/// `limit` and `$top` are one parameter, and sending both, or `0`, is a 400.
+/// See [`QueueQuery`].
 #[tracing::instrument(skip(svc, ctx, odata, params))]
 pub async fn list_queue(
     Extension(ctx): Extension<SecurityContext>,
@@ -55,7 +55,7 @@ pub async fn list_queue(
         .map_err(|e| as_queue_error(None, e))?;
     let page = svc
         .runs
-        .queue_page(&ctx, params.environment_id, &params.merge_into(odata))
+        .queue_page(&ctx, params.environment_id, &odata)
         .await
         .map_err(|e| as_queue_error(None, e))?;
     Ok(Json(page.map_items(QueueEntryDto::from)))

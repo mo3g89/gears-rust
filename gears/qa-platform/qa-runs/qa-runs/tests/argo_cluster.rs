@@ -46,13 +46,10 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use qa_runs::config::ArgoExecutorConfig;
-use qa_runs::domain::ports::run_executor::{
-    ExecutionEvent, ExecutionNode, ExecutionRef, RunAccess, RunEnv, RunExecutor, RunSpec,
-    RunnerSpec,
+use qa_runs::{
+    ArgoRunExecutor, ExecutionEvent, ExecutionNode, ExecutionRef, ExecutorOutcome, LogResume,
+    RunAccess, RunEnv, RunExecutor, RunSpec, RunnerSpec, workflow_resource,
 };
-use qa_runs::domain::repos::LogResume;
-use qa_runs::domain::state_machine::ExecutorOutcome;
-use qa_runs::infra::executor::argo::{ArgoRunExecutor, workflow_resource};
 
 /// Where the kubeconfig is. Absent means "skip", not "fail": these are run
 /// deliberately, and a bare `--ignored` on a machine with no cluster should say
@@ -311,7 +308,7 @@ async fn a_real_workflow_runs_and_reports_a_real_test_result() {
     };
     assert_eq!(
         *nodes,
-        qa_runs::domain::ports::run_executor::NodeOutcome::NoneFailed,
+        qa_runs::NodeOutcome::NoneFailed,
         "status.nodes reported one Pod node and it succeeded"
     );
 

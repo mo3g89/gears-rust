@@ -1,8 +1,7 @@
 //! How a run reaches its target environment: the mounts, environment
 //! variables, and runner shape a plugin hands back to `qa-runs` (see
 //! `gears/qa-platform/docs/features/product-plugins.md`'s
-//! `prepare_run_access` section; `PRODUCT-PLUGINS-DESIGN.md` §5.2 and §7,
-//! cited here before the docs squash, no longer exist).
+//! `prepare_run_access` section).
 //!
 //! `qa-runs`' `KubeconfigMount` generalises into [`RunAccess`] here — one
 //! plugin-shaped seam instead of an inline kubeconfig block, with no other
@@ -98,9 +97,10 @@ pub struct RunVar {
     pub value: String,
 }
 
-/// The runner shape for one product (**D11**: `RunnerSpec` varies per
-/// *product*, not per environment — a per-environment image would make a
-/// run's provenance unclear).
+/// The runner shape for one product (`QaProductPluginV1::runner`; DESIGN §3.7,
+/// "`qa-product-sdk`"): `RunnerSpec` varies per *product*, not per
+/// environment — a per-environment image would make a run's provenance
+/// unclear.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunnerSpec {
     /// `None` means "inherit the deployment-wide `qa-runs.argo.runner_image`".
@@ -128,16 +128,15 @@ pub struct RunVarContract {
 impl RunVarContract {
     /// The full set of names a run parameter may not override: the
     /// platform's floor, whatever the platform passes as `floor`, **unioned**
-    /// with whatever this plugin additionally reserves (**D8**).
+    /// with whatever this plugin additionally reserves.
     ///
     /// # What the floor actually contains, and what it does not
     ///
     /// Corrected at the Phase E review (finding I-2). This doc used to
-    /// enumerate the floor the way `PRODUCT-PLUGINS-DESIGN.md` §7 once did
+    /// enumerate the floor the way an earlier design document did
     /// — "`TEST_FILES`, `TEST_BUNDLE_URL`, `TEST_VERSION`, `COLLECT_ONLY`,
     /// and the collect and progress URLs" — and that list was **not** what
-    /// `qa-runs` passes. (That document is not in the repository any more;
-    /// its successor, `gears/qa-platform/docs/features/product-plugins.md`,
+    /// `qa-runs` passes. (`gears/qa-platform/docs/features/product-plugins.md`
     /// does not enumerate the floor at all.) `qa_runs::domain::params::RESERVED_NAMES`
     /// carries the source system's eleven names verbatim plus a twelfth,
     /// `QA_RUNNER_PYTEST_ARGS` (added later, not a legacy port), and none of

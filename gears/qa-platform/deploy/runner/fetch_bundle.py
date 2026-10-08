@@ -158,8 +158,28 @@ def unpack(data, dest):
         # default in 3.14.
         if name.startswith("/") or ".." in name.split("/"):
             die("archive entry %r escapes the extraction directory" % name)
-    archive.extractall(dest)
-    archive.close()
+    # `name` is checked above; `linkname` is not, and a symlink whose target is
+    # `../..` or `/etc` lets a LATER entry be written through it, outside `dest`.
+    # The pod runs as uid 65534, which limits what that can overwrite but not
+    # where it lands. filter="data" refuses links that resolve outside `dest`,
+    # absolute names, device nodes, and strips setuid/setgid and owner bits.
+    #
+    # Absent `tarfile.data_filter` (a 3.9-3.11 patch release from before the
+    # backport), `extractall(filter=...)` is a TypeError at best -- and on a
+    # port that ignored the keyword it would be a silent no-op. Refuse to run
+    # instead. The image is `python:3.12-slim`, where the filter has existed
+    # since 3.12.0, so this branch is unreachable there.
+    if not hasattr(tarfile, "data_filter"):
+        die(
+            "this Python (%s) has no tarfile extraction filters; refusing to "
+            "unpack a bundle without them" % sys.version.split()[0]
+        )
+    try:
+        archive.extractall(dest, filter="data")
+    except tarfile.FilterError as error:
+        die("archive entry rejected by the extraction filter: %s" % error)
+    finally:
+        archive.close()
     print(
         "fetch-bundle: unpacked %d entries into %s: %s"
         % (len(names), dest, ", ".join(sorted(names)[:20]))

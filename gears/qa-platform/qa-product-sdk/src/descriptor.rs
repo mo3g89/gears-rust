@@ -3,8 +3,7 @@
 //!
 //! The UI renders forms, tables and detail pages from these descriptors (see
 //! `gears/qa-platform/docs/features/product-plugins.md`'s "No UI code is
-//! written" line under "Adding a product"; `PRODUCT-PLUGINS-DESIGN.md` §8,
-//! cited here before the docs squash, no longer exists), so a plugin adds a
+//! written" line under "Adding a product"), so a plugin adds a
 //! field without any UI change. Two invariants are checked at registration
 //! rather than at render time, because both failures are silent when they
 //! happen late — see [`validate_schemas`].
@@ -43,13 +42,11 @@ impl FieldKind {
 /// opaque attribute map, and the platform copies the role-claimed attributes
 /// into real, indexable columns on every write (`observed_version`,
 /// `observed_build`, `observed_base_url` — see [`crate::observation::project_roles`];
-/// this was decision **D10** in `PRODUCT-PLUGINS-DESIGN.md`, which no longer
-/// exists).
+/// the role claim is what makes a value indexable).
 ///
 /// # There is no `Health` role
 ///
-/// A predecessor of this enum (`PRODUCT-PLUGINS-DESIGN.md` §5.1, no longer
-/// readable) listed five roles; only the four below were ever implemented.
+/// A predecessor of this enum listed five roles; only the four below were ever implemented.
 /// `Health` is deliberately
 /// absent: health does not arrive through the attribute map at all. It has
 /// its own channel — [`crate::observation::HealthOutcome`], returned
@@ -246,13 +243,15 @@ fn check_keys(fields: &[FieldDesc]) -> Result<(), SchemaError> {
 /// The one field a plugin declares as both **required** and **secret**, if
 /// there is exactly one.
 ///
-/// This is how a platform column that holds a *single* credential reference
-/// gets a **key** without the platform naming any product's credential —
-/// `qa_environments.kubeconfig_credstore_ref`, which both observation and
-/// dispatch read to build a [`CredentialSlot`](crate::plugin::CredentialSlot).
+/// This is how a *single*, unkeyed credential reference gets a **key** without
+/// the platform naming any product's credential — today the pre-plugin
+/// `kubeconfig`/`kubeconfig_credstore_ref` request pair. Until Task 19 it was
+/// also the `qa_environments.kubeconfig_credstore_ref` column, which
+/// observation and dispatch read to build a
+/// [`CredentialSlot`](crate::plugin::CredentialSlot).
 ///
 /// `None` for a schema with no required secret and for a schema with two: one
-/// column holds one reference and cannot say which of two required secrets it
+/// reference cannot say which of two required secrets it
 /// is, and a guess would hand a plugin the wrong material under the right
 /// name. A caller that gets `None` must refuse the operation, not pick.
 ///
@@ -262,14 +261,17 @@ fn check_keys(fields: &[FieldDesc]) -> Result<(), SchemaError> {
 ///
 /// # Why it lives in the SDK
 ///
-/// It is a derivation over [`FieldDesc`] and nothing else, and **two gears
-/// need the same answer**: `qa-environments` to resolve a slot for
-/// [`observe`](crate::QaProductPluginV1::observe), `qa-runs` to name one for
-/// [`prepare_run_access`](crate::QaProductPluginV1::prepare_run_access). Two
-/// private copies of one derivation is the coupling class that produced five
-/// defects in Phase B of this work; a plugin that renames its credential field
-/// renames the slot in both gears, in one release, with nothing in either to
-/// update.
+/// It is a derivation over [`FieldDesc`] and nothing else. It was put here when
+/// **two gears needed the same answer**: `qa-environments` to resolve a slot
+/// for [`observe`](crate::QaProductPluginV1::observe) and `qa-runs` to name one
+/// for [`prepare_run_access`](crate::QaProductPluginV1::prepare_run_access),
+/// both for the single unkeyed pre-plugin reference. Task 19 dropped that
+/// reference and both readers' fallback to it; today `qa-environments`' write
+/// path is the one caller, keying the pre-plugin `kubeconfig` field a create or
+/// update may still submit. Two private copies of one derivation is the
+/// coupling class that produced five defects in Phase B of this work, and a
+/// plugin that renames its credential field renames the key in one release with
+/// nothing downstream to update.
 #[must_use]
 pub fn sole_required_secret_key(schema: &[FieldDesc]) -> Option<String> {
     let mut required_secrets = schema

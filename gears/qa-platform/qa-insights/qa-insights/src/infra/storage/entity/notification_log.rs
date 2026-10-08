@@ -1,7 +1,7 @@
 //! `SeaORM` entity for the `qa_notification_log` table.
 //!
 //! The notification audit trail. Egress failures are recorded here and **never
-//! propagated to a caller** (design §4.8), which makes this table the only
+//! propagated to a caller**, which makes this table the only
 //! place an operator can see that Slack or SMTP is broken. Legacy is the same:
 //! `log_notification` swallows its own insert error into a `tracing::warn!`
 //! (`manager/src/services/notifications.rs:594-617`).

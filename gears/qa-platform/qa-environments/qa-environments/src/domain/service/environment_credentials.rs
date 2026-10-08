@@ -1,4 +1,4 @@
-//! The plugin-driven credential write path (Task 18b).
+//! The plugin-driven credential write path.
 //!
 //! # What this module is for
 //!
@@ -15,7 +15,7 @@
 //! everything else goes to the `config` column, and nothing in this gear names
 //! a credential key.
 //!
-//! # One mechanism, not two (ruling F-8)
+//! # One mechanism, not two
 //!
 //! The obvious way to add this was to keep the audited single-kubeconfig path
 //! for the credential that has a column and add a second mechanism for the
@@ -26,15 +26,14 @@
 //! map *first*, and from there one path handles *n* ≥ 1 credentials. The
 //! single-kubeconfig case is n=1.
 //!
-//! # The dual-write, and why it is not redundant (ruling F-1)
+//! # The dual-write is gone
 //!
-//! Every write here also maintains `kubeconfig_credstore_ref`. That column has
-//! two production readers — this gear's own
+//! Until Task 19 every write here also maintained the pre-plugin
+//! `kubeconfig_credstore_ref` column, because its two readers — this gear's
 //! [`resolve_credential_slots`](super::EnvironmentsService::resolve_credential_slots)
-//! and `qa-runs`' `DispatchService::plugin_dispatch` (ruling E-17) — and both
-//! read it because when they were written *nothing wrote* `credentials`. Task
-//! 19 drops the column; until it does, dropping the dual-write would break
-//! every run against every environment.
+//! and `qa-runs`' `DispatchService::plugin_dispatch` — were written when
+//! *nothing wrote* `credentials`. Task 19 dropped the column and both readers'
+//! fallback to it; `credentials` is the only stored source.
 
 use std::collections::BTreeMap;
 
@@ -108,8 +107,21 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     ) -> Result<StoredCredentials, DomainError> {
         let schema = plugin.credential_schema();
 
+        // 0. A reference is refused at write when the credential store could
+        //    not resolve its spelling -- a syntax check, not a lookup, so the
+        //    designed "named before provisioned" state is untouched. Covers the
+        //    plugin-shaped `credentials` map; the legacy
+        //    `kubeconfig`/`kubeconfig_credstore_ref` request pair was checked
+        //    by name in `desugar_legacy_credential_pair` and passes again here.
+        for (key, submission) in &submitted {
+            if let CredentialSubmission::Reference(reference) = submission {
+                Self::validate_credstore_ref(&format!("credentials.{key}.reference"), reference)?;
+            }
+        }
+
         // 1. The plugin's verdict on the pasted half. **This path resolves
-        //    nothing** — see the module header and ruling F-4 (reversed): a
+        //    nothing** — see the module header (a reference is classified from
+        //    the schema, never resolved, on this path): a
         //    credstore reference is an out-of-band binding the plugin has no
         //    opinion on and could not form one about without the bytes, and
         //    creating an environment that names a not-yet-provisioned
@@ -265,10 +277,10 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             }
         }
 
-        // 5. Merge over what the row already held, and derive the dual-write.
-        //    `sole_key` is what lets the merge attribute a pre-plugin row's
-        //    single unkeyed reference to a key, so replacing it supersedes it
-        //    instead of duplicating it.
+        // 5. Merge over what the row already held. Every stored reference is
+        //    keyed since Task 19, so the merge matches by key; `sole_key` (the
+        //    plugin's sole required secret) only picks the reference reported
+        //    as `PersistedCredentials::legacy_ref`.
         let sole_key = sole_required_secret_key(schema);
         let (credentials, superseded) =
             Self::merge_credentials(existing, credentials, submitted, sole_key.as_deref());
@@ -298,46 +310,17 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
 
     /// The credential half of a **create**: desugar, classify, store.
     ///
-    /// # The productless branch, and why it does not refuse (ruling F-7)
-    ///
-    /// `product_id` is `Option<Uuid>` until Task 20, and a productless
-    /// environment is creatable today — `observe_through_plugin` already
-    /// refuses to *observe* one while `create_environment` happily makes one.
-    /// Starting to refuse it here would move Task 20's behaviour change a task
-    /// early and break a create the shipped UI can still make.
-    ///
-    /// So with no product there is no plugin, nothing can be classified, and
-    /// the credential takes the pre-plugin path: the reference goes to
-    /// `kubeconfig_credstore_ref`, `credentials` stays empty, and one `warn`
-    /// says why. An empty `credentials` is exactly what
-    /// [`EnvironmentsService::resolve_credential_slots`]' fallback exists to
-    /// serve.
-    ///
-    /// **The PRODUCTLESS branch dies at Task 20b** (`product_id NOT NULL`).
-    /// This comment used to add "which is why Task 20 runs before Task 19",
-    /// true under ruling F-6 and false since F-12 split Task 20 and moved the
-    /// environments half *after* the drop (re-review finding R3-4).
-    ///
-    /// **The plugin-unavailable branch below is not** — `product_id NOT NULL`
-    /// says nothing about whether a product's plugin resolves, so it outlives
-    /// Task 20b (review finding I-9 corrected this sentence, which used to
-    /// cover both). It is safe for a different reason: `store_legacy_pair`
-    /// populates the legacy column, and Task 19's re-derivation overwrites
-    /// *from* that column, so a row written through it is repaired rather than
-    /// stranded.
-    ///
-    /// **Task 19 removes that branch too, and for a reason `NOT NULL` has
-    /// nothing to do with** (ruling F-13): the drop takes the legacy column,
-    /// a credential can only be stored under a key, and the only source of a
-    /// key is the plugin's own schema. So after Task 19 an unavailable plugin
-    /// refuses the write — the behaviour I-9 reversed — and the cost is
-    /// smaller than I-9 could measure, because C-1's guard had already made
-    /// the update path a refusal for every plugin-shaped row.
+    /// `product_id` is a plain `Uuid` since Task 20b, so every create names a
+    /// product. When that product's plugin is unavailable the write refuses
+    /// ([`Self::refuse_unclassifiable`]): Task 19 dropped the pre-plugin
+    /// `kubeconfig_credstore_ref` column, so a credential can only be stored
+    /// under a key, and only the plugin's schema supplies one.
     ///
     /// # Errors
     ///
-    /// Whatever [`Self::store_submitted_credentials`] rejects, plus the
-    /// pre-plugin pair's own rules on the productless branch.
+    /// Whatever [`Self::store_submitted_credentials`] rejects, the pre-plugin
+    /// pair's own rules ([`Self::desugar_legacy_credential_pair`]), and the
+    /// plugin-unavailable refusal.
     pub(super) async fn resolve_new_credentials(
         &self,
         ctx: &SecurityContext,
@@ -346,52 +329,23 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         // The productless branch that stood here is gone with Task 20b: the
         // column is `NOT NULL` and `NewEnvironment::product_id` is a plain
         // `Uuid`, so the state is unrepresentable rather than refused. What
-        // survives is the plugin-unavailable branch below, which `NOT NULL`
-        // says nothing about (ruling F-13, and the asymmetry the Task 18b
-        // re-review established).
+        // survives is the plugin-unavailable branch below, which refuses.
         let product_id = new.product_id;
         let plugin = match self.product_plugins.plugin_for(ctx, product_id).await {
             Ok(plugin) => plugin,
-            // The port has already logged which of its three causes this was.
+            // The port has already logged which of its two causes this was.
             //
-            // **This falls back rather than refusing, and the review argued
-            // both ways** (finding I-9). Refusing was tried and reverted: this
-            // port's whole design treats an unavailable plugin as a *recorded
-            // fact about the environment* rather than a failure —
-            // `PluginUnavailable::ResolverAbsent` exists for "qa-catalog is
-            // not running beside this gear" — and refusing every
-            // credential-bearing write while a sibling gear restarts
-            // contradicts that directly. Six existing tests said so.
-            //
-            // What made the fallback unsafe was C-1, and that is fixed where
-            // it belongs: `store_unclassified_patch` refuses outright when the
-            // row already holds plugin-shaped credentials, so this branch can
-            // never desynchronise the column both readers prefer.
-            //
-            // **How much the fallback actually preserves, stated exactly
-            // (review finding IMPORTANT-3), because the sentence above
-            // overstates it.** C-1's guard refuses every *update* to a row
-            // with a populated `credentials` — which is every row written
-            // since Task 18b. So what survives a qa-catalog outage is: a
-            // create, and an update to a row that is still pre-18b-shaped.
-            // Rotating a credential on a plugin-shaped row is refused, and
-            // `keyed_row_needs_its_plugin_error` is where it says so.
-            //
-            // A create through here does leave `credentials = []` on a row
-            // that HAS a product. That row is served by the readers' fallback,
-            // and Task 19's re-derivation repairs it, because it is an
-            // overwrite from the legacy column — which this branch does
-            // populate. **Task 19 then removes this branch entirely**
-            // (ruling F-13): with no legacy column there is no key to store a
-            // credential under and nowhere to put it, so an unavailable plugin
-            // refuses. See Phase F's header and Task 19's seventh warning
-            // item.
+            // **This refuses.** Finding I-9 once reverted a refusal here and
+            // stored the reference in the pre-plugin column instead, because
+            // this port treats an unavailable plugin as a recorded fact about
+            // the environment rather than a failure. Task 19 dropped that
+            // column, so there is nowhere to store an unclassified credential;
+            // `refuse_unclassifiable`'s doc carries the argument.
             Err(unavailable) => {
                 warn!(
                     detail = unavailable.detail(),
                     "qa-environments: this environment's product plugin is unavailable, so its \
-                     credentials cannot be classified; storing the credential reference in the \
-                     pre-plugin column only"
+                     credentials cannot be classified; refusing the create, nothing was stored"
                 );
                 return Err(Self::refuse_unclassifiable(unavailable));
             }
@@ -461,7 +415,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             && patch.credentials.is_empty();
         if mentions_no_credential {
             if let Some(named) = patch.kubeconfig_credstore_ref.as_deref() {
-                Self::validate_credstore_ref(named)?;
+                Self::validate_credstore_ref("kubeconfig_credstore_ref", named)?;
             }
             return Ok(None);
         }
@@ -476,14 +430,12 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         let product_id = existing.product_id;
         let plugin = match self.product_plugins.plugin_for(ctx, product_id).await {
             Ok(plugin) => plugin,
-            // Falls back for the reason on the create path above. Safe here
-            // because `store_unclassified_patch` refuses a row that already
-            // holds plugin-shaped credentials (Critical C-1).
+            // Refuses, for the reason on the create path above.
             Err(unavailable) => {
                 warn!(
                     detail = unavailable.detail(),
                     "qa-environments: this environment's product plugin is unavailable, so its \
-                     credentials cannot be classified; updating the pre-plugin column only"
+                     credentials cannot be classified; refusing the update, nothing was changed"
                 );
                 return Err(Self::refuse_unclassifiable(unavailable));
             }
@@ -505,13 +457,13 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     ///
     /// # The key comes from the plugin, never from a literal
     ///
-    /// `sole_key` is
-    /// [`sole_required_secret_key`] over the product's schema — the same
-    /// derivation rulings E-17/D-19 make for the same column in both gears
-    /// that read it, and the reason a plugin that renames its credential field
-    /// renames this in one release with nothing here to update. Writing
-    /// `"kubeconfig"` would put one product's credential key in the gear whose
-    /// whole purpose is to stop naming that product.
+    /// `sole_key` is [`sole_required_secret_key`] over the product's schema — a
+    /// derivation that lives in `qa_product_sdk::descriptor` (qa-runs' dispatch
+    /// used it too, until Task 19 removed its unkeyed fallback), and the reason
+    /// a plugin that renames its credential field renames this in one release
+    /// with nothing here to update. Writing `"kubeconfig"` would put one
+    /// product's credential key in the gear whose whole purpose is to stop
+    /// naming that product.
     ///
     /// `None` means the plugin declares no single required secret, so there is
     /// no key for the single legacy field to belong to and the pair cannot be
@@ -548,7 +500,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         let legacy = match (legacy_ref, legacy_material) {
             (Some(_), Some(_)) => return Err(Self::both_kubeconfig_fields_error()),
             (Some(reference), None) => {
-                Self::validate_credstore_ref(&reference)?;
+                Self::validate_credstore_ref("kubeconfig_credstore_ref", &reference)?;
                 Some(CredentialSubmission::Reference(reference))
             }
             (None, Some(material)) => Some(CredentialSubmission::Material(
@@ -582,10 +534,11 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         Ok(submitted)
     }
 
-    /// **Ruling F-13.** With `kubeconfig_credstore_ref` dropped, a credential
-    /// can only be stored *keyed*, and the only source of a key is the
-    /// plugin's own `credential_schema()`. So a write that reaches no plugin
-    /// has nowhere to put anything, and refuses.
+    /// **A write that reaches no plugin refuses.** With
+    /// `kubeconfig_credstore_ref` dropped, a credential can only be stored
+    /// *keyed*, and the only source of a key is the plugin's own
+    /// `credential_schema()`. So a write that reaches no plugin has nowhere to
+    /// put anything, and refuses.
     ///
     /// # This is the decision Task 18b deliberately reversed, and why it is
     /// # right now when it was wrong then
@@ -599,14 +552,15 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// **The cost is far smaller than the reversal assumed**, and the thing
     /// that shrank it landed in the same fix wave: Critical C-1's guard already
     /// refused this path for any row holding plugin-shaped credentials, and
-    /// `m20260903_000012` populates that column on every row that had a legacy
+    /// `m20260903_000012` (folded into `migrations::m20260812_000001_initial`
+    /// by the docs squash) populates that column on every row that had a legacy
     /// reference. So on the update path this was *already* a refusal for the
     /// overwhelming majority of rows; on create there was never a row to fall
     /// back to. What changed is the message, not the availability.
     ///
-    /// Both callers reach this: the productless branch (`product_id` is still
-    /// `Option<Uuid>` until Task 20b) and the plugin-unavailable branch. They
-    /// keep separate messages because they have separate remedies.
+    /// Create and update both reach this when the product's plugin is
+    /// unavailable; [`Self::unclassifiable_credential_error`] words the refusal
+    /// by cause, because the causes have separate remedies.
     fn refuse_unclassifiable(cause: PluginUnavailable) -> DomainError {
         Self::unclassifiable_credential_error(cause)
     }
@@ -622,16 +576,6 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// so surfacing it interpolates nothing.
     fn unclassifiable_credential_error(cause: PluginUnavailable) -> DomainError {
         match cause {
-            // Unchanged from before the split, field included: the shipped UI
-            // still posts to this endpoint until Task 22, and re-pointing a
-            // 400's `field` is a wire change no finding asked for (the
-            // re-review's `n-3` records what one of those costs).
-            PluginUnavailable::NoProduct => DomainError::Validation {
-                field: "credentials".to_owned(),
-                message: "plugin-shaped credentials need a product to resolve the plugin that \
-                          classifies them; set `product_id`"
-                    .to_owned(),
-            },
             // **Transient.** `ResolverAbsent` is "qa-catalog is not running
             // beside this gear", which a retry clears once it is back.
             PluginUnavailable::ResolverAbsent => DomainError::Validation {
@@ -681,11 +625,11 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// submitted `Reference` under a key the plugin does not declare is
     /// dropped by [`Self::reconcile_classifications`] and never reaches
     /// `validate_credentials` at all (a reference is classified from the
-    /// schema, ruling F-4 reversed), so one transposed character in a key name
+    /// schema, never resolved), so one transposed character in a key name
     /// produced an accepted row with `credentials = []` **and**
-    /// `kubeconfig_credstore_ref = ""` — a credential-less environment, which
-    /// is precisely the state Task 19's warning item 5 exists to prevent and
-    /// which its re-derivation cannot repair.
+    /// `kubeconfig_credstore_ref = ""` (a column Task 19 has since dropped) — a
+    /// credential-less environment, which is precisely the state Task 19's
+    /// warning item 5 was about and which its re-derivation could not repair.
     ///
     /// Counting *stored* required secrets instead closes all three variants
     /// the review found, and it is a real requirement check rather than a
@@ -734,7 +678,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     ///   so an undeclared key reaches nothing, and rejecting the whole form
     ///   over one is a worse failure than dropping it". The `warn` is what
     ///   stops a dropped credential being silent, and it names the key —
-    ///   never a value (ruling F-5);
+    ///   never a value;
     /// * a **classification for a key that was not submitted is refused**,
     ///   because acting on it would have this gear mint a secret out of
     ///   nothing.
@@ -753,9 +697,8 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                 // `CredentialInput`. This is the one place in this file where
                 // a plugin-controlled runtime string is interpolated into an
                 // operator-facing message, and the "Credential containment"
-                // rule's layer 1 (`PRODUCT-PLUGINS-DESIGN.md` §9, cited here
-                // before the docs squash, no longer exists; the rule itself
-                // is unchanged) exists to make exactly that inexpressible
+                // rule's layer 1 (ADR-0008; `docs/features/product-plugins.md`,
+                // "Credential containment") exists to make exactly that inexpressible
                 // for *failure* text (`PluginFailure::detail` is
                 // `&'static str`).
                 //
@@ -875,35 +818,16 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         (merged, superseded)
     }
 
-    /// The credentials a row currently holds, preferring the plugin-shaped
-    /// column and falling back to the pre-plugin one.
+    /// The credentials a row currently holds: `Environment::credentials`,
+    /// every entry keyed.
     ///
-    /// This is the same preference [`EnvironmentsService::resolve_credential_slots`]
-    /// and `qa-runs`' `plugin_dispatch` apply, and it exists in three places
-    /// for one release only: Task 19 drops the fallback with the column.
-    ///
-    /// The fallback is a **lossy** source — it can name at most one credential
-    /// — which is why it is only ever consulted when `credentials` is empty,
-    /// and why Task 19's re-derivation runs the other way only on rows that
-    /// have no more than one. See `PersistedCredentials::legacy_ref` (review
-    /// finding CRITICAL-1).
-    ///
-    /// # The fallback needs the plugin to supply the key
-    ///
-    /// The legacy column holds a reference and **no key**, and a merge is
-    /// keyed: without a key the stored reference matches no replacement, so it
-    /// would be kept *beside* the new one and the row would end up naming the
-    /// same credential twice. So `sole_key` is
-    /// [`sole_required_secret_key`] over the plugin's schema — the same
-    /// derivation rulings E-17/D-19 use for exactly this column, in both gears
-    /// that read it.
-    ///
-    /// `None` means the plugin declares no single required secret, so the
-    /// legacy reference cannot be attributed to any key. It is reported as
-    /// *no stored credentials* rather than guessed at, which is the same
-    /// refusal `LEGACY_CREDENTIAL_UNBINDABLE` and `AMBIGUOUS_CREDENTIAL`
-    /// already make: a guess here would supersede — and delete — a secret
-    /// under the wrong name.
+    /// Until Task 19 this fell back to the pre-plugin
+    /// `kubeconfig_credstore_ref` when `credentials` was empty, attributing
+    /// that single unkeyed reference to `sole_key` (the plugin's sole required
+    /// secret, from `qa_product_sdk::descriptor::sole_required_secret_key`) so
+    /// that a replacement superseded it instead of sitting beside it. Task 19
+    /// dropped the column and the fallback with it; `sole_key` is unused here
+    /// and stays only in the signature.
     fn stored_credentials(
         existing: &Environment,
         sole_key: Option<&str>,
@@ -928,18 +852,13 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         serde_json::Value::Object(merged)
     }
 
-    /// The value for the pre-plugin `kubeconfig_credstore_ref` column: the
-    /// reference belonging to the plugin's sole required secret field.
+    /// The reference belonging to the plugin's sole required secret field,
+    /// reported as `PersistedCredentials::legacy_ref`.
     ///
-    /// Empty when the plugin declares no single required secret — one column
-    /// cannot say which of two required secrets it holds, and both readers
-    /// already refuse that case rather than guess
-    /// (`plugin_dispatch`'s `AMBIGUOUS_CREDENTIAL`, this gear's
-    /// `LEGACY_CREDENTIAL_UNBINDABLE`). Empty also when that field simply was
-    /// not among the submitted credentials, which a patch that replaced some
-    /// *other* credential legitimately produces — and which is exactly why the
-    /// merge above runs first, so this reads the post-merge state and finds the
-    /// reference the row is keeping.
+    /// It used to fill the pre-plugin `kubeconfig_credstore_ref` column; Task
+    /// 19 dropped that column and nothing persists this value any more. Empty
+    /// when the plugin declares no single required secret, and empty when that
+    /// field is not among the post-merge credentials.
     fn legacy_reference(sole_key: Option<&str>, credentials: &[EnvironmentCredential]) -> String {
         let Some(key) = sole_key else {
             return String::new();

@@ -1,7 +1,7 @@
 //! ADR-0001's containment, asserted rather than assumed.
 //!
 //! **The plan asked for a stronger claim than is true, and this asserts the
-//! true one** (ruling F-19). Task 19 Step 4 wanted
+//! true one**. Task 19 Step 4 wanted
 //! `cargo tree -p qa-environments --all-features -i kube` to error — no
 //! Kubernetes anywhere in this crate's graph. That is unachievable while this
 //! gear writes decision D4's runner `Secret`, and the only way to make such a

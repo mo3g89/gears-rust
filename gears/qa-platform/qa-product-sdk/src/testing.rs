@@ -104,7 +104,7 @@
 //! narrow the gap and neither closes it: Layer 1 makes the *classified* half
 //! of a failure structurally incapable of carrying runtime bytes, and a
 //! plugin's own tests are expected to drive its parse-failure paths directly.
-//! **Tasks 9 and 10:** a plugin whose parsing can fail should call
+//! **** a plugin whose parsing can fail should call
 //! `assert_no_leak` and additionally assert, in its own unit tests, that its
 //! error branches classify rather than format.
 //!

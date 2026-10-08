@@ -85,8 +85,7 @@ pub struct RebuildReq {
 ///
 /// # `watermark_at` is deliberately not on the wire
 ///
-/// `ReconcileOutcome` carries it — as `watermark_advanced_to` until the
-/// 2026-09-18 follow-ups renamed and re-specified it — and for a rebuild it is
+/// `ReconcileOutcome` carries it, and for a rebuild it is
 /// always `None`, meaningfully so: not touching the watermark is the
 /// endpoint's contract, not a gap in it. `result_rows_written` stays off for
 /// the neighbouring reason: it is a diagnostic for the ticker's log rather than
@@ -96,17 +95,14 @@ pub struct RebuildReq {
 /// `ReconcileOutcome` (the reconcile ticker, which has no HTTP surface) does not
 /// keep. The endpoint's description states the guarantee instead.
 ///
-/// # `caught_up` **is** on the wire now, as `complete`, and that is the change
-/// # the 2026-09-18 follow-up made here
+/// # `caught_up` **is** on the wire, as `complete`
 ///
-/// It used to be excluded by the same argument as `watermark_at` — always
-/// `false` for a rebuild, which read one page and had no walk to finish. That
-/// stopped being true when the rebuild learned to page: it now means "every run
+/// Unlike `watermark_at`, it is not always the same value for a rebuild: the
+/// rebuild pages through its window, so it means "every run
 /// in `[from, to)` was reached", which is the single most important thing this
-/// response says, and its absence is what made a truncated rebuild
-/// indistinguishable from a complete one. The old signal was a `WARN` in the
-/// gear's log, and the outage this endpoint's fix wave came out of established
-/// exactly what a log line nobody branches on is worth.
+/// response says, and without it a truncated rebuild would be
+/// indistinguishable from a complete one. A log line alone is not a signal a
+/// client can branch on.
 ///
 /// [`Self::resume_from`] travels with it rather than leaving the operator to
 /// work out a continuation: it is the `from` of the next request.
@@ -116,13 +112,13 @@ pub struct RebuildReq {
 ///
 /// `ReconcileOutcome::stopped_at_run` names the run a stopped pass stopped on.
 /// It exists for the log line and for the alert the reconcile ticker raises
-/// (Task 40 — `crate::gear`'s `report_reconcile_outcome`), which has no HTTP
+/// (`crate::gear`'s `report_reconcile_outcome`), which has no HTTP
 /// surface at all — see
 /// `domain::service::reconcile`'s header on how a permanently failing run wedges
 /// a tenant's backfill. It would be *useful* here too: an operator reading
 /// `stopped_at_gap: true` currently has to go to the logs to find out which run.
 /// Adding it is an additive key on a shipped response and nothing here objects
-/// to it; it is simply not this review wave's to add. Unlike `watermark_at`,
+/// to it; it is simply not part of this response today. Unlike `watermark_at`,
 /// there is no argument that it should stay off.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
@@ -140,7 +136,8 @@ pub struct RebuildOutcomeDto {
     /// `true` when every run that finished in `[from, to)` was reached.
     ///
     /// `false` means the rebuild did **part** of the job: it spent its page
-    /// budget, or it stopped on a run it could not re-project. This is the field
+    /// budget, qa-runs stopped answering after the first page, or it stopped
+    /// on a run it could not re-project. This is the field
     /// to branch on — a client that ignores it reads a partial replay as a
     /// complete one, which is the failure this response was reshaped to prevent.
     /// [`Self::resume_from`] then carries where to continue.
@@ -173,7 +170,7 @@ impl From<ReconcileOutcome> for RebuildOutcomeDto {
 }
 
 // ===========================================================================
-// The two flat collections (Task 17)
+// The two flat collections
 // ===========================================================================
 
 /// One file-level test outcome, as `GET /qa/v1/test-results` returns it.
@@ -185,7 +182,7 @@ impl From<ReconcileOutcome> for RebuildOutcomeDto {
 ///
 /// **One contract field is withheld here, and it is the only one:
 /// `run_created_at`.** This doc said "there is nothing further to withhold here
-/// and this is a straight projection" until Task 21b added that column, so the
+/// and this is a straight projection" until that column was added, so the
 /// claim is corrected rather than left standing. It is the fallback half of the
 /// dashboard's window expression — `COALESCE(run_finished_at, run_created_at)`
 /// — denormalized so this gear's aggregates need no cross-gear join. On the
@@ -241,18 +238,18 @@ pub struct TestResultDto {
     /// The build under test. Not a duplicate of [`Self::product_version`]: that
     /// one is the analytics *filter*, this one the analytics *projection*.
     pub app_build: Option<String>,
-    /// Renamed from `platform_id` (Task 25): the wire now agrees with the
+    /// Renamed from `platform_id`: the wire now agrees with the
     /// Rust field. The column moved with it: `environment_id` is now the
     /// column, the Rust field and the wire key alike. Every other
     /// `platform_id` on this crate's wire, whatever its own source entity,
     /// was renamed the same way — this is the one place it is spelled out
     /// in full.
     ///
-    /// **This was a breaking API change** (Task 25): a client reading
+    /// **This was a breaking API change**: a client reading
     /// `platform_id` out of a response now finds it absent, replaced by
     /// `environment_id`. Every renamed field on this crate's wire is a
     /// response field - unlike `qa-runs`, nothing here is also a request
-    /// field, so there is no 400 to raise on this crate's side of ruling G-4.
+    /// field, so there is no 400 to raise on this crate's side.
     pub environment_id: Option<Uuid>,
     pub repo_id: Option<Uuid>,
     pub plan_path: Option<String>,
@@ -427,7 +424,7 @@ pub struct DashboardRunDto {
     /// Sourced from `qa_runs_sdk::Run::environment_id` (this crate's own
     /// `test_result::Model` is not involved here — this row never touches
     /// `qa_test_results`), so it is qa-runs' own physical column, one gear
-    /// over, that this field projects. Renamed from `platform_id` (Task 25)
+    /// over, that this field projects. Renamed from `platform_id`
     /// — see [`TestResultDto::environment_id`]'s doc for why: the same
     /// rename applies on both sides of the boundary, even though the source
     /// column this field is sourced from is qa-runs', not this crate's own.
@@ -565,7 +562,7 @@ pub struct FailedTestCardDto {
     pub plan_path: Option<String>,
     /// The environment the run occupied, as an id rather than a name — the same
     /// substitution [`DashboardRunDto::environment_id`] documents.
-    /// Renamed from `platform_id` (Task 25) — see
+    /// Renamed from `platform_id` — see
     /// [`TestResultDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// When the failure's run finished, falling back to when the row was
@@ -992,7 +989,7 @@ impl From<CoverageBuild> for CoverageBuildDto {
 }
 
 // ---------------------------------------------------------------------------
-// Analytics — the overview and its build-tests drill-down (Task 25b)
+// Analytics — the overview and its build-tests drill-down
 // ---------------------------------------------------------------------------
 
 /// `GET /qa/v1/analytics/overview` — its nine query parameters.
@@ -1016,6 +1013,8 @@ pub struct AnalyticsOverviewQuery {
     /// Required, non-blank. The `product_version` predicate on the rows.
     pub version: String,
     /// Required. `all` or `plan`, case-insensitively.
+    // A `String`, not `AnalyticsScopeDto`, on purpose: see that type's
+    // "Why the *request* side is still a `String`, unlike this".
     pub scope: String,
     /// Required when `scope=plan`, and the plan's **path**.
     pub plan_id: Option<String>,
@@ -1057,6 +1056,8 @@ impl From<AnalyticsOverviewQuery> for OverviewQuery {
 pub struct AnalyticsBuildTestsQuery {
     pub product_id: String,
     pub version: String,
+    // A `String`, not `AnalyticsScopeDto`, on purpose: see that type's
+    // "Why the *request* side is still a `String`, unlike this".
     pub scope: String,
     pub plan_id: Option<String>,
     pub branch: Option<String>,
@@ -1094,6 +1095,8 @@ impl From<AnalyticsBuildTestsQuery> for BuildTestsQuery {
 pub struct AnalyticsExportQuery {
     pub product_id: String,
     pub version: String,
+    // A `String`, not `AnalyticsScopeDto`, on purpose: see that type's
+    // "Why the *request* side is still a `String`, unlike this".
     pub scope: String,
     pub plan_id: Option<String>,
     pub branch: Option<String>,
@@ -1164,7 +1167,7 @@ pub struct OverviewSummaryDto {
     /// **Per file, the collect job's exact count wins where one exists, and
     /// the static count parsed out of the test source is the fallback** —
     /// never the other way, and never a whole-payload choice of one source or
-    /// the other: `domain::analytics::universe::expected_cases` (Task 29) mixes
+    /// the other: `domain::analytics::universe::expected_cases` mixes
     /// the two per file. The static source is
     /// `qa_catalog_sdk::UniverseTest::static_case_count`, present on every
     /// universe entry the overview reads; its own doc records the same
@@ -1204,8 +1207,8 @@ impl From<OverviewSummary> for OverviewSummaryDto {
 ///   this subsystem — `qa_insights_sdk`'s header records that it is materialized
 ///   on read from qa-catalog — so the pair *is* the identity.
 /// * The environment is [`Self::last_environment_id`] **and**
-///   [`Self::last_environment`] (renamed from `last_environment_id`/`last_platform`
-///   at ruling G-3): the id, and the name qa-environments resolved for it. Both,
+///   [`Self::last_environment`] (renamed from `last_platform_id`/`last_platform`):
+///   the id, and the name qa-environments resolved for it. Both,
 ///   rather than only the name, because the name is `null` for an environment
 ///   the caller cannot see, and a client that has to draw *something* needs the
 ///   id to disambiguate two unresolved bars.
@@ -1213,7 +1216,7 @@ impl From<OverviewSummary> for OverviewSummaryDto {
 ///   gear**: `RunsReader` has no bulk name lookup, and a per-item `get_run`
 ///   would be an N+1 across a gear boundary on a list whose length is the
 ///   universe size. Named for what it carries rather than a `last_run_name`
-///   with a UUID inside it, which is the discipline Task 23 applied to the
+///   with a UUID inside it, which is the discipline applied to the
 ///   environment id.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
@@ -1546,12 +1549,12 @@ impl From<GroupSummary> for GroupSummaryDto {
 /// there is one. Collapsing them into a `value: String` would force a choice
 /// between dropping an unresolvable bar — silent data loss on a chart whose
 /// job is comparison — and rendering a UUID into a field a client will draw
-/// as a name, which is the exact outcome Task 23 typed `PlatformGroupSummary`
+/// as a name, which is the exact outcome that typing `PlatformGroupSummary`
 /// around a `Uuid` to prevent.
 ///
-/// Renamed from `PlatformGroupSummaryDto`, with its `environment_id`/`platform`
+/// Renamed from `PlatformGroupSummaryDto`, with its `platform_id`/`platform`
 /// fields, to `EnvironmentGroupSummaryDto` with `environment_id`/`environment`
-/// (Task 25) — see [`TestResultDto::environment_id`]'s doc for why.
+/// — see [`TestResultDto::environment_id`]'s doc for why.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct EnvironmentGroupSummaryDto {
@@ -1588,13 +1591,13 @@ pub struct GroupedSummariesDto {
     /// **Ordered by resolved name**, with the bars qa-environments could not
     /// name last, ordered by id.
     ///
-    /// Task 23's fold orders by id because that is all it has, so the sort
+    /// The fold orders by id because that is all it has, so the sort
     /// happens here, where the names exist. **A rendered order changes when an
     /// environment is
     /// renamed**, which is the correct direction and a change to expect rather than a
     /// regression to hunt.
     ///
-    /// Renamed from `platform` (Task 25), alongside its element type
+    /// Renamed from `platform`, alongside its element type
     /// (`PlatformGroupSummaryDto` → [`EnvironmentGroupSummaryDto`]).
     pub environment: Vec<EnvironmentGroupSummaryDto>,
 }
@@ -1623,8 +1626,9 @@ pub struct AnalyticsOverviewDto {
     pub plan_id: Option<String>,
     /// Normalized: `null` means every branch.
     pub branch: Option<String>,
-    /// `none` | `component` | `tag` | `environment`.
-    pub group_by: String,
+    /// `none` | `component` | `tag` | `environment` — see
+    /// [`AnalyticsGroupByDto`].
+    pub group_by: AnalyticsGroupByDto,
     /// Normalized: trimmed, and `null` when blank.
     pub group_value: Option<String>,
     pub summary: OverviewSummaryDto,
@@ -1648,7 +1652,7 @@ impl From<AnalyticsOverview> for AnalyticsOverviewDto {
             scope: overview.scope.into(),
             plan_id: overview.plan_id,
             branch: overview.branch,
-            group_by: group_to_str(overview.group_by).to_owned(),
+            group_by: overview.group_by.into(),
             group_value: overview.group_value,
             summary: OverviewSummaryDto::from(overview.summary),
             lists: AnalyticsListsDto {
@@ -1837,15 +1841,47 @@ impl From<AnalyticsScopeDto> for Scope {
     }
 }
 
-/// `GroupBy` rendered for the wire. The fourth arm renders `"environment"`,
-/// matching the domain vocabulary rather than the column name. The other three
-/// arms keep the stored spelling, for [`AnalyticsScopeDto`]'s reason.
-const fn group_to_str(group: GroupBy) -> &'static str {
-    match group {
-        GroupBy::None => "none",
-        GroupBy::Component => "component",
-        GroupBy::Tag => "tag",
-        GroupBy::Environment => "environment",
+/// The grouping an analytics overview was computed under, echoed back.
+/// `environment` matches the domain vocabulary rather than the column name; the
+/// other three keep the stored spelling.
+//
+// Mirrors `domain::analytics::aggregates::GroupBy`, for [`AnalyticsScopeDto`]'s
+// reason, and replaces `const fn group_to_str(GroupBy) -> &'static str`, whose
+// output landed in an `AnalyticsOverviewDto::group_by: String` (the third
+// pass, the sibling of review finding #35). The spellings are unchanged; this
+// type's `#[serde(rename_all = "snake_case")]` is now their sole encoder, and
+// the published schema is a four-value `enum`, so the generated TypeScript
+// narrows. The request-side `group_by` query parameters stay `String`, for the
+// reason [`AnalyticsScopeDto`] gives for `scope`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum AnalyticsGroupByDto {
+    None,
+    Component,
+    Tag,
+    Environment,
+}
+
+impl From<GroupBy> for AnalyticsGroupByDto {
+    fn from(group: GroupBy) -> Self {
+        match group {
+            GroupBy::None => Self::None,
+            GroupBy::Component => Self::Component,
+            GroupBy::Tag => Self::Tag,
+            GroupBy::Environment => Self::Environment,
+        }
+    }
+}
+
+impl From<AnalyticsGroupByDto> for GroupBy {
+    /// The direction that closes the mirror, as for [`AnalyticsScopeDto`].
+    fn from(group: AnalyticsGroupByDto) -> Self {
+        match group {
+            AnalyticsGroupByDto::None => Self::None,
+            AnalyticsGroupByDto::Component => Self::Component,
+            AnalyticsGroupByDto::Tag => Self::Tag,
+            AnalyticsGroupByDto::Environment => Self::Environment,
+        }
     }
 }
 
@@ -1875,7 +1911,7 @@ pub struct AnalyticsPlanQuery {
 /// `GET /qa/v1/analytics/plan/tests?plan_id=` renders it.
 ///
 /// `last_environment_id` and `last_environment` (renamed from
-/// `last_environment_id`/`last_platform` at ruling G-3) both ride along for
+/// `last_platform_id`/`last_platform`) both ride along for
 /// [`AnalyticsListItemDto`]'s reason: the name is `null` for an environment
 /// the caller cannot see or that no row named, and the two are indistinguishable
 /// on the wire, exactly as `EnvironmentReader::names`' header records.
@@ -2023,7 +2059,7 @@ impl From<PlanTestHistory> for PlanTestHistoryDto {
     }
 }
 
-// ==================== Saved views (Task 28) ====================
+// ==================== Saved views ====================
 
 /// `GET /qa/v1/analytics/views`. The plan identity is
 /// [`Self::repo_id`] + [`Self::plan_path`], for the reason
@@ -2034,6 +2070,8 @@ impl From<PlanTestHistory> for PlanTestHistoryDto {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct SavedViewsListQuery {
     /// Required. `all` or `plan`, case-insensitively.
+    // A `String`, not `SavedViewScopeDto`, on purpose: see that type's
+    // "Why only the *response* side is typed".
     pub scope: String,
     /// Required together with [`Self::plan_path`] when `scope=plan`.
     pub repo_id: Option<Uuid>,
@@ -2051,6 +2089,8 @@ pub struct SavedViewsListQuery {
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
 pub struct NewSavedViewReq {
+    // A `String`, not `SavedViewScopeDto`, on purpose: see that type's
+    // "Why only the *response* side is typed".
     pub scope: String,
     pub repo_id: Option<Uuid>,
     pub plan_path: Option<String>,
@@ -2198,7 +2238,7 @@ impl TryFrom<SavedView> for SavedViewDto {
 }
 
 // ===========================================================================
-// The collect trigger and report (Task 30)
+// The collect trigger and report
 // ===========================================================================
 
 /// The query string `POST /qa/v1/analytics/collect` takes.
@@ -2305,7 +2345,7 @@ pub struct CollectCountReq {
     pub case_count: i64,
 }
 
-// ==================== JIRA settings (Task 32) ====================
+// ==================== JIRA settings ====================
 
 /// The tenant's JIRA settings on the wire — `GET/PUT /qa/v1/settings/jira`.
 ///
@@ -2364,7 +2404,7 @@ impl From<JiraSettingsDto> for JiraConfigInput {
     }
 }
 
-// ==================== JIRA poller settings (Task 35) ====================
+// ==================== JIRA poller settings ====================
 
 /// The tenant's poller cadence and auto-rerun switch on the wire —
 /// `GET/PUT /qa/v1/settings/jira-poller`.
@@ -2403,7 +2443,7 @@ impl From<JiraPollerConfigDto> for JiraPollerConfig {
     }
 }
 
-// ==================== JIRA bug registry (Task 33) ====================
+// ==================== JIRA bug registry ====================
 
 /// One row of `GET /qa/v1/jira/open-bugs`. The plan is
 /// [`Self::repo_id`]/[`Self::plan_path`] and the environment is
@@ -2418,7 +2458,7 @@ pub struct JiraBugDto {
     pub repo_id: Uuid,
     pub plan_path: String,
     pub app_version: Option<String>,
-    /// Renamed from `platform_id` (Task 25) — see
+    /// Renamed from `platform_id` — see
     /// [`TestResultDto::environment_id`]'s doc for why.
     pub environment_id: Option<Uuid>,
     /// Free JIRA workflow text — `"Open"` unless [`Self::resolved_at`] is set,
@@ -2452,10 +2492,10 @@ impl From<JiraBug> for JiraBugDto {
 
 /// `GET /qa/v1/jira/open-bugs`'s query string.
 ///
-/// [`SavedViewsListQuery`]'s shape without the `scope` field: there is no
-/// scope concept here, only the optional pair — controller ruling R85. No
-/// `#[toolkit_macros::api_dto(request)]`, [`SavedViewsListQuery`]'s reason: a
-/// query string, not a body.
+/// [`SavedViewsListQuery`]'s shape without the `scope` field: there is no scope
+/// concept here, only the optional pair, together or neither
+/// (`JiraService::open_bugs`). No `#[toolkit_macros::api_dto(request)]`,
+/// [`SavedViewsListQuery`]'s reason: a query string, not a body.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct OpenBugsQuery {
     /// Required together with [`Self::plan_path`]. Absent with `plan_path`
@@ -2498,7 +2538,7 @@ impl From<crate::domain::ports::jira_client::IssueRef> for JiraBugFilingDto {
     }
 }
 
-// ==================== Notification settings (Task 38) ====================
+// ==================== Notification settings ====================
 
 /// One status's Slack Block Kit sections, on the wire. `enabled`
 /// is a routing concern already spent by
@@ -2587,15 +2627,12 @@ impl From<ScheduledRunSlackTemplatesDto> for ScheduledRunSlackTemplates {
 /// [`JiraSettingsDto`], no field here needed a **rename** —
 /// [`Self::slack_webhook_credstore_ref`] is already named for what it holds.
 ///
-/// **The name was the only thing that was already right** (Phase C's final
-/// review, Important 1). That field is a credential-store reference and never a
-/// URL — possession of a Slack incoming-webhook URL *is* the authorization to
-/// post, so the column is as sensitive as a JIRA API token's reference — and
-/// until that review nothing enforced it, so an operator following the field's
-/// own name was the only thing keeping the secret out of a document
-/// `GET /qa/v1/settings/notifications` hands to any holder of
+/// **That field is a credential-store reference and never a
+/// URL** — possession of a Slack incoming-webhook URL *is* the authorization to
+/// post, so the column is as sensitive as a JIRA API token's reference, and
+/// `GET /qa/v1/settings/notifications` hands the document to any holder of
 /// `gts.cf.qa.insights.notification_config.v1~/get`.
-/// `domain::service::notify::NotifyService::save_config` now applies the JIRA
+/// `domain::service::notify::NotifyService::save_config` applies the JIRA
 /// surface's own syntax check to it. The one asymmetry that remains with
 /// [`JiraSettingsDto`] is that an empty value here *clears* the reference
 /// instead of preserving the stored one — see that method's doc.
@@ -2608,6 +2645,10 @@ impl From<ScheduledRunSlackTemplatesDto> for ScheduledRunSlackTemplates {
               invents"
 )]
 pub struct NotificationConfigDto {
+    /// Credstore **reference** to the Slack incoming webhook, never the URL.
+    /// The secret it names holds the full
+    /// `https://hooks.slack.com/services/…` URL; the Slack adapter resolves it
+    /// at send time and refuses anything else before dialling.
     pub slack_webhook_credstore_ref: String,
     pub slack_channel: String,
     pub manager_ui_base_url: String,
@@ -2769,8 +2810,7 @@ pub struct NotificationPreviewDto {
     /// format rather than this gear's own. Encoded from
     /// `domain::ports::SlackBlock` by `infra::notify::block_kit`, the one
     /// encoder the outbound adapter uses too — which is what makes "the
-    /// preview shows what gets sent" true by construction (review finding
-    /// #17).
+    /// preview shows what gets sent" true by construction.
     pub blocks: Vec<serde_json::Value>,
 }
 
@@ -2807,11 +2847,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AnalyticsBuildTestsQuery, AnalyticsOverview, AnalyticsOverviewDto, AnalyticsOverviewQuery,
-        AnalyticsPlanQuery, AnalyticsScopeDto, BuildTestDetailDto, BuildTestsQuery,
-        CollectReportQuery, CoverageBuildDto, DailyStatusPointDto, DashboardRunDto,
-        DashboardStatsDto, FailedTestCardDto, FlakyTestCardDto, GroupBy, HashMap, JiraBug,
-        JiraBugDto, JiraBugFilingDto, JiraConfig, JiraPollerConfigDto, JiraSettingsDto,
+        AnalyticsBuildTestsQuery, AnalyticsGroupByDto, AnalyticsOverview, AnalyticsOverviewDto,
+        AnalyticsOverviewQuery, AnalyticsPlanQuery, AnalyticsScopeDto, BuildTestDetailDto,
+        BuildTestsQuery, CollectReportQuery, CoverageBuildDto, DailyStatusPointDto,
+        DashboardRunDto, DashboardStatsDto, FailedTestCardDto, FlakyTestCardDto, GroupBy, HashMap,
+        JiraBug, JiraBugDto, JiraBugFilingDto, JiraConfig, JiraPollerConfigDto, JiraSettingsDto,
         NewSavedViewReq, NotificationConfigDto, NotificationLogEntryDto, NotificationPreviewDto,
         PlanBuildDistributionDto, PlanTestHistoryDto, RebuildOutcomeDto, RebuildReq, SavedViewDto,
         SavedViewScopeDto, ScheduledRunSlackTemplateDto, ScheduledRunSlackTemplatesDto, Scope,
@@ -2832,7 +2872,7 @@ mod tests {
     use crate::domain::service::reconcile::ReconcileOutcome;
     use crate::domain::service::saved_views::SavedViewInput;
 
-    /// **`DashboardRunDto` serializes `environment_id`, never `environment_id`.**
+    /// **`DashboardRunDto` serializes `environment_id`, never `platform_id`.**
     ///
     /// Important-4 of the Task 25 review: a struct-field read is a proxy for
     /// the wire shape, not the wire shape itself - only a real
@@ -2885,6 +2925,11 @@ mod tests {
             resume_from: Some(datetime!(2026-08-18 09:30:00 UTC)),
             stopped_at_gap: true,
             stopped_at_run: Some(Uuid::from_u128(0x5709)),
+            // Deliberately `Some` and deliberately absent from the assertions
+            // below: it is a log field, and a rebuild neither reads nor writes
+            // a sweep cursor. If it ever reaches the wire, the exhaustive
+            // field-by-field check below is where that has to be argued.
+            sweep_cursor_at: Some(datetime!(2026-08-18 08:00:00 UTC)),
         });
 
         assert_eq!(
@@ -2928,6 +2973,8 @@ mod tests {
             resume_from: Some(datetime!(2026-08-18 09:30:00 UTC)),
             stopped_at_gap: false,
             stopped_at_run: None,
+            // Not on the wire: a log field, never a rebuild's answer.
+            sweep_cursor_at: None,
         });
 
         let json = serde_json::to_value(&dto).expect("the response serializes");
@@ -2954,6 +3001,8 @@ mod tests {
             resume_from: None,
             stopped_at_gap: false,
             stopped_at_run: None,
+            // Not on the wire: a log field, never a rebuild's answer.
+            sweep_cursor_at: None,
         });
 
         assert_eq!((dto.scanned, dto.replayed), (7, 7));
@@ -3520,7 +3569,7 @@ mod tests {
         assert_eq!(json["coverage"]["function_pct"], 92.0);
     }
     // -----------------------------------------------------------------------
-    // Analytics (Task 25b)
+    // Analytics
     // -----------------------------------------------------------------------
 
     /// **Legacy's nine query parameters deserialize into the nine fields of the
@@ -3754,7 +3803,8 @@ mod tests {
     }
 
     /// The echoed `scope` and `group_by` are legacy's lowercase spellings —
-    /// `scope_to_str` and `group_to_str` — and
+    /// what `scope_to_str` and `group_to_str` rendered before
+    /// [`AnalyticsScopeDto`] and [`AnalyticsGroupByDto`] replaced them — and
     /// not the enums' `Debug`.
     #[test]
     fn the_echoed_scope_and_grouping_use_legacys_spelling() {
@@ -3769,7 +3819,7 @@ mod tests {
         // 20 fix round): `scope` is [`AnalyticsScopeDto`] now, and the rendered
         // JSON is what the echo is for.
         assert_eq!(json["scope"], "plan");
-        assert_eq!(dto.group_by, "component");
+        assert_eq!(json["group_by"], "component");
     }
 
     /// **Both analytics scopes render the spelling `scope_to_str` rendered.**
@@ -3795,6 +3845,30 @@ mod tests {
             assert_eq!(
                 Scope::from(AnalyticsScopeDto::from(scope)),
                 scope,
+                "the mirror must round-trip, so neither side can drift"
+            );
+        }
+    }
+
+    /// **Every grouping renders the spelling `group_to_str` rendered**, and the
+    /// mirror round-trips — the same pin as the scope's, for
+    /// [`AnalyticsGroupByDto`].
+    #[test]
+    fn every_analytics_grouping_serialises_to_legacys_spelling() {
+        for (group, spelling) in [
+            (GroupBy::None, "none"),
+            (GroupBy::Component, "component"),
+            (GroupBy::Tag, "tag"),
+            (GroupBy::Environment, "environment"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(AnalyticsGroupByDto::from(group))
+                    .expect("a grouping must serialize"),
+                serde_json::json!(spelling)
+            );
+            assert_eq!(
+                GroupBy::from(AnalyticsGroupByDto::from(group)),
+                group,
                 "the mirror must round-trip, so neither side can drift"
             );
         }
@@ -4307,7 +4381,7 @@ mod tests {
             url: "https://acme.atlassian.net".to_owned(),
             project_key: "VHP".to_owned(),
             email: "qa@example.com".to_owned(),
-            api_token_credstore_ref: "cred://qa-jira-api-token".to_owned(),
+            api_token_credstore_ref: "qa-jira-api-token".to_owned(),
             issue_type: Some("Bug".to_owned()),
             enabled: true,
         });
@@ -4334,7 +4408,7 @@ mod tests {
              must never be one of them",
         );
         assert_eq!(
-            json["api_token_credstore_ref"], "cred://qa-jira-api-token",
+            json["api_token_credstore_ref"], "qa-jira-api-token",
             "the reference is returned verbatim - unmasked, because it is not material",
         );
     }
@@ -4348,7 +4422,7 @@ mod tests {
             url: "https://acme.atlassian.net".to_owned(),
             project_key: "VHP".to_owned(),
             email: "qa@example.com".to_owned(),
-            api_token_credstore_ref: "cred://qa-jira-api-token".to_owned(),
+            api_token_credstore_ref: "qa-jira-api-token".to_owned(),
             issue_type: None,
             enabled: true,
         };
@@ -4358,7 +4432,7 @@ mod tests {
         assert_eq!(input.url, "https://acme.atlassian.net");
         assert_eq!(input.project_key, "VHP");
         assert_eq!(input.email, "qa@example.com");
-        assert_eq!(input.api_token_credstore_ref, "cred://qa-jira-api-token");
+        assert_eq!(input.api_token_credstore_ref, "qa-jira-api-token");
         assert_eq!(input.issue_type, None);
         assert!(input.enabled);
     }
@@ -4536,7 +4610,7 @@ mod tests {
     #[test]
     fn the_notification_config_conversion_maps_each_field_to_its_own_name() {
         let config = NotificationConfig {
-            slack_webhook_credstore_ref: "cred://slack-hook".to_owned(),
+            slack_webhook_credstore_ref: "slack-hook".to_owned(),
             slack_channel: "#qa-alerts".to_owned(),
             manager_ui_base_url: "https://qa.example.com".to_owned(),
             slack_enabled: true,
@@ -4563,7 +4637,7 @@ mod tests {
         };
 
         let dto = NotificationConfigDto::from(config.clone());
-        assert_eq!(dto.slack_webhook_credstore_ref, "cred://slack-hook");
+        assert_eq!(dto.slack_webhook_credstore_ref, "slack-hook");
         assert_eq!(dto.slack_channel, "#qa-alerts");
         assert_eq!(dto.manager_ui_base_url, "https://qa.example.com");
         assert!(dto.slack_enabled);

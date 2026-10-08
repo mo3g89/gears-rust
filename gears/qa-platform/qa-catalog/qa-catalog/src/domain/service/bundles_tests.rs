@@ -19,9 +19,11 @@ use toolkit_db::secure::DBRunner;
 use toolkit_security::{AccessScope, pep_properties};
 use uuid::Uuid;
 
+use super::branch_snapshot::BranchSync;
 use super::bundles::{BundleDownloadSigningSecret, BundlesService};
 use super::test_support::{
-    MockTestReposRepository, PermissiveAuthZ, ctx, repo_fixture, test_db_provider,
+    MockRepoSyncPort, MockTestReposRepository, PermissiveAuthZ, branch_sync_over,
+    branch_sync_over_an_empty_remote, ctx, repo_fixture, test_db_provider,
 };
 use crate::domain::error::DomainError;
 use crate::domain::ports::bundle_store::BundleStore;
@@ -236,14 +238,41 @@ async fn build_service_with_secret(
 ) -> BundlesService<MockBundlesRepository, MockTestReposRepository> {
     let enforcer = PolicyEnforcer::new(Arc::new(PermissiveAuthZ));
     let db = test_db_provider().await;
+    let branch_sync = branch_sync_over_an_empty_remote(Arc::clone(&repos), repos_dir.clone()).await;
     BundlesService::new(
         db,
         bundles,
         repos,
         store,
         repos_dir,
+        branch_sync,
         TEST_TTL,
         BundleDownloadSigningSecret(secret.to_owned()),
+        Arc::new(NoopMetrics),
+        enforcer,
+    )
+}
+
+/// [`build_service`] with the lazy-sync collaborator named, for the tests
+/// that build a bundle on a branch without a snapshot.
+async fn build_service_with_sync(
+    bundles: Arc<MockBundlesRepository>,
+    repos: Arc<MockTestReposRepository>,
+    store: Arc<InMemoryBundleStore>,
+    repos_dir: PathBuf,
+    branch_sync: Arc<dyn BranchSync>,
+) -> BundlesService<MockBundlesRepository, MockTestReposRepository> {
+    let enforcer = PolicyEnforcer::new(Arc::new(PermissiveAuthZ));
+    let db = test_db_provider().await;
+    BundlesService::new(
+        db,
+        bundles,
+        repos,
+        store,
+        repos_dir,
+        branch_sync,
+        TEST_TTL,
+        BundleDownloadSigningSecret(TEST_SIGNING_SECRET.to_owned()),
         Arc::new(NoopMetrics),
         enforcer,
     )
@@ -1284,12 +1313,14 @@ async fn build_service_with_authz(
 ) -> BundlesService<MockBundlesRepository, MockTestReposRepository> {
     let enforcer = PolicyEnforcer::new(authz);
     let db = test_db_provider().await;
+    let branch_sync = branch_sync_over_an_empty_remote(Arc::clone(&repos), repos_dir.clone()).await;
     BundlesService::new(
         db,
         bundles,
         repos,
         store,
         repos_dir,
+        branch_sync,
         TEST_TTL,
         BundleDownloadSigningSecret(TEST_SIGNING_SECRET.to_owned()),
         Arc::new(NoopMetrics),
@@ -1493,5 +1524,69 @@ async fn purging_each_enumerated_tenant_removes_only_that_tenants_rows() {
     assert!(
         bundles.rows.lock().unwrap().is_empty(),
         "no row should survive once every enumerated tenant has been purged"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A bundle on a branch without a snapshot
+// ---------------------------------------------------------------------------
+
+/// A bundle build is a reader of branch content like plan discovery, and
+/// goes through the same step: a branch the remote has but this gear never
+/// materialized is synced first, and the bundle is built from what the sync
+/// wrote. Before, this was `RepoNotSynced` until somebody synced the branch
+/// by hand.
+#[tokio::test]
+async fn building_a_bundle_on_an_unsynced_branch_syncs_it_first() {
+    let tenant_id = Uuid::new_v4();
+    let repo_id = Uuid::new_v4();
+    // `main` is synced; `26.7` exists on the remote and has no snapshot.
+    let (tmp, repos) = synced_fixture(repo_id);
+    let engine = Arc::new(MockRepoSyncPort::succeeding(
+        vec!["main".to_owned(), "26.7".to_owned()],
+        vec![("tests/test_b.py".to_owned(), FIXTURE_CONTENT.to_owned())],
+    ));
+    let branch_sync = branch_sync_over(
+        Arc::clone(&repos),
+        Arc::clone(&engine),
+        tmp.path().to_path_buf(),
+        std::time::Duration::from_mins(5),
+    )
+    .await;
+    let svc = build_service_with_sync(
+        Arc::new(MockBundlesRepository::default()),
+        repos,
+        Arc::new(InMemoryBundleStore::default()),
+        tmp.path().to_path_buf(),
+        branch_sync,
+    )
+    .await;
+
+    let descriptor = svc
+        .create_bundle(
+            &ctx(tenant_id),
+            BundleRequest {
+                repo_id,
+                branch: "26.7".to_owned(),
+                files: vec!["tests/test_b.py".to_owned()],
+            },
+        )
+        .await
+        .expect("a branch the remote has is synced, then bundled");
+
+    assert_eq!(
+        engine.synced_branches(),
+        vec!["26.7".to_owned()],
+        "exactly one sync, of the requested branch"
+    );
+    let bytes = svc
+        .get_bundle_content(&ctx(tenant_id), descriptor.id)
+        .await
+        .unwrap();
+    assert!(
+        untar(&bytes)
+            .iter()
+            .any(|(path, _)| path.ends_with("tests/test_b.py")),
+        "the bundle carries the content the sync materialized"
     );
 }

@@ -1,4 +1,4 @@
-//! The launch service: parity spec §3.4's six rules, in order.
+//! The launch service: six rules, in order.
 //!
 //! One public entry — [`LaunchService::launch`] — whose structure *is* the six
 //! rules. Each is cited beside the logic it justifies:
@@ -21,7 +21,7 @@
 //! an oversight"* (`manager/src/services/exclusivity.rs:397-400`; the whole doc
 //! comment on `scan_test_meta` is `:394-402`). Ported: this
 //! module resolves exclusivity from whatever the catalog can serve **without**
-//! forcing a sync, and `service::dispatch` (Task 14) owns the force-sync and the
+//! forcing a sync, and `service::dispatch` owns the force-sync and the
 //! per-group bundle build.
 //!
 //! The ordering matters for more than cost. The admission decision — and
@@ -46,7 +46,8 @@
 //! fault was a missing grant. That is now propagated instead: see
 //! [`LaunchService::gather_group_meta`] for the match that draws the line, and
 //! [`LaunchService::resolve`] for where it surfaces (`DomainError::Forbidden`
-//! for a denial, [`DomainError::Catalog`] for anything else non-absent).
+//! for a denial, [`DomainError::CatalogRefused`] for a refusal the caller can
+//! act on, [`DomainError::Catalog`] for anything else non-absent).
 //!
 //! **Finding #9's fix round 1 found the same hole one call earlier.** A custom
 //! plan's nested `plan.yaml` lookup (`get_plan`) is scoped by the same kind of
@@ -55,7 +56,7 @@
 //! `TEST_META` file used to be folded into "unreadable" — reachable on the
 //! identical missing-grant input, one hop upstream of the fix finding #9
 //! originally shipped. [`LaunchService::resolve_one_nested_plan`] now applies
-//! the same split, through the same [`classify_catalog_failure`] every call
+//! the same split, through the same [`DomainError::from_catalog`] every call
 //! site in this module now shares.
 //!
 //! That distinction is about the **exclusivity scan** and not about the whole
@@ -72,8 +73,8 @@
 //! launch, so nothing was unsafe; what was wrong is that this file then held
 //! two rules for "which variant means a deny" that had to agree, which is the
 //! drift the paragraph above exists to have already stopped. They route through
-//! [`classify_catalog_failure`] as well now, and it is the only such rule left
-//! in this module.
+//! [`DomainError::from_catalog`] as well now, and it is the only such rule left
+//! in this gear: `dispatch_spec` uses it too.
 //!
 //! # Composition order, and what a failure costs at each step
 //!
@@ -317,7 +318,7 @@ pub trait InlineDispatcher: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// The branch this run will resolve against: the explicit request, else the
-/// platform's default, else the repository's default (parity spec §3.4 rule 1).
+/// platform's default, else the repository's default (launch rule 1).
 ///
 /// Ported from `effective_branch` (`manager/src/services/exclusivity.rs:297-312`
 /// — explicit trimmed and non-empty-filtered, else the platform default, trimmed
@@ -469,21 +470,17 @@ fn platform_default_branch(platform: Option<&Environment>) -> Option<&str> {
         // behaviour difference with no justification.
         is_default: _,
         // Added 2026-08-28 by the platform-observation work (qa-environments
-        // Task 7). This function only ever cared about `default_branch`.
+        // Task 7). This function only ever cared about `default_branch`, so
+        // both are consciously ignored.
         //
-        // **Nothing in this gear consumes either field any more.** It was true
-        // until Task 18 that dispatch assembly read them; it now reads
-        // `observed_attrs` through the product plugin's role projections
-        // instead, so these two are ignored here *and* everywhere else in
-        // qa-runs. Corrected at the Phase E review, because a `grep` for these
-        // names in this crate returns only comments and Task 19 decides the
-        // drop from exactly that grep.
+        // `vhp_base_url` and `observed_namespace` sat here too, until Task 19
+        // dropped them, and so did the cluster-health field (qa-environments
+        // Task 5), until the same drop took its five `cluster_*` columns.
+        // Dispatch assembly read the first two until Task 18; it has read
+        // `observed_attrs` through the product plugin's role projections since,
+        // and branch resolution never read any of them.
         version_detect_error: _,
         version_detected_at: _,
-        // Added 2026-08-28 by the cluster-health work (qa-environments
-        // Task 5). Branch resolution has nothing to do with cluster health,
-        // so this is consciously ignored rather than wired, exactly like
-        // `vhp_base_url`/`observed_namespace` above.
         // Added 2026-09-04 by the product-plugins work (qa-environments
         // Task 14, `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash)). Branch
         // resolution has nothing to do with any of them, so they are
@@ -491,16 +488,16 @@ fn platform_default_branch(platform: Option<&Environment>) -> Option<&str> {
         //
         // Two of them do have a consumer in this gear, and it is not this
         // function: `config` and `observed_attrs` are what `build_spec` hands
-        // the plugin as an `EnvironmentHandle` (Task 18), replacing its inline
+        // the plugin as an `EnvironmentHandle`, replacing its inline
         // `vhp_base_url`/`observed_namespace`/kubeconfig-mount block. This
         // destructuring is what routed that task here, which is the whole
         // reason it has no `..`.
         //
         // `credentials` is **not** that consumer either, but no longer for
         // Task 18's reason. Task 18 found the column unwritten and keyed
-        // dispatch off `kubeconfig_credstore_ref` instead (ruling D-19);
-        // **Task 18b became its writer, and `plugin_dispatch` now prefers it**
-        // with the legacy column only as a fallback (ruling F-2). What is true
+        // dispatch off `kubeconfig_credstore_ref` instead;
+        // **Task 18b became its writer**, and since Task 19 dropped the legacy
+        // column `plugin_dispatch` reads `credentials` alone. What is true
         // here is narrower: this function does not read either one — it builds
         // the run row, and `DispatchService::plugin_dispatch` is where the
         // credential slot is assembled. Corrected at the pre-Task-19 review
@@ -525,7 +522,7 @@ fn platform_default_branch(platform: Option<&Environment>) -> Option<&str> {
 // ---------------------------------------------------------------------------
 
 /// Group `(repo_id, path)` pairs by repository, deduplicating paths and keeping
-/// a deterministic order (parity spec §3.4 rule 2; the grouping itself is
+/// a deterministic order (launch rule 2; the grouping itself is
 /// `manager/src/routes/custom_plans.rs:652-658` - the `BTreeMap` declared at
 /// `:652`, iterated at `:654-658`).
 ///
@@ -932,10 +929,8 @@ struct Resolved {
     target: RunTarget,
     environment_id: Option<Uuid>,
     /// Rule 6: the branch label **is** the recorded test version. There is no
-    /// version-to-branch mapping and looking for one is the withdrawn
-    /// requirement `DECOMPOSITION.md:123`'s Withdrawn bullet records (`:122` is the
-    /// adjacent *Resolved* bullet about cross-repo custom plans)
-    /// (`manager/src/routes/runs.rs:645` and
+    /// version-to-branch mapping and looking for one is a withdrawn
+    /// requirement (`manager/src/routes/runs.rs:645` and
     /// `manager/src/routes/custom_plans.rs:960`, both
     /// `let test_version = Some(branch.clone());`).
     test_version: String,
@@ -1037,60 +1032,6 @@ fn tags_declare_validation(tags: &[String]) -> bool {
         .any(|tag| tag.trim().eq_ignore_ascii_case("validation"))
 }
 
-/// The 500 half of [`classify_catalog_failure`], and its only caller.
-///
-/// Kept separate rather than inlined because [`DomainError::Catalog`]'s
-/// `String` payload is built the same way for every non-deny cause, and a
-/// second `DomainError::Catalog(error.to_string())` written at a call site is
-/// how a site drifts back out of the shared classification -- which is the
-/// defect whole-branch review I5 found here.
-fn catalog_error(error: &qa_catalog_sdk::QaCatalogError) -> DomainError {
-    DomainError::Catalog(error.to_string())
-}
-
-/// Translate a `QaCatalogError` that is **not** the absence case into the
-/// `DomainError` it fails a launch with.
-///
-/// **Every** catalog read in this file routes its failure through here. The
-/// classification is written once rather than re-derived per call site -- two
-/// copies of "which `QaCatalogError` variant means a deny" that must always
-/// agree is exactly the drift this codebase's `EnforcerError` split
-/// (`domain/error.rs`) exists to avoid repeating, and this module's header
-/// warns about twice.
-///
-/// A `PermissionDenied` surfaces as [`DomainError::Forbidden`] (403), the same
-/// split already made for that flattened authorization error; every other
-/// cause -- including a future `QaCatalogError` variant, since every one is
-/// `#[non_exhaustive]` -- goes through [`catalog_error`] (500).
-///
-/// # Two kinds of caller, and what `NotFound` means to each
-///
-/// **Whole-branch review I5 added the second kind, and this section is the
-/// correction that owes.** The previous version named exactly two callers --
-/// [`resolve_single_file_read`] and
-/// [`LaunchService::resolve_one_nested_plan`] -- and said both "route their own
-/// `NotFound` (the absent case) elsewhere before ever reaching this function,
-/// so it never has to, and must not, treat an absent resource as a failure".
-/// The three target-resolution reads (`get_repo`, `get_plan`,
-/// `get_custom_plan`) now come here too, and they do **not** route `NotFound`
-/// elsewhere: for them an absent repository, plan or custom plan is not an
-/// optional thing to fall through on, it is the target of the launch, so the
-/// launch fails.
-///
-/// That is not a behaviour change from routing them here -- they reached
-/// [`catalog_error`] directly before, so their `NotFound` was already a
-/// [`DomainError::Catalog`] 500 and still is; the only thing that moved is
-/// their `PermissionDenied`, from 500 to 403, which is the disagreement I5
-/// found. So the rule is: this function classifies a failure, and whether an
-/// absence *is* a failure stays the caller's question. A caller for which it is
-/// not must still answer it before calling.
-fn classify_catalog_failure(error: qa_catalog_sdk::QaCatalogError) -> DomainError {
-    match error {
-        QaCatalogError::PermissionDenied { .. } => DomainError::Forbidden,
-        other => catalog_error(&other),
-    }
-}
-
 fn environments_error(error: &qa_environments_sdk::QaEnvironmentsError) -> DomainError {
     DomainError::Environments(error.to_string())
 }
@@ -1099,11 +1040,10 @@ fn environments_error(error: &qa_environments_sdk::QaEnvironmentsError) -> Domai
 /// reports for a dangling reference, naming `field`.
 ///
 /// A **deliberately different** classification from
-/// [`classify_catalog_failure`]/[`environments_error`]: both of those exist for
-/// a launch already under way, where an absent target is a fault
-/// (`DomainError::Catalog`/`Environments`, both 500) — see
-/// `classify_catalog_failure`'s own doc, *"an absent repository, plan or
-/// custom plan is ... the target of the launch, so the launch fails"*.
+/// [`DomainError::from_catalog`]/[`environments_error`]: both of those exist for
+/// a launch already under way, where an absent target fails the launch (the
+/// catalog's own 404 through [`DomainError::CatalogRefused`], or the opaque
+/// [`DomainError::Environments`] 500).
 /// [`LaunchService::resolve_target_exists`] exists for the one case where the
 /// absence is not yet a fault: the caller can still fix the request before it
 /// is ever persisted, so it is reported as `Validation` (400) instead, with
@@ -1181,7 +1121,7 @@ impl<R: RunsRepository> LaunchService<R> {
             .get_repo(ctx, repo_id)
             .await
             .map(|repo| repo.default_branch)
-            .map_err(classify_catalog_failure)
+            .map_err(DomainError::from_catalog)
     }
 
     /// Resolve a plan-backed target (`Plan` or `Test`).
@@ -1209,7 +1149,7 @@ impl<R: RunsRepository> LaunchService<R> {
             .catalog
             .get_plan(ctx, repo_id, &branch, path)
             .await
-            .map_err(classify_catalog_failure)?;
+            .map_err(DomainError::from_catalog)?;
 
         // Rule 2. A plan-backed target is one repository by construction, so
         // the grouping is a single group and rule 3's guard cannot fire.
@@ -1267,7 +1207,7 @@ impl<R: RunsRepository> LaunchService<R> {
             .catalog
             .get_custom_plan(ctx, plan_id)
             .await
-            .map_err(classify_catalog_failure)?;
+            .map_err(DomainError::from_catalog)?;
 
         // Rule 2 first, because rule 3's guard is a question about the grouping.
         // Bundling groups by repository; exclusivity groups by *nested plan*
@@ -1404,7 +1344,7 @@ impl<R: RunsRepository> LaunchService<R> {
     ///
     /// The plan drafting this method took `tenant: &TenantBound` and no
     /// `environment_id` or `branch` parameter, on the premise that
-    /// `classify_catalog_failure`/`environments_error` already answer
+    /// `DomainError::from_catalog`/`environments_error` already answer
     /// [`DomainError::Validation`] for an absent target the way a launch
     /// would. Neither does — see [`dangling_reference`]'s doc, which is why
     /// this method builds its own `Validation` rather than delegating to
@@ -1424,6 +1364,8 @@ impl<R: RunsRepository> LaunchService<R> {
     /// [`DomainError::Validation`] naming `"target.repo_id"`, `"target.path"`,
     /// `"target.id"` or `"environment_id"` when that reference does not
     /// resolve; [`DomainError::Forbidden`] when a policy denies the read;
+    /// [`DomainError::CatalogRefused`] for any other refusal the catalog
+    /// answers the caller with (a branch with no synced content, say), and
     /// [`DomainError::Catalog`]/[`DomainError::Environments`] on any other
     /// failure.
     pub(crate) async fn resolve_target_exists(
@@ -1457,7 +1399,7 @@ impl<R: RunsRepository> LaunchService<R> {
                             format!("repository {repo_id} does not exist"),
                         ));
                     }
-                    Err(error) => return Err(classify_catalog_failure(error)),
+                    Err(error) => return Err(DomainError::from_catalog(error)),
                 };
                 let resolved_branch = resolve_branch(
                     branch,
@@ -1476,7 +1418,7 @@ impl<R: RunsRepository> LaunchService<R> {
                             "{path} does not resolve to a plan on branch {resolved_branch}"
                         ),
                     )),
-                    Err(error) => Err(classify_catalog_failure(error)),
+                    Err(error) => Err(DomainError::from_catalog(error)),
                 }
             }
             RunTarget::CustomPlan { id } => match self.catalog.get_custom_plan(ctx, *id).await {
@@ -1485,7 +1427,7 @@ impl<R: RunsRepository> LaunchService<R> {
                     "target.id",
                     format!("custom plan {id} does not exist"),
                 )),
-                Err(error) => Err(classify_catalog_failure(error)),
+                Err(error) => Err(DomainError::from_catalog(error)),
             },
             RunTarget::Collect { repo_id, .. } => {
                 match self.catalog.get_repo(ctx, *repo_id).await {
@@ -1494,7 +1436,7 @@ impl<R: RunsRepository> LaunchService<R> {
                         "target.repo_id",
                         format!("repository {repo_id} does not exist"),
                     )),
-                    Err(error) => Err(classify_catalog_failure(error)),
+                    Err(error) => Err(DomainError::from_catalog(error)),
                 }
             }
         }
@@ -1541,7 +1483,7 @@ impl<R: RunsRepository> LaunchService<R> {
     /// layer rather than by consulting a platform. This gear keeps the
     /// repository default as the last tier instead of hard-coding `main`,
     /// because that default is the same fact expressed per repository and the
-    /// collect trigger (Task 30) owns the `main` policy.
+    /// collect trigger owns the `main` policy.
     async fn collect_target_facts(
         &self,
         ctx: &SecurityContext,
@@ -1973,7 +1915,7 @@ impl<R: RunsRepository> LaunchService<R> {
     /// earlier: [`Self::scan_nested_plan`] is never reached, and the same
     /// destructive-suite-resolves-parallel outcome results, just one hop
     /// upstream of where the original fix landed. Fixed with the identical
-    /// split `TEST_META` already gets — see [`classify_catalog_failure`], which
+    /// split `TEST_META` already gets — see [`DomainError::from_catalog`], which
     /// this function's `Err` arm now shares with
     /// [`resolve_single_file_read`] rather than re-deriving it.
     ///
@@ -2005,7 +1947,7 @@ impl<R: RunsRepository> LaunchService<R> {
     /// still succeeds with the same run row. The log line is visible to an
     /// operator of *this* deployment, not to the caller. **A PEP denial no
     /// longer joins them**: it is `PermissionDenied`, not `NotFound`, and now
-    /// fails the launch closed via [`classify_catalog_failure`] — the same
+    /// fails the launch closed via [`DomainError::from_catalog`] — the same
     /// outcome a denied `TEST_META` read gets, and for the same reason: a
     /// missing grant is not "this resource does not exist", and treating it as
     /// one lets a suite resolve parallel instead of failing loudly. Note that
@@ -2152,7 +2094,7 @@ impl<R: RunsRepository> LaunchService<R> {
             // finding #9 fixed for `TEST_META` can deny this call first, one
             // hop upstream of `scan_nested_plan`, and folding it into
             // "contributes nothing" resolved a declared-exclusive custom plan
-            // as parallel just as silently. See `classify_catalog_failure`,
+            // as parallel just as silently. See `DomainError::from_catalog`,
             // shared with `resolve_single_file_read`'s identical split.
             Err(error) => {
                 warn!(
@@ -2163,7 +2105,7 @@ impl<R: RunsRepository> LaunchService<R> {
                     "exclusivity: the nested plan.yaml read failed for a reason other than \
                      being absent; failing the launch rather than resolving it parallel",
                 );
-                Err(classify_catalog_failure(error))
+                Err(DomainError::from_catalog(error))
             }
         }
     }
@@ -2402,7 +2344,7 @@ enum SingleFileRead {
 /// `exclusive: True` as **parallel** when the only fault was a missing grant,
 /// a destructive test silently losing its platform-to-itself guarantee. That
 /// is the dangerous direction, and it fails closed now, via
-/// [`classify_catalog_failure`] -- the same classification
+/// [`DomainError::from_catalog`] -- the same classification
 /// [`LaunchService::resolve_one_nested_plan`]'s `get_plan` read reuses, fixed
 /// alongside this task's own review round for the identical reason: the same
 /// missing grant denies both calls.
@@ -2437,7 +2379,7 @@ fn resolve_single_file_read(
                 "exclusivity: the TEST_META read failed for a reason other than the file \
                  being absent; failing the launch rather than resolving it parallel",
             );
-            Err(classify_catalog_failure(error))
+            Err(DomainError::from_catalog(error))
         }
     }
 }
@@ -2604,12 +2546,12 @@ impl<R: RunsRepository> LaunchService<R> {
     /// this file, which is where it started.
     async fn abandon(&self, ctx: &SecurityContext, run: &Run, cause: &DomainError) {
         let finished_at = OffsetDateTime::now_utc();
-        if !cause.disclosable() {
+        if !cause.records_verbatim() {
             warn!(
                 run_id = %run.id,
                 cause = %cause,
-                "admission failed for a reason the caller is not entitled to see; the run \
-                 records an opaque message and this line carries the detail",
+                "admission failed for a reason the run row does not record verbatim; this \
+                 line carries the detail",
             );
         }
         let recorded_reason = cause.recorded_text();
@@ -2795,7 +2737,7 @@ impl<R: RunsRepository> LaunchService<R> {
         })
     }
 
-    /// Launch a run: parity spec §3.4's rules, in order.
+    /// Launch a run: the six launch rules of this module's doc, in order.
     ///
     /// # The order, and why each step is where it is
     ///
@@ -2824,10 +2766,13 @@ impl<R: RunsRepository> LaunchService<R> {
     /// [`DomainError::AmbiguousBranch`] for a multi-repository custom plan with
     /// no explicit branch, [`DomainError::Environments`] /
     /// [`DomainError::Catalog`] when the platform or the target cannot be
-    /// resolved, and the same two from resolving exclusivity: a `TEST_META`
-    /// read or a nested `plan.yaml` read that fails for a reason other than
-    /// the resource being absent now surfaces as [`DomainError::Forbidden`] (a
-    /// denial) or [`DomainError::Catalog`] (anything else) rather than being
+    /// resolved, [`DomainError::CatalogRefused`] when the catalog refuses the
+    /// target with an answer the caller can act on (it does not exist, or the
+    /// branch has no synced content), and the same from resolving exclusivity:
+    /// a `TEST_META` read or a nested `plan.yaml` read that fails for a reason
+    /// other than the resource being absent now surfaces as
+    /// [`DomainError::Forbidden`] (a denial), [`DomainError::CatalogRefused`]
+    /// or [`DomainError::Catalog`] (anything else) rather than being
     /// swallowed (review finding #9). [`DomainError::QueueFull`] /
     /// [`DomainError::ConcurrencyLimit`] when admission refuses, and
     /// [`DomainError::Database`] on a persistence failure.

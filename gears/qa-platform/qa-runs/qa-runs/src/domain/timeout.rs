@@ -7,12 +7,12 @@
 //! resolution decides; it did not belong inside the service that orders it.
 //!
 //! It was moved out of `service::launch` in Task 13's third review round, and the
-//! trigger was a defect rather than tidiness: **Task 15's re-run has to resolve a
-//! new deadline for a new run**, and `resolve_timeout_seconds` was private to
-//! `launch`. The thing that would have been duplicated is a three-branch chain
-//! with two load-bearing asymmetries that take a page to explain — the exact
-//! shape of legacy's own warning about the branch chain, and exactly what
-//! parity spec §3.4 rule 1's "written once" discipline exists to prevent.
+//! trigger was a defect rather than tidiness: **Task 15's re-run has to resolve a new
+//! deadline for a new run**, and `resolve_timeout_seconds` was private to `launch`.
+//! The thing that would have been duplicated is a three-branch chain with two
+//! load-bearing asymmetries that take a page to explain — the exact shape of legacy's
+//! own warning about the branch chain, and exactly what keeping the branch chain
+//! written once, in `launch::resolve_branch`, exists to prevent.
 //!
 //! Contrast the branch chain, which stays private to `launch` on purpose: dispatch
 //! must read the *recorded* branch off `Run::test_version` rather than resolve it

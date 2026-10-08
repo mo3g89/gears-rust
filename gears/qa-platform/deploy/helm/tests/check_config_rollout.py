@@ -2,28 +2,28 @@
 
 # What this guard is for
 
-A ConfigMap is not part of a Deployment's pod template. Changing one changes
-nothing Kubernetes can observe, so `helm upgrade` writes the new object,
-reports success, and the running pod keeps serving the values it read at
-start-up. MEASURED on the dev stand 2026-09-21: setting
+A ConfigMap or a Secret is not part of a Deployment's pod template. Changing
+one changes nothing Kubernetes can observe, so `helm upgrade` writes the new
+object, reports success, and the running pod keeps serving the values it read
+at start-up. MEASURED on the dev stand 2026-09-21: setting
 `bundleDownloadSigningSecret` produced revision 29 with the new value in
 `qa-platform-gears-config`, and the gears pod was still 38 minutes old
 afterwards, still signing bundles with the old key. Nothing anywhere said so.
 
 `gears-deployment.yaml` now hashes each rendered config source into a
-`checksum/*` pod annotation, which puts the ConfigMap's content inside the pod
+`checksum/*` pod annotation, which puts the object's content inside the pod
 template and makes a config change a rollout. This guard holds the three
 properties that makes true, because each one fails silently on its own:
 
 1. **Every config source the gears pod consumes is covered.** An annotation
-   that exists but does not name the ConfigMap somebody added last week is
+   that exists but does not name the config object somebody added last week is
    worth nothing, and nothing else in the tree would notice -- the Deployment
    renders, the volume mounts, the pod runs the stale value exactly as before.
 
 2. **Two identical renders agree.** This is the half that is easy to lose. The
    two signing secrets used to default to a per-render `randAlphaNum 32`; with
    the checksum in place, that fallback would give *every* `helm upgrade` a
-   different ConfigMap and a different hash, so a no-op upgrade would roll the
+   different rendered object and a different hash, so a no-op upgrade would roll the
    pod -- and this Deployment is `strategy: Recreate`, so that is a real
    outage, taken for nothing, on every deploy.
 
@@ -33,6 +33,10 @@ properties that makes true, because each one fails silently on its own:
 And the two `required`s that property 2 depends on are asserted directly, so
 that reinstating a default here fails loudly rather than quietly restoring
 property 2's failure mode.
+
+The two signing secrets also refuse a value under 16 characters once trimmed,
+naming the value and "at least 16", and render at exactly 16 -- the render-time
+copy of the floor both gears apply at runtime.
 """
 import pathlib
 import subprocess
@@ -51,11 +55,17 @@ ORIGIN = "https://guard-config-rollout.invalid"
 ADMIN_PASSWORD = "guard-fixture-not-a-real-password"        # nosec: test fixture
 BUNDLE_KEY = "guard-fixture-not-a-real-bundle-key"          # nosec: test fixture
 COLLECT_KEY = "guard-fixture-not-a-real-collect-key"        # nosec: test fixture
+# `required` since 2026-09-29, and the chart refuses the committed dev
+# literal outside devMode -- check_realm_secrecy.py owns both of those.
+# It goes in EVERY render here, including the deliberately-incomplete one
+# in check_neither_signing_secret_has_a_default: that render must fail on
+# the one value it is testing and name it, not on a different `required`.
+WORKFLOW_SECRET = "guard-fixture-not-a-real-workflow-secret"  # nosec: test fixture
 
 GEARS_DEPLOYMENT = "qa-platform-gears"
 
 # Which annotation covers which rendered object. Written out rather than
-# derived, so that mounting a new ConfigMap without hashing it is a FAILURE
+# derived, so that mounting a new config object without hashing it is a FAILURE
 # here and not an invisible gap: `check_every_config_source_is_hashed` compares
 # this table against what the rendered pod actually consumes, in both
 # directions.
@@ -70,7 +80,14 @@ COVERED = {
 # It is not a template: certs-job.yaml creates and refreshes that Secret inside
 # the cluster, so there is nothing for `include` to render and its contents are
 # not knowable at render time. Rotating it is that Job's business.
-NOT_A_TEMPLATE = {"qa-platform-tls"}
+#
+# `qa-platform-secret-writer-token` (secret-writer-serviceaccount.yaml) IS
+# rendered, but with no `data`: the token controller fills it in-cluster, so
+# its rendered form never changes and a checksum of it would never roll
+# anything. It is mounted as a directory (no subPath), so the kubelet
+# refreshes the files if the controller rewrites it, and kube-client re-reads
+# the tokenFile -- no roll is needed for the running process to see it.
+NOT_A_TEMPLATE = {"qa-platform-tls", "qa-platform-secret-writer-token"}
 
 
 def render(extra=(), release=RELEASE):
@@ -80,6 +97,8 @@ def render(extra=(), release=RELEASE):
         "--namespace", "qa-platform",
         "--set", f"publicOrigin={ORIGIN}",
         "--set", f"keycloak.adminPassword={ADMIN_PASSWORD}",
+        "--set", f"argo.workflowClientSecret={WORKFLOW_SECRET}",
+        "--set", "postgres.password=guard-fixture-not-a-real-db-password",  # nosec: test fixture only
         "--set", f"bundleDownloadSigningSecret={BUNDLE_KEY}",
         "--set", f"collectReportSigningSecret={COLLECT_KEY}",
         *extra,
@@ -211,7 +230,7 @@ def check_a_changed_value_changes_the_hash(failures):
     """The property the annotation exists for, against the value that proved it.
 
     `bundleDownloadSigningSecret` is the one whose staleness was observed on
-    the stand: the ConfigMap held the new key and the pod kept signing with the
+    the stand: the rendered config held the new key and the pod kept signing with the
     old one for 38 minutes, until it was restarted by hand."""
     before, stderr, rc = render()
     if rc != 0:
@@ -236,7 +255,7 @@ def check_a_changed_value_changes_the_hash(failures):
             "the upgrade -- every bundle it mints would then fail "
             "verification once something else restarted it.")
         return
-    print(f"PASS: {key} changes when a value rendered into that ConfigMap changes")
+    print(f"PASS: {key} changes when a value rendered into that object changes")
 
 
 def check_the_signing_secrets_have_no_default(failures):
@@ -251,6 +270,8 @@ def check_the_signing_secrets_have_no_default(failures):
             "--namespace", "qa-platform",
             "--set", f"publicOrigin={ORIGIN}",
             "--set", f"keycloak.adminPassword={ADMIN_PASSWORD}",
+            "--set", f"argo.workflowClientSecret={WORKFLOW_SECRET}",
+            "--set", "postgres.password=guard-fixture-not-a-real-db-password",  # nosec: test fixture only
         ]
         other = ("collectReportSigningSecret" if value.startswith("bundle")
                  else "bundleDownloadSigningSecret")
@@ -276,12 +297,48 @@ def check_the_signing_secrets_have_no_default(failures):
             "the value")
 
 
+# 15 characters, a whitespace-padded 12, and exactly 16: the floor is 16 once
+# trimmed, the same predicate qa-catalog's and qa-insights'
+# `signing_secret_is_configured` apply at runtime
+# (`secret.trim().len() >= MIN_SIGNING_SECRET_LEN`).
+SHORT_SIGNING_VALUES = ("fifteen-chars-x", "   padded-short  ")  # nosec: test fixture only
+FLOOR_SIGNING_VALUE = "sixteen-chars-xx"  # nosec: test fixture only
+
+
+def check_the_signing_secrets_have_a_floor(failures):
+    """A short root used to RENDER: the gears then booted Ready and refused
+    every bundle download (qa-catalog) or every collect report (qa-insights)
+    at request time, which looks like a healthy pod. The chart now refuses it
+    at render time, with the runtime's own floor."""
+    before = len(failures)
+    for value in ("bundleDownloadSigningSecret", "collectReportSigningSecret"):
+        for short in SHORT_SIGNING_VALUES:
+            _, stderr, rc = render(extra=("--set", f"{value}={short}"))
+            if rc == 0:
+                failures.append(
+                    f"FAIL: {value}={short!r} ({len(short.strip())} characters "
+                    "trimmed) rendered. The gears refuse it at runtime, so the "
+                    "chart must refuse it at render time.")
+            elif value not in stderr or "at least 16" not in stderr:
+                failures.append(
+                    f"FAIL: {value}={short!r} was refused (good) but the message "
+                    f"does not name {value} and 'at least 16':\n{stderr}")
+        _, stderr, rc = render(extra=("--set", f"{value}={FLOOR_SIGNING_VALUE}"))
+        if rc != 0:
+            failures.append(
+                f"FAIL: a 16-character {value} must render:\n{stderr}")
+    if len(failures) == before:
+        print("PASS: both signing secrets refuse a value under 16 characters "
+              "once trimmed, and render at 16")
+
+
 def main():
     failures = []
     check_every_config_source_is_hashed(failures)
     check_two_identical_renders_agree(failures)
     check_a_changed_value_changes_the_hash(failures)
     check_the_signing_secrets_have_no_default(failures)
+    check_the_signing_secrets_have_a_floor(failures)
     if failures:
         print("\n".join(failures))
         return 1

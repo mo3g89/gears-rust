@@ -1,10 +1,15 @@
 //! The outbound JIRA port — Task 32.
 //!
-//! Three methods, because legacy has three JIRA REST interactions and no more:
-//! a find-or-create ([`JiraClient::create_or_find_issue`], legacy
-//! `manager/src/services/jira.rs:33-193`), a status-category read
-//! ([`JiraClient::check_status`], `jira.rs:254-289`) and the single-issue read
-//! that status read is a projection of ([`JiraClient::get_issue`]).
+//! Two methods: a find-or-create ([`JiraClient::create_or_find_issue`], legacy
+//! `manager/src/services/jira.rs:33-193`) and a status-category read
+//! ([`JiraClient::check_status`], `jira.rs:254-289`).
+//!
+//! **There was a third.** `get_issue` returned the whole [`JiraIssue`] that
+//! `check_status` projects down to one field, and no caller in this gear or
+//! any other ever asked for it; finding #38's triage deleted it. The read it
+//! named still happens — `infra::jira::OagwJiraClient::fetch_issue` is the
+//! single-issue `GET`, and `check_status` is the projection — it is simply not
+//! a port method any more.
 //!
 //! # The config crosses the port; the credential does not
 //!
@@ -33,18 +38,6 @@ use toolkit_security::SecurityContext;
 
 use crate::domain::error::DomainError;
 
-/// The optional scheme prefix a credential-store reference may carry.
-///
-/// oagw's apikey auth plugin strips exactly this before handing the remainder to
-/// `SecretRef::new` (`gears/system/oagw/oagw/src/infra/plugin/apikey_auth.rs:42-47`),
-/// so both `cred://name` and a bare `name` are legal on the wire and mean the
-/// same secret.
-pub const CREDSTORE_REF_SCHEME: &str = "cred://";
-
-/// `SecretRef`'s own length ceiling
-/// (`gears/credstore/credstore-sdk/src/models.rs:59-63`).
-pub const MAX_CREDSTORE_REF_LEN: usize = 255;
-
 /// Refuse a credential-store reference oagw's credential plugin could not
 /// resolve.
 ///
@@ -60,11 +53,13 @@ pub const MAX_CREDSTORE_REF_LEN: usize = 255;
 /// # Why this is validated in this gear at all
 ///
 /// `qa_jira_config.api_token_credstore_ref` is copied verbatim into the oagw
-/// upstream's apikey auth config, where it reaches `SecretRef::new` after only a
-/// `cred://` prefix strip (`apikey_auth.rs:42-47`). **`SecretRef` accepts
+/// upstream's apikey auth config, where it reaches `SecretRef::new` (the
+/// apikey plugin's `SecretRef::new` call in
+/// `gears/system/oagw/oagw/src/infra/plugin/apikey_auth.rs`, which would also
+/// strip a `cred://` prefix this gear no longer stores). **`SecretRef` accepts
 /// `[a-zA-Z0-9_-]` and nothing else, up to 255 bytes, and colons are prohibited
 /// outright "to prevent `ExternalID` collisions in backend storage"**
-/// (`gears/credstore/credstore-sdk/src/models.rs:42-83`). A reference that
+/// (`credstore_sdk::SecretRef`'s own doc). A reference that
 /// violates that — `credstore://qa/jira/api-token`, say, which is the shape a
 /// URL-flavoured guess produces — is accepted by the `PUT`, stored, and then
 /// fails as `PluginError::Internal("invalid secret ref ...")` inside oagw at
@@ -82,11 +77,13 @@ pub const MAX_CREDSTORE_REF_LEN: usize = 255;
 /// no check at all and whose four doc claims about "never a URL" it is what
 /// makes true.
 ///
-/// **The `credstore://` spelling is not valid syntax and never was.** It carries
-/// a colon and slashes, both of which this function rejects; it is refused here
-/// rather than quietly stripped, because a reference oagw would resolve to
-/// nothing is better refused at the `PUT` than at request time. See
-/// [`CREDSTORE_REF_SCHEME`] for the one prefix that is legal.
+/// **The rule is `credstore_sdk::SecretRef::new`'s, and it is the same rule
+/// qa-environments and qa-catalog apply.** No scheme prefix is accepted:
+/// `credstore://…` carries a colon and slashes, and `cred://…`, which `oagw`'s
+/// apikey plugin would strip, is refused too, so that the platform has one
+/// spelling. Migration `m20261007_000008_bare_credstore_refs` rewrote every stored
+/// `cred://` value to its bare name. A reference `oagw` would resolve to nothing
+/// is better refused at the `PUT` than at request time.
 ///
 /// # Errors
 ///
@@ -111,27 +108,18 @@ pub fn validate_credstore_ref(field: &str, reference: &str) -> Result<(), Domain
         ),
     };
 
-    let name = reference
-        .strip_prefix(CREDSTORE_REF_SCHEME)
-        .unwrap_or(reference);
-    if name.is_empty() {
+    if reference.is_empty() {
         return Err(invalid("it must not be empty"));
     }
-    if name.len() > MAX_CREDSTORE_REF_LEN {
-        return Err(invalid(
-            "it must not exceed 255 characters after any cred:// prefix",
-        ));
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(invalid(
-            "it must be letters, digits, underscores and dashes only, optionally prefixed with \
-             cred:// - slashes and colons in particular are rejected by the credential store",
-        ));
-    }
-    Ok(())
+    credstore_sdk::SecretRef::new(reference)
+        .map(|_| ())
+        .map_err(|_| {
+            invalid(
+                "it must be a name of letters, digits, underscores and dashes only, at most 255 \
+                 characters, such as `qa-jira-api-token`; no scheme prefix such as cred:// is \
+                 accepted, and slashes and colons are rejected by the credential store",
+            )
+        })
 }
 
 /// The `statusCategory.key` JIRA reports for an issue.
@@ -177,6 +165,13 @@ impl StatusCategory {
     }
 
     /// The category key verbatim.
+    ///
+    /// **`#[cfg(test)]` since finding #38's triage.** Production compares
+    /// categories through [`Self::is_resolved`] and never reads the text; the
+    /// only readers are the tests that assert what an instance answered, and a
+    /// `cfg` says "test-only" in the type system where a dead-code allowance
+    /// would only say "do not ask".
+    #[cfg(test)]
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -244,10 +239,16 @@ pub struct IssueRef {
 /// One JIRA issue, as much of it as this gear reads.
 ///
 /// Legacy never models this — `check_jira_status` projects the same `GET` down
-/// to one string and discards the rest (`jira.rs:279-287`). The type exists
-/// because the brief's port has a `get_issue`, and it carries exactly the two
-/// fields the response body is read for plus the key the caller asked about, so
-/// a later consumer does not have to reopen the adapter to surface a summary.
+/// to one string and discards the rest (`jira.rs:279-287`).
+///
+/// **Crate-internal, and no longer on [`JiraClient`].** The port carried a
+/// `get_issue` that returned this and had no caller anywhere; finding #38's
+/// triage deleted it, on the same ruling the owner gave `latest_per_test` — a
+/// surface written for "a later consumer" is a surface with no consumer. What
+/// survives is this type as the return of the adapter's own private
+/// `fetch_issue`, which [`JiraClient::check_status`] projects down to one
+/// field. A future caller that wants the summary re-adds the port method
+/// against a body this adapter already parses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JiraIssue {
     pub key: String,
@@ -262,9 +263,14 @@ pub struct JiraIssue {
 ///
 /// # Errors
 ///
-/// Every method returns [`DomainError::Internal`] for a transport or gateway
-/// failure and [`DomainError::JiraNotConfigured`] when the config it is handed
-/// is disabled — the second is a refusal, not a failure, and legacy makes the
+/// Every method returns [`DomainError::UpstreamEgress`] (`channel = "jira"`) for
+/// a failure on the far side, classified as Slack's adapter classifies:
+/// `Authentication` for JIRA's `401`/`403` (the secret behind
+/// `api_token_credstore_ref` was refused), `Unreachable` for the gateway's own
+/// answer, `Timeout` for a deadline and `Rejected` for any other non-2xx.
+/// [`DomainError::Internal`] is this gear's own fault (a body that is not JSON,
+/// a create answer with no key). It returns [`DomainError::JiraNotConfigured`]
+/// when the config it is handed is disabled — the second is a refusal, not a failure, and legacy makes the
 /// same one (`jira.rs:65-67`, `"JIRA integration is disabled"`).
 #[async_trait]
 pub trait JiraClient: Send + Sync {
@@ -300,15 +306,8 @@ pub trait JiraClient: Send + Sync {
         config: &JiraConfig,
         jira_key: &str,
     ) -> Result<StatusCategory, DomainError>;
-
-    /// The issue behind [`Self::check_status`]' one field.
-    ///
-    /// Same `GET /rest/api/3/issue/{key}` (`jira.rs:261-273`); this returns the
-    /// summary alongside the category rather than discarding it.
-    async fn get_issue(
-        &self,
-        ctx: &SecurityContext,
-        config: &JiraConfig,
-        jira_key: &str,
-    ) -> Result<JiraIssue, DomainError>;
 }
+
+#[cfg(test)]
+#[path = "jira_client_tests.rs"]
+mod tests;

@@ -87,8 +87,9 @@
 //! doc) — one bool parameter could not carry that difference honestly where
 //! two methods can.
 //!
-//! Controller ruling R73: this port grows only for a read or write a test in
-//! this crate exercises, and `domain::service::jira_poller`'s
+//! A port grows only in the task that consumes it (`runs_reader`'s header):
+//! this port grows only for a read or write a test in this crate exercises, and
+//! `domain::service::jira_poller`'s
 //! `an_auto_rerun_goes_through_the_normal_launch_path` and
 //! `the_branch_is_resolved_once_and_reused_for_lookup_and_launch` are that
 //! test.
@@ -108,7 +109,7 @@ pub trait RunsLauncher: Send + Sync {
     /// `qa_runs_sdk::QaRunsClientV1::launch` wrapped with
     /// `RunTarget::Collect { repo_id, collect_url }` and `branch` on the
     /// request — Task 5's run kind, verbatim; see that type's own doc for the
-    /// `COLLECT_ONLY`/`VHP_COLLECT_URL` contract this preserves (D2).
+    /// `COLLECT_ONLY`/`VHP_COLLECT_URL` contract this preserves.
     ///
     /// Never queued and never exclusive: `RunKind::Collect` bypasses
     /// admission on qa-runs' side

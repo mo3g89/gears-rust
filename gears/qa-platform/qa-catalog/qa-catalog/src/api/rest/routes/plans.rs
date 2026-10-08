@@ -22,7 +22,15 @@ pub(super) fn register_plan_routes(mut router: Router, openapi: &dyn OpenApiRegi
         .description(
             "Discover plans from the synced working copy of the given \
              repository and branch (plans are never persisted; they are \
-             materialized on read)",
+             materialized on read). A branch the remote has but that was \
+             never synced is synced on this first read, which needs the sync \
+             permission on the repository. A branch the remote does not have \
+             answers 404. A repository whose credential cannot be resolved or \
+             is rejected by the remote answers 400 with the reason, recorded \
+             in its `sync_error`; a remote that cannot be listed (including \
+             one answering HTTP 403) answers 503. For a short backoff after \
+             either failure, every read that would sync that repository gives \
+             the same answer without contacting the remote.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -35,12 +43,15 @@ pub(super) fn register_plan_routes(mut router: Router, openapi: &dyn OpenApiRegi
             StatusCode::OK,
             "Discovered plans",
         )
-        // Missing/invalid query params and RepoNotSynced both render 400.
+        // Missing/invalid query params, RepoNotSynced (including a recorded
+        // credential fault) render 400; BranchNotFound is 404; a remote that
+        // cannot be listed, or one inside its backoff for that, is 503.
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
         .error_500(openapi)
+        .error_503(openapi)
         .register(router, openapi);
 
     router

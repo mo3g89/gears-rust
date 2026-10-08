@@ -45,7 +45,12 @@
 //! `infra::git::layout`). A read for `(repo, branch)` is served from that
 //! branch's snapshot when the repository has synced successfully
 //! (`last_synced_at` set, `sync_error` clear) and the snapshot exists on
-//! disk; anything else is [`DomainError::RepoNotSynced`].
+//! disk. Otherwise the branch is synced on that first read when the remote
+//! has it, and the read fails with [`DomainError::BranchNotFound`] when it
+//! does not, or with [`DomainError::RepoNotSynced`] (carrying the recorded
+//! sync failure) when the sync left nothing to read. The rule lives in
+//! `super::branch_snapshot`; [`PlansService::list_universe`] is the one
+//! reader that skips an unsynced branch instead.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -58,6 +63,7 @@ use toolkit_security::SecurityContext;
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
+use super::branch_snapshot::{BranchSync, ensure_branch_snapshot};
 use super::{DbProvider, actions, resources};
 use crate::domain::error::DomainError;
 use crate::domain::parsing::case_count::count_test_functions;
@@ -77,6 +83,9 @@ pub struct PlansService<R: TestReposRepository> {
     db: Arc<DbProvider>,
     repos_repo: Arc<R>,
     repos_dir: PathBuf,
+    /// Syncs a branch a read finds without a snapshot — see
+    /// [`ensure_branch_snapshot`].
+    branch_sync: Arc<dyn BranchSync>,
     policy_enforcer: PolicyEnforcer,
     /// Discovery is a filesystem walk over the synced working copy — see
     /// this module's header. Cached per `(repo_id, branch)`, invalidated by
@@ -137,22 +146,36 @@ impl<R: TestReposRepository> PlansService<R> {
         db: Arc<DbProvider>,
         repos_repo: Arc<R>,
         repos_dir: PathBuf,
+        branch_sync: Arc<dyn BranchSync>,
         policy_enforcer: PolicyEnforcer,
     ) -> Self {
         Self {
             db,
             repos_repo,
             repos_dir,
+            branch_sync,
             policy_enforcer,
             discovery_cache: Mutex::new(HashMap::new()),
         }
     }
 
     /// Resolve the repository (tenancy precheck under its own `TEST_REPO/GET`
-    /// scope), require it synced for `branch`, and return the three fields the
-    /// discovery cache keys on — the owning product, the content revision and
-    /// the content root (see [`Self::discovery_cache`]) — along with the
+    /// scope), make sure `branch` has a snapshot, and return the three fields
+    /// the discovery cache keys on — the owning product, the content revision
+    /// and the content root (see [`Self::discovery_cache`]) — along with the
     /// canonicalized content-root directory.
+    ///
+    /// A branch without a snapshot is synced here, on this first read, when
+    /// the remote has it (see `super::branch_snapshot`); a branch the remote
+    /// does not have is [`DomainError::BranchNotFound`] and is never synced.
+    /// The sync runs under the caller's `ctx`: it needs `SYNC` on the
+    /// repository, and a caller without that grant gets the sync's own
+    /// refusal ([`DomainError::Forbidden`]) — nothing is elevated. A read
+    /// needs no `SYNC` only when the branch has a snapshot **and** the
+    /// repository's `sync_error` is clear; while `sync_error` is set (any
+    /// branch's last sync failed) the read re-syncs the branch and needs it.
+    /// A remote that cannot be listed is `SyncFailed`; a credential it cannot
+    /// be listed with is recorded and read back as `RepoNotSynced`.
     ///
     /// The `content_root` is returned as the stored *column*, not derived back
     /// out of the canonicalized `PathBuf`: the path is absolute and
@@ -177,8 +200,14 @@ impl<R: TestReposRepository> PlansService<R> {
             .await?
             .ok_or(DomainError::NotFound { id: repo_id })?;
 
-        require_synced(&repo, branch)?;
-        let root = content_root_dir(&self.repos_dir, &repo, branch)?;
+        let (repo, root) = ensure_branch_snapshot(
+            self.branch_sync.as_ref(),
+            &self.repos_dir,
+            ctx,
+            repo,
+            branch,
+        )
+        .await?;
         Ok((repo.product_id, repo.head_commit, repo.content_root, root))
     }
 }
@@ -379,7 +408,11 @@ impl<R: TestReposRepository> PlansService<R> {
     /// ## Failure posture: skip the repository, do not fail the call
     ///
     /// A repository that has never synced, or has no snapshot for the
-    /// selected branch, contributes nothing and is logged. Legacy behaves the
+    /// selected branch, contributes nothing and is logged. It is **not**
+    /// synced on this read, unlike a plan or bundle read of one branch (see
+    /// `super::branch_snapshot`): this call spans every repository of a
+    /// product, so syncing here would fetch all of them in one request, and
+    /// one unreachable remote would stall the overview for the others. Legacy behaves the
     /// same way — under a branch filter it drops plan entries that do not
     /// resolve on that branch rather than erroring (`analytics.rs:856-865`) —
     /// and one unsynced repository must not blank the overview for every
@@ -789,7 +822,9 @@ pub(super) fn validate_rel_path(field: &str, raw: &str) -> Result<(), DomainErro
 ///
 /// Under the multi-branch model any branch is readable once the repository
 /// has synced successfully at least once — the per-branch snapshot's actual
-/// presence is checked by [`content_root_dir`], which canonicalizes it.
+/// presence is checked by [`content_root_dir`], which canonicalizes it. The
+/// refusal carries the recorded `sync_error` as its reason — the
+/// repository's last failure, which may be another branch's.
 ///
 /// `sync_error` is repository-scoped, not per-branch: there is no per-branch
 /// state store (a deliberate parity choice — the source system's per-branch
@@ -804,6 +839,7 @@ pub(super) fn require_synced(repo: &TestRepository, branch: &str) -> Result<(), 
         Err(DomainError::RepoNotSynced {
             repo_id: repo.id,
             branch: branch.to_owned(),
+            reason: repo.sync_error.clone(),
         })
     }
 }
@@ -823,6 +859,7 @@ pub(super) fn content_root_dir(
     let not_synced = || DomainError::RepoNotSynced {
         repo_id: repo.id,
         branch: branch.to_owned(),
+        reason: repo.sync_error.clone(),
     };
 
     let workdir = crate::infra::git::layout::branch_workdir(repos_dir, repo.id, branch);

@@ -5,8 +5,8 @@
 //! this gear's own aggregate, which is why the resolver lives here and not in
 //! the two gears that consume it (products are `qa-catalog`'s aggregate per
 //! `DESIGN.md` §3.3's `products` service: "Product CRUD; binds a product to
-//! its plugin instance" -- `PRODUCT-PLUGINS-DESIGN.md` §3, cited here
-//! before the docs squash, no longer exists).
+//! its plugin instance"; see also `docs/features/product-plugins.md`,
+//! "Registration and resolution").
 //!
 //! # Shape borrowed from `chat-engine`
 //!
@@ -41,8 +41,8 @@
 //! reads the registry and then looks each id up in the hub.
 //!
 //! Both live in this one type on purpose: it is the single place in
-//! `qa-catalog` that knows GTS exists (design §4.1, reading 2), and splitting
-//! them would make that two places.
+//! `qa-catalog` that knows GTS exists, and splitting them would make that two
+//! places.
 //!
 //! An earlier revision of this module doc said enumeration deliberately did
 //! not exist. That was true when only `plugin_for` had a caller; Task 13's
@@ -84,7 +84,7 @@ use crate::domain::repos::ProductsRepository;
 /// service holds.
 ///
 /// So the service depends on this, the registry implements it, and
-/// `AppServices::new` wires the two together (ruling F-11).
+/// `AppServices::new` wires the two together.
 ///
 /// # It is process-local, and that is a real limitation
 ///
@@ -94,7 +94,7 @@ use crate::domain::repos::ProductsRepository;
 /// four QA gears share one process and one hub, so the window is exactly that
 /// upgrade — and a retry succeeds on the far side of it. Recorded rather than
 /// hidden, because "the API refused something it accepted a minute ago" is a
-/// confusing thing to meet without an explanation (ruling F-10).
+/// confusing thing to meet without an explanation.
 pub trait ProductPluginPresence: Send + Sync {
     /// `true` when `instance_id` names a product plugin registered in this
     /// process, under the `ClientHub` scope the plugin registered itself with.

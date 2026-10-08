@@ -1083,15 +1083,16 @@ async fn a_finished_event_derives_the_terminal_state_from_the_counts() {
     );
 }
 
-/// Decision D2, end to end, until 2026-08-28: this test used to assert
-/// `RunState::Failed`, because "a skipped test means the run didn't fully
-/// execute, so it must never read as passing either" (`argo.rs:2180-2181`,
-/// `manager/src/services/argo.rs:2197`). The product owner overrode that rule
-/// on 2026-08-28 — see `domain::state_machine::derive_terminal_state`'s "Skips
-/// no longer fail a run" — because the suites this platform runs are full of
-/// environment-gated skips, and the old rule marked nearly every real run red.
-/// A skipped result on an otherwise-clean execution is `Succeeded` now; the
-/// skip count is surfaced in the UI instead of hiding in the state.
+/// Legacy's rule that a skipped test fails a run, end to end, until 2026-08-28:
+/// this test used to assert `RunState::Failed`, because "a skipped test means
+/// the run didn't fully execute, so it must never read as passing either"
+/// (`argo.rs:2180-2181`, `manager/src/services/argo.rs:2197`). The product owner
+/// overrode that rule on 2026-08-28 — see
+/// `domain::state_machine::derive_terminal_state`'s "Skips no longer fail a run"
+/// — because the suites this platform runs are full of environment-gated skips,
+/// and the old rule marked nearly every real run red. A skipped result on an
+/// otherwise-clean execution is `Succeeded` now; the skip count is surfaced in
+/// the UI instead of hiding in the state.
 #[tokio::test]
 async fn a_skipped_result_no_longer_fails_the_run() {
     let h = harness(RunState::Running, LeaseState::Free).await;
@@ -1590,10 +1591,10 @@ async fn finishing_a_run_archives_its_log() {
 /// `flush_due` below the thing that wrote it. Either one alone would be
 /// vacuous.
 ///
-/// # Where D-RLP-4's claim is actually covered
+/// # Where the tick's claim is actually covered
 ///
-/// D-RLP-4 says the tick covers the terminal paths `finish` does not, and its
-/// three parts live in three places, none of them this test:
+/// The claim is that the dispatcher tick covers the terminal paths `finish`
+/// does not, and its three parts live in three places, none of them this test:
 ///
 /// * **`flush_due` drains every buffered run** — against the real
 ///   `RunLogArchive` and a real repository, in

@@ -6,6 +6,7 @@ use toolkit::api::operation_builder::{OperationBuilder, OperationBuilderODataExt
 
 use super::License;
 use crate::api::rest::{dto, handlers};
+use crate::infra::storage::PAGE_LIMITS;
 use crate::infra::storage::odata::VariableFilterField;
 
 const API_TAG: &str = "QA Environments";
@@ -44,6 +45,24 @@ pub(super) fn register_variable_routes(
         // The same `VariableFilterField` both repository reads translate with.
         .with_odata_filter::<VariableFilterField>()
         .with_odata_orderby::<VariableFilterField>()
+        // The toolkit's `OData` extractor binds both on every route it serves
+        // (`ODataParams`); `with_odata_filter` declares neither, so they are
+        // declared here. `qa-platform-openapi`'s
+        // `every_odata_list_operation_declares_limit_and_cursor` keeps it so.
+        .query_param_typed(
+            "limit",
+            false,
+            format!(
+                "Page size; defaults to {}, 1 or more, capped at {}; 0 is a 400. `$top` is the same parameter, and sending both is a 400.",
+                PAGE_LIMITS.default, PAGE_LIMITS.max
+            ),
+            "integer",
+        )
+        .query_param(
+            "cursor",
+            false,
+            "Opaque token from the previous page's `next_cursor`. `$skiptoken` is the same parameter.",
+        )
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
@@ -56,7 +75,10 @@ pub(super) fn register_variable_routes(
         .operation_id("qa_environments.upsert_variable")
         .summary("Create or update a variable")
         .description(
-            "Insert or update a pipeline (global) or per-environment variable by natural key",
+            "Insert or update a pipeline (global) or per-environment variable by natural key. \
+             Two concurrent requests for one name both succeed and the later write wins. 409 is \
+             answered only when the variable is created and deleted again while this request is \
+             running; retrying succeeds.",
         )
         .tag(API_TAG)
         .authenticated()

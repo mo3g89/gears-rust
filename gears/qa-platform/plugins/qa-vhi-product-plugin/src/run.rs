@@ -203,8 +203,8 @@ pub fn runner() -> RunnerSpec {
 ///
 /// # The four names left unreserved, for two different reasons
 ///
-/// [`BASE_URL_VAR`] is parity with VHP's `E2E_VHP_BASE_URL`, which decision D3
-/// deliberately leaves overridable by a run parameter -- reserving it here
+/// [`BASE_URL_VAR`] is parity with VHP's `E2E_VHP_BASE_URL`, which is
+/// deliberately overridable by a run parameter -- reserving it here
 /// would close that exposure quietly, from this plugin's side, rather than in
 /// the PRD amendment `qa-runs::domain::params::RESERVED_NAMES`' SECURITY NOTE
 /// says it belongs in.

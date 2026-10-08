@@ -17,10 +17,12 @@
 # image with no registry behind it be used at all -- `Always` would try to pull
 # `docker.io/library/qa-platform-pytest-runner` and fail.
 #
-# Pinned by digest-less tag on purpose: `python:3.12-slim` is the same base the
-# source runner uses, and this image is rebuilt by hand on a dev host rather
-# than by a pipeline that could pin one.
-FROM python:3.12-slim
+# Pinned by digest, with the tag beside it. `python:3.12-slim` is the same
+# family the source runner uses; the exact patch release and the digest are
+# recorded so two builds a week apart are the same image. The rationale and the
+# bump procedure are in the PINS block further down, above the tooling install, which
+# this line is part of -- one procedure for every pin in this file.
+FROM python:3.12.14-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 
 # `pytest` alone. Every package added here has to exist inside an environment
 # that may have no internet at build time, and the marker plugin is stdlib-only
@@ -73,25 +75,77 @@ RUN apt-get update \
 # adoption tests skip -- green, having tested nothing. If the suite's pin moves,
 # this moves with it.
 #
-# kubectl tracks stable rather than a pin, matching the source system. That is a
-# deliberate difference from the two pinned tools: kubectl is version-skew
-# tolerant against the API server by one minor either way, and pinning it here
-# would silently age against whatever cluster a platform points at.
+# kubectl IS PINNED, and its published SHA-256 is verified. It used to track
+# `stable.txt`, which the source system does and which this file defended as
+# version-skew tolerance. The skew argument is real and is kept below; the
+# defect was that "whatever stable.txt says today" was then installed with no
+# integrity check, so the binary was whatever the URL served.
 #
 # These add ~250 MB to a ~150 MB image. The alternative -- a second image for
 # cluster-touching suites -- was rejected for a dev deployment with one runner
 # image and no registry: `qa-runs.argo.runner_image` names exactly one.
+#
+# PINS: EVERY BINARY BELOW IS A VERSION PLUS A VERIFIED SHA-256, AND EVERY BASE
+# IMAGE IS A TAG PLUS A DIGEST. Second review, finding #95.
+#
+# What drifts if they are not pinned:
+#   * `stable.txt` moves whenever Kubernetes cuts a release, so kubectl -- and
+#     with it the runner's behaviour against a cluster -- became a function of
+#     the day the image was built, with no diff in this repository. The digest-
+#     less `python:3.12-slim` (and `node:20-alpine`/`nginx:alpine` in
+#     deploy/docker/qa-platform-ui.Dockerfile) drift the same way: two builds a
+#     week apart are two images with one name.
+#   * A version alone is not integrity. The three downloads trusted TLS to
+#     dl.k8s.io, get.helm.sh and github.com and nothing else, though each
+#     publishes a SHA-256 beside the artefact. A substituted or truncated
+#     binary was caught only if it failed to execute.
+#
+# What broke: nothing yet. This closes a gap the review found; it is not the
+# fix for an incident. The precedent is PDFIUM_VERSION in the root
+# .cargo/config.toml, where an unpinned upstream fetch changed output on every
+# open branch at once with no diff in the repo. Recorded plainly so the next
+# reader does not go looking for a breakage that is not written down.
+#
+# Version skew, which is why kubectl used to float: kubectl is supported one
+# minor either side of the API server. A pin ages, so KUBECTL_VERSION is moved
+# when the cluster a platform points at moves a minor -- not when stable.txt
+# does.
+#
+# To bump any of them (deliberately, in one commit, never one half alone):
+#   kubectl: choose the version, then fetch its published checksum
+#              curl -fsSL https://dl.k8s.io/release/<version>/bin/linux/amd64/kubectl.sha256
+#            and change KUBECTL_VERSION and KUBECTL_SHA256 together.
+#   helm:    HELM_SHA256 is in
+#              https://get.helm.sh/helm-<version>-linux-amd64.tar.gz.sha256sum
+#   istioctl: ISTIO_SHA256 is in
+#              https://github.com/istio/istio/releases/download/<version>/istioctl-<version>-linux-amd64.tar.gz.sha256
+#            (ISTIO_VERSION must still move with the suite's own pin, above.)
+#   python base: pick the tag, then
+#              docker buildx imagetools inspect python:<tag>
+#            and replace the tag AND the top-level `Digest:` on the FROM line.
+# Then run `make helm-tests` and
+#   python3 gears/qa-platform/deploy/helm/tests/check_image_pins.py --online
+# which re-fetches each checksum and re-resolves each tag, and finally rebuild
+# and import the image (deploy/runner/build-and-import.sh). Reverting a pin
+# because it is inconvenient reopens #95; raise it through this procedure.
+ARG KUBECTL_VERSION=v1.37.1
+ARG KUBECTL_SHA256=65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8
 ARG HELM_VERSION=v3.21.0
 ARG ISTIO_VERSION=1.28.6
+ARG HELM_SHA256=0093eb572e3d2380f094df162ddb525e219249de88957afe24cfbb19632acd36
+ARG ISTIO_SHA256=e47f32c363e5fcd233a126f56d88897c9e0a92b7025c9e72deff813756c9f89e
 RUN set -eux; \
-    curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"; \
+    curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"; \
+    echo "${KUBECTL_SHA256}  kubectl" | sha256sum -c -; \
     install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl; \
     rm kubectl; \
     curl -fsSL -o helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"; \
+    echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -; \
     tar -xzf helm.tar.gz; \
     install -o root -g root -m 0755 linux-amd64/helm /usr/local/bin/helm; \
     rm -rf helm.tar.gz linux-amd64; \
     curl -fsSL -o istioctl.tar.gz "https://github.com/istio/istio/releases/download/${ISTIO_VERSION}/istioctl-${ISTIO_VERSION}-linux-amd64.tar.gz"; \
+    echo "${ISTIO_SHA256}  istioctl.tar.gz" | sha256sum -c -; \
     tar -xzf istioctl.tar.gz; \
     install -o root -g root -m 0755 istioctl /usr/local/bin/istioctl; \
     rm -rf istioctl.tar.gz istioctl; \

@@ -154,15 +154,18 @@ export function EditEnvironmentDialog({ environment, trigger }: EditEnvironmentD
                 id="product"
                 value={productId}
                 onChange={setProductId}
-                options={[
-                  { value: '', label: 'No product' },
-                  ...(products || []).map((product) => ({
-                    value: product.id,
-                    label: `${product.name} (${product.key})`,
-                  })),
-                ]}
-                placeholder="No product"
+                options={(products || []).map((product) => ({
+                  value: product.id,
+                  label: `${product.name} (${product.key})`,
+                }))}
+                placeholder="Select a product"
               />
+              {/*
+                No "No product" option: `qa_environments.product_id` is `NOT NULL`
+                and the gear refuses an empty `product_id` with 400, so an
+                environment always names its product and the dialog only
+                offers to move it to another one.
+              */}
             </div>
 
             <div className="flex items-start justify-between gap-4 rounded-md border border-border/60 p-3">
@@ -178,19 +181,8 @@ export function EditEnvironmentDialog({ environment, trigger }: EditEnvironmentD
                 id="is-default"
                 checked={isDefault}
                 onCheckedChange={setIsDefault}
-                disabled={!productId}
               />
             </div>
-            {!productId && (
-              <p className="text-xs text-muted-foreground">
-                An environment with no product cannot be a product&apos;s default.
-              </p>
-            )}
-
-            <p className="text-xs text-muted-foreground">
-              Version and build are not observed in this deployment: nothing here reads an
-              environment's install metadata, so both stay empty.
-            </p>
           </div>
 
           <DialogFooter>

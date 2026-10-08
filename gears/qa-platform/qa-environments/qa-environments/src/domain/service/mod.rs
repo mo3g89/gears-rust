@@ -77,7 +77,7 @@ mod environments_observation_tests;
 mod environments_metrics_tests;
 
 /// Task 15's own tests: what reaches the product plugin, and what its answer
-/// writes into both column sets.
+/// writes into the observation columns.
 #[cfg(test)]
 mod observation_projection_tests;
 
@@ -238,9 +238,10 @@ pub mod resources {
     /// type-schema that registers it is
     /// [`crate::gts::authz_types::QaPlatformV1`].
     ///
-    /// The entity token is `platform`, not `environment`: the D5 aggregate
-    /// rename never reached these ids and the error surface already publishes
-    /// `platform`. Renaming it is a separate change to a published contract.
+    /// The entity token is `platform`, not `environment`: the rename of the
+    /// platform aggregate to environment did not reach these ids and the error
+    /// surface already publishes `platform`. Renaming it is a separate change
+    /// to a published contract.
     pub const PLATFORM_NAME: &str = gts_id!("cf.qa.environments.platform.v1~");
 
     pub const VARIABLE: ResourceType = ResourceType::from_static(
@@ -299,8 +300,8 @@ where
         clippy::too_many_arguments,
         reason = "the DI container's constructor takes one argument per collaborator it wires \
                   (three repositories, the db provider, authz, credstore, the observation \
-                  port, the product-plugin port, the two metrics ports, and the one scalar \
-                  knob). Grouping them into a parameter struct would move the same eleven \
+                  port, the product-plugin port, the two metrics ports, and the two scalar \
+                  knobs). Grouping them into a parameter struct would move the same twelve \
                   names one indirection away without removing any of them, and \
                   `AppServices::new` has exactly one caller (`gear.rs`'s `init`)."
     )]
@@ -316,6 +317,7 @@ where
         metrics: Option<Arc<dyn ObservationMetrics>>,
         plugin_metrics: Option<Arc<dyn PluginMetrics>>,
         max_variables: usize,
+        observe_timeout: std::time::Duration,
     ) -> Self {
         let enforcer = PolicyEnforcer::new(authz);
 
@@ -330,6 +332,7 @@ where
                 metrics,
                 plugin_metrics,
                 enforcer.clone(),
+                observe_timeout,
             ),
             variables: VariablesService::new(
                 Arc::clone(&db),

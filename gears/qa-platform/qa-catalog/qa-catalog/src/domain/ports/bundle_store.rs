@@ -2,8 +2,8 @@ use async_trait::async_trait;
 
 use crate::domain::error::DomainError;
 
-/// Port abstracting bundle blob storage. p1 impl: gear-local filesystem
-/// (Task 9). A `file-storage` adapter follows when `FileStorageClientV1`
+/// Port abstracting bundle blob storage. p1 impl: gear-local filesystem.
+/// A `file-storage` adapter follows when `FileStorageClientV1`
 /// gains operations. Consumed by `domain::service::BundlesService`.
 #[async_trait]
 pub trait BundleStore: Send + Sync {

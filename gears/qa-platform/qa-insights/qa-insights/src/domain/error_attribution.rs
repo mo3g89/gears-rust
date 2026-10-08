@@ -52,22 +52,22 @@ use crate::domain::error::DomainError;
 /// same type for `JiraBugNotTracked` and `JiraNotConfigured` -- one
 /// `gts_id` per resource, not two that could disagree.
 #[resource_error(gts_id!("cf.qa.insights.jira_bug.v1~"))]
-pub(crate) struct JiraBugResourceError;
+pub struct JiraBugResourceError;
 
 /// Render an error from a **JIRA** operation — settings or bug registry —
 /// attributing a `Validation` or a `Forbidden` to the JIRA resource rather
 /// than to the test result.
 ///
 /// [`as_saved_view_error`](crate::api::rest::error::as_saved_view_error)'s
-/// reason, and this call site has one of its own.
-/// Task 32's settings surface raises `Validation` naming `url` or
-/// `poll_interval_seconds`; Task 33's registry raises it naming `plan_path`
-/// (R85's "together or not at all" rule on `GET /qa/v1/jira/open-bugs`) — none
-/// of the three is a test-result field, and every PDP denial on either surface
-/// is about `qa.jira_config` or `qa.jira_bug`. `JiraNotConfigured` and
+/// reason, and this call site has one of its own. Task 32's settings surface
+/// raises `Validation` naming `url` or `poll_interval_seconds`; Task 33's
+/// registry raises it naming `plan_path` (the "together or not at all"
+/// `repo_id`/`plan_path` rule on `GET /qa/v1/jira/open-bugs`) — none of the
+/// three is a test-result field, and every PDP denial on either surface is
+/// about `qa.jira_config` or `qa.jira_bug`. `JiraNotConfigured` and
 /// `RunNotIngested` already carry their own resource in the blanket `match`
-/// (the latter is `TestResultResourceError`, `domain::error`'s own, on
-/// purpose —
+/// (the latter is `TestResultResourceError`, `domain::error`'s own, on purpose
+/// —
 /// [`JiraService::file_bugs`](crate::domain::service::jira::JiraService::file_bugs)'s
 /// own doc says why an unprojected run is that error and not a JIRA one), so
 /// the fall-through arm leaves both of them (and `Database`) untouched.
@@ -78,7 +78,7 @@ pub(crate) struct JiraBugResourceError;
 /// the two JIRA configuration singletons" in one type (its declaration,
 /// above), so a second function would only be routing two
 /// identical `match` arms to the same resource through two names.
-pub(crate) fn as_jira_error(e: DomainError) -> CanonicalError {
+pub fn as_jira_error(e: DomainError) -> CanonicalError {
     match e {
         DomainError::Validation { field, message } => JiraBugResourceError::invalid_argument()
             .with_field_violation(field, message, "VALIDATION")

@@ -163,11 +163,12 @@ pub async fn cancel_run(
 /// before the stream opens must still be able to answer a canonical JSON error,
 /// while the success path answers `text/event-stream`.
 ///
-/// # The authorization happens before `subscribe`, and the order is the point
+/// # The authorization happens before `subscribe_with_replay`, and the order is the point
 ///
-/// `RunLogBroadcaster::subscribe` mints a channel entry for **any** UUID and
-/// cannot authorize — it holds no repository and no `SecurityContext`, and says
-/// so at its own definition. Subscribing first and checking afterwards would let
+/// `RunLogBroadcaster::subscribe_with_replay` mints a channel entry for **any**
+/// UUID and cannot authorize — the broadcaster holds no repository and no
+/// `SecurityContext`, so there is nothing in it that could check a run or a
+/// tenant. Subscribing first and checking afterwards would let
 /// an unauthenticated-for-that-run caller create one map entry per request,
 /// keyed by an id they chose, for runs that need not exist. So the run is read
 /// under the caller's own `qa.run`/`get` scope first, and a run that is absent
@@ -183,7 +184,7 @@ pub async fn cancel_run(
 /// lives.
 ///
 /// **It is a check, not a lock.** A run that terminates and is reaped *between*
-/// this read and `subscribe` below takes the same path a live run does: the
+/// this read and `subscribe_with_replay` below takes the same path a live run does: the
 /// subscription is minted, `recv()` never returns `None` because the reap
 /// already happened, and the client holds an idle connection until
 /// [`MAX_STREAM_DURATION`] cuts it. The window is one scoped read wide and the
@@ -215,9 +216,11 @@ pub async fn cancel_run(
 ///
 /// Still pinned either side of the handler, and still worth keeping because
 /// they are properties of the collaborators rather than of the ordering: that
-/// `RunLogBroadcaster::subscribe` mints a channel for an id it cannot authorize
+/// the broadcaster mints a channel for an id it cannot authorize
 /// (`infra::logs::broadcast`,
-/// `subscribe_mints_a_channel_for_an_id_it_cannot_authorize`), and that
+/// `subscribe_mints_a_channel_for_an_id_it_cannot_authorize` -- driven through
+/// the test-only `subscribe`, which shares `subscribe_locked` with the
+/// `subscribe_with_replay` this handler calls), and that
 /// `RunsService::get` refuses another tenant's run
 /// (`domain::service::runs`, `reads_are_scoped_to_the_callers_own_tenant`).
 ///
@@ -278,18 +281,18 @@ pub async fn stream_run_logs(
     // THE ARCHIVE ARM IS UNBOUNDED, BY A DECISION THAT IS NOT THIS HANDLER'S
     // TO REVISIT.
     //
-    // `qa_run_logs.text` has no size cap - the design's §8 records that as a
-    // decision made with the risk stated to the user, not an oversight. This
-    // branch also `return`s before `logs.subscribe_with_replay` below, so
+    // `qa_run_logs.text` has no size cap - a user decision (2026-08-31) made
+    // with the risk stated to the user, not an oversight. This branch also
+    // `return`s before `logs.subscribe_with_replay` below, so
     // `MAX_SUBSCRIBERS_PER_RUN` does not gate it: nothing stops one caller
-    // issuing N concurrent GETs against one large finished run. `lines_as_events`
-    // is what keeps that to one resident copy of `text` per request rather than
-    // two - `text.lines().map(str::to_owned).collect()` would hold a second,
-    // roughly-equal-sized `Vec<String>` alongside it for the life of the
-    // response - but one uncapped copy times N concurrent readers is still
-    // unbounded. `infra::logs::broadcast::truncation_marker` and
-    // `MAX_RETAINED_BYTES_PER_RUN` are the shape a cap would take on this arm
-    // if one is ever wanted; none is added here, because that reopens a
+    // issuing N concurrent GETs against one large finished run.
+    // `lines_as_events` is what keeps that to one resident copy of `text` per
+    // request rather than two - `text.lines().map(str::to_owned).collect()`
+    // would hold a second, roughly-equal-sized `Vec<String>` alongside it for
+    // the life of the response - but one uncapped copy times N concurrent
+    // readers is still unbounded. `infra::logs::broadcast::truncation_marker`
+    // and `MAX_RETAINED_BYTES_PER_RUN` are the shape a cap would take on this
+    // arm if one is ever wanted; none is added here, because that reopens a
     // decision the user made explicitly and is recorded, not one this task
     // found reason to override.
     if is_terminal(run.state) {
@@ -401,7 +404,7 @@ fn sse_event(line: &str) -> Event {
 ///
 /// That is what the terminal branch did until this function replaced it, and
 /// it is a real cost rather than a tidy one: `qa_run_logs.text` has no size
-/// cap (design §8, a decision made with the risk stated to the user), and
+/// cap (a user decision made with the risk stated to the user), and
 /// this branch is not gated by [`MAX_SUBSCRIBERS_PER_RUN`] — it `return`s
 /// before `subscribe_with_replay` is ever reached. A `Vec<String>` collecting
 /// every line holds close to `text.len()` bytes again, on top of `text`

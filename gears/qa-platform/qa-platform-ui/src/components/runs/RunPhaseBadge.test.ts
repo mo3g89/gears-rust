@@ -3,7 +3,7 @@
 // UI casing fix: `styleFor` compared `phase` against Title-Case strings
 // ('Succeeded', 'Running', ...) but `WorkflowRun.phase` is qa-runs' own
 // lowercase `RunState` set — `runFromDto` sets it to `dto.state` "without
-// re-casing" (`adapters.ts`, decision X4; `RunState::as_str`,
+// re-casing" (`adapters.ts`; `RunState::as_str`,
 // qa-runs-sdk/src/models.rs:271-284). Every real run therefore fell through
 // to the `default` branch and never got its intended per-state colour. This
 // suite renders the actual badge against real lowercase phase values and

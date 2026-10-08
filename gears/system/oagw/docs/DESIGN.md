@@ -908,12 +908,14 @@ Cardinality management: no tenant labels; `http.route` is the normalized route m
 
 ### 4.3 Audit Logging
 
-Structured JSON logs to stdout, ingested by centralized logging system (e.g., ELK, Loki). Fields: `timestamp`, `level`, `event`, `request_id`, `tenant_id`, `principal_id`, `host`, `path`, `method`, `status`, `duration_ms`, `request_size`, `response_size`, `error_type`.
+Structured JSON logs to stdout, ingested by centralized logging system (e.g., ELK, Loki). Fields: `timestamp`, `level`, `event`, `request_id`, `tenant_id`, `principal_id`, `host`, `route`, `method`, `status`, `duration_ms`, `request_size`, `response_size`, `error_type`.
+
+**No request paths**: `route` is the matched route's path **pattern** (the same value as the `http.route` metric label), never the request path, and `host` is the upstream alias. A request's path suffix can itself be a credential — a Slack incoming webhook's secret is its URL path — so the proxy's "Connected to upstream" and "Proxy request completed/failed" lines, and pingora's own failure lines (via `ProxyHttp::request_summary`), name the alias and route pattern only. Until 2026-09-30 these lines carried a `path` field (the upstream request path) and an `instance` field (the full `/<alias>/<suffix>` proxy URI); log queries on those fields must move to `upstream`/`route`. pingora's own DEBUG/TRACE request-header dumps still carry the path and cannot be overridden, so keep the `pingora_*` log targets at `info` or below.
 
 **No PII**: Never log request/response bodies, query parameters, or headers (except allowlisted). **No secrets**: Never log API keys, tokens, or credentials. High-frequency sampling: rate-limited to prevent excessive log volume (e.g., sample 1/100 for high-volume routes).
 
 **What is Logged**:
-- **Success requests**: Request ID, tenant, host, path, method, status, duration, sizes
+- **Success requests**: Request ID, tenant, host, route pattern, method, status, duration, sizes
 - **Failed requests**: All above + error_type, error_message
 - **Config changes**: Upstream/route create/update/delete operations
 - **Auth failures**: Failed authentication attempts (rate limited to prevent log flooding)

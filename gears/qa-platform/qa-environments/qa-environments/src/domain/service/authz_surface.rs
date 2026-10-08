@@ -86,7 +86,9 @@ pub const ENFORCED: &[(&str, &str)] = &[
     // `qa.variable` - `variables`. `create` and `update` both come from
     // `upsert`, which resolves which of the two it is from a natural-key probe
     // *before* asking the PDP, so that a create is never authorized under
-    // `update` or the reverse; `get` is that probe's own scope.
+    // `update` or the reverse; `get` is that probe's own scope. An upsert whose
+    // insert loses a create race to a concurrent one asks for `update` a
+    // second time, on the winning row's id, at its own call site.
     (resources::VARIABLE_NAME, actions::CREATE),
     (resources::VARIABLE_NAME, actions::DELETE),
     (resources::VARIABLE_NAME, actions::GET),
@@ -144,7 +146,7 @@ const RESOURCE_TYPES: &[&str] = &[
 /// from its failure message; do not adjust it to make a red test green without
 /// checking what changed.
 #[cfg(test)]
-const EXPECTED_ACCESS_SCOPE_SITES: usize = 18;
+const EXPECTED_ACCESS_SCOPE_SITES: usize = 19;
 
 #[cfg(test)]
 #[path = "authz_surface_tests.rs"]

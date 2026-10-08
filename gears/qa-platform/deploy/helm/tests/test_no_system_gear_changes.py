@@ -1,19 +1,18 @@
 """qa-platform must not modify gears/system/authz-resolver or
 gears/system/event-broker.
 
-Both were modified once and reverted -- see
-docs/FOOTPRINT-OUTSIDE-QA-PLATFORM.md. authz-resolver carried a
-`system_grants` config surface bolted onto static-authz-plugin; event-broker
+Both were modified once and reverted, and this guard keeps them that way.
+authz-resolver carried a `system_grants` config surface bolted onto static-authz-plugin; event-broker
 carried a config stanza that existed only to satisfy qa-insights' now-deleted
 `event_broker` dependency. This fails the build if either comes back, because
 the cost of finding out at review time is a rewrite of whatever depended on
 it.
 
-This test is NOT wired into any CI workflow or Makefile -- run it by hand
-(`python -m pytest tests/test_no_system_gear_changes.py -v` from this
-directory) whenever a change touches `gears/system/authz-resolver` or
-`gears/system/event-broker` on this branch. Nothing stops a future PR from
-silently reintroducing drift until someone does.
+This test IS wired into CI: `make helm-tests` runs it (`python3 -m pytest
+tests/` in the root Makefile's `helm-tests` recipe), and the `lint` job in
+`.github/workflows/ci.yml` runs `make helm-tests`. It can also be run by hand
+(`python -m pytest tests/test_no_system_gear_changes.py -v` from `deploy/helm/`) when a change touches
+`gears/system/authz-resolver` or `gears/system/event-broker` on this branch.
 """
 import subprocess
 from pathlib import Path

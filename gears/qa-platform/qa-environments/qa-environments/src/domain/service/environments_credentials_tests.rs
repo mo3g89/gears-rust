@@ -13,13 +13,20 @@
 //! reference-over-a-paste — are in `environments_kubeconfig_tests`, which
 //! Task 18b left passing unmodified except for the generated-reference prefix.
 //! That file passing is the evidence that folding the pair into the plugin
-//! path (ruling F-8) preserved its behaviour; duplicating it here would assert
+//! path preserved its behaviour; duplicating it here would assert
 //! the same thing against the same code twice.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use authz_resolver_sdk::AuthZResolverApi;
+use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
+use authz_resolver_sdk::models::{
+    EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
+};
+use credstore_sdk::SharingMode;
 use qa_environments_sdk::{
     CredentialMaterial, CredentialSubmission, EnvironmentPatch, NewEnvironment,
 };
@@ -32,11 +39,16 @@ use toolkit_odata::ODataQuery;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::ports::{PluginUnavailable, ProductPluginPort};
+use crate::domain::ports::{NoopRunnerSecretWriter, PluginUnavailable, ProductPluginPort};
+use crate::domain::system_actor;
 use crate::test_support::{
-    FixedPluginPort, RecordingCredStore, ScriptedPlugin, UnavailablePluginPort,
-    build_services_tenant_scoped_with_plugin_and_credstore, ctx, field, inmem_db, no_plugin_port,
+    CapturedLogs, FixedPluginPort, RecordingCredStore, RecordingSecretObserver, ScriptedPlugin,
+    SharingCredStore, StoredSecret, TenantScopedAuthZ, UnavailablePluginPort,
+    build_services_tenant_scoped_with_plugin_and_credstore, build_services_with_plugin_port, ctx,
+    field, inmem_db, no_plugin_port,
 };
+use toolkit_canonical_errors::CanonicalError;
+use toolkit_security::{PlatformSecurityContext, pep_properties};
 
 /// The product every environment in this module belongs to.
 fn product() -> Uuid {
@@ -93,15 +105,16 @@ fn pasted(value: &str) -> CredentialSubmission {
 // Where a submitted credential lands
 // ---------------------------------------------------------------------------
 
-/// A pasted secret is minted under the new prefix, lands in `credentials`
-/// under the **plugin's** key, and **dual-writes** the pre-plugin column.
+/// A pasted secret is minted under the new prefix and lands in `credentials`
+/// under the **plugin's** key, and the row read back says the same.
 ///
-/// The dual-write is the whole reason Task 18b is safe to land before Task 19:
-/// `qa-runs`' dispatch reads that column in production (ruling E-17), so a
-/// write path that stopped maintaining it would break every run against every
-/// environment.
+/// Until Task 19 the write also dual-wrote the pre-plugin
+/// `kubeconfig_credstore_ref` column, which `qa-runs`' dispatch read, and this
+/// test pinned that. Task 19 dropped the column; the assertion that stood for
+/// it is now a read-back of the row, because the create's answer alone cannot
+/// show that the reference was stored rather than only returned.
 #[tokio::test]
-async fn a_pasted_secret_lands_in_credentials_and_dual_writes_the_legacy_column() {
+async fn a_pasted_secret_is_minted_under_the_gears_prefix_and_stored_under_the_plugins_key() {
     let credstore = Arc::new(RecordingCredStore::new());
     let plugin = Arc::new(ScriptedPlugin::vhp_shaped(detection()));
     let services = build_services_tenant_scoped_with_plugin_and_credstore(
@@ -132,10 +145,16 @@ async fn a_pasted_secret_lands_in_credentials_and_dual_writes_the_legacy_column(
         "a pasted document is minted under a reference this gear owns, got {}",
         created.credentials[0].credstore_ref
     );
+    let reread = services
+        .environments
+        .get_environment(&ctx(tenant), created.id)
+        .await
+        .unwrap();
     assert_eq!(
-        created.credentials[0].credstore_ref, created.credentials[0].credstore_ref,
-        "and the pre-plugin column is DUAL-WRITTEN with the same reference, \
-         because qa-runs' dispatch still reads it (ruling E-17)"
+        reread.credentials, created.credentials,
+        "and the row read back holds the same key and reference the create \
+         answered with: `credentials` is the only column a credential \
+         reference is stored in, and the one qa-runs' dispatch reads"
     );
     assert_eq!(
         credstore.references(),
@@ -324,7 +343,7 @@ async fn a_plugin_rejection_surfaces_its_fixed_detail_and_no_submitted_value() {
 /// That is the plugin contract's own choice, not this gear's:
 /// `qa-vhp-product-plugin`'s `validate_credentials` documents that undeclared
 /// keys "are ignored rather than rejected ... rejecting the whole form over one
-/// is a worse failure than dropping it" (ruling F-5). The `warn` that keeps it
+/// is a worse failure than dropping it". The `warn` that keeps it
 /// from being silent names the key and never a value; this asserts the storage
 /// half.
 #[tokio::test]
@@ -439,9 +458,9 @@ async fn a_reference_for_a_non_secret_field_is_refused() {
     );
 }
 
-/// **The write path resolves nothing** (ruling F-4, reversed): only pasted
-/// material reaches `validate_credentials`, and a reference-only submission
-/// reaches it not at all.
+/// **The write path resolves nothing**: only pasted material reaches
+/// `validate_credentials`, and a reference-only submission reaches it not at
+/// all.
 ///
 /// This is what keeps creating an environment against a not-yet-provisioned
 /// reference possible — a designed, self-healing state whose recovery
@@ -479,6 +498,281 @@ async fn a_reference_only_submission_is_never_resolved_and_never_validated() {
         "with nothing pasted there is no form to validate, so the plugin is \
          not asked at all, got {:?}",
         plugin.validated_keys()
+    );
+}
+
+/// An environment's credential is read as the qa-environments system actor
+/// on every path: a refresh by the user who stored the secret answers exactly
+/// what the background observation cycle answers. Before, a reference to a
+/// `private` secret observed on refresh and failed on every cycle.
+#[tokio::test]
+async fn a_refresh_and_the_observation_cycle_read_the_credential_as_one_identity() {
+    for sharing in [SharingMode::Private, SharingMode::Tenant] {
+        let tenant = Uuid::new_v4();
+        let user = ctx(tenant);
+        let credstore = Arc::new(SharingCredStore::new(vec![StoredSecret {
+            reference: "team-a-prod-cluster",
+            value: "apiVersion: v1\n",
+            tenant,
+            owner: user.subject_id(),
+            sharing,
+        }]));
+        let services = build_services_tenant_scoped_with_plugin_and_credstore(
+            inmem_db().await,
+            port(Arc::new(ScriptedPlugin::vhp_shaped(detection()))),
+            credstore,
+        );
+        let created = services
+            .environments
+            .create_environment(
+                &user,
+                submitting(
+                    "prod",
+                    vec![(
+                        "kubeconfig",
+                        CredentialSubmission::Reference("team-a-prod-cluster".to_owned()),
+                    )],
+                ),
+            )
+            .await
+            .expect("a reference is stored unresolved");
+
+        let refreshed = services
+            .environments
+            .observe_environment(&user, created.id)
+            .await
+            .expect("an observation outcome is persisted, not raised");
+        let background = services
+            .environments
+            .observe_environment(&system_actor::for_observation(tenant), created.id)
+            .await
+            .expect("an observation outcome is persisted, not raised");
+
+        assert_eq!(
+            refreshed.version_detect_error, background.version_detect_error,
+            "{sharing:?}: a refresh and a background cycle must read the secret as one identity"
+        );
+        match sharing {
+            SharingMode::Private => assert!(
+                refreshed
+                    .version_detect_error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("`tenant` sharing")),
+                "a private secret is refused with the reason: {refreshed:?}"
+            ),
+            _ => assert_eq!(refreshed.version_detect_error, None),
+        }
+    }
+}
+
+/// The runner `Secret` write on create reads the credential as the system
+/// actor too — the identity the observation ticker's self-heal reads it as. So
+/// a reference to a `private` secret owned by the very creator writes no
+/// `Secret` on create, rather than writing one the self-heal could never
+/// refresh; a `tenant`-shared one is written.
+#[tokio::test]
+async fn the_runner_secret_write_on_create_reads_the_credential_as_the_system_actor() {
+    for sharing in [SharingMode::Private, SharingMode::Tenant] {
+        let tenant = Uuid::new_v4();
+        let user = ctx(tenant);
+        let observer = Arc::new(RecordingSecretObserver::new());
+        let services = build_services_with_plugin_port(
+            inmem_db().await,
+            Arc::new(TenantScopedAuthZ),
+            Arc::new(SharingCredStore::new(vec![StoredSecret {
+                reference: "team-a-prod-cluster",
+                value: "apiVersion: v1\n",
+                tenant,
+                owner: user.subject_id(),
+                sharing,
+            }])),
+            Arc::clone(&observer) as Arc<_>,
+            port(Arc::new(ScriptedPlugin::vhp_shaped(detection()))),
+            crate::config::QaEnvironmentsConfig::default().max_variables,
+        );
+        services
+            .environments
+            .create_environment(
+                &user,
+                submitting(
+                    "prod",
+                    vec![(
+                        "kubeconfig",
+                        CredentialSubmission::Reference("team-a-prod-cluster".to_owned()),
+                    )],
+                ),
+            )
+            .await
+            .expect("a reference is stored unresolved");
+
+        let written: Vec<String> = observer
+            .secret_writes()
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .collect();
+        match sharing {
+            SharingMode::Private => assert!(
+                written.is_empty(),
+                "a private secret is not readable by the system actor: {written:?}"
+            ),
+            _ => assert_eq!(written, vec!["team-a-prod-cluster".to_owned()]),
+        }
+    }
+}
+
+/// `AuthZ` double that grants every subject a scope over a fixed set of
+/// tenants: the shape of a caller whose scope spans a tenant hierarchy, a
+/// parent tenant over its child.
+struct GrantsTenantsAuthZ {
+    tenants: Vec<Uuid>,
+}
+
+#[async_trait]
+impl AuthZResolverApi for GrantsTenantsAuthZ {
+    async fn evaluate(
+        &self,
+        _ctx: PlatformSecurityContext,
+        _request: EvaluationRequest,
+    ) -> Result<EvaluationResponse, CanonicalError> {
+        Ok(EvaluationResponse {
+            decision: true,
+            context: EvaluationResponseContext {
+                constraints: vec![Constraint {
+                    predicates: vec![Predicate::In(InPredicate::new(
+                        pep_properties::OWNER_TENANT_ID,
+                        self.tenants.clone(),
+                    ))],
+                }],
+                ..Default::default()
+            },
+        })
+    }
+}
+
+/// The credential is read in the tenant that **owns** the environment, the
+/// tenant the observation cycle binds to, not in the caller's. A refresh by a
+/// caller of the parent tenant, whose scope reaches the child's environment,
+/// reads the child's `tenant`-shared secret exactly as the cycle does; bound to
+/// the caller's tenant, the read would miss on the refresh and succeed in the
+/// cycle.
+#[tokio::test]
+async fn a_refresh_by_a_parent_scoped_caller_reads_the_credential_in_the_owning_tenant() {
+    let parent = Uuid::new_v4();
+    let child = Uuid::new_v4();
+    let credstore = Arc::new(SharingCredStore::new(vec![StoredSecret {
+        reference: "child-prod-cluster",
+        value: "apiVersion: v1\n",
+        tenant: child,
+        owner: Uuid::new_v4(),
+        sharing: SharingMode::Tenant,
+    }]));
+    let services = build_services_with_plugin_port(
+        inmem_db().await,
+        Arc::new(GrantsTenantsAuthZ {
+            tenants: vec![parent, child],
+        }),
+        credstore,
+        Arc::new(NoopRunnerSecretWriter),
+        port(Arc::new(ScriptedPlugin::vhp_shaped(detection()))),
+        crate::config::QaEnvironmentsConfig::default().max_variables,
+    );
+    let created = services
+        .environments
+        .create_environment(
+            &ctx(child),
+            submitting(
+                "prod",
+                vec![(
+                    "kubeconfig",
+                    CredentialSubmission::Reference("child-prod-cluster".to_owned()),
+                )],
+            ),
+        )
+        .await
+        .expect("a reference is stored unresolved");
+
+    let refreshed = services
+        .environments
+        .observe_environment(&ctx(parent), created.id)
+        .await
+        .expect("an observation outcome is persisted, not raised");
+    assert_eq!(
+        refreshed.version_detect_error, None,
+        "the owning tenant's secret is read: {refreshed:?}"
+    );
+}
+
+/// The runner `Secret` write on an update reads the credential in the tenant
+/// that **owns** the environment too. A parent-scoped caller replaces a child
+/// environment's reference with one that names the child's `tenant`-shared
+/// secret; the write reads it in the child's tenant, as the self-heal would,
+/// and so writes the `Secret`. Bound to the caller's tenant, the read misses
+/// and nothing is written.
+#[tokio::test]
+async fn a_parent_scoped_update_reads_the_replaced_credential_in_the_owning_tenant() {
+    let parent = Uuid::new_v4();
+    let child = Uuid::new_v4();
+    let observer = Arc::new(RecordingSecretObserver::new());
+    let services = build_services_with_plugin_port(
+        inmem_db().await,
+        Arc::new(GrantsTenantsAuthZ {
+            tenants: vec![parent, child],
+        }),
+        Arc::new(SharingCredStore::new(vec![StoredSecret {
+            reference: "child-rotated-cluster",
+            value: "apiVersion: v1\n",
+            tenant: child,
+            owner: Uuid::new_v4(),
+            sharing: SharingMode::Tenant,
+        }])),
+        Arc::clone(&observer) as Arc<_>,
+        port(Arc::new(ScriptedPlugin::vhp_shaped(detection()))),
+        crate::config::QaEnvironmentsConfig::default().max_variables,
+    );
+    let created = services
+        .environments
+        .create_environment(
+            &ctx(child),
+            submitting(
+                "prod",
+                vec![(
+                    "kubeconfig",
+                    CredentialSubmission::Reference("child-original-cluster".to_owned()),
+                )],
+            ),
+        )
+        .await
+        .expect("a reference is stored unresolved");
+    assert!(
+        observer.secret_writes().is_empty(),
+        "the original reference names no secret, so the create writes nothing"
+    );
+
+    services
+        .environments
+        .update_environment(
+            &ctx(parent),
+            created.id,
+            EnvironmentPatch {
+                credentials: BTreeMap::from([(
+                    "kubeconfig".to_owned(),
+                    CredentialSubmission::Reference("child-rotated-cluster".to_owned()),
+                )]),
+                ..EnvironmentPatch::default()
+            },
+        )
+        .await
+        .expect("the parent's scope reaches the child's environment");
+
+    let written: Vec<String> = observer
+        .secret_writes()
+        .into_iter()
+        .map(|(reference, _)| reference)
+        .collect();
+    assert_eq!(
+        written,
+        vec!["child-rotated-cluster".to_owned()],
+        "the replaced credential is read in the owning child tenant"
     );
 }
 
@@ -690,7 +984,7 @@ async fn an_update_supersedes_only_the_keys_it_mentions() {
 }
 
 // ---------------------------------------------------------------------------
-// Both readers prefer `credentials` (ruling F-2)
+// Both readers prefer `credentials`
 // ---------------------------------------------------------------------------
 
 /// `resolve_credential_slots` reads `credentials` when it is populated, and
@@ -759,7 +1053,7 @@ async fn observation_resolves_every_credential_in_the_plugin_shaped_column() {
 }
 
 // ---------------------------------------------------------------------------
-// The productless branch (ruling F-7)
+// The productless branch
 // ---------------------------------------------------------------------------
 
 // Four tests were deleted here by Task 19, with the column they were about.
@@ -770,13 +1064,14 @@ async fn observation_resolves_every_credential_in_the_plugin_shaped_column() {
 // `n-4`) and `a_reference_minted_under_the_pre_task_18b_prefix_is_still_ours_
 // to_delete` all exercised `kubeconfig_credstore_ref` — either the pre-plugin
 // write path, or the readers' fallback to it. Task 19 dropped the column,
-// ruling **F-2** dropped both fallbacks with it, and ruling **F-13** made the
+// both fallbacks went with it, and `refuse_unclassifiable` made the
 // pre-plugin path refuse, so none of the four describes reachable behaviour.
 //
 // What replaced their properties, so none is silently lost:
 //
-// * the productless and plugin-unavailable *refusals* are
-//   `the_two_pre_plugin_routes_give_two_different_remedies`;
+// * the plugin-unavailable *refusal* is
+//   `the_two_pre_plugin_routes_give_two_different_remedies` (the productless
+//   one went with Task 20b, below);
 // * n-ary secret cleanup on delete is
 //   `deleting_an_environment_forgets_every_secret_it_owns` (finding I-4),
 //   which is the general case the 1-ary legacy test was a special case of;
@@ -786,16 +1081,17 @@ async fn observation_resolves_every_credential_in_the_plugin_shaped_column() {
 //   `a_rotation_supersedes_a_secret_minted_under_the_old_prefix` holds that.
 
 // `plugin_shaped_credentials_with_no_product_are_refused` was deleted by Task
-// 20b. It asserted the refusal ruling F-13 put on a productless credential
-// write; `m20260903_000013` made `product_id` `NOT NULL` and
-// `NewEnvironment::product_id` a plain `Uuid`, so the state is unrepresentable
-// rather than refused -- the same progression Task 20a made for
+// 20b. It asserted the refusal `refuse_unclassifiable` put on a productless
+// credential write; `m20260903_000013` (folded into
+// `migrations::m20260812_000001_initial` by the docs squash) made `product_id`
+// `NOT NULL` and `NewEnvironment::product_id` a plain `Uuid`, so the state is
+// unrepresentable rather than refused -- the same progression Task 20a made for
 // `NewProduct::plugin_instance_id`.
 //
 // What holds the property now: the type itself, plus
 // `TryFrom<CreateEnvironmentReq>`'s refusal at the wire, which
 // `dto::tests::create_environment_req_into_new_environment` exercises. The
-// plugin-UNAVAILABLE half of F-13 is untouched and is
+// plugin-UNAVAILABLE half of that refusal is untouched and is
 // `the_two_pre_plugin_routes_give_two_different_remedies`.
 
 /// The `FieldRole` import is used by the schema helper below; this keeps the
@@ -859,9 +1155,10 @@ async fn a_role_claiming_credential_schema_is_still_only_about_credentials() {
 /// A submitted `Reference` under a key the plugin does not declare is dropped
 /// by `reconcile_classifications` and never reaches `validate_credentials` at
 /// all, so before the fix one transposed character produced an accepted row
-/// with `credentials = []` **and** `kubeconfig_credstore_ref = ""` — the
-/// credential-less row Task 19's warning item 5 exists to prevent, which its
-/// re-derivation cannot repair because it re-derives *from* the empty column.
+/// with `credentials = []` **and** `kubeconfig_credstore_ref = ""` (a column
+/// Task 19 has since dropped) — the credential-less row Task 19's warning item
+/// 5 was about, which its re-derivation could not repair because it
+/// re-derived *from* the empty column.
 #[tokio::test]
 async fn a_create_that_stores_no_required_secret_is_refused() {
     let variants: Vec<(&str, (&str, CredentialSubmission))> = vec![
@@ -869,7 +1166,7 @@ async fn a_create_that_stores_no_required_secret_is_refused() {
             "a reference under a typo'd key -- reaches no plugin at all",
             (
                 "kubeconfg",
-                CredentialSubmission::Reference("credstore://team-a/prod".to_owned()),
+                CredentialSubmission::Reference("team-a-prod".to_owned()),
             ),
         ),
         ("a paste under an undeclared key", ("nope", pasted("x"))),
@@ -881,7 +1178,7 @@ async fn a_create_that_stores_no_required_secret_is_refused() {
 
     for (label, entry) in variants {
         let credstore = Arc::new(RecordingCredStore::new());
-        credstore.seed("credstore://team-a/prod", KUBECONFIG);
+        credstore.seed("team-a-prod", KUBECONFIG);
         let plugin = Arc::new(ScriptedPlugin::vhp_shaped(detection()));
         let services = build_services_tenant_scoped_with_plugin_and_credstore(
             inmem_db().await,
@@ -921,21 +1218,66 @@ async fn a_create_that_stores_no_required_secret_is_refused() {
     }
 }
 
-/// **Review finding IMPORTANT-3.** The two routes into the pre-plugin path have
-/// two different remedies, so they must not share one message.
+/// The plugin-shaped channel (`credentials: {key: {"reference": ..}}`) is a
+/// write path for a credential reference too, and it used to accept any
+/// string. A spelling the credential store cannot resolve is refused at write
+/// with a 400 naming the wire field; a valid one still succeeds.
+#[tokio::test]
+async fn a_credentials_map_reference_is_checked_at_write() {
+    let services = build_services_tenant_scoped_with_plugin_and_credstore(
+        inmem_db().await,
+        port(Arc::new(ScriptedPlugin::vhp_shaped(detection())) as Arc<_>),
+        Arc::new(RecordingCredStore::new()),
+    );
+
+    let err = services
+        .environments
+        .create_environment(
+            &ctx(Uuid::new_v4()),
+            submitting(
+                "prod",
+                vec![(
+                    "kubeconfig",
+                    CredentialSubmission::Reference("credstore://kc/staging".to_owned()),
+                )],
+            ),
+        )
+        .await
+        .expect_err("an unresolvable reference must be refused at write");
+    let DomainError::Validation { field, message } = &err else {
+        panic!("expected a validation error (400), got {err:?}");
+    };
+    assert_eq!(field, "credentials.kubeconfig.reference");
+    assert!(message.contains("kc-staging"), "got {message}");
+
+    services
+        .environments
+        .create_environment(
+            &ctx(Uuid::new_v4()),
+            submitting(
+                "prod",
+                vec![(
+                    "kubeconfig",
+                    CredentialSubmission::Reference("kc-staging".to_owned()),
+                )],
+            ),
+        )
+        .await
+        .expect("a valid reference still succeeds");
+}
+
+/// **Review finding IMPORTANT-3.** The routes into a refused, unclassifiable
+/// write have different remedies, so they must not share one message.
 ///
-/// `store_unclassified_credential`/`store_unclassified_patch` are reached when
-/// the row names no product **or** when its product's plugin cannot be
-/// resolved. Both used to answer "set `product_id`" / "restore `product_id`",
-/// which on the second route is false in both halves: `product_id` was never
-/// removed, and editing it is not the remedy — waiting for qa-catalog is.
+/// There were two: a row that named no product (gone with Task 20b) and a
+/// product whose plugin cannot be resolved. Both used to answer "set
+/// `product_id`" / "restore `product_id`", which on the second route is false
+/// in both halves: `product_id` was never removed, and editing it is not the
+/// remedy — waiting for qa-catalog is.
 ///
-/// The second half of this test is the one that matters for Task 19. A row
-/// with a populated `credentials` **is refused** during a plugin outage, by
-/// Critical C-1's guard — so the fallback finding I-9 reverted the refusal to
-/// preserve does not, in fact, keep plugin-shaped rows writable. See ruling
-/// F-13: after Task 19 drops the legacy column there is no fallback left at
-/// all and this becomes the only behaviour.
+/// Since Task 19 dropped the legacy column there is no pre-plugin fallback, so
+/// a write that reaches no plugin refuses on create and on update alike (see
+/// `refuse_unclassifiable`).
 #[tokio::test]
 async fn the_two_pre_plugin_routes_give_two_different_remedies() {
     // ---- route 2, create: the product is set; its plugin cannot be resolved.
@@ -1065,7 +1407,112 @@ async fn the_two_pre_plugin_routes_give_two_different_remedies() {
     // Route 1 -- the productless one -- is gone with Task 20b: `product_id` is
     // `NOT NULL` and `NewEnvironment` takes a plain `Uuid`, so a credential
     // write with no product cannot be constructed to be refused. Route 2 above
-    // is the whole of ruling F-13 now.
+    // is the whole of `refuse_unclassifiable`'s refusal now.
+}
+
+/// The `warn!` a write logs when it reaches no plugin says what the write
+/// does: it **refuses**, on create and on update alike. Until Task 19 the same
+/// two lines said the reference was stored or updated "in the pre-plugin
+/// column only", which was true while that column was the fallback; after the
+/// drop they described a write that no longer happens, beside a 400 saying
+/// nothing was written.
+///
+/// Both callsites are reached by other tests in this crate too, so this drives
+/// each once before measuring and rebuilds the callsite interest cache against
+/// this test's subscriber (see [`CapturedLogs`]'s first hazard).
+#[tokio::test]
+async fn a_write_that_reaches_no_plugin_logs_that_it_refused() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .finish();
+    // `#[tokio::test]` runs on a current-thread runtime, so a thread-local
+    // default subscriber covers every `.await` below.
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let credstore = Arc::new(RecordingCredStore::new());
+    let db = inmem_db().await;
+    let tenant = Uuid::new_v4();
+    let created = build_services_tenant_scoped_with_plugin_and_credstore(
+        db.clone(),
+        port(Arc::new(ScriptedPlugin::vhp_shaped(detection()))),
+        credstore.clone(),
+    )
+    .environments
+    .create_environment(
+        &ctx(tenant),
+        submitting("prod", vec![("kubeconfig", pasted(KUBECONFIG))]),
+    )
+    .await
+    .unwrap();
+    let unavailable =
+        build_services_tenant_scoped_with_plugin_and_credstore(db, no_plugin_port(), credstore);
+    let create = || async {
+        unavailable
+            .environments
+            .create_environment(
+                &ctx(tenant),
+                submitting("staging", vec![("kubeconfig", pasted(KUBECONFIG))]),
+            )
+            .await
+            .expect_err("no plugin, no key: the create refuses")
+    };
+    let update = || async {
+        unavailable
+            .environments
+            .update_environment(
+                &ctx(tenant),
+                created.id,
+                EnvironmentPatch {
+                    kubeconfig: Some(CredentialMaterial::from("rotated".to_owned())),
+                    ..EnvironmentPatch::default()
+                },
+            )
+            .await
+            .expect_err("no plugin, no key: the update refuses")
+    };
+
+    // Warm-up: register both callsites, then rebuild their cached interest
+    // against this subscriber and discard what the warm-up wrote.
+    create().await;
+    update().await;
+    tracing::callsite::rebuild_interest_cache();
+    logs.clear();
+
+    create().await;
+    let on_create = logs.text();
+    logs.clear();
+    update().await;
+    let on_update = logs.text();
+
+    for (path, text, says) in [
+        (
+            "create",
+            &on_create,
+            "refusing the create, nothing was stored",
+        ),
+        (
+            "update",
+            &on_update,
+            "refusing the update, nothing was changed",
+        ),
+    ] {
+        assert!(
+            text.contains("product plugin is unavailable"),
+            "the {path} refusal must log its `warn!` at all -- the capture is not \
+             seeing this code path: {text}"
+        );
+        assert!(
+            text.contains(says),
+            "the {path} refusal's log line must say the write was refused: {text}"
+        );
+        assert!(
+            !text.contains("pre-plugin column"),
+            "and must not claim a store into the column Task 19 dropped: {text}"
+        );
+    }
 }
 
 /// **Review finding IMPORTANT-1.** A refused write must forget every secret it
@@ -1205,7 +1652,7 @@ async fn a_refused_credential_write_forgets_every_secret_it_minted() {
 /// for it, not only the one the legacy column names.
 ///
 /// No live effect today — every plugin in this tree declares one secret field —
-/// but the path is generic, and after Task 19 drops the legacy column a 1-ary
+/// but the path is generic, and since Task 19 dropped the legacy column a 1-ary
 /// delete would clean up nothing at all.
 #[tokio::test]
 async fn deleting_an_environment_forgets_every_secret_it_owns() {

@@ -3,22 +3,33 @@ name: CI
 on:
   pull_request:
     branches: [ main, develop ]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
+    # `paths` with negations rather than `paths-ignore`, so that qa-platform's
+    # Markdown can be re-included: the qa-platform citation guards (see the
+    # `rust` filter below) read those files, and under a plain
+    # `paths-ignore: '**/*.md'` a docs-only qa-platform PR never started this
+    # workflow at all. Order matters -- a later positive pattern re-includes a
+    # path an earlier `!` pattern excluded.
+    paths:
+      - '**'
+      - '!**/*.md'
+      - '!docs/**'
+      - 'gears/qa-platform/**/*.md'
   # PR CI only ever validates the ephemeral refs/pull/N/merge ref, so without
   # this trigger the integrated tip of main is tested nowhere: a semantic
   # conflict between two PRs merged minutes apart is caught by neither PR's run.
   push:
     branches: [ main ]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
+    paths:
+      - '**'
+      - '!**/*.md'
+      - '!docs/**'
+      - 'gears/qa-platform/**/*.md'
   workflow_dispatch:
 
-# NOTE: workflow-level paths-ignore above still skips the entire workflow for
-# pure doc/markdown changes.  The per-job path filters below provide finer
-# granularity so that, e.g., a Cargo.toml-only change skips FIPS/dylint.
+# NOTE: the workflow-level `paths` above still skips the entire workflow for
+# pure doc/markdown changes, except qa-platform's (see there). The per-job path
+# filters below provide finer granularity so that, e.g., a Cargo.toml-only
+# change skips FIPS/dylint.
 
 # Concurrency strategy:
 # - On pull_request: group by PR number. New commits cancel the in-flight run.
@@ -94,6 +105,27 @@ jobs:
               # still get the cross-lane TimescaleDB pin checked, or the guard
               # silently never runs on exactly the diff it exists to catch.
               - 'testing/e2e/lib/sidecars.py'
+              # Input to `make qa-openapi-check` in the test job, which is the
+              # only gate that compares this file with what the code generates.
+              # The `ui` filter below lists it too, but `ui-contract` diffs only
+              # the generated `.d.ts`: a hand-edited json plus a regenerated
+              # `.d.ts` would otherwise run the `ui` job alone and pass.
+              - 'gears/qa-platform/docs/openapi.json'
+              # Inputs of the qa-platform citation guards that are not Rust.
+              # qa-runs' file_citations_tests.rs scans every .ts/.tsx/.sh of
+              # gears/qa-platform plus docs/*.md and resolves citations to any
+              # .rs/.ts/.tsx/.sh/.md there; migration_citations_tests.rs scans
+              # the UI's .ts/.tsx, docs/*.md and docs/features/, and every file
+              # of deploy/, config/ and apps/cf-gears-example-server. Both run
+              # in the test job, so a docs-, UI-, chart- or script-only diff
+              # must still get them run.
+              - 'gears/qa-platform/**/*.md'
+              - 'gears/qa-platform/**/*.ts'
+              - 'gears/qa-platform/**/*.tsx'
+              - 'gears/qa-platform/**/*.sh'
+              - 'gears/qa-platform/deploy/**'
+              - 'gears/qa-platform/config/**'
+              - 'apps/cf-gears-example-server/**'
             fips:
               - 'libs/toolkit/**'
               - 'libs/toolkit-http/**'
@@ -465,6 +497,12 @@ jobs:
       - name: Test qa-insights with Postgres (integration)
         run: make test-qa-insights-pg
 
+      - name: Test qa-catalog with Postgres (integration)
+        run: make test-qa-catalog-pg
+
+      - name: Test qa-environments with Postgres (integration)
+        run: make test-qa-environments-pg
+
       - name: Test qa-catalog with the real git transport (integration)
         run: make test-qa-catalog-git
 
@@ -820,8 +858,11 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
 
+      # Pinned (finding #95): these run every chart guard, so a new release of
+      # either must be a reviewed bump, not a surprise on an unrelated PR. The
+      # versions are the ones the guards were last run with locally.
       - name: Install pytest
-        run: python3 -m pip install --quiet pytest pyyaml
+        run: python3 -m pip install --quiet pytest==8.3.5 pyyaml==6.0.2
 
       - name: Run the qa-platform Helm chart guards
         run: make helm-tests
@@ -830,19 +871,27 @@ jobs:
       # the templates -- the templates are Go-template text, not valid
       # Kubernetes YAML, until `helm template` fills them in. Both steps
       # pass the same fixture --set values the guard scripts above use.
-      # FOUR values have no default on purpose, so a bare render/lint with no
-      # overrides fails before either tool gets a chance to run: publicOrigin
-      # (WS3 Task 1), keycloak.adminPassword (WS3 Task 3), and the two signing
+      # SIX values have no default on purpose, so a bare render/lint with no
+      # overrides fails before either tool gets a chance to run: publicOrigin,
+      # keycloak.adminPassword, the two signing
       # secrets (2026-09-21 -- each is the only access control on an
       # anonymously reachable route, and their old per-render `randAlphaNum`
-      # fallback silently rotated the key on every upgrade).
+      # fallback silently rotated the key on every upgrade), and
+      # argo.workflowClientSecret (2026-09-29 -- the confidential client's
+      # secret; its committed literal is refused outside devMode), and
+      # postgres.password (2026-10-07 -- its committed "qa" is refused
+      # outside devMode).
+      # `check_ci_render_values.py` (make helm-tests) replays both --set lists,
+      # because `helm lint` alone tolerates a missing `required` value.
       - name: helm lint (qa-platform)
         run: |
           helm lint gears/qa-platform/deploy/helm/qa-platform \
             --set publicOrigin=https://example-ci-lint.invalid \
             --set keycloak.adminPassword=ci-fixture-not-a-real-password \
             --set bundleDownloadSigningSecret=ci-fixture-not-a-real-bundle-key \
-            --set collectReportSigningSecret=ci-fixture-not-a-real-collect-key
+            --set collectReportSigningSecret=ci-fixture-not-a-real-collect-key \
+            --set argo.workflowClientSecret=ci-fixture-not-a-real-workflow-secret \
+            --set postgres.password=ci-fixture-not-a-real-db-password
 
       # kubeconform is not on the taiki-e/install-action tool registry and
       # is not preinstalled on ubuntu-latest, so it is fetched directly
@@ -860,14 +909,22 @@ jobs:
           sudo mv /tmp/kubeconform /usr/local/bin/kubeconform
           chmod +x /usr/local/bin/kubeconform
 
+      # `--api-versions` because secret-writer-admission-policy.yaml renders
+      # only where the ValidatingAdmissionPolicy API is advertised, and this
+      # render has no cluster to discover it from: without the flag the policy
+      # and its binding are absent and kubeconform never schema-checks them
+      # (finding #94). check_ci_render_values.py requires both in this render.
       - name: kubeconform (rendered qa-platform manifests)
         run: |
           helm template qa-platform gears/qa-platform/deploy/helm/qa-platform \
             --namespace qa-platform \
+            --api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy \
             --set publicOrigin=https://example-ci-lint.invalid \
             --set keycloak.adminPassword=ci-fixture-not-a-real-password \
             --set bundleDownloadSigningSecret=ci-fixture-not-a-real-bundle-key \
             --set collectReportSigningSecret=ci-fixture-not-a-real-collect-key \
+            --set argo.workflowClientSecret=ci-fixture-not-a-real-workflow-secret \
+            --set postgres.password=ci-fixture-not-a-real-db-password \
             | kubeconform -strict -summary
 
       - name: Install protoc
@@ -880,8 +937,10 @@ jobs:
         with:
           toolchain: stable
 
+      # Pinned (finding #95): `cargo gears lint` decides what this job fails
+      # on, so its version moves only with a reviewed bump here.
       - name: Install cargo-gears
-        run: cargo install --locked cargo-gears
+        run: cargo install --locked cargo-gears --version 0.0.7
 
       - name: Run architecture lints
         run: cargo gears lint --dylint

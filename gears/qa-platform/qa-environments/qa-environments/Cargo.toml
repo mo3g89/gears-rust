@@ -9,12 +9,15 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[package.metadata.cargo-shear]
+ignored = ["testcontainers", "testcontainers-modules"]
+
 [features]
 default = []
 
 # Decision D4's runner-`Secret` writer (`infra::runner_secret_writer`).
 #
-# **Renamed from `platform-observation` by Task 19b (ruling F-19.)** It used to
+# **Renamed from `platform-observation` by Task 19b.** It used to
 # gate an adapter that observed an environment's own cluster AND wrote the
 # runner `Secret`; Task 15 moved observation to the product plugin and Task 19
 # deleted what was left of it, so this now gates the `Secret` writer and
@@ -40,7 +43,7 @@ default = []
 # * `kube` — the API client. `client` for HTTP and `rustls-tls`/`aws-lc-rs` for
 #   TLS, matching qa-runs' `argo` feature so both gears agree on one TLS stack.
 #   No `runtime`: nothing here watches or streams.
-# * `k8s-openapi` — `core::v1::Secret` (D4). `ConfigMap` went with detection.
+# * `k8s-openapi` — `core::v1::Secret`. `ConfigMap` went with detection.
 # * `hyper-util`/`rustls` — not called directly for requests (`kube` owns the
 #   client); the writer downcasts through them to classify a transport failure
 #   (connect vs. TLS/certificate) by the *type* of the error `kube` returns,
@@ -48,6 +51,13 @@ default = []
 #   versions `kube`'s own `rustls-tls` stack uses (one entry each in
 #   Cargo.lock), which is what makes the downcast succeed.
 runner-secret = ["dep:kube", "dep:k8s-openapi", "dep:hyper-util", "dep:rustls"]
+# Gates the real-Postgres tier (Docker required; `test_support::pg_db` starts one
+# container per test). The unit tier is in-memory SQLite with one connection, so
+# two writers of one variable can never overlap there, with a fix or without one.
+# `infra::storage::variables_pg_tests` is the only test that can falsify the
+# concurrent-upsert behaviour of `PUT /qa/v1/variables` (DESIGN §3.2). Run with
+# `make test-qa-environments-pg`.
+postgres = ["dep:testcontainers", "dep:testcontainers-modules"]
 
 [dependencies]
 qa-environments-sdk = { path = "../qa-environments-sdk" }
@@ -133,6 +143,11 @@ hyper-util = { workspace = true, features = ["client-legacy"], optional = true }
 # `tokio-rustls`) raises a certificate/handshake failure as. Never used to
 # build a TLS config or connection of our own.
 rustls = { workspace = true, optional = true }
+
+# Only under `--features postgres`; see `[features]`. Same placement as
+# qa-catalog, qa-insights and qa-runs (Cargo has no optional dev-dependencies).
+testcontainers = { workspace = true, optional = true }
+testcontainers-modules = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The in-memory metric pipeline `infra::metrics::probe` builds: an adapter test

@@ -2,7 +2,7 @@
 //!
 //! Covers the primitive the design rests on (one `gix` clone materializing
 //! two branches' trees into separate plain directories — the original
-//! spike, spec §3.1), the real [`RepoSyncPort`] engine driven per branch,
+//! spike), the real [`RepoSyncPort`] engine driven per branch,
 //! the missing-branch failure mode, and concurrent syncs through the same
 //! two-tier locks `ReposService` uses. Gated behind `integration` like the
 //! sibling gix suite, because it drives the real git transport:
@@ -151,7 +151,7 @@ async fn engine_materializes_each_branch_into_its_own_snapshot() {
     let url = fixture_url(&origin);
     let repos_dir = tmp.path().join("repos");
     let repo_id = uuid::Uuid::new_v4();
-    let engine = GixSyncEngine;
+    let engine = GixSyncEngine::default();
 
     for branch in ["main", "release/5.0"] {
         let result = engine
@@ -187,7 +187,7 @@ async fn syncing_a_branch_absent_from_the_remote_fails_cleanly() {
     let repos_dir = tmp.path().join("repos");
     let repo_id = uuid::Uuid::new_v4();
 
-    let err = GixSyncEngine
+    let err = GixSyncEngine::default()
         .sync(
             &url,
             "no-such-branch",
@@ -215,18 +215,22 @@ async fn concurrent_syncs_of_different_branches_do_not_corrupt_each_other() {
     // Serialize through the same two-tier lock the service uses; without the
     // repo tier these concurrent fetches race on the shared object store.
     let cache = std::sync::Arc::new(qa_catalog::SyncCache::new(std::time::Duration::ZERO));
+    // One engine, cloned into every task as the service shares it: the clones
+    // share its per-clone-directory lock.
+    let engine = GixSyncEngine::default();
 
     let mut handles = Vec::new();
     for branch in ["main", "release/5.0", "main", "release/5.0"] {
         let url = url.clone();
         let repos_dir = repos_dir.clone();
         let cache = std::sync::Arc::clone(&cache);
+        let engine = engine.clone();
         handles.push(tokio::spawn(async move {
             let repo_lock = cache.repo_lock(repo_id).await;
             let branch_lock = cache.branch_lock(repo_id, branch).await;
             let _repo_guard = repo_lock.lock().await;
             let _branch_guard = branch_lock.lock().await;
-            GixSyncEngine
+            engine
                 .sync(
                     &url,
                     branch,

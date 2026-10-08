@@ -365,7 +365,7 @@ async fn a_collect_target_cannot_be_scheduled() {
 }
 
 // ---------------------------------------------------------------------------
-// Notification settings (D9)
+// Notification settings
 // ---------------------------------------------------------------------------
 
 /// A schedule with every field the notification edit must not disturb set to
@@ -535,7 +535,7 @@ async fn a_full_replace_leaves_the_notification_settings_standing() {
 /// Legacy's form deserializes straight into `ScheduledRunNotificationEvent`
 /// (`manager/src/models.rs:291-299`), so an unrecognised name is refused there
 /// and never stored. Storing one here would be a subscription that silently
-/// never fires, because qa-insights' routing core (Task 36) can only act on
+/// never fires, because qa-insights' routing core can only act on
 /// names it knows.
 ///
 /// `"InProgress"` is in the refused list on purpose: it is the *variant* name,
@@ -1826,7 +1826,7 @@ async fn another_tenants_schedule_is_invisible() {
 }
 
 // ---------------------------------------------------------------------------
-// Referential integrity (Task 7)
+// Referential integrity
 // ---------------------------------------------------------------------------
 
 /// A schedule naming a custom plan qa-catalog cannot resolve is refused on

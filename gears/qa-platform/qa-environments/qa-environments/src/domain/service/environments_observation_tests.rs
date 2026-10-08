@@ -18,7 +18,7 @@
 //! resolution) through `pick_vpadm_namespace`/`vpadm_namespace_for`. Task 15
 //! **deleted both**: a plugin reads its own non-secret credential fields out
 //! of `EnvironmentHandle::config`, so the gear no longer resolves one
-//! product's variable on its behalf (ruling D-9). The property those three
+//! product's variable on its behalf. The property those three
 //! tests protected — an environment's own namespace reaching the thing that
 //! observes it — is now
 //! `the_config_column_reaches_the_plugin_verbatim` in
@@ -50,11 +50,12 @@ use qa_product_sdk::observation::{
 
 use crate::domain::ports::{ProductPluginPort, RunnerSecretWriter};
 use crate::test_support::{
-    FailingSecretObserver, FixedPluginPort, KeyedPlugin, RecordingCredStore,
+    FailingSecretObserver, FixedPluginPort, HangingPlugin, KeyedPlugin, RecordingCredStore,
     RecordingSecretObserver, ScriptedPlugin, SelectivelyFailingSecretObserver,
     TruncatingSecretObserver, build_services_tenant_scoped_with_observer,
     build_services_tenant_scoped_with_observer_and_port, build_services_tenant_scoped_with_plugin,
-    build_services_tenant_scoped_with_plugin_and_credstore, ctx, field, inmem_db,
+    build_services_tenant_scoped_with_plugin_and_credstore,
+    build_services_tenant_scoped_with_plugin_and_observe_timeout, ctx, field, inmem_db,
 };
 
 /// Every environment in this module belongs to one product, because an
@@ -139,10 +140,10 @@ fn port_detecting(version: &str) -> Arc<dyn ProductPluginPort> {
 ///
 /// This test used to assert `failed == 1` / `observed == 2`, because an
 /// unresolvable kubeconfig made `observe_environment` return a genuine `Err`
-/// *before* any `ObservationOutcome` existed — and nothing was persisted, so
-/// the environment read "not yet observed" forever while the reason lived only in
-/// a log line. Cluster-health spec section 8; measured on the remote, where
-/// seven of eight environments sat in exactly that state.
+/// *before* any `ObservationOutcome` existed — and nothing was persisted, so the
+/// environment read "not yet observed" forever while the reason lived only in a
+/// log line. Measured on the remote, where seven of eight environments sat in
+/// exactly that state.
 ///
 /// The resolution failure is now folded into the outcome instead, so all three
 /// environments complete a pass and the broken one's reason is persisted where an
@@ -455,7 +456,7 @@ async fn a_cycle_cancelled_before_it_starts_attempts_nothing() {
 // the observer. Task 15 deleted that method and `pick_vpadm_namespace` with
 // it: a plugin reads its own non-secret credential fields out of
 // `EnvironmentHandle::config`, and the gear resolving one product's variable
-// on its behalf is the coupling this plan exists to remove (ruling D-9).
+// on its behalf is the coupling this plan exists to remove.
 //
 // Deleted rather than adapted, because there is nothing left in this gear for
 // them to test -- and recorded here rather than silently removed, because a
@@ -584,8 +585,8 @@ async fn a_self_heal_failure_is_logged_with_the_environment_attached() {
 /// caller — the ticker's self-heal — so an environment created through the UI had
 /// no runner `Secret` until the next cycle (default `poll_interval_seconds:
 /// 300`, floor 60). That gap IS the ~5-minute `FailedMount` window D4 exists
-/// to eliminate, and the spec (§4.6) said "on create, on update, and as a
-/// self-heal" the whole time.
+/// to eliminate, which is why the `Secret` is written on create, on update,
+/// and as a self-heal.
 ///
 /// The assertion is at the port because there is nowhere else it could be:
 /// the `Secret` is written into the **Argo** cluster, so it appears in no
@@ -1414,4 +1415,69 @@ async fn an_environment_with_no_credentials_writes_nothing() {
         environment.credentials
     );
     assert!(observer.secret_writes().is_empty());
+}
+
+/// **An observation is bounded by the platform, whatever the plugin
+/// does.** The plugin never answers; `observe_environment` (the refresh
+/// route's path, and the ticker's) returns within the deadline with the
+/// timeout persisted as a value for **both** halves, like every other failed
+/// observation, and the abandoned call counted under the `timeout` class.
+#[tokio::test]
+async fn an_observation_that_outlives_its_deadline_is_recorded_as_a_timeout() {
+    use crate::domain::metrics::QA_ENVIRONMENTS_PLUGIN_CALL;
+    use crate::domain::ports::metrics::PluginCallClass;
+    use crate::infra::metrics::probe::MetricsProbe;
+
+    let probe = MetricsProbe::new();
+    let services = build_services_tenant_scoped_with_plugin_and_observe_timeout(
+        inmem_db().await,
+        Arc::new(FixedPluginPort::new(Arc::new(HangingPlugin))),
+        probe.adapter(),
+        std::time::Duration::from_millis(50),
+    );
+    let tenant = Uuid::new_v4();
+    let created = services
+        .environments
+        .create_environment(&ctx(tenant), pasted("environment-hang", "kubeconfig-hang"))
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let row = services
+        .environments
+        .observe_environment(&ctx(tenant), created.id)
+        .await
+        .expect("a timed-out observation is a value, not an error");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "took {elapsed:?}"
+    );
+    let message = row
+        .version_detect_error
+        .as_deref()
+        .expect("the timeout must be recorded on the row");
+    assert!(message.contains("observe_timeout_seconds"), "{message}");
+
+    // The health half failed too: a failed read is `Unknown` with the reason,
+    // and `health_checked_at` set — something did try to look.
+    let health = row
+        .health_detail
+        .as_deref()
+        .expect("the health half must record the timeout as well");
+    assert!(health.contains("observe_timeout_seconds"), "{health}");
+    assert_eq!(row.health_state, qa_environments_sdk::HealthState::Unknown);
+    assert!(row.health_checked_at.is_some());
+
+    let series = probe.collect();
+    assert_eq!(
+        series.counter_with(
+            QA_ENVIRONMENTS_PLUGIN_CALL,
+            &[("class", PluginCallClass::Timeout.as_str())]
+        ),
+        1,
+        "the abandoned call is counted once, under `timeout`; the exported names were {:?}",
+        series.names()
+    );
 }

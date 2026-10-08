@@ -2,10 +2,12 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use qa_catalog_sdk::{NewTestRepository, TestRepository, TestRepositoryUpdate};
+use sea_orm::sea_query::OnConflict;
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 use toolkit_db::secure::{
-    DBRunner, SecureDeleteExt, SecureEntityExt, secure_insert, secure_update_with_scope,
+    DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, secure_insert,
+    secure_update_with_scope,
 };
 use toolkit_security::AccessScope;
 use uuid::Uuid;
@@ -25,6 +27,48 @@ use crate::infra::storage::mapper::repo_to_sdk;
 #[derive(Clone, Default)]
 pub struct OrmTestReposRepository;
 
+/// Stale rows deleted per statement: an id list, not one statement per row,
+/// and well under every backend's bind-parameter ceiling.
+const STALE_BRANCH_ROWS_PER_DELETE: usize = 500;
+
+/// The ids of `cached` rows a listing makes stale — filed under another
+/// tenant than `owner`, or a name `listed` lacks — in ascending order.
+///
+/// Sorted because they are deleted in chunks of
+/// [`STALE_BRANCH_ROWS_PER_DELETE`], one statement per chunk, inside one
+/// transaction. Two writers replacing the same repository's branches read
+/// the cached rows in whatever order the backend returns them; unsorted, each
+/// could lock its first chunk and then wait for the other's, a deadlock once
+/// more than one chunk is stale. Sorted, both take the same rows in the same
+/// order.
+fn stale_branch_rows(
+    cached: &[repo_branch::Model],
+    owner: Uuid,
+    listed: &BTreeSet<String>,
+) -> Vec<Uuid> {
+    let mut stale: Vec<Uuid> = cached
+        .iter()
+        .filter(|row| row.tenant_id != owner || !listed.contains(&row.name))
+        .map(|row| row.id)
+        .collect();
+    stale.sort_unstable();
+    stale
+}
+
+/// The `ON CONFLICT` clause of a branch-cache insert: the three columns of
+/// `idx_qa_branches_unique`, `DO NOTHING`. The target is named on purpose — a
+/// bare `ON CONFLICT DO NOTHING` would also swallow a primary-key collision
+/// (see qa-insights' `jira_sea_repo::bug_conflict_target`).
+fn branch_conflict_target() -> OnConflict {
+    OnConflict::columns([
+        BranchColumn::TenantId,
+        BranchColumn::RepoId,
+        BranchColumn::Name,
+    ])
+    .do_nothing()
+    .to_owned()
+}
+
 #[async_trait]
 impl TestReposRepository for OrmTestReposRepository {
     async fn get<C: DBRunner>(
@@ -41,6 +85,22 @@ impl TestReposRepository for OrmTestReposRepository {
             .await
             .map_err(db_err)?;
         Ok(found.map(repo_to_sdk))
+    }
+
+    async fn owner_tenant<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<Uuid>, DomainError> {
+        let found = RepoEntity::find()
+            .filter(sea_orm::Condition::all().add(RepoColumn::Id.eq(id)))
+            .secure()
+            .scope_with(scope)
+            .one(runner)
+            .await
+            .map_err(db_err)?;
+        Ok(found.map(|row| row.tenant_id))
     }
 
     async fn list<C: DBRunner>(
@@ -227,46 +287,81 @@ impl TestReposRepository for OrmTestReposRepository {
         &self,
         runner: &C,
         scope: &AccessScope,
-        tenant_id: Uuid,
         repo_id: Uuid,
         branches: Vec<String>,
     ) -> Result<(), DomainError> {
-        let now = OffsetDateTime::now_utc();
+        // The owning tenant, from the repository row itself (DESIGN §3.8 "qa-catalog schema").
+        let owner = RepoEntity::find()
+            .filter(sea_orm::Condition::all().add(RepoColumn::Id.eq(repo_id)))
+            .secure()
+            .scope_with(scope)
+            .one(runner)
+            .await
+            .map_err(db_err)?
+            .ok_or(DomainError::NotFound { id: repo_id })?
+            .tenant_id;
 
-        BranchEntity::delete_many()
+        // An idempotent diff (DESIGN §3.3), not delete-all-then-insert. Names
+        // already cached for the owner are kept, cached names the listing lacks
+        // (or rows filed under another tenant visible in `scope`, DESIGN §3.8)
+        // are deleted, and the rest are inserted with `ON CONFLICT DO NOTHING`.
+        // Two writers racing on
+        // one repository therefore both commit: what one inserted the other
+        // finds already there. A name the racing writer could not see yet
+        // survives until the next listing, which converges the cache.
+        let listed: BTreeSet<String> = branches.into_iter().collect();
+        let cached = BranchEntity::find()
             .filter(sea_orm::Condition::all().add(BranchColumn::RepoId.eq(repo_id)))
             .secure()
             .scope_with(scope)
-            .exec(runner)
+            .all(runner)
             .await
             .map_err(db_err)?;
 
-        // Collapse duplicates from the git remote (and give the cache a stable
-        // insertion order) before hitting the `(tenant_id, repo_id, name)`
-        // unique index.
-        let unique: BTreeSet<String> = branches.into_iter().collect();
+        let stale = stale_branch_rows(&cached, owner, &listed);
+        for chunk in stale.chunks(STALE_BRANCH_ROWS_PER_DELETE) {
+            BranchEntity::delete_many()
+                .filter(
+                    sea_orm::Condition::all().add(BranchColumn::Id.is_in(chunk.iter().copied())),
+                )
+                .secure()
+                .scope_with(scope)
+                .exec(runner)
+                .await
+                .map_err(db_err)?;
+        }
 
-        for name in unique {
+        let present: BTreeSet<&str> = cached
+            .iter()
+            .filter(|row| row.tenant_id == owner)
+            .map(|row| row.name.as_str())
+            .collect();
+        let now = OffsetDateTime::now_utc();
+        for name in listed
+            .iter()
+            .filter(|name| !present.contains(name.as_str()))
+        {
             let am = repo_branch::ActiveModel {
                 id: ActiveValue::Set(Uuid::new_v4()),
-                tenant_id: ActiveValue::Set(tenant_id),
+                tenant_id: ActiveValue::Set(owner),
                 repo_id: ActiveValue::Set(repo_id),
-                name: ActiveValue::Set(name),
+                name: ActiveValue::Set(name.clone()),
                 refreshed_at: ActiveValue::Set(now),
             };
-
-            match secure_insert::<BranchEntity>(am, scope, runner).await {
-                Ok(_) => {}
-                // Two syncs of the same repository racing each other: the
-                // loser sees rows it did not insert. Surface a retryable
-                // domain conflict rather than an opaque `Database` error.
-                // Since `idx_qa_branches_unique` is prefixed with `tenant_id`,
-                // the colliding row is necessarily one of this tenant's own —
-                // another tenant cannot make this branch fail forever, so
-                // "retry" is honest advice.
-                Err(e) if e.is_unique_violation() => {
-                    return Err(DomainError::BranchCacheConflict { repo_id });
-                }
+            let inserted = BranchEntity::insert(am.clone())
+                .secure()
+                .scope_with_model(scope, &am)
+                .map_err(db_err)?
+                .on_conflict_raw(branch_conflict_target())
+                .exec(runner)
+                .await;
+            match inserted {
+                // `RecordNotInserted` is how SeaORM reports the `DO NOTHING`
+                // path: another writer filed this name first.
+                Ok(_) | Err(ScopeError::Db(sea_orm::DbErr::RecordNotInserted)) => {}
+                // A unique violation here can only be another constraint (the
+                // named target cannot raise it), and on Postgres it has already
+                // aborted the transaction: a real error.
                 Err(e) => return Err(db_err(e)),
             }
         }
@@ -310,5 +405,73 @@ impl TestReposRepository for OrmTestReposRepository {
                 tenant_id: m.tenant_id,
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use time::OffsetDateTime;
+    use uuid::Uuid;
+
+    use super::{STALE_BRANCH_ROWS_PER_DELETE, stale_branch_rows};
+    use crate::infra::storage::entity::repo_branch;
+
+    /// Two writers chunk the same stale set the same way whatever order the
+    /// backend returned the cached rows in: the ids come back sorted, so the
+    /// first chunk of one is the first chunk of the other. A finite fixture
+    /// past two chunks.
+    #[test]
+    fn stale_rows_are_sorted_so_every_writer_deletes_the_same_chunks_in_the_same_order() {
+        let owner = Uuid::new_v4();
+        let repo_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        let rows: Vec<repo_branch::Model> = (0..(STALE_BRANCH_ROWS_PER_DELETE * 2 + 7))
+            .map(|i| repo_branch::Model {
+                id: Uuid::new_v4(),
+                tenant_id: owner,
+                repo_id,
+                name: format!("gone-{i}"),
+                refreshed_at: now,
+            })
+            .collect();
+        let listed: BTreeSet<String> = BTreeSet::from(["main".to_owned()]);
+
+        let forward = stale_branch_rows(&rows, owner, &listed);
+        let mut reversed_rows = rows.clone();
+        reversed_rows.reverse();
+        let backward = stale_branch_rows(&reversed_rows, owner, &listed);
+
+        assert_eq!(forward.len(), rows.len());
+        assert!(forward.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(forward, backward);
+    }
+
+    /// A listed name under the owner is kept; the same name filed under
+    /// another tenant is stale.
+    #[test]
+    fn a_listed_name_is_kept_only_under_its_owner() {
+        let owner = Uuid::new_v4();
+        let repo_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        let kept = repo_branch::Model {
+            id: Uuid::new_v4(),
+            tenant_id: owner,
+            repo_id,
+            name: "main".to_owned(),
+            refreshed_at: now,
+        };
+        let foreign = repo_branch::Model {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            ..kept.clone()
+        };
+        let listed: BTreeSet<String> = BTreeSet::from(["main".to_owned()]);
+
+        assert_eq!(
+            stale_branch_rows(&[kept, foreign.clone()], owner, &listed),
+            vec![foreign.id]
+        );
     }
 }

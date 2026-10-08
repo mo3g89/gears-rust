@@ -91,7 +91,7 @@ UI_CRT="$TLS_DIR/ui.crt"
 UI_KEY="$TLS_DIR/ui.key"
 
 # The containers that read these files run as uid 1000 (checked: `id` in
-# quay.io/keycloak/keycloak:26.0 -> uid=1000(keycloak), and in the gears image
+# quay.io/keycloak/keycloak:26.0.8 -> uid=1000(keycloak), and in the gears image
 # -> uid=1000(appuser)). This script runs as root in postgres:16, so without the
 # chown below the files land root-owned and neither reader can open them. The
 # `ui` container's nginx is the exception -- its master process is root (the

@@ -1,22 +1,22 @@
-//! The outbound email port — Task 38 fixed the shape (R102); Task 39 supplied
+//! The outbound email port — Task 38 fixed the shape; Task 39 supplied
 //! the one production implementation, and **the SMTP follow-up reversed the
 //! decision that made that implementation inert**.
 //!
-//! # D10 is closed, and this header is what it was replaced by
+//! # The deferred socket is closed, and this header is what it was replaced by
 //!
-//! D10 said: config, routing and dedupe ship for email exactly as they do for
-//! Slack, and only the socket is deferred. The cost of leaving it there was
-//! measured rather than guessed — an operator fills in the SMTP columns, sends
-//! a test, reads a success back, and receives nothing — and owner decision 1
-//! settled it as *implement it fully*. The socket now exists:
+//! The original design said: config, routing and dedupe ship for email exactly
+//! as they do for Slack, and only the socket is deferred. The cost of leaving
+//! it there was measured rather than guessed — an operator fills in the SMTP
+//! columns, sends a test, reads a success back, and receives nothing — and the
+//! owner settled it as *implement it fully*. The socket now exists:
 //! [`crate::infra::notify::mail_smtp::SmtpMailClient`] is a real `lettre`
 //! transport, and ADR-0011 (`cpt-cf-qa-adr-smtp-egress`) is the architectural
 //! half of the decision, because SMTP cannot traverse `oagw` and so this is the
 //! gear's first direct, non-gateway TCP egress.
 //!
 //! [`crate::infra::notify::mail_unsupported::UnsupportedMailClient`] did not go
-//! away with D10: it is the explicitly-bound answer for a deployment whose
-//! operator has not enabled SMTP egress at all
+//! away with the deferral: it is the explicitly-bound answer for a deployment
+//! whose operator has not enabled SMTP egress at all
 //! (`crate::config::QaInsightsConfig::smtp_allowed_hosts` empty). What changed
 //! is what it *answers* — see the next section.
 //!
@@ -45,11 +45,11 @@
 //!
 //! [`MailClient::send`] takes `ctx: &SecurityContext`, the same as
 //! [`crate::domain::ports::slack_client::SlackClient::send`] (which gained it
-//! in fix round 1, ruling R108). **This module used to argue the opposite**,
+//! in fix round 1). **This module used to argue the opposite**,
 //! and the argument is kept here because the finding that overruled it turned
 //! out to be right for a reason it only predicted:
 //!
-//! > D10's inert adapter never reaches a network, so there is no per-tenant
+//! > The inert adapter never reaches a network, so there is no per-tenant
 //! > resolution for a context to drive, and a future SMTP-backed adapter would
 //! > authenticate to a relay from [`MailMessage`]'s own `smtp_host`/`smtp_port`
 //! > rather than from an identity — therefore the parameter would be unused
@@ -118,8 +118,9 @@ pub struct MailMessage {
 ///
 /// **The password is not in here and never crosses this port.** The reference
 /// is resolved by the adapter, at send time, through
-/// `credstore_sdk::CredStoreClientV1` under the sending tenant's own
-/// `SecurityContext` — which is the whole reason [`MailClient::send`] takes
+/// `credstore_sdk::CredStoreClientV1` under the `SecurityContext`
+/// [`MailClient::send`] is handed — the qa-insights system actor bound to the
+/// sending tenant — which is the whole reason [`MailClient::send`] takes
 /// one. A struct with a `password: String` field would put plaintext into a
 /// value the domain layer builds, clones and (per `#[derive(Debug)]`) can
 /// format, which ADR-0008 (`cpt-cf-qa-adr-credential-containment`) forbids
@@ -151,6 +152,8 @@ pub trait MailClient: Send + Sync {
     /// Send `message` as `ctx`'s subject. `ctx` is the sending tenant's
     /// identity and the authority the relay password is resolved under — see
     /// this module's header, "One method, and it takes a `ctx`".
+    /// Both of `NotifyService`'s call sites pass the qa-insights system actor
+    /// bound to that tenant, so an adapter resolves secrets as real sends do.
     /// `Ok(SendOutcome::Sent)` on success.
     async fn send(
         &self,

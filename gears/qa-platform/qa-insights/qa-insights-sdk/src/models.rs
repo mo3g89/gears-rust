@@ -413,7 +413,7 @@ pub struct SkipListEntry {
 /// field holds only the reference. The field is *named* for the reference rather
 /// than merely typed as a `String`, so that a `String` holding an actual token
 /// cannot be assigned to it by accident — the same shape
-/// `qa_environments_sdk::Environment::kubeconfig_credstore_ref` uses.
+/// `qa_environments_sdk::EnvironmentCredential::credstore_ref` uses.
 ///
 /// One of **two** credentials stored this way, the other being
 /// [`NotificationConfig::slack_webhook_credstore_ref`]: a Slack incoming-webhook
@@ -531,12 +531,27 @@ impl ScheduledRunSlackTemplates {
 ///
 /// # Which field gates which event
 ///
-/// Every boolean here is a routing gate; `notify::routing` owns the mapping.
-/// Two are worth flagging:
-/// [`Self::run_queue_queued_slack_enabled`] is *off* by default because a busy
-/// environment produces a lot of queue events, and the companion `expired` event
-/// has **no toggle at all** — it is the one that stops a run disappearing
-/// silently.
+/// `qa-insights`' `notify::routing` owns the mapping, and not every boolean
+/// here is part of it. Worth flagging:
+///
+/// * [`Self::notify_on_failure`] and [`Self::notify_on_success`] are the
+///   **outcome policy**, live since 2026-09-29. They gate both channels, on
+///   the same three-way verdict a run-completed message prints in its own
+///   headline; with both off, a finished run notifies on nothing. They were
+///   inert before that date, matching the source system, so a deployment
+///   upgrading across it starts obeying whatever was stored — and the default
+///   is failures only.
+/// * [`Self::slack_enabled`] and [`Self::email_enabled`] are the per-channel
+///   switches, each independent of the other and of the schedule's own
+///   `slack_enabled`, which gates Slack alone.
+/// * [`Self::run_queue_queued_slack_enabled`] is *off* by default because a
+///   busy environment would produce a lot of queue events. It gates no routing
+///   decision today, because nothing produces a queue alert: no `queued` alert
+///   and no `expired` alert exists (see `DESIGN.md` §3.5, "What actually
+///   notifies"). [`Self::notify_on_schedule_completion`] gates nothing either.
+///   Both are kept as stored settings an operator's UI round-trips rather than
+///   dropped, because removing a column from a settings document is a
+///   migration and a UI change.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(
     clippy::struct_excessive_bools,
@@ -553,14 +568,34 @@ pub struct NotificationConfig {
     /// and the same naming-not-retyping so a raw URL cannot be assigned by
     /// accident.
     ///
-    /// **Decided 2026-08-20.**
+    /// **What the secret holds:** the full Slack incoming-webhook URL,
+    /// `https://hooks.slack.com/services/T…/B…/…`. `qa-insights`'
+    /// `infra::notify::slack_oagw` resolves it through
+    /// `credstore_sdk::CredStoreClientV1` at send time, under the sending
+    /// tenant's context, refuses anything that is not such a URL before
+    /// dialling, and proxies it through oagw. The URL is never rendered in an
+    /// error and never returned by the GET surface, which answers with this
+    /// reference; and **neither qa-insights nor oagw logs it at `info` or
+    /// above** — oagw's proxy logs, and pingora's own failure lines through
+    /// oagw's `request_summary` override, name the upstream alias and the
+    /// route pattern (`/services`), never the request path (`oagw`'s
+    /// `infra::proxy::pingora_proxy`, "Request logs"). pingora's DEBUG/TRACE
+    /// request-header dumps do carry it, so its log targets must stay at
+    /// `info`. oagw also returns the proxy URI to its caller as a problem
+    /// detail's `instance`, which qa-insights drops.
+    ///
+    /// **Decided 2026-08-20; the resolution path 2026-09-30.**
     pub slack_webhook_credstore_ref: String,
     pub slack_channel: String,
     /// Base URL used to build run links in rendered messages.
     pub manager_ui_base_url: String,
     pub slack_enabled: bool,
-    /// Defaults to `true` — the only notify gate that starts on.
+    /// Announce a run whose results say it did not pass. Defaults to `true` —
+    /// the only notify gate that starts on, so a tenant that never touches
+    /// this type gets failure alerts and nothing else.
     pub notify_on_failure: bool,
+    /// Announce a run with at least one passed result and none failed or errored
+    /// (skipped results do not count against it). Defaults to `false`.
     pub notify_on_success: bool,
     pub notify_on_schedule_completion: bool,
     pub scheduled_run_slack_enabled: bool,
@@ -594,8 +629,10 @@ pub struct NotificationConfig {
     /// Credstore reference to the SMTP AUTH password. **Never the password.**
     ///
     /// The third of this gear's credentials held by reference, and the first
-    /// one this gear resolves *itself*: a Slack webhook and a JIRA token both
-    /// ride HTTP, so oagw can fetch and inject them, and SMTP is not HTTP.
+    /// one this gear resolved *itself*: a JIRA token rides an HTTP header, so
+    /// oagw fetches and injects it, and SMTP is not HTTP. (The Slack webhook
+    /// became the second, because its credential is a URL path oagw cannot
+    /// inject — see [`Self::slack_webhook_credstore_ref`].)
     /// `qa-insights`' `infra::notify::mail_smtp` reads this through
     /// `credstore_sdk::CredStoreClientV1` at send time and hands the value
     /// straight to `lettre`; it is never logged, never rendered and never

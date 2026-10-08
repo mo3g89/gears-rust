@@ -13,7 +13,8 @@ pub struct Model {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
-    /// **`NOT NULL` since Task 20b** (`m20260903_000013`, decision D9).
+    /// **`NOT NULL` since Task 20b** (`m20260903_000013`, folded into
+    /// `migrations::m20260812_000001_initial` by the docs squash).
     pub product_id: Uuid,
     pub description: Option<String>,
     pub available: bool,
@@ -74,13 +75,13 @@ pub struct Model {
     /// `[]` for an environment whose credentials have never been written
     /// through the plugin path.
     ///
-    /// **There is no `value` field in that shape, ever**, which is what makes
-    /// this column structurally incapable of holding credential material —
-    /// the rule `infra::runner_secret_errors` exists to enforce elsewhere, applied
-    /// here to a schema instead. Added by
-    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash), which backfills it from
-    /// `kubeconfig_credstore_ref`. Writer: Task 15's `record_observation`;
-    /// until then the backfill is the only thing that has ever set it.
+    /// **There is no `value` field in that shape, ever**, which is what makes this column
+    /// structurally incapable of holding credential material — the rule
+    /// `infra::runner_secret_errors` exists to enforce elsewhere, applied here to a schema instead.
+    /// Added by `m20260903_000011_environment_plugin_columns` (folded into
+    /// `migrations::m20260812_000001_initial` by the docs squash), which backfilled it from the
+    /// pre-plugin `kubeconfig_credstore_ref` (dropped by Task 19). Written by the create and update
+    /// paths since Task 18b, from the credential write path's `PersistedCredentials`.
     pub credentials: serde_json::Value,
     /// The most recent observation's plugin-defined attribute map, stored as
     /// `qa_product_sdk::observation::ObservedAttrs` itself (a JSON object of
@@ -102,20 +103,20 @@ pub struct Model {
     /// Kept apart from [`Self::observed_attrs`] because the two have different
     /// authors — this one a human, that one a machine — and an environment
     /// page has to be able to say which of two values a human may correct.
-    /// Added by `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash), which backfills
-    /// it from each environment's `VPADM_NAMESPACE` variable; see that
-    /// migration's module doc for why the case-fold belongs in a one-time
-    /// backfill and nowhere else.
+    /// Added by `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash), which backfilled
+    /// it, once, from each environment's `VPADM_NAMESPACE` variable; nothing
+    /// writes it from that variable since.
     pub config: serde_json::Value,
     /// The `FieldRole::BaseUrl` projection of [`Self::observed_attrs`].
     ///
-    /// It replaced `vhp_base_url`, which Task 19 dropped.
-    ///
-    /// During Phase D both columns are written from the same observation, and
-    /// `vhp_base_url` stays authoritative for existing readers; Task 19 drops
-    /// it. `NULL` means "never conclusively detected", exactly as it does
-    /// there. Added by `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash), which
-    /// backfills it from `vhp_base_url`.
+    /// It replaced `vhp_base_url`, which Task 19 dropped. Through Phase D both
+    /// columns were written from the same observation and `vhp_base_url`
+    /// stayed authoritative for the readers of that time; since the drop this
+    /// is the only base-URL column. `NULL` means "never conclusively
+    /// detected", exactly as it did there. Added by
+    /// `m20260903_000011_environment_plugin_columns` (folded into
+    /// `migrations::m20260812_000001_initial` by the docs squash), which
+    /// backfilled it from `vhp_base_url`.
     pub observed_base_url: Option<String>,
     /// `qa_product_sdk::observation::HealthState`'s wire form — `ok`,
     /// `degraded`, `down` or `unknown`. `NOT NULL DEFAULT 'unknown'`, matching
@@ -125,24 +126,25 @@ pub struct Model {
     ///
     /// `unknown` is what a *failed* read stores as well as what a never-read
     /// row holds: [`Self::health_checked_at`] is what separates them. Added by
-    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash), which backfills it from
-    /// `cluster_status` (see its module doc for the mapping table).
+    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash), which backfilled it from
+    /// `cluster_status` (since dropped).
     pub health_state: String,
     /// Why the most recent health read reached the state it did, when there is
     /// something to say. **Classified text only** — a fixed `&'static str`
     /// chosen by variant, or the one sanctioned exception
     /// (`PluginFailure::remote_message`) — never a formatted error and never
-    /// anything derived from a credential (**D12**). Added by
-    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash), which backfills it from
-    /// `cluster_status_message`, itself already classified (D-CH-5).
+    /// anything derived from a credential. Added by
+    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash), which backfilled it from
+    /// `cluster_status_message` (since dropped), itself already classified text
+    /// under the same rule: a failed read classifies, never echoes.
     pub health_detail: Option<String>,
     /// When the most recent health read ran. `NULL` means **nothing ever
     /// looked**, which is a different fact from `health_state = 'unknown'`
     /// after a look that failed — and the only thing that distinguishes them,
     /// which is why `HealthOutcome::NotAttempted` writes no health column at
     /// all rather than stamping a time. Added by
-    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash), which backfills it from
-    /// `cluster_checked_at`.
+    /// `m20260903_000011_environment_plugin_columns` (folded into `migrations::m20260812_000001_initial` by the docs squash), which backfilled it from
+    /// `cluster_checked_at` (since dropped).
     pub health_checked_at: Option<OffsetDateTime>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,

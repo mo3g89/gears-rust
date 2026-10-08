@@ -3,9 +3,10 @@
 //! Follows the two shipped sibling gears' migration shape — a backend `match`
 //! producing one `execute_unprepared` DDL blob per dialect (DESIGN §3.8,
 //! "Database Schemas & Tables"). Column, index and FK order is kept identical
-//! across `POSTGRES_UP`, `MYSQL_UP` and `SQLITE_UP`, because a three-way
-//! eyeball diff is the only thing that catches a forgotten dialect: the tests
-//! below exercise `SQLite` only.
+//! across `POSTGRES_UP` and `SQLITE_UP` — there is no `MYSQL_UP`, and `up()` has
+//! no `MySQL` arm — because a forgotten dialect is the defect an executing test
+//! cannot catch: the tests below run `SQLite` only, and the two parity tests are
+//! what compare the blobs' declarations.
 //!
 //! ## A note on how `DESIGN.md` is cited here
 //!
@@ -112,7 +113,7 @@
 //!
 //! `(tenant_id, run_id) REFERENCES qa_runs(tenant_id, id)` would close the
 //! oracle in the database, at the cost of a redundant `UNIQUE (tenant_id, id)`
-//! on the parent in all three dialects. It stays declined because neither
+//! on the parent in both dialects. It stays declined because neither
 //! shipped sibling gear uses one and because the precheck above is required
 //! anyway — a caller must get `NotFound`, not a constraint error, and only the
 //! service can produce that. But the residual is now written down, which is the
@@ -172,7 +173,8 @@
 //! (`TIMESTAMP` is 4 bytes). `idx_qa_run_queue_tenant_run` and
 //! `idx_qa_run_test_results_run` are 36*4 + 36*4 = 288. All fit, so no column
 //! had to shrink. The one tuple that would *not* fit is the rejected per-test
-//! unique index, at 6432 bytes — see below.
+//! unique index, at 6432 bytes — see below. This gear declares no `MySQL`
+//! blob; the budget is recorded for whoever ports it.
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::ConnectionTrait;
@@ -739,17 +741,17 @@ DROP TABLE IF EXISTS qa_runs;
 /// `INSERT` names them all, and the `SELECT` behind `find_by_id` reads them all
 /// back), both `NOT NULL DEFAULT ''` clauses, both foreign keys, and the
 /// tenant-prefixing of both unique indexes. What they do **not** cover: the
-/// `MYSQL_UP` and `POSTGRES_UP` blobs, neither of which *these* tests run —
-/// against this tier they stay a three-way eyeball diff, and the parity tests
-/// below are what compare their declarations.
+/// `POSTGRES_UP` blob, which *these* tests do not run — against this tier
+/// it is only compared with `SQLITE_UP`, by the parity tests below, which
+/// compare the two blobs' declarations.
 ///
 /// **Corrected 2026-08-17**, because that sentence used to end *"which nothing
 /// in this workspace executes"* and half of it was false. `POSTGRES_UP` **is**
 /// executed: `infra::storage::test_db`'s `pg_db` applies this gear's real
 /// `Migrator` against a Postgres container whenever the `integration` feature is
 /// on, so that blob's syntax is checked — just not by the default gate.
-/// `MYSQL_UP` is the half that stands: nothing on any tier runs it, and only its
-/// declarations are checked. A later migration (`m20260813_000004_schedules`,
+/// There is no `MYSQL_UP` to run: this gear declares no `MySQL` blob. A later
+/// migration (`m20260813_000004_schedules`,
 /// since squashed into this same file -- see `qa_schedules` above) recorded
 /// the correction against this file when it landed; two tasks then declined to
 /// make it here as outside their ownership, which is how a known-false sentence
@@ -806,8 +808,10 @@ mod tests {
     ///
     /// Strips `--` comment lines and blank lines, then takes the leading
     /// identifier of each remaining line inside a `CREATE TABLE` body, skipping
-    /// the trailing constraint clauses (`UNIQUE`/`KEY`/`CONSTRAINT`/`FOREIGN`/
-    /// `PRIMARY`/`INDEX`) that `MySQL` declares inline and the others do not.
+    /// the trailing constraint clauses (`UNIQUE`/`CONSTRAINT`/`FOREIGN`/`PRIMARY`)
+    /// rather than treating them as columns. The MySQL-only inline `KEY`/`INDEX`
+    /// clauses are not skipped: neither shipped dialect can contain one, and
+    /// the test below asserts no column is named after either.
     fn columns_by_table(ddl: &str) -> Vec<(String, Vec<String>)> {
         let mut out = Vec::new();
         let mut table: Option<(String, Vec<String>)> = None;
@@ -831,7 +835,7 @@ mod tests {
             let ident = line.split([' ', '(']).next().unwrap_or_default();
             if matches!(
                 ident.to_uppercase().as_str(),
-                "UNIQUE" | "KEY" | "CONSTRAINT" | "FOREIGN" | "PRIMARY" | "INDEX"
+                "UNIQUE" | "CONSTRAINT" | "FOREIGN" | "PRIMARY"
             ) {
                 continue;
             }
@@ -840,14 +844,14 @@ mod tests {
         out
     }
 
-    /// The three dialects declare the same tables with the same columns in the
+    /// The two dialects declare the same tables with the same columns in the
     /// same order.
     ///
     /// This replaces a control that had quietly stopped working. The module
-    /// header says a three-way eyeball diff "is the only thing that catches a
+    /// header used to say an eyeball diff "is the only thing that catches a
     /// forgotten dialect" — but the blobs are now 68%, 6% and 0% comment by
-    /// line, so they are no longer visually comparable and the diff cannot be
-    /// performed by a human at all. Rationing the comments to restore
+    /// line (figures from when three blobs existed), so they are no longer
+    /// visually comparable and the diff cannot be performed by a human at all. Rationing the comments to restore
     /// diff-ability would trade the better artifact for the weaker control.
     /// This test makes comment density irrelevant instead.
     ///
@@ -875,6 +879,17 @@ mod tests {
             pg.iter().all(|(_, c)| c.len() >= 5),
             "the parser produced a suspiciously short column list: {pg:?}"
         );
+        for (dialect, tables) in [("POSTGRES_UP", &pg), ("SQLITE_UP", &sq)] {
+            for (table, cols) in tables {
+                assert!(
+                    !cols
+                        .iter()
+                        .any(|c| matches!(c.to_uppercase().as_str(), "KEY" | "INDEX")),
+                    "{dialect}.{table} has an inline KEY/INDEX clause, which the parser \
+                     no longer skips (it is MySQL-only syntax): {cols:?}"
+                );
+            }
+        }
         assert_eq!(pg, sq, "POSTGRES_UP and SQLITE_UP disagree");
     }
 
@@ -928,10 +943,8 @@ mod tests {
 
     /// Every index declared by a dialect, as `(name, unique, columns)`.
     ///
-    /// Two syntaxes to parse, which is the whole reason a divergence is easy to
-    /// miss by eye: Postgres and `SQLite` write `CREATE [UNIQUE] INDEX ... ON
-    /// t(cols)` as free-standing statements, `MySQL` writes `[UNIQUE] KEY name
-    /// (cols)` inline in the `CREATE TABLE` body.
+    /// Both dialects write `CREATE [UNIQUE] INDEX ... ON t(cols)` as
+    /// free-standing statements, which is the one syntax parsed here.
     fn indexes(ddl: &str) -> Vec<(String, bool, Vec<String>)> {
         let mut out = Vec::new();
         // Strip `--` lines *before* flattening: a comment above a statement
@@ -968,30 +981,11 @@ mod tests {
                 cols.split(',').map(|c| c.trim().to_owned()).collect(),
             ));
         }
-        for line in ddl.lines() {
-            let line = line.trim().trim_end_matches(',');
-            let (unique, rest) = if let Some(r) = line.strip_prefix("UNIQUE KEY ") {
-                (true, r)
-            } else if let Some(r) = line.strip_prefix("KEY ") {
-                (false, r)
-            } else {
-                continue;
-            };
-            let (name, cols) = rest.split_once(" (").expect("KEY clause has a column list");
-            out.push((
-                name.trim().to_owned(),
-                unique,
-                cols.trim_end_matches(')')
-                    .split(',')
-                    .map(|c| c.trim().to_owned())
-                    .collect(),
-            ));
-        }
         out.sort();
         out
     }
 
-    /// The three dialects declare the same indexes, with the same uniqueness
+    /// The two dialects declare the same indexes, with the same uniqueness
     /// and the same column order.
     ///
     /// The companion to the column test, and it exists because breaking the
@@ -1482,7 +1476,7 @@ mod tests {
         );
     }
 
-    /// D-RLP-1 retention is nothing but this cascade. The DDL-substring test
+    /// Run-log retention is nothing but this cascade. The DDL-substring test
     /// (`every_dialect_cascades_from_qa_runs_on_the_composite_key`, below)
     /// proves the clause is declared; this proves it fires.
     #[tokio::test]
@@ -1570,8 +1564,10 @@ mod tests {
     /// the shape that lets a mapper acquire a second, silent reading of "no
     /// events".
     ///
-    /// `MySQL`'s parenthesised form is the reason the assertion is on
-    /// `DEFAULT` + `[]` rather than on the exact literal.
+    /// The assertion is on `DEFAULT` + `[]` rather than on the exact literal
+    /// because the two dialects spell the default differently (`MySQL`'s
+    /// parenthesised form was the original reason, from when a third blob
+    /// existed).
     #[test]
     fn the_events_column_is_not_null_with_an_empty_array_default_everywhere() {
         for (dialect, ddl) in [
@@ -1589,7 +1585,7 @@ mod tests {
     }
 
 
-    /// The cascade is the entire retention policy (spec D-RLP-1) **and** the
+    /// The cascade is the entire retention policy **and** the
     /// only thing tying a log row's tenant to its run's tenant, so it is
     /// asserted in the DDL text of every dialect and not only behaviourally —
     /// and asserted in the *form* each dialect actually honors, not merely
@@ -1605,7 +1601,7 @@ mod tests {
     ///
     /// **Final fix wave.** The key is now composite (see the module header),
     /// which cannot be spelled inline in any dialect — so Postgres is no
-    /// longer exempt from the table-level requirement and all three bodies
+    /// longer exempt from the table-level requirement and both bodies
     /// are held to one spelling. Break-tested twice: dropping `tenant_id`
     /// from either side of any one dialect's `FOREIGN KEY` turns the first
     /// assertion red, and putting a dialect's key back inline on `run_id`

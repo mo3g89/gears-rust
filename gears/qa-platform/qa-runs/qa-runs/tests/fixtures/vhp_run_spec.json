@@ -30,7 +30,7 @@
   },
   "mounts": [
     {
-      "credstore_ref": "credstore://qa/environments/sv-staging/kubeconfig",
+      "credstore_ref": "qa-environments-sv-staging-kubeconfig",
       "kind": "secret",
       "mode": 256,
       "path": "/.kube/kubeconfig"

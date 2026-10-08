@@ -126,8 +126,7 @@ export function CustomPlanEditorPage() {
       </div>
 
       {/* Name only: a custom plan carries no description in this deployment, and a
-          field whose content the backend silently drops is worse than no field
-          (REMOVED-SURFACES.md, Task 8a C7). */}
+          field whose content the backend silently drops is worse than no field. */}
       <div className="space-y-1.5">
         <Label htmlFor="name">Plan Name</Label>
         <Input

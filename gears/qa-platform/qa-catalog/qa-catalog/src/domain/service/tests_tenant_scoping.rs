@@ -30,8 +30,8 @@ use crate::domain::system_actor;
 use crate::test_support::{
     DenyAllAuthZ, all_branch_rows, build_services, build_services_tenant_scoped,
     build_services_tenant_scoped_at, build_services_tenant_scoped_with_credstore,
-    build_services_with_branch_listing, ctx, inmem_db, seed_expired_bundle, seed_product,
-    seed_raw_custom_plan_row,
+    build_services_with_branch_listing, build_services_with_branch_listing_and_credstore, ctx,
+    inmem_db, seed_expired_bundle, seed_product, seed_raw_branch_row, seed_raw_custom_plan_row,
 };
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::PlatformSecurityContext;
@@ -651,8 +651,8 @@ async fn product_scoped_by_tenant() {
                 key: "VHI".to_owned(),
                 description: "Virtuozzo Hybrid Infrastructure".to_owned(),
                 folder: Some("virt".to_owned()),
-                // Every product names a plugin since Task 20 (D6), and the target
-                // must be registered (ruling F-10).
+                // Every product names a plugin since Task 20, and the target
+                // must be registered.
                 plugin_instance_id: crate::test_support::FIXTURE_PLUGIN_INSTANCE_ID.to_owned(),
             },
         )
@@ -801,8 +801,8 @@ async fn pdp_deny_blocks_create() {
                 key: "VHI".to_owned(),
                 description: String::new(),
                 folder: None,
-                // Every product names a plugin since Task 20 (D6), and the target
-                // must be registered (ruling F-10).
+                // Every product names a plugin since Task 20, and the target
+                // must be registered.
                 plugin_instance_id: crate::test_support::FIXTURE_PLUGIN_INSTANCE_ID.to_owned(),
             },
         )
@@ -905,9 +905,10 @@ async fn unique_repo_name_is_per_tenant() {
 /// The branch-cache refresher (lifecycle task in `crate::gear`) enumerates
 /// `(repo, tenant)` targets under one system context and then refreshes each
 /// repository under a *second* system context bound to that repository's own
-/// tenant — because `replace_branches` files the rewritten rows under
-/// `ctx.subject_tenant_id()`. This is the DB-backed proof that the binding
-/// survives the whole path: every `qa_repo_branches` row must carry its own
+/// tenant — because the refresh is authorized under that context;
+/// `replace_branches` files the rows under the repository's owning tenant,
+/// read off its row. This is the DB-backed proof that the binding survives
+/// the whole path: every `qa_repo_branches` row must carry its own
 /// repository's tenant, and each tenant's scoped read must see only its own.
 ///
 /// It drives the real `system_actor` factories rather than plain tenant
@@ -1015,6 +1016,113 @@ async fn refreshed_branch_rows_carry_their_own_repo_tenant() {
     assert!(
         matches!(cross, DomainError::NotFound { id } if id == repo_a.id),
         "expected NotFound reading tenant A's branches as B, got {cross:?}"
+    );
+}
+
+/// DESIGN §3.8 "qa-catalog schema": branch rows are filed under the repository's **owning**
+/// tenant, never the caller's. A caller whose scope spans a tenant hierarchy
+/// (here a parent tenant holding a scope over its child) used to re-tag the
+/// child's cache under the parent: the rows then sat outside the child's own
+/// scope, and the child read an empty branch list for its own repository.
+/// Both writers — `sync_repo` and `refresh_branches` — go through
+/// `replace_branches`, which now reads the owner off the repository row, so
+/// one caller proves it for both.
+#[tokio::test]
+async fn a_refresh_by_a_parent_scoped_caller_files_the_rows_under_the_owning_child() {
+    let db = inmem_db().await;
+    let parent = Uuid::new_v4();
+    let child = Uuid::new_v4();
+    let services =
+        build_services_with_branch_listing(db.clone(), &["main", "26.7"], vec![parent, child]);
+    let product = seed_product(&services, &ctx(child), "child-product").await;
+    let repo = services
+        .repos
+        .create_repo(&ctx(child), new_repo("child-repo", product))
+        .await
+        .unwrap();
+    // What the pre-fix code left behind: the child's branch filed under the parent.
+    seed_raw_branch_row(&db, parent, repo.id, "main").await;
+
+    services
+        .repos
+        .refresh_branches(&system_actor::for_branch_refresh(parent), repo.id)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        all_branch_rows(&db).await,
+        {
+            let mut expected = vec![
+                (repo.id, child, "26.7".to_owned()),
+                (repo.id, child, "main".to_owned()),
+            ];
+            expected.sort();
+            expected
+        },
+        "every row carries the owning tenant, and the row filed under the parent is gone"
+    );
+    assert_eq!(
+        services
+            .repos
+            .list_branches(&ctx(child), repo.id)
+            .await
+            .unwrap(),
+        vec!["26.7".to_owned(), "main".to_owned()],
+        "the owning tenant reads its own repository's cache"
+    );
+}
+
+/// The repository's credential is read under the system actor bound to the
+/// repository's **owning** tenant, read off its row by the real repository
+/// adapter — never the tenant of the context the refresh was authorized under.
+/// Here that context is bound to the parent tenant whose scope reaches the
+/// child's repository; the child's `tenant`-shared secret is invisible from the
+/// parent tenant, so binding the read to the caller's tenant misses it.
+#[tokio::test]
+async fn a_parent_scoped_refresh_reads_the_credential_in_the_owning_child_tenant() {
+    let db = inmem_db().await;
+    let parent = Uuid::new_v4();
+    let child = Uuid::new_v4();
+    let credstore = Arc::new(super::test_support::SharingCredStore::new(vec![
+        super::test_support::StoredSecret {
+            reference: "child-repo-token",
+            value: "x-access-token:ghp_child",
+            tenant: child,
+            owner: Uuid::new_v4(),
+            sharing: credstore_sdk::SharingMode::Tenant,
+        },
+    ]));
+    let services = build_services_with_branch_listing_and_credstore(
+        db.clone(),
+        &["main"],
+        vec![parent, child],
+        credstore,
+    );
+    let product = seed_product(&services, &ctx(child), "child-product").await;
+    let repo = services
+        .repos
+        .create_repo(
+            &ctx(child),
+            NewTestRepository {
+                credential_ref: Some("child-repo-token".to_owned()),
+                ..new_repo("child-repo", product)
+            },
+        )
+        .await
+        .unwrap();
+
+    services
+        .repos
+        .refresh_branches(&system_actor::for_branch_refresh(parent), repo.id)
+        .await
+        .expect("the owning tenant's secret is read, whatever tenant authorized the refresh");
+    assert_eq!(
+        services
+            .repos
+            .list_branches(&ctx(child), repo.id)
+            .await
+            .unwrap(),
+        vec!["main".to_owned()]
     );
 }
 
@@ -1383,15 +1491,15 @@ async fn ssh_credential_ref_resolves_within_the_owning_tenant() {
 /// # The failure it guards
 ///
 /// Measured on the shipped UI: `productReqFromForm` sends
-/// `{name, key, description, folder}` and cannot send `plugin_instance_id` —
-/// it is generated against `docs/api/api.json`, which has no `/qa/v1` path.
-/// Under the original full-replace semantics an operator editing a product's
+/// `{name, key, description, folder}` and cannot send `plugin_instance_id` — it
+/// is generated against `docs/api/api.json`, which has no `/qa/v1` path. Under
+/// the original full-replace semantics an operator editing a product's
 /// description silently unbound its plugin, which stops every one of that
 /// product's environments being observed and every one of its runs being
 /// dispatched, and recovery meant re-entering a ~100-character GTS id no UI
-/// surface offers. Unbinding is also not a state this platform wants: spec
-/// decision D6 is "every product names a plugin", and the contract migration
-/// makes the column `NOT NULL`.
+/// surface offers. Unbinding is also not a state this platform wants: every
+/// product names a plugin — `qa_products.plugin_instance_id` is NOT NULL
+/// (DESIGN §3.8, "qa-catalog schema").
 #[tokio::test]
 async fn an_update_that_names_no_plugin_leaves_the_products_binding_alone() {
     let db = inmem_db().await;
@@ -1399,8 +1507,9 @@ async fn an_update_that_names_no_plugin_leaves_the_products_binding_alone() {
     let tenant = Uuid::new_v4();
     let caller = ctx(tenant);
 
-    // The id the `m20260903_000003_product_plugin_instance` migration's
-    // backfill used to bind every existing product to, back when this
+    // The id the backfill of `m20260903_000003_product_plugin_instance`
+    // (folded into `migrations::m20260812_000002_initial` by the docs squash)
+    // used to bind every existing product to, back when this
     // gear's schema still had a backfill step. Written out rather than
     // recomposed from `QaProductPluginSpecV1::TYPE_ID`, because this test is
     // about the update path, not about the id's construction. (That
@@ -1495,7 +1604,7 @@ async fn an_update_that_names_a_plugin_rebinds_the_product() {
         "gts.cf.toolkit.plugins.plugin.v1~cf.core.qa_product.plugin.v1~cf.core._.vhp_product.v1"
             .to_owned();
     // Both ids must be REGISTERED since Task 20: a rebind target that resolves
-    // to nothing is refused (ruling F-10), so an invented string would make
+    // to nothing is refused, so an invented string would make
     // this test assert the refusal instead of the rebind.
     let rebound = crate::test_support::FIXTURE_PLUGIN_INSTANCE_ID_B.to_owned();
 

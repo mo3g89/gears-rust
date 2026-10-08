@@ -174,7 +174,7 @@ describe('useAnalyticsBuildTests', () => {
 });
 
 describe('fetchEnvironmentDtos (the environment name index)', () => {
-  /** `GET /qa/v1/environments` as it answers since review finding #55: a page. */
+  /** `GET /qa/v1/environments` as it answers: a page. */
   const ENVIRONMENTS_PAGE = {
     items: [
       { id: 'env-uuid-1', name: 'alpha' },
@@ -203,7 +203,7 @@ describe('fetchEnvironmentDtos (the environment name index)', () => {
     expect(mockedApiGet.mock.calls.map(([path]) => path)).toContain('/environments/env-uuid-1');
   });
 
-  it('does not repeat the fetch within the stale window -- the regression finding #55 measured', async () => {
+  it('does not repeat the fetch within the stale window -- the regression the page-bounding measured', async () => {
     // `useRun(name, 5000)` reaches this through `fetchRunDetails` every 5 s per
     // open Run Detail page, and `useDashboard` every 15 s. Two consumers here
     // stand in for two polls: before the cache, each was its own request for the
@@ -245,7 +245,7 @@ describe('fetchVariableDtos (the Settings -> Variables editor)', () => {
    * Two pages of pipeline variables, the way the gear serves them without an
    * `environment_id`: a single table, so `next_cursor` is real.
    *
-   * Task 24 review finding 3: the first version of `fetchVariableDtos`
+   * The first version of `fetchVariableDtos`
    * discarded that cursor, so the editor rendered a first page as if it were
    * the whole variable set. `variableWritePlan` derives deletes only from the
    * `previous` array it is handed, so nothing was destroyed by it -- but the
@@ -430,7 +430,7 @@ describe('useRuns (product scoping)', () => {
     expect(names).not.toContain('theirs');
   });
 
-  // Round 2 review finding: `CustomPlan.product_id` is always `null` in this gear (no
+  // `CustomPlan.product_id` is always `null` in this gear (no
   // such field exists), so a custom-plan run resolves through its tests' repositories
   // instead (`productScope.ts`). These two are the vacuity proof for that fix: the same
   // run construction, unanimous for the foreign product vs. unanimous for the selected
@@ -494,7 +494,7 @@ const ENVIRONMENTS_EMPTY_PAGE = {
 };
 
 /**
- * The C1 race, made deterministic: every endpoint answers at once except
+ * The race where `/runs` resolves before `/test-repos`, made deterministic: every endpoint answers at once except
  * `/test-repos`, which answers only when the test says so.
  *
  * This is the ordering the reviewer reproduced against the shipped code with a
@@ -538,7 +538,7 @@ async function flushSettledWork() {
 }
 
 // ---------------------------------------------------------------------------
-// C1 — the filter must not be able to cache an empty list.
+// The filter must not be able to cache an empty list.
 //
 // The scope used to be computed INSIDE `queryFn`, against `repos`,
 // `customPlans` and `standardPlans` captured from sibling queries — none of

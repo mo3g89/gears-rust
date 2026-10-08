@@ -20,7 +20,7 @@ interface TestResultsTableProps {
 
 /**
  * Test names are plain text rather than links: the test catalog's detail view has
- * no backend in this deployment and was removed (REMOVED-SURFACES.md, Task 8a C1).
+ * no backend in this deployment and was removed.
  */
 export function TestResultsTable({ results }: TestResultsTableProps) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -98,7 +98,7 @@ export function TestResultsTable({ results }: TestResultsTableProps) {
         <TableBody>
           {results.map((result, index) => {
             const isFailure = result.status === 'FAILED' || result.status === 'ERROR';
-            // `logs` has no source in this deployment (CONTRACT-DIFF §8-C2), so this
+            // `logs` has no source in this deployment (no gear stores a per-test log slice), so this
             // is empty and the row shows no error detail — the run detail page says so.
             const errors = (isFailure && result.logs ? extractTestErrors(result.logs) : []).map(
               parseError

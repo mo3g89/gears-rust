@@ -24,7 +24,7 @@ const VHP_SCHEMA: FieldDesc[] = [
 ];
 
 describe('credentialsPayload', () => {
-  it('builds the externally tagged map Task 18b Step 2 defined', () => {
+  it('builds the externally tagged map the gear defines', () => {
     // Trimmed, as the dialog has always trimmed a pasted kubeconfig: trailing
     // whitespace is not part of a YAML document, and storing it would make two
     // identical pastes mint two different secrets.

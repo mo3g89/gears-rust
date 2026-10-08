@@ -66,11 +66,11 @@ pub trait QaInsightsClientV1: Send + Sync {
     /// **Correction, 2026-08-20 (Task 8 review).** The first draft of this doc
     /// cited only site 1 and read as though it were the only caller. It is not.
     /// The conclusion it was supporting survives unchanged — site 2 is a REST
-    /// read, not a launch path — but the evidence was wrong, and the second site
-    /// is a **forward requirement, not a curiosity**: this gear must serve
-    /// `GET /qa/v1/jira/open-bugs` itself (design §4.6, plan Task 33), so the
-    /// same query needs a REST route as well as this method. Recorded here so
-    /// Tasks 31-35 do not rediscover it.
+    /// read, not a launch path — but the evidence was wrong, and the second
+    /// site is a **forward requirement, not a curiosity**: this gear must serve
+    /// `GET /qa/v1/jira/open-bugs` itself (plan Task 33), so the same query
+    /// needs a REST route as well as this method. Recorded here so Tasks 31-35
+    /// do not rediscover it.
     ///
     /// **Only plan runs consult the launch path**: legacy's custom-plan launch
     /// never calls `get_open_bugs`, so a custom-plan run has no skip list at

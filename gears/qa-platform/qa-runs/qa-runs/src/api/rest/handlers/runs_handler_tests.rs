@@ -311,7 +311,7 @@ async fn every_run_handler_attributes_a_denial_to_the_run() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 6: the archived log is what serves a finished run
+// The archived log is what serves a finished run
 // ---------------------------------------------------------------------------
 
 /// A run name unique enough for one test's fixture calls not to collide.

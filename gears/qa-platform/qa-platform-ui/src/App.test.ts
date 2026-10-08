@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// I-2 (Task 26 review): nothing pinned the `/platforms` -> `/environments` collection
+// Nothing pinned the `/platforms` -> `/environments` collection
 // redirect, or that `/platforms/:name` preserves its path parameter through
 // `RedirectToEnvironmentDetail` on the way to `/environments/:name`. A future cleanup
 // that deleted either `<Route>` as "dead" would have been green in every other gate —
@@ -13,7 +13,7 @@
 // Both redirects are IMPORTED from `./App`, never reimplemented here. The first
 // version of this file wrote the collection redirect inline as its own
 // `<Navigate>`, so it asserted against a copy: changing the real route's target
-// in `App.tsx` survived all 231 tests (re-review, N-1). A test that reimplements
+// in `App.tsx` survived every test. A test that reimplements
 // what it is checking cannot fail when the real thing changes.
 //
 // `.test.ts`, not `.test.tsx`: `vitest.config.ts`'s `include` glob is `src/**/*.test.ts`
@@ -88,7 +88,7 @@ afterEach(() => {
   setSelectedProduct('');
 });
 
-describe('the retired /platforms routes redirect rather than 404 (I-2)', () => {
+describe('the retired /platforms routes redirect rather than 404', () => {
   it('/platforms redirects to /environments', () => {
     render(
       createElement(
@@ -132,7 +132,7 @@ describe('the retired /platforms routes redirect rather than 404 (I-2)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// C2 — `/runs` and `/schedules` are behind `RequireProduct`, like every other
+// `/runs` and `/schedules` are behind `RequireProduct`, like every other
 // product-scoped surface.
 //
 // Both hooks gained `enabled: !!product` when the lists became product-scoped,
@@ -149,7 +149,7 @@ describe('the retired /platforms routes redirect rather than 404 (I-2)', () => {
 // "the gate is visible" check on the no-products case and still be wrong on the
 // still-loading one.
 // ---------------------------------------------------------------------------
-describe('C2 — /runs and /schedules are gated on a resolved product', () => {
+describe('/runs and /schedules are gated on a resolved product', () => {
   /** Answer everything except `/products`, which never settles: the state every
    *  visit passes through before the switcher has anything to select. */
   function mockProductsStillLoading() {

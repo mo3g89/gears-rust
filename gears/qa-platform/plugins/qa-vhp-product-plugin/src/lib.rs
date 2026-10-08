@@ -11,18 +11,17 @@
 //!
 //! [`detect`] is copied from `qa-environments/src/domain/observation.rs` and
 //! [`observe`]'s orchestration from
-//! `qa-environments/src/infra/observer/kube_observer.rs`. Both originals stay
-//! in place and stay working until Task 19 removes them: Phase C must not
-//! change `qa-environments`' behaviour, so the two paths run side by side
-//! until the one-way door in Phase E. Each module's header names its origin
-//! and says what changed on the way over.
+//! `qa-environments/src/infra/observer/kube_observer.rs`. Phase C must not
+//! change `qa-environments`' behaviour, so the two paths ran side by side
+//! until the one-way door in Phase E. Both originals have since been deleted
+//! (the observer by Task 19b), and these modules are the only copies. Each
+//! module's header names its origin and says what changed on the way over.
 //!
 //! [`run`] is the same arrangement one gear over: its four frozen variable
-//! names and the base-domain derivation are copied from
-//! `qa-runs/src/domain/runvars.rs`, which keeps its copies — and its own
-//! tests over the precedence ladder — until Task 18 makes dispatch read them
-//! from the plugin. That module's header, and a comment beside the constants
-//! in `runvars.rs`, name each other.
+//! names and the base-domain derivation were copied from
+//! `qa-runs/src/domain/runvars.rs`, which kept its copies until Task 18 made
+//! dispatch read them from the plugin. Since then they live only here;
+//! `runvars.rs`' module doc records the move.
 //!
 //! Task 8 took the *other* half of those files — what a Kubernetes cluster is,
 //! as opposed to what vpadm installed on it — into `qa-connector-k8s`. That
@@ -119,9 +118,9 @@ impl QaProductPluginV1 for VhpProductPlugin {
         run::prepare_run_access(env)
     }
 
-    /// VHP inherits the deployment-wide runner image, so `observed` is
-    /// unread: **D11** puts the runner shape on the *product*, and a
-    /// per-environment image would make a run's provenance unclear. The
+    /// VHP inherits the deployment-wide runner image, so `observed` is unread:
+    /// the runner shape is per *product* (DESIGN §3.7, "`qa-product-sdk`"), and
+    /// a per-environment image would make a run's provenance unclear. The
     /// parameter stays in the signature for the products that will use it.
     fn runner(&self, _observed: Option<&ObservedAttrs>) -> RunnerSpec {
         run::runner()

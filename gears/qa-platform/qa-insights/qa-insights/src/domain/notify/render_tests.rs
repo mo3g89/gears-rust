@@ -1,18 +1,18 @@
 //! Tests for the notification rendering core (Task 37 brief, Step 0/1).
 //!
-//! # R97: the brief's `the_preview_renders_exactly_what_the_send_renders`
+//! # The brief's `the_preview_renders_exactly_what_the_send_renders`
 //!
-//! The brief pins `render_scheduled_run(&ctx).rendered_message ==
-//! preview_scheduled_run(&ctx)`, citing legacy's two call sites
-//! (`notifications.rs:388` and `:431`) as evidence the paths can drift. But
-//! both legacy call sites already route through **one** private function,
-//! `build_scheduled_run_slack_message` (`:862-878`) — they were never two
-//! renderers. This port keeps that shape explicitly:
-//! [`super::preview_scheduled_run`] calls [`super::render_scheduled_run`] and
-//! nothing else (see `render.rs`'s doc comment on
-//! [`super::preview_scheduled_run`]). Under that design the brief's assertion
-//! cannot fail — there is only one function's output to compare against
-//! itself — so shipping it as a test would assert nothing. Per R97 it is
+//! The brief pins
+//! `render_scheduled_run(&ctx).rendered_message == preview_scheduled_run(&ctx)`,
+//! citing legacy's two call sites (`notifications.rs:388` and `:431`) as
+//! evidence the paths can drift. But both legacy call sites already route
+//! through **one** private function, `build_scheduled_run_slack_message`
+//! (`:862-878`) — they were never two renderers. This port keeps that shape
+//! explicitly: [`super::preview_scheduled_run`] calls
+//! [`super::render_scheduled_run`] and nothing else (see `render.rs`'s doc
+//! comment on [`super::preview_scheduled_run`]). Under that design the brief's
+//! assertion cannot fail — there is only one function's output to compare
+//! against itself — so shipping it as a test would assert nothing. It is
 //! replaced below by
 //! [`every_section_status_icon_and_fallback_survive_the_shared_renderer`],
 //! which exercises the property that actually has content: every section,
@@ -26,8 +26,9 @@ use qa_runs_sdk::SLACK_NOTIFICATION_EVENTS;
 
 use super::{
     RenderedScheduledRunMessage, RunCompletedRenderContext, ScheduledRunRenderContext,
-    preview_scheduled_run, render_run_completed, render_scheduled_run,
+    preview_scheduled_run, render_run_completed, render_scheduled_run, run_completed_outcome,
 };
+use crate::domain::notify::routing::RunOutcome;
 use crate::domain::ports::SlackBlock;
 
 /// The text of one rendered block, whichever variant it is. Replaced the
@@ -133,7 +134,7 @@ fn every_block_message_carries_a_non_empty_fallback() {
     assert!(!message.blocks.is_empty());
 }
 
-/// R97's replacement for the brief's tautological preview/send test: the
+/// The replacement for the brief's tautological preview/send test: the
 /// property that has actual content is that every section, the `status_icon`
 /// placeholder, and the fallback all render non-trivially, for every one of
 /// the six tokens — not just the one the brief's example happened to use.
@@ -367,7 +368,7 @@ fn fallback_text_never_repeats_the_results_sections_own_wording() {
     );
 }
 
-/// R98: legacy's generic completion alert derives its headline from the
+/// Legacy's generic completion alert derives its headline from the
 /// result counts (`notifications.rs:191-192,222-228`) — `FAILED` beats
 /// `SUCCEEDED` beats `COMPLETED`, and the same rendered `text` becomes both
 /// the (non-templated) Slack message and the email body; only the subject
@@ -395,7 +396,66 @@ fn run_completed_email_headline_reflects_the_result_counts() {
     assert!(completed.text.contains("COMPLETED"));
 }
 
-/// R99: the email subject keeps legacy's literal `"VHP test run"` branding
+/// **The gate and the headline are the same verdict.** Since the 2026-09-29
+/// ruling, `notify_on_failure`/`notify_on_success` decide whether a run
+/// notifies at all, and the message that does go out states its own verdict
+/// in its first line. If those two were computed separately they could
+/// disagree — `notify_on_failure` admitting a message headed `SUCCEEDED` —
+/// so [`super::run_completed_outcome`] is the one classification and
+/// `run_completed_headline` is derived from it. This pins the correspondence
+/// for all three classes, from the same context the renderer is given.
+///
+/// Mutated against: swapping `outcome_of`'s `Failed` and `Succeeded` arms
+/// turns rows 1 and 3 red on *both* assertions at once, which is the point —
+/// the two can no longer drift apart one at a time.
+#[test]
+fn the_outcome_a_run_is_routed_on_is_the_headline_its_message_carries() {
+    let rows = [
+        (
+            vec!["PASSED".to_owned(), "FAILED".to_owned()],
+            RunOutcome::Failed,
+            "FAILED",
+        ),
+        (
+            vec!["PASSED".to_owned(), "ERROR".to_owned()],
+            RunOutcome::Failed,
+            "FAILED",
+        ),
+        (
+            vec!["PASSED".to_owned(), "PASSED".to_owned()],
+            RunOutcome::Succeeded,
+            "SUCCEEDED",
+        ),
+        (Vec::new(), RunOutcome::Indeterminate, "COMPLETED"),
+        (
+            vec!["SKIPPED".to_owned()],
+            RunOutcome::Indeterminate,
+            "COMPLETED",
+        ),
+    ];
+
+    for (statuses, outcome, headline) in rows {
+        let ctx = RunCompletedRenderContext {
+            run_name: "nightly-smoke-142".to_owned(),
+            plan_id: "vhp/smoke".to_owned(),
+            platform: None,
+            product_key: None,
+            result_statuses: statuses.clone(),
+        };
+        assert_eq!(
+            run_completed_outcome(&ctx),
+            outcome,
+            "the routing outcome for {statuses:?}"
+        );
+        assert!(
+            render_run_completed(&ctx).text.contains(headline),
+            "the message for {statuses:?} must be headed {headline}: {}",
+            render_run_completed(&ctx).text
+        );
+    }
+}
+
+/// The email subject keeps legacy's literal `"VHP test run"` branding
 /// (`notifications.rs:328`: `format!("VHP test run {} {}", run.name,
 /// headline)`) verbatim — an earlier draft of this renderer rebranded it to
 /// `"QA run"` unilaterally, and the controller reverted that: rebranding is a
@@ -422,7 +482,7 @@ fn run_completed_email_subject_keeps_the_legacy_vhp_branding() {
     );
 }
 
-/// R98: the rendered text carries the plan id and, when present, the
+/// The rendered text carries the plan id and, when present, the
 /// platform and product key, joined by `" · "`, plus the passed/failed/
 /// skipped counts on their own line — legacy's `text` format
 /// (`notifications.rs:230-245`).
@@ -447,7 +507,7 @@ fn run_completed_text_carries_plan_platform_product_and_counts() {
     assert!(rendered.text.contains("passed 1, failed 1, skipped 1"));
 }
 
-/// R98: an absent platform or product key is simply omitted from the joined
+/// An absent platform or product key is simply omitted from the joined
 /// info clause, not rendered as a placeholder or a `"-"` filler — legacy only
 /// ever pushes present values onto `info_parts` (`notifications.rs:230-236`).
 #[test]

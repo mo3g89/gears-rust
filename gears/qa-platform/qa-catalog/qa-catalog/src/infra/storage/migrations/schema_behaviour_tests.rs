@@ -11,9 +11,10 @@
 //! `m20260812_000002_initial`. What was dropped with those files was the
 //! mechanics of the step itself — the backfill to the VHP plugin, the `SQLite`
 //! table rebuild, the `down` that made the column nullable again — all of which
-//! describe a transition a fresh database never makes. Decision D6, *every
-//! product names a plugin and there is no fallback path*, is the part that
-//! outlives the transition, so it is the part asserted here.
+//! describe a transition a fresh database never makes. That every product
+//! names a plugin — `qa_products.plugin_instance_id` is NOT NULL (DESIGN §3.8,
+//! "qa-catalog schema") — is the part that outlives the transition, so it is
+//! the part asserted here.
 
 // THE ONE LINT ALLOWANCE IN THIS FILE, and why it is here rather than in
 // `clippy.toml`.
@@ -90,7 +91,8 @@ async fn scalar<T: TryGetable>(conn: &DatabaseConnection, sql: &str) -> T {
     .expect("the column must decode")
 }
 
-/// **Decision D6 as a database constraint, not a service convention.**
+/// **"Every product names a plugin" as a database constraint, not a service
+/// convention.**
 ///
 /// `create_product` refuses a product that names no plugin, but a guard in one
 /// service is not what makes the invariant hold — any other writer, and any

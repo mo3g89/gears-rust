@@ -20,15 +20,13 @@ use crate::domain::error::DomainError;
 ///
 /// # This is where the guide's contract is actually enforced
 ///
-/// `api::rest::dto`'s `QUEUE_LIMIT_*` constants govern only the **legacy
-/// `limit` query parameter**. A bare `GET /qa/v1/queue` sends neither `limit`
-/// nor `$top`, so its page size comes from `PAGE_LIMITS.default`; a
-/// `$top=5000` is clamped solely by `PAGE_LIMITS.max`. The literals are
-/// therefore pinned here as well as there - see
-/// `tests::the_page_limits_are_the_literals_the_guide_freezes`. They were not,
-/// and mutating this pair to `{ default: 15, max: 9999 }` left the whole suite
-/// green while `dto.rs` claimed "if one moves, the failing test says which
-/// contract changed".
+/// Every page size this gear's two collections answer comes from here: the
+/// `OData` extractor binds `limit` (alias `$top`) and refuses `0`, a request
+/// with neither takes `PAGE_LIMITS.default`, and a larger one is clamped to
+/// `PAGE_LIMITS.max`. The literals are pinned by
+/// `tests::the_page_limits_are_the_literals_the_guide_freezes`; before it,
+/// mutating this pair to `{ default: 15, max: 9999 }` left the whole suite
+/// green.
 pub const PAGE_LIMITS: LimitCfg = LimitCfg {
     default: 200,
     max: 500,

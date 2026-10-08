@@ -1,5 +1,6 @@
 //! Observation through the product plugin: what reaches the plugin, and what
-//! the plugin's answer writes into both column sets.
+//! the plugin's answer writes into the observation columns (one set since
+//! Task 19 dropped the legacy one).
 //!
 //! Against a REAL in-memory `SQLite` database and real test doubles for
 //! credstore and the plugin — the same tier `environments_observation_tests`
@@ -136,7 +137,7 @@ async fn the_cycle_resolves_the_plugin_for_the_environments_product() {
 
 /// `observe` needs plaintext, so the slot must be `resolved` — a
 /// `reference_only` slot would leave a plugin unable to authenticate and is
-/// what dispatch uses instead (Task 18).
+/// what dispatch uses instead.
 #[tokio::test]
 async fn the_slot_handed_to_observe_carries_the_resolved_material() {
     let plugin = Arc::new(ScriptedPlugin::vhp_shaped(full_detection()));
@@ -304,11 +305,14 @@ async fn role_projection_writes_the_new_columns() {
     assert_eq!(observed.observed_attrs.get("build"), Some("1471"));
 }
 
-/// The dual write, and the thing that makes Phase D revertible: the same
-/// observation still writes the legacy columns, with their own asymmetric
-/// merge rules intact.
+/// The role projections reach their columns: `observed_base_url` from the
+/// `BaseUrl` role, and the namespace through `observed_attrs`. Until Task 19
+/// this test pinned the dual write — the same observation also wrote the
+/// legacy `vhp_base_url` and `observed_namespace`, which is what kept Phase D
+/// revertible — under the name `the_legacy_columns_are_written_identically`.
+/// Those columns are gone, and the name went with them.
 #[tokio::test]
-async fn the_legacy_columns_are_written_identically() {
+async fn the_base_url_and_namespace_projections_reach_their_columns() {
     let plugin = Arc::new(ScriptedPlugin::vhp_shaped(full_detection()));
     let services = build_services_tenant_scoped_with_plugin(
         inmem_db().await,
@@ -338,7 +342,7 @@ async fn the_legacy_columns_are_written_identically() {
         observed.observed_attrs.get("namespace"),
         Some("virtuozzo"),
         "and the Namespace projection reaches `observed_attrs`, which is the \
-         namespace's only home since `observed_namespace` was dropped (E-23)"
+         namespace's only home since `observed_namespace` was dropped"
     );
     assert!(observed.version_detect_error.is_none());
     assert!(observed.version_detected_at.is_some());
@@ -347,13 +351,15 @@ async fn the_legacy_columns_are_written_identically() {
 /// A verdict that is neither `Ok` nor a failure, carried end to end — and the
 /// one place the coarsening asymmetry is visible.
 ///
-/// `HealthState` has three verdicts where legacy has four: `Warning` and
+/// `HealthState` has three verdicts where legacy had four: `Warning` and
 /// `Degraded` both coarsen to `Degraded`. The plugin contract's answer is that
 /// the finer value rides along in `Checked`'s `detail`, so this asserts both
 /// halves of the pair from one observation: `health_state` takes the coarse
-/// verdict, `cluster_status` takes legacy's exact spelling back out of
-/// `detail`. Without this, a `health_state` hardcoded to `ok` on the `Checked`
-/// arm passes every other test in this module — measured, not assumed.
+/// verdict, `health_detail` keeps the plugin's own word. (Until Task 19 the
+/// second column was the legacy `cluster_status`, which took legacy's exact
+/// spelling back out of `detail`; the drop left `health_detail` as its home.)
+/// Without this, a `health_state` hardcoded to `ok` on the `Checked` arm passes
+/// every other test in this module — measured, not assumed.
 #[tokio::test]
 async fn a_degraded_verdict_reaches_both_columns_in_each_ones_vocabulary() {
     let mut attrs = ObservedAttrs::default();
@@ -364,7 +370,7 @@ async fn a_degraded_verdict_reaches_both_columns_in_each_ones_vocabulary() {
             state: HealthState::Degraded,
             // Legacy's own name for a cluster that answered and listed no
             // nodes at all -- a *different* status from `Degraded`, which
-            // `HealthState` cannot express and this column can.
+            // `HealthState` cannot express and `health_detail` can.
             detail: Some("Warning"),
         },
     }));
@@ -400,14 +406,17 @@ async fn a_degraded_verdict_reaches_both_columns_in_each_ones_vocabulary() {
     );
 }
 
-/// `observed_namespace` is the one legacy column a later detection must
-/// **not** overwrite — only fill from `NULL`. An accidental overwrite is
-/// invisible in the happy path, so this drives two observations with
-/// different namespaces and asserts the first one survives.
+/// A later detection **overwrites** the namespace in `observed_attrs`: the map
+/// is not sticky. Until Task 19 the `observed_namespace` column beside it was
+/// the one legacy column a later detection must *not* overwrite, only fill
+/// from `NULL`; the drop left the map as the namespace's only home. A wrong
+/// merge rule is invisible in the happy path, so this drives two observations
+/// with different namespaces and asserts the second one wins.
 ///
-/// Its mirror image is `vhp_base_url`/`observed_base_url`, where the stored
-/// value must yield to a conclusive detection and survive an inconclusive
-/// one; the second half asserts that too, from the same pair of calls.
+/// `observed_base_url` is the other half: the stored value must yield to a
+/// conclusive detection and survive an inconclusive one (the rule
+/// `vhp_base_url` shared until Task 19 dropped it); the second half asserts
+/// that too, from the same pair of calls.
 #[tokio::test]
 async fn a_later_observation_overwrites_the_namespace_but_not_a_working_base_url() {
     let mut first = ObservedAttrs::default();
@@ -462,10 +471,10 @@ async fn a_later_observation_overwrites_the_namespace_but_not_a_working_base_url
         .await
         .unwrap();
     // **`observed_attrs` is overwritten, not sticky** -- and since Task 19
-    // dropped `observed_namespace` that is the whole rule rather than half of
-    // a contradiction. Finding E-23 was exactly that contradiction: the column
-    // was sticky, the map was not, so a redeployed environment ran in its new
-    // namespace and displayed the old one.
+    // dropped `observed_namespace` that is the whole rule rather than half of a
+    // contradiction. A review finding was exactly that contradiction: the
+    // column was sticky, the map was not, so a redeployed environment ran in
+    // its new namespace and displayed the old one.
     assert_eq!(
         second_pass.observed_attrs.get("namespace"),
         Some("detected-later"),
@@ -567,9 +576,8 @@ async fn a_failed_observation_persists_only_classified_text() {
     );
 }
 
-/// `NotAttempted` writes no health column at all — in either set, and not
-/// even a checked-at, because "never checked" is the truth when nothing
-/// looked.
+/// `NotAttempted` writes no health column at all — not even a checked-at,
+/// because "never checked" is the truth when nothing looked.
 ///
 /// `health_state` is `NOT NULL DEFAULT 'unknown'`, so "writes no health
 /// column" means the row keeps its existing value; that is what is asserted,
@@ -614,7 +622,7 @@ async fn not_attempted_writes_no_health_columns() {
         observed.observed_version.as_deref(),
         Some("9.2"),
         "while the environment half, which DID succeed, still wrote its own \
-         columns (D-CH-4: the halves are independent)"
+         columns (the two halves of one call are independent)"
     );
 }
 
@@ -685,7 +693,7 @@ async fn an_undeclared_attribute_never_reaches_storage() {
     assert_eq!(
         observed.observed_version.as_deref(),
         Some("9.2"),
-        "and its projection still reaches the legacy column"
+        "and its projection still reaches its own `observed_version` column"
     );
 }
 
@@ -695,14 +703,15 @@ async fn an_undeclared_attribute_never_reaches_storage() {
 
 // `an_environment_with_no_product_records_that_it_cannot_be_observed` was
 // deleted by Task 20b. It planted a productless row through the repository --
-// `create_environment` refused one from Task 19 on (ruling F-13) -- and
-// asserted the cycle recorded why. `m20260903_000013` made `product_id`
-// `NOT NULL` and the model followed, so the row is now unrepresentable and
-// the test could only be kept by constructing a state no deployment can hold.
+// `create_environment` refused one from Task 19 on -- and
+// asserted the cycle recorded why. `m20260903_000013` (folded into
+// `migrations::m20260812_000001_initial` by the docs squash) made `product_id`
+// `NOT NULL` and the model followed, so the row is now unrepresentable and the
+// test could only be kept by constructing a state no deployment can hold.
 //
-// `PluginUnavailable::NoProduct` itself is still reachable, from qa-catalog's
-// resolver rather than from a row, and `an_unresolvable_plugin_records_why_
-// and_writes_no_health_column` covers that arm.
+// `PluginUnavailable` has no `NoProduct` variant for the same reason, and
+// `an_unresolvable_plugin_records_why_and_writes_no_health_column` covers
+// the arms that remain.
 
 /// The two remaining upstream failures: the product's plugin is not
 /// resolvable, and no resolver is registered in this deployment. Both record
@@ -715,7 +724,7 @@ async fn an_unresolvable_plugin_records_why_and_writes_no_health_column() {
     ] {
         // **Created through a working plugin, then observed without one.**
         // Since Task 19 a credential can only be stored under a key the
-        // product's plugin declares (ruling F-13), so an environment cannot be
+        // product's plugin declares, so an environment cannot be
         // created while its plugin is unavailable -- but one created earlier
         // can certainly be *observed* while it is, which is the state this
         // test is about and the reason `ProductPluginPort` records
@@ -757,8 +766,8 @@ async fn an_unresolvable_plugin_records_why_and_writes_no_health_column() {
 /// It used to assert that *observation* recorded `LEGACY_CREDENTIAL_UNBINDABLE`
 /// on a pre-Task-18b row, reached by emptying `credentials` after the create so
 /// `resolve_credential_slots` fell back to the single legacy column and had to
-/// derive a key for it. Task 19 dropped that column and ruling **F-2** dropped
-/// the fallback with it, so there is no longer a stored reference without a key
+/// derive a key for it. Task 19 dropped that column and the fallback with it,
+/// so there is no longer a stored reference without a key
 /// for observation to be confused by.
 ///
 /// The constant is still live, and this is where: the wire still carries the
@@ -795,8 +804,15 @@ async fn the_pre_plugin_pair_cannot_bind_to_a_plugin_with_no_sole_required_secre
             panic!("expected a validation error, got {error:?}");
         };
         assert!(
-            message.contains("pre-plugin column"),
-            "an operator must be told what to fix, got: {message}"
+            message.contains(
+                "Submit it under `credentials` instead, keyed by the plugin's own credential field"
+            ) && message.contains("nothing was written"),
+            "an operator must be told what happened and what to do instead, got: {message}"
+        );
+        assert!(
+            !message.contains("pre-plugin column") && !message.contains("still holds"),
+            "and must not describe a stored reference in the column Task 19 dropped -- \
+             this is a write being refused, not a row being read: {message}"
         );
         assert!(
             plugin.handles().is_empty(),

@@ -12,9 +12,9 @@
 //!
 //! The orchestration is `qa-environments/src/infra/observer/kube_observer.rs`'
 //! `observe`, `detect` and `detect_base_domain`, rewritten against
-//! [`qa_connector_k8s::KubeClient`] instead of a bare `kube::Client`. That module
-//! stays in place and stays working until Task 19 removes it; this is a copy,
-//! not a move, because Phase C must not change `qa-environments`' behaviour.
+//! [`qa_connector_k8s::KubeClient`] instead of a bare `kube::Client`. It was a
+//! copy, not a move, because Phase C must not change `qa-environments`'
+//! behaviour; Task 19b deleted that module, and this is the only copy.
 //!
 //! # What changed in the copy, and exactly what it costs
 //!
@@ -109,10 +109,10 @@ const UNKNOWN_NAMESPACE: &str = "unknown";
 /// The separator joining externally-visible hostnames into one `Text` value.
 const HOSTS_SEPARATOR: &str = ", ";
 
-/// The scheme every VHP base URL is built with, matching
-/// `qa-environments/src/infra/storage/environments_sea_repo.rs`' own
-/// `format!("https://{domain}")` — the value `vhp_base_url` holds today and
-/// which `observed_base_url` must be a drop-in successor to.
+/// The scheme every VHP base URL is built with: `format!("https://{domain}")`,
+/// the value the pre-plugin `vhp_base_url` column held until Task 19 dropped
+/// it, and which `observed_base_url` is the drop-in successor to. The plugin
+/// composes the scheme now; qa-environments stores the projection verbatim.
 const BASE_URL_SCHEME: &str = "https://";
 
 /// Fixed failure for an environment whose kubeconfig this caller did not
@@ -340,10 +340,11 @@ async fn gateway_hosts(client: &KubeClient, namespace: &str) -> Vec<String> {
 ///
 /// `baseDomain` carries `https://` + the domain, not the bare domain, because
 /// it claims [`qa_product_sdk::descriptor::FieldRole::BaseUrl`] and so becomes
-/// `observed_base_url` — the column that replaces `vhp_base_url`, whose value
-/// has always been `format!("https://{domain}")`. The bare host
+/// `observed_base_url` — the column that replaced `vhp_base_url`, whose value
+/// was always `format!("https://{domain}")`. The bare host
 /// `VPADM_BASE_DOMAIN` needs is derived back out of it in [`crate::run`],
-/// which is the same direction `qa-runs` derives it today.
+/// the same direction `qa-runs` derived it before Task 18 moved the
+/// derivation here.
 fn observed_attrs(detected: &DetectedPlatform, hosts: &[String]) -> ObservedAttrs {
     let mut attrs = ObservedAttrs::default();
     attrs.set(PLATFORM_VERSION_KEY, detected.version.clone());

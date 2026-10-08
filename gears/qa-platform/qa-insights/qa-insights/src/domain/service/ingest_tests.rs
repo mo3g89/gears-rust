@@ -123,7 +123,7 @@ fn result(test_file: &str, test_name: &str, nodeid: &str) -> RunTestResult {
 /// # The two instants are the case this test was blind to
 ///
 /// It said "seven" and asserted seven until Task 21b's third fix round.
-/// `run_created_at` — added by controller Ruling A, and the fallback half of
+/// `run_created_at` — added in Task 21b's fix round, and the fallback half of
 /// legacy's `COALESCE(rr.finished_at, rr.created_at)` — was written by
 /// `project_rows` (this crate's **only** non-test writer of that column) and
 /// asserted nowhere. And `Run` carries *four* instants, all of which `run_with`
@@ -349,23 +349,20 @@ fn absent_run_metadata_projects_as_null_not_as_empty_text() {
 }
 
 // ---------------------------------------------------------------------------
-// Status classification (Task 14)
+// Status classification
 // ---------------------------------------------------------------------------
 
-use super::{FAILED_STATUSES, PASSED_STATUSES, ResultCounts, StatusBucket, classify, classify_all};
+use super::{FAILED_STATUSES, PASSED_STATUSES, StatusBucket, classify};
 
-/// The five counters, ported from `manager/src/routes/plans.rs:188-192`.
-/// `XFAIL`/`XPASS` are deliberately in `total` and nowhere else — legacy counts
-/// them separately (`manager/src/routes/analytics.rs:1359-1360`) and folding
-/// them into `passed` would inflate every pass rate on the dashboard.
+/// `XFAIL`/`XPASS` are deliberately uncounted — legacy counts them separately
+/// (`manager/src/routes/analytics.rs:1359-1360`) and folding them into
+/// `passed` would inflate every pass rate on the dashboard.
 #[test]
 fn xfail_and_xpass_count_toward_total_and_no_other_bucket() {
-    let counts = classify_all(&["PASSED", "XFAIL", "XPASS", "FAILED"]);
-    assert_eq!(counts.total, 4);
-    assert_eq!(counts.passed, 1);
-    assert_eq!(counts.failed, 1);
-    assert_eq!(counts.skipped, 0);
-    assert_eq!(counts.in_progress, 0);
+    assert_eq!(classify("XFAIL"), StatusBucket::Uncounted);
+    assert_eq!(classify("XPASS"), StatusBucket::Uncounted);
+    assert_eq!(classify("PASSED"), StatusBucket::Passed);
+    assert_eq!(classify("FAILED"), StatusBucket::Failed);
 }
 
 /// Status is an open set and the mapper must not fail closed: two legacy paths
@@ -374,12 +371,7 @@ fn xfail_and_xpass_count_toward_total_and_no_other_bucket() {
 /// `other.to_uppercase()`). A ninth value is a runner change, not corruption.
 #[test]
 fn an_unrecognized_status_is_stored_and_counted_only_in_total() {
-    let counts = classify_all(&["QUARANTINED"]);
-    assert_eq!(counts.total, 1);
-    assert_eq!(
-        counts.passed + counts.failed + counts.skipped + counts.in_progress,
-        0
-    );
+    assert_eq!(classify("QUARANTINED"), StatusBucket::Uncounted);
 }
 
 /// The whole eight-value vocabulary at once, against the SQL it ports.
@@ -404,22 +396,6 @@ fn the_whole_status_vocabulary_maps_the_way_the_legacy_sql_filters_do() {
     assert_eq!(classify("XPASS"), StatusBucket::Uncounted);
 }
 
-/// `total` is `COUNT(tr.id)` over every row, so a set that is *entirely*
-/// uncounted still has a total. A caller deriving `total` by addition would get
-/// zero here and divide by it.
-#[test]
-fn a_run_of_only_uncounted_statuses_still_has_a_total() {
-    let counts = classify_all(&["XFAIL", "XPASS", "QUARANTINED"]);
-    assert_eq!(counts.total, 3);
-    assert_eq!(
-        counts,
-        ResultCounts {
-            total: 3,
-            ..ResultCounts::default()
-        }
-    );
-}
-
 /// Matching is exact — no trimming, no re-casing — because legacy's is. A
 /// lowercase status moves no counter there either, and normalising it here
 /// would be a silent divergence that starts moving one.
@@ -432,15 +408,6 @@ fn classification_is_case_sensitive_and_does_not_trim() {
     assert_eq!(classify("Passed"), StatusBucket::Uncounted);
     assert_eq!(classify(" PASSED"), StatusBucket::Uncounted);
     assert_eq!(classify("PASSED "), StatusBucket::Uncounted);
-}
-
-/// An empty set is all zeroes rather than a panic or a `None`. A run with no
-/// results is a real state — the projection writes it — and every caller
-/// divides by `total`.
-#[test]
-fn an_empty_set_counts_to_zero_everywhere() {
-    let counts = classify_all::<&str>(&[]);
-    assert_eq!(counts, ResultCounts::default());
 }
 
 /// **[`FAILED_STATUSES`] is legacy's pair, and [`classify`] is defined from it.**
