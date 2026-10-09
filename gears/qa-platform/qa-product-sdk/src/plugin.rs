@@ -226,7 +226,7 @@ impl EnvironmentHandle<'_> {
 
 /// The contract every QA Platform product plugin implements.
 ///
-/// Eight methods, grouped as they are dispatched: declaration (drives the UI
+/// Its methods, grouped as they are dispatched: declaration (drives the UI
 /// and the platform's semantic bindings), environment lifecycle
 /// (`qa-environments`), and dispatch (`qa-runs`). Task 9–10 implement this
 /// trait; Task 15 calls [`Self::observe`]; Task 18 calls

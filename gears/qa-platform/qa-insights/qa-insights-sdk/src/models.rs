@@ -246,8 +246,7 @@ impl SavedViewScope {
 /// plan identity coalesces to the empty string. That coalescing is the whole
 /// point: it lets one owner keep a global view and a plan-scoped view of the
 /// *same name* without collision. Storage materializes the coalesced value as
-/// its own column, because `SQLite` and `MySQL` do not both support functional
-/// indexes.
+/// its own column, written by the repository on every insert and update.
 ///
 /// # `query_json` is opaque text
 ///

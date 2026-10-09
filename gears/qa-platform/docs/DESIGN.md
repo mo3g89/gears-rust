@@ -120,7 +120,7 @@ states the boundary precisely.
 | `cpt-cf-qa-nfr-result-latency` | A result is visible ≤ 5 s p95 after the runner reports it | qa-runs ingestion path | Event-driven ingestion, no polling; one upsert per event | Latency assertion in the e2e harness |
 | `cpt-cf-qa-nfr-dispatch-latency` | A queued run starts ≤ 10 s p95 after its environment frees. **Measured 2026-09-21** — see §3.11, "The dispatch-latency window, and the measurement that was retracted" | qa-runs dispatcher | Interval sweep at 5 s; the ≈4.75 s design argument assumed a single queued run per environment and did not account for `max_concurrent_runs` being checked *before* the per-environment FIFO, nor for genuine multi-run backlog per environment | `qa_runs_free_to_start_duration_seconds` is the row's own quantity, anchored on `qa_environment_leases.freed_at` — the lease-release instant the retracted 2026-09-18 measurement lacked. Two 600 s windows differing only in per-environment backlog (2 vs 5): n = 214 and 239, every sample ≤ 10 s, p95 4.21 s and 4.51 s by per-sample SQL, while `qa_runs_queue_wait_duration_seconds` over the same drains moved 7.7× — which is what says the number is not queue depth. `qa_runs_free_to_start_unanchored_total` publishes the coverage. §3.11 has the method and the three things it does not settle |
 | `cpt-cf-qa-nfr-log-latency` | A log line reaches a viewer ≤ 2 s p95 | qa-runs + `SseBroadcaster` | Executor log stream bridged to SSE with no buffering threshold | e2e streaming test |
-| `cpt-cf-qa-nfr-tenant-isolation` | No row crosses a tenant boundary | every gear, infra/storage | `SecureORM` with a tenant column on all 30 tables; per-gear `tests_tenant_scoping` suites | Tenant-scoping test module per gear |
+| `cpt-cf-qa-nfr-tenant-isolation` | No row crosses a tenant boundary | every gear, infra/storage | `SecureORM` with a tenant column on every table; per-gear `tests_tenant_scoping` suites | Tenant-scoping test module per gear |
 | `cpt-cf-qa-nfr-credential-containment` | Credential material never reaches a published surface | `qa-product-sdk`, plugins, connectors | Nothing derived from credential material is formatted; `PluginFailure::detail` is `&'static str`; keys travel credstore → memory → pipe → short-lived ssh-agent; secrets reach remote commands on stdin | `assert_no_leak` drives every plugin with planted material and fails the build if any of it surfaces |
 | `cpt-cf-qa-nfr-infra-agnostic` | A default build has no Kubernetes dependency | qa-runs, qa-environments, qa-connector-k8s | The Argo adapter is behind qa-runs' non-default `argo` feature and the runner-`Secret` writer is behind qa-environments' own, independently-switched, non-default `runner-secret` feature; `qa-connector-k8s` carries `kube`/`k8s-openapi` unconditionally but is linked only by the plugins that need a cluster, not by a default gear build | `cargo tree -p qa-runs -i kube -e normal` prints nothing, and `cargo tree -p qa-environments -i kube` errors (`kube` is not in the graph at all) without `--features runner-secret` |
 | `cpt-cf-qa-nfr-ingest-recovery` | Ingestion recovers within 60 s of a control-plane restart | qa-insights | `qa_ingest_watermarks` records the last reconciled `finished_at`; the reconcile sweep resumes from it | Restart test asserting watermark advance |
@@ -1159,8 +1159,7 @@ clients. Every table carries `tenant_id` and every query runs through `SecureORM
 as the tenant scope.
 
 Every gear's schema was declared by **one** migration at the first installation, and each list has
-been append-only since: qa-runs is at four, qa-insights at seven, qa-environments and qa-catalog at
-two. The collapse to one was a property of a platform that installed from scratch rather than a
+been append-only since (each gear's `migrations/mod.rs` is the list). The collapse to one was a property of a platform that installed from scratch rather than a
 rule for the future — the chains were collapsed when no deployment had run any of them, and
 nothing has been collapsed since. What the collapse removed was the record of how the schema was reached — a
 table rename, an expand/contract pair around the plugin columns, a dozen single-column
@@ -1381,7 +1380,7 @@ is read, by the preview and test send);
 outcome policy, see §3.5, "What actually notifies" — where
 `m20260929_000007_opt_existing_tenants_into_success_notifications` is also why an upgrading
 deployment's stored `notify_on_success` is not the column default. The last two SMTP columns are
-added by `m20260921_000002_smtp_credentials`, the first of this gear's seven migrations after its
+added by `m20260921_000002_smtp_credentials`, the first of this gear's migrations after its
 initial one;
 `email_smtp_credstore_ref` is a reference and never a password, and `email_smtp_port` also selects
 the TLS mode (465 implicit, otherwise `STARTTLS` required) — [ADR-0011](./ADR/0011-cpt-cf-qa-adr-smtp-egress.md).

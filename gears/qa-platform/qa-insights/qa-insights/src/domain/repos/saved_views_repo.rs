@@ -16,8 +16,8 @@ use crate::domain::error::DomainError;
 /// This is obligation #2 of the schema, and the only silent-correctness failure
 /// mode in it. Legacy's uniqueness is a *functional* index over
 /// `COALESCE(plan_id, '')` (`001_initial.sql:194-195`); this schema materializes
-/// the coalesced value as a column because `SQLite` and `MySQL` do not both
-/// support functional indexes, and **nothing in the database checks that the
+/// the coalesced value as a column the repository writes (a choice the
+/// initial migration's header explains), and **nothing in the database checks that the
 /// column agrees with `repo_id`/`plan_path`**. A writer that forgets it gets the
 /// `''` default, which silently collides a plan-scoped view with the owner's
 /// global view of the same name.

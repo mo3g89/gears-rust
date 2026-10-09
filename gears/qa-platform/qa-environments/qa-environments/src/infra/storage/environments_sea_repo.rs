@@ -445,8 +445,8 @@ impl EnvironmentsRepository for OrmEnvironmentsRepository {
     /// observation is applied atomically or not at all — a crash cannot leave
     /// `health_state` fresh next to a stale `observed_version`, which is the
     /// failure mode two statements would have. `Func::coalesce` is ordinary
-    /// ANSI SQL, so the statement is identical across Postgres, `MySQL` and
-    /// `SQLite`; no dialect branch is needed here, unlike the migrations that
+    /// ANSI SQL, so the statement is identical on Postgres and `SQLite`; no
+    /// dialect branch is needed here, unlike the migrations that
     /// add these columns.
     ///
     /// `updated_at` is deliberately **not** touched: it tracks operator edits

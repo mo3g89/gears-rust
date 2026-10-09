@@ -85,9 +85,8 @@
 //! ```
 //! (`001_initial.sql:194-195`.)
 //!
-//! `SQLite` and `MySQL` do not both support functional indexes, so the
-//! coalesced value is materialized as its own column, `plan_key`, written by the
-//! repository on every insert and update — `saved_views_sea_repo`, through the
+//! The coalesced value is materialized as its own column, `plan_key`, written by
+//! the repository on every insert and update — `saved_views_sea_repo`, through the
 //! single derivation `mapper::plan_key`. The nullable
 //! `repo_id`/`plan_path` pair stays as the readable representation; `plan_key`
 //! exists only to be indexed.
@@ -111,8 +110,9 @@
 //! read as though it were forced.** `GENERATED ALWAYS AS (...) STORED` plus a
 //! unique index over the generated column is accepted *and* indexable by both
 //! dialects this file ships — `PostgreSQL` 16 and `SQLite` 3.51 — and by
-//! `MySQL` 8, which it does not ship, so "no functional indexes" does not
-//! close the question the way the paragraph above implies on its own. It would also delete obligation #2
+//! `MySQL` 8, which it does not ship. So does a plain expression index over
+//! `COALESCE(plan_id, '')`: no dialect forced the materialized column, and an
+//! earlier version of the paragraph above wrongly said one did. A generated column would also delete obligation #2
 //! below outright, along with the only silent-correctness failure mode in this
 //! schema: a writer that forgets `plan_key` gets the `''` default and quietly
 //! collides a plan-scoped view with the owner's global view of the same name.
@@ -598,8 +598,8 @@ CREATE TABLE IF NOT EXISTS qa_analytics_saved_views (
     repo_id UUID NULL,
     plan_path VARCHAR(1024) NULL,
     -- **Materialized COALESCE.** Legacy's unique index is functional --
-    -- `COALESCE(plan_id, '')` (:194-195) -- and SQLite and MySQL do not both
-    -- support functional indexes, so the coalesced value is its own column.
+    -- `COALESCE(plan_id, '')` (:194-195); here the coalesced value is its own
+    -- column, by choice (module header: the generated-column alternative).
     -- Written by the repository on every insert and update: '' when
     -- repo_id/plan_path are NULL, otherwise '<repo_id>/<plan_path>'.
     -- 36 + 1 + 1024 = 1061. See the module header for what the coalesce buys.

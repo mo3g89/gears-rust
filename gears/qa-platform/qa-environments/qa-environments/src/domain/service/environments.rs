@@ -1897,11 +1897,12 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// did not. Git refs are UTF-8 and non-ASCII branch names are legal, so that
     /// was a real, reachable false rejection rather than a theoretical one.
     ///
-    /// The half worth having regardless of dialect is the **silent** one: outside
-    /// strict mode `MySQL` truncates rather than errors, and a truncated ref is a
-    /// *different, valid-looking* branch name, so the run would sync the wrong
-    /// branch with no error anywhere — the same silent-divergence class this whole
-    /// field was added to fix.
+    /// The half worth having regardless of dialect is the **silent** one: a
+    /// backend that truncates rather than errors (non-strict `MySQL` does; this
+    /// gear declares no `MySQL` schema) would turn the ref into a *different,
+    /// valid-looking* branch name, and the run would sync the wrong branch with
+    /// no error anywhere — the same silent-divergence class this whole field was
+    /// added to fix.
     ///
     /// # What is and is not tested
     ///
@@ -1916,9 +1917,8 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// over-long write is *observed* rather than argued — disabling it makes the
     /// over-length create **succeed** and store the value in full.
     ///
-    /// The Postgres error and the `MySQL` truncation are stated from those
-    /// engines' documented semantics and are exercised by **no test in this
-    /// repository**. No claim is made about what any git hosting provider permits.
+    /// The Postgres error is stated from that engine's documented semantics and
+    /// is exercised by **no test in this repository**. No claim is made about what any git hosting provider permits.
     fn validate_default_branch(value: Option<&str>) -> Result<(), DomainError> {
         if value.is_some_and(|branch| branch.chars().count() > MAX_DEFAULT_BRANCH_CHARS) {
             return Err(DomainError::Validation {

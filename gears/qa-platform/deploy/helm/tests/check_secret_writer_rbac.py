@@ -51,6 +51,11 @@ Each check below is a way this could quietly regress:
      itself must survive `secret_name`'s sanitise/truncate unchanged, or a
      legitimate name would not start with it and the policy would deny the
      writer's own writes.
+  7. (2026-10-08 re-verification of #94.) The chart refuses to render when
+     `argo.namespace` equals the release namespace. The policy admits the
+     writer to every Opaque Secret named with the runner prefix, and every
+     Secret this chart owns carries that prefix too, so a shared namespace
+     would let the writer overwrite them (the realm, the gears config).
 
 Standalone script, like its siblings in this directory -- see the Makefile's
 `helm-tests` target for why each one is invoked directly."""
@@ -409,6 +414,22 @@ def check_admission_policy(docs, failures):
         print(f"PASS: {VAP_NAME} renders only where {VAP_API} is served, and restricts {WRITER_SA} to Opaque Secrets named {prefix}*")
 
 
+def check_same_namespace_refused(docs, failures):
+    # The admission policy admits the writer to every Opaque Secret named
+    # with the runner prefix, and every chart-owned Secret in the release
+    # namespace carries that prefix too. The two namespaces must differ.
+    refused, stderr = render("--set", f"argo.namespace={RELEASE_NAMESPACE}")
+    if refused is not None:
+        failures.append(
+            "FAIL: the chart must refuse argo.namespace equal to the release "
+            "namespace -- the secret writer could then overwrite the chart's "
+            "own qa-platform-* Secrets")
+    elif "argo.namespace" not in stderr:
+        failures.append(f"FAIL: the refusal must name argo.namespace; got:\n{stderr}")
+    else:
+        print("PASS: argo.namespace equal to the release namespace is refused")
+
+
 def main():
     docs, stderr = render()
     if docs is None:
@@ -417,7 +438,8 @@ def main():
     failures = []
     for check in (check_gears_sa_has_no_secrets, check_writer_role,
                   check_sa_and_token, check_kubeconfig_wiring,
-                  check_qa_runs_stays_on_the_pod_identity, check_admission_policy):
+                  check_qa_runs_stays_on_the_pod_identity, check_admission_policy,
+                  check_same_namespace_refused):
         mine = []
         check(docs, mine)
         failures += mine

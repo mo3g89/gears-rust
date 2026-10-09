@@ -142,8 +142,9 @@ into the historical model, correlates failures with JIRA, and sends notification
   where the ruling was to widen — so a migration opts existing tenants in and leaves the default
   alone for new ones (DESIGN §3.5). A deployment upgrading from before 2026-09-29 was announcing
   nothing, so for it the opt-in decides what it starts receiving. ADR-0011 and
-  `domain::notify::routing`'s header carry the rest of the reasoning. * A browser UI covering all of
-  the above. * A Helm chart deploying the subsystem with Postgres, Keycloak and Argo wiring.
+  `domain::notify::routing`'s header carry the rest of the reasoning.
+* A browser UI covering all of the above.
+* A Helm chart deploying the subsystem with Postgres, Keycloak and Argo wiring.
 
 ### 4.2 Out of Scope
 

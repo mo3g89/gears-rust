@@ -15,8 +15,9 @@
 //! This is obligation #2 of the migration's module header, and it is the only
 //! silent-correctness failure mode in this schema. Legacy's uniqueness is a
 //! *functional* index over `COALESCE(plan_id, '')` (`001_initial.sql:194-195`);
-//! `SQLite` and `MySQL` do not both support functional indexes, so the
-//! coalesced value is materialized here as its own column. It must be written on
+//! this schema materializes the coalesced value as its own column instead, by
+//! choice rather than by dialect limit (the qa-insights initial migration's
+//! header, "A stored generated column would also work, and was declined"). It must be written on
 //! **every insert and every update**: `""` when `repo_id`/`plan_path` are
 //! `None`, otherwise `"<repo_id>/<plan_path>"`. A writer that forgets it gets
 //! the `''` column default, which quietly collides a plan-scoped view with the

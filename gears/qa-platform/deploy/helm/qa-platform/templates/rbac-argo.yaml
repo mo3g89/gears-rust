@@ -33,7 +33,20 @@
      resource cannot live in the same `helm uninstall` blast radius as
      everything else in the release -- Helm still tracks and removes it (it
      carries this release's ownership annotations), it just does so in a
-     different namespace than the rest of the manifest. */}}
+     different namespace than the rest of the manifest.
+
+     THE TWO NAMESPACES MUST DIFFER (2026-10-08 re-verification of #94).
+     secret-writer-admission-policy.yaml admits qa-platform-secret-writer to
+     every Opaque Secret in argo.namespace whose name starts with the runner
+     prefix, and every Secret this chart owns (qa-platform-realm,
+     qa-platform-gears-config, qa-platform-postgres, ...) carries the same
+     prefix. In one shared namespace the writer could overwrite them -- plant a
+     known workflow-client secret in the realm, say. Renaming the prefix would
+     orphan every live runner Secret, so the configuration is refused instead.
+     check_secret_writer_rbac.py asserts the refusal. */}}
+{{- if eq (toString .Values.argo.namespace) .Release.Namespace }}
+{{- fail (printf "argo.namespace %q equals the release namespace. qa-platform-secret-writer may write any Opaque Secret named %s* in argo.namespace, and every Secret this chart owns carries that prefix, so sharing the namespace would let it overwrite them. Run Argo's workflows in a namespace of their own." .Values.argo.namespace (include "qa-platform.runnerSecretPrefix" .)) }}
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

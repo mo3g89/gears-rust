@@ -106,6 +106,12 @@ derived from our credential material, and suppressing it would leave operators d
     `Opaque` Secrets whose names start with the runner prefix `qa-platform-`. The writer can still
     create such a Secret, or overwrite any tenant's runner-credential Secret by name, because they
     all share that prefix. It cannot touch any other Secret, and cannot read, list or delete one.
+    That holds only while the Argo namespace is not the release namespace: every Secret the chart
+    owns (`qa-platform-realm`, `qa-platform-gears-config`, …) carries the same prefix, so in a
+    shared namespace the writer could overwrite them. The chart therefore refuses to render when
+    `argo.namespace` equals the release namespace (`rbac-argo.yaml`). The prefix was not renamed,
+    because that would orphan every live runner Secret. *(Added 2026-10-08, re-verification of
+    #94.)*
   - Where the API is not served, the policy does not render, and the writer can create any Secret
     in the namespace or overwrite any existing one by name. That includes minting a
     `kubernetes.io/service-account-token` Secret for any ServiceAccount there, Argo's controller and

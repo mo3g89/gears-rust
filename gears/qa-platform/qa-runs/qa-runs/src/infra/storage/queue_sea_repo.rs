@@ -250,9 +250,8 @@ impl QueueRepository for OrmQueueRepository {
             // `ORDER BY` is indistinguishable from a correct one. What the
             // test *does* discriminate is a **wrong** order — reversing either
             // clause turns it red, since that contradicts the scan. The
-            // clauses stay because Postgres and `MySQL` are free to choose
-            // another plan and neither is exercised anywhere in this
-            // workspace.
+            // clauses stay because Postgres is free to choose another plan
+            // and no test in this crate runs against it.
             .order_by(QueueColumn::EnqueuedAt, sea_orm::Order::Asc)
             .order_by(QueueColumn::Id, sea_orm::Order::Asc)
             .all(runner)

@@ -84,8 +84,8 @@ use crate::domain::error::DomainError;
 ///
 /// qa-runs clamps the window it serves this listing from:
 /// `runs_sea_repo::sweep_limit` is `u64::from(requested).min(PAGE_LIMITS.max)`
-/// and `PAGE_LIMITS.max` is 500 (`qa-runs/src/infra/storage/db.rs`). A caller
-/// that asks for more gets 500 rows and **no indication that it was cut**.
+/// and `PAGE_LIMITS.max` is `qa_runs_sdk::MAX_PAGE_LIMIT`, 500
+/// (`qa-runs/src/infra/storage/db.rs`). A caller that asks for more gets 500 rows and **no indication that it was cut**.
 ///
 /// # Why a caller has to know the number
 ///
@@ -99,17 +99,15 @@ use crate::domain::error::DomainError;
 /// constant so that comparison can never be made against a number qa-runs will
 /// not honour.
 ///
-/// # It is duplicated, and it cannot not be
+/// # One constant, owned by the contract
 ///
-/// `qa-runs`' `PAGE_LIMITS` lives in a `pub(crate)` module, so no import is
-/// possible — the same argument, in the same words, that
-/// `crate::infra::storage::db::PAGE_LIMITS` records for its own copy of the
-/// pair. This one is stated here rather than borrowed from that copy because
-/// this is a property of the **port**, not of this gear's own `OData`
-/// collections, and a domain module must not read `infra`.
-/// `tests::the_port_page_cap_matches_qa_runs` below pins the literal and names
-/// the line to check it against.
-pub const MAX_FINISHED_RUNS_PAGE: u32 = 500;
+/// The value is `qa_runs_sdk::MAX_PAGE_LIMIT`, the same constant qa-runs'
+/// `PAGE_LIMITS.max` is built from, so the two sides cannot drift apart. It
+/// used to be a copied literal with a test on each side that pinned 500. This
+/// port re-exports it under its own name because the bound is a property of
+/// the **port** that this gear's domain reads, and a domain module must not
+/// reach into another gear's `infra`.
+pub const MAX_FINISHED_RUNS_PAGE: u32 = qa_runs_sdk::MAX_PAGE_LIMIT;
 
 /// The reads qa-insights performs against qa-runs.
 #[async_trait]
@@ -290,27 +288,4 @@ pub trait RunsReader: Send + Sync {
         ctx: &SecurityContext,
         schedule_id: Uuid,
     ) -> Result<Option<ScheduleNotificationSettings>, DomainError>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::MAX_FINISHED_RUNS_PAGE;
-
-    /// The literal **is** the contract here, not a restatement of the constant:
-    /// the other side lives in qa-runs, where `PAGE_LIMITS` is `pub(crate)` and
-    /// so unreachable from this crate without widening qa-runs' surface.
-    /// [`MAX_FINISHED_RUNS_PAGE`] is a **copy** of
-    /// a number the compiler cannot check against its source: qa-runs' own
-    /// `PAGE_LIMITS.max` (`qa-runs/src/infra/storage/db.rs`), applied to this
-    /// listing by `runs_sea_repo::sweep_limit`
-    /// (`qa-runs/src/infra/storage/runs_sea_repo.rs`, whose
-    /// `the_sweep_limit_is_clamped_to_the_page_ceiling_and_zero_stays_zero`
-    /// pins the same number on that side).
-    ///
-    /// A divergence is then a review question rather than an invisible page
-    /// that the sweep reads as short.
-    #[test]
-    fn the_port_page_cap_matches_qa_runs() {
-        assert_eq!(MAX_FINISHED_RUNS_PAGE, 500);
-    }
 }

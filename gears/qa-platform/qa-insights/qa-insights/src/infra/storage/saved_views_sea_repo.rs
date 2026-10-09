@@ -3,8 +3,10 @@
 //! # Obligation #2 lives in this file, and only in this file
 //!
 //! `qa_analytics_saved_views.plan_key` materializes legacy's
-//! `COALESCE(plan_id, '')` (`001_initial.sql:194-195`) because `SQLite` and
-//! `MySQL` do not both support functional indexes. It is the fourth column of
+//! `COALESCE(plan_id, '')` (`001_initial.sql:194-195`) as a column this file
+//! writes, by choice rather than by dialect limit (the initial migration's
+//! header records the generated-column alternative and why it was declined).
+//! It is the fourth column of
 //! `idx_qa_analytics_saved_views_unique`, it is `NOT NULL DEFAULT ''`, and
 //! **nothing in the database checks that it agrees with `repo_id`/`plan_path`**.
 //!

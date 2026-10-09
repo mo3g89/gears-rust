@@ -364,9 +364,9 @@ async fn custom_plan_scoped_by_tenant() {
 /// name and the JSON shape are both runtime strings.
 ///
 /// **The dialect limit:** `inmem_db` is `sqlite::memory:`, where the column is
-/// `files TEXT NOT NULL DEFAULT '[]'`. The `MySQL` (`JSON`) and Postgres
-/// (`JSONB`) definitions of the same column are asserted by inspection only —
-/// no test in this gear executes them. No DDL changed here, so that limit is
+/// `files TEXT NOT NULL DEFAULT '[]'`. The Postgres (`JSONB`) definition of the
+/// same column is asserted by inspection only —
+/// no test in this gear executes it. No DDL changed here, so that limit is
 /// inherited rather than introduced.
 #[tokio::test]
 async fn custom_plan_entries_round_trip_through_the_database() {
@@ -526,8 +526,8 @@ async fn an_empty_plan_path_is_rejected_even_though_the_type_permits_it() {
 /// every launch targeting one fails.
 ///
 /// **Dialect limit:** `sqlite::memory:`, where the column is
-/// `files TEXT NOT NULL DEFAULT '[]'`. The `MySQL` (`JSON`) and Postgres (`JSONB`)
-/// definitions are asserted by inspection only. No DDL changed, so the limit is
+/// `files TEXT NOT NULL DEFAULT '[]'`. The Postgres (`JSONB`) definition is
+/// asserted by inspection only. No DDL changed, so the limit is
 /// inherited rather than introduced.
 #[tokio::test]
 async fn a_row_stored_before_plan_path_existed_still_loads_through_the_service() {

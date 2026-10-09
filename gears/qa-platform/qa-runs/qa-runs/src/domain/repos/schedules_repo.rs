@@ -575,21 +575,17 @@ pub trait SchedulesRepository: Send + Sync {
     /// instance that won the claim and no other writer exists, so there is no
     /// transition to compare and set.
     ///
-    /// # `false` does not portably mean "no such row"
+    /// # `false` means "no such row in scope" only on the dialects this gear ships
     ///
-    /// The implementation reports `rows_affected == 1`, and **`MySQL` counts
-    /// *changed* rows where Postgres and `SQLite` count *matched* ones**. So a
-    /// call that writes `(None, None)` against a row already holding NULLs
-    /// changes nothing, and the dialects disagree: `true` on Postgres and
-    /// `SQLite`, `false` on `MySQL`, for a row that exists and is in scope. This
-    /// table has no `updated_at` to force a change and mask the difference —
-    /// that absence is deliberate for other reasons (see this module's header),
-    /// and this is one of its consequences.
-    ///
-    /// Unreachable from the firing ticker, which always records either a run id
-    /// or a reason, never neither. Written down because the `MySQL` tier is
-    /// executed by nothing in this workspace, so no test can catch a caller who
-    /// later depends on the other reading.
+    /// The implementation reports `rows_affected == 1`, and Postgres and
+    /// `SQLite`, the two dialects this gear's migrations declare, count
+    /// *matched* rows: a call that writes `(None, None)` over NULLs still
+    /// reports `true`. A dialect that counts *changed* rows (`MySQL` does) would
+    /// report `false` for that row, and this table has no `updated_at` to force
+    /// a change — an absence that is deliberate for other reasons (see this
+    /// module's header). Whoever adds such a dialect must revisit this method.
+    /// The firing ticker never hits the case: it always records either a run id
+    /// or a reason, never neither.
     ///
     /// # Errors
     ///

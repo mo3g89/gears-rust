@@ -161,7 +161,7 @@ const FIELD_COUNT: usize = 5;
 /// The longest expression [`parse_cron`] will look at, in characters.
 ///
 /// **Tied to the column, not chosen for parsing.** `qa_schedules.cron` is
-/// `VARCHAR(255)` on Postgres and `MySQL`
+/// `VARCHAR(255)` on Postgres
 /// (`infra::storage::migrations::m20260813_000003_initial`; declared under
 /// `m20260813_000004_schedules` before that migration was folded into this
 /// one by the docs squash), so a longer

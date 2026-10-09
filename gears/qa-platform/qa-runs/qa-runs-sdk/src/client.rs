@@ -10,6 +10,17 @@ use crate::models::{
     RunTestResult, Schedule, ScheduleNotificationSettings, ScheduleTick,
 };
 
+/// The most rows one page of a qa-runs collection holds, whatever `limit` asks
+/// for.
+///
+/// qa-runs clamps every page to this (its `PAGE_LIMITS.max`) and says nothing
+/// about having done so, so a caller that reads "fewer rows than I asked for"
+/// as "the end" must never ask for more. The number lives here, in the
+/// contract, so that qa-runs' clamp and a consumer's bound are one constant
+/// rather than two literals kept in step by tests —
+/// [`QaRunsClientV1::list_runs_finished_since`] says why that matters.
+pub const MAX_PAGE_LIMIT: u32 = 500;
+
 /// Object-safe client for the qa-runs gear (Version 1).
 ///
 /// Registered in `ClientHub`:
@@ -58,10 +69,10 @@ pub trait QaRunsClientV1: Send + Sync {
     /// `limit` is mandatory for the same reason [`list_runs`](Self::list_runs)'
     /// is, and the implementation clamps it again.
     ///
-    /// # `limit` is capped at 500, silently
+    /// # `limit` is capped at [`MAX_PAGE_LIMIT`] (500), silently
     ///
-    /// The server clamps `limit` to its own page ceiling — `PAGE_LIMITS.max`,
-    /// 500 — and says nothing about having done so: a request for 800 returns
+    /// The server clamps `limit` to its own page ceiling, [`MAX_PAGE_LIMIT`],
+    /// and says nothing about having done so: a request for 800 returns
     /// at most 500 rows with no error, no flag and no count. **A page shorter
     /// than the `limit` you asked for is therefore not evidence that you have
     /// reached the end.** A caller that tests `page.len() < limit` for "caught
@@ -70,7 +81,7 @@ pub trait QaRunsClientV1: Send + Sync {
     /// nothing logged. That is not hypothetical — it wedged qa-insights'
     /// reconcile walk for three days in 2026-09. Page with
     /// [`FinishedRunCursor::after`] until a page comes back **empty**, or keep
-    /// `limit` at or below 500 and let fullness mean what you think it means.
+    /// `limit` at or below [`MAX_PAGE_LIMIT`] and let fullness mean what you think it means.
     ///
     /// # Why this exists at all, and why there is no legacy citation for it
     ///

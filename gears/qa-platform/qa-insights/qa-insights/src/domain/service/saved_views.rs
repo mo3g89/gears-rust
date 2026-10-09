@@ -287,8 +287,8 @@
 //! (`api_list_views`'s `else` branch, `manager/src/routes/analytics.rs:556-563`),
 //! so a stray `plan_id` on a legacy row is merely inert, never a data-loss bug.
 //!
-//! This gear's `plan_key` materialization (forced by `SQLite`/`MySQL` lacking
-//! functional indexes; see that trait's header) removes the option of porting
+//! This gear's `plan_key` materialization (a repository-written column rather
+//! than a functional index; see that trait's header) removes the option of porting
 //! legacy's literal permissiveness safely. [`required_plan`] therefore clears
 //! any submitted plan identity when `scope` is `all`, so `plan_key` and
 //! `scope` can never disagree about what a row is. **Found by this task's Step

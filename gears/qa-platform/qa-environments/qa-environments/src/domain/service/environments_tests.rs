@@ -161,7 +161,8 @@ async fn the_create_path_trims_the_override_and_treats_blank_as_absent() {
 ///
 /// 512 characters must be accepted and 513 rejected: an off-by-one rejecting 512
 /// would turn a storable value into a 400, and one accepting 513 would hand the
-/// problem to a `MySQL` that truncates silently.
+/// problem to the database: a Postgres error, or silent truncation on a backend
+/// that truncates.
 #[tokio::test]
 async fn an_override_wider_than_the_column_is_a_validation_error_on_both_paths() {
     let db = inmem_db().await;

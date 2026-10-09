@@ -18,7 +18,7 @@ mod models;
 /// about this crate.
 pub use qa_catalog_sdk::Exclusivity;
 
-pub use client::QaRunsClientV1;
+pub use client::{MAX_PAGE_LIMIT, QaRunsClientV1};
 pub use errors::QaRunsError;
 pub use models::{
     ExclusiveTier, FinishedRunCursor, LaunchOutcome, LaunchRequest, NewSchedule, QueueEntry,

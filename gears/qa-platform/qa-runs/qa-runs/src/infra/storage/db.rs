@@ -27,9 +27,14 @@ use crate::domain::error::DomainError;
 /// `tests::the_page_limits_are_the_literals_the_guide_freezes`; before it,
 /// mutating this pair to `{ default: 15, max: 9999 }` left the whole suite
 /// green.
+///
+/// `max` is `qa_runs_sdk::MAX_PAGE_LIMIT` rather than a literal: qa-insights
+/// bounds its reconcile page by that same constant, and a page cap the
+/// consumer cannot see is how its sweep once read a clamped page as the end.
+/// The `as` widens `u32` to `u64` and cannot truncate.
 pub const PAGE_LIMITS: LimitCfg = LimitCfg {
     default: 200,
-    max: 500,
+    max: qa_runs_sdk::MAX_PAGE_LIMIT as u64,
 };
 
 /// Classify an `OData` failure as the caller's mistake or the server's.
