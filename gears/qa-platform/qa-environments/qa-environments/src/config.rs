@@ -1,40 +1,26 @@
 //! Typed configuration for the `qa-environments` gear.
 //!
+//! Typed configuration for the `qa-environments` gear.
+//!
 //! # Why nothing here is behind a cargo feature
 //!
 //! [`QaEnvironmentsConfig`] is `#[serde(default, deny_unknown_fields)]`, and
-//! `deny_unknown_fields` plus a `#[cfg(feature = …)]` field is a latent boot
-//! failure: the same config file that a `runner-secret` build accepts
-//! is *rejected outright* by a build without the feature, with a message
-//! naming a field the operator did in fact write and that the product does in
-//! fact have. A deployment cannot then be rolled back to a default binary
-//! without also editing its config — which is exactly the moment nobody wants
-//! to be editing config.
+//! `deny_unknown_fields` plus a `#[cfg(feature = ...)]` field is a latent boot
+//! failure: the same config file that a `runner-credentials` build accepts
+//! would be *rejected outright* by a build without the feature, with a message
+//! naming a field the operator did in fact write. A deployment could then not
+//! be rolled back to a default binary without also editing its config.
 //!
-//! The 2026-08-28 final review flagged that combination, latent only because
-//! the shipped stack rendered `qa-environments: config: {}`. It is not latent
-//! any more: `config/qa-platform-stack.yaml` now carries an anchor under that
-//! key and an `--argo` deployment inserts `argo.kubeconfig_path` there.
-//!
-//! The resolution keeps both properties instead of trading one for the other.
-//! **The config shape is the same in every build** — every field parses
-//! everywhere, so a config file is portable across binaries and
-//! `deny_unknown_fields` still catches a genuine typo — while **the feature
-//! still decides what is built**: these structs name no Kubernetes type (they
-//! are `String`/`bool`/`u64`), so keeping them costs a default build nothing
-//! and is consistent with ADR-0001 (see its Amendments section). What is
-//! feature-gated is the *reader* of [`Self::argo`] alone —
-//! `crate::gear::build_runner_secret_writer`, the only thing that actually
-//! needs `kube`.
-//!
-//! The one consequence, made explicit rather than left to be discovered: in a
-//! build without `runner-secret`, [`Self::argo`]'s fields are accepted and
-//! then ignored — nothing reads them. **[`Self::observation`]'s fields are not
-//! part of that consequence.** Since Task 15 moved observation to the product
-//! plugin (no Kubernetes client needed), `ObservationConfig` is parsed *and*
-//! read in every build, feature or no feature, and the observation ticker
-//! spawns unconditionally — see `crate::gear::QaEnvironments::serve_with_services`'s
-//! own doc, "Unconditional since Task 19b."
+//! So **the config shape is the same in every build**: every field parses
+//! everywhere, and `deny_unknown_fields` still catches a genuine typo, while
+//! the feature decides only what is built. These structs name no Kubernetes
+//! type (they are `String`/`bool`/`u64`), so keeping them costs a default
+//! build nothing and is consistent with ADR-0001. The reader of
+//! [`QaEnvironmentsConfig::argo`] is feature-gated alone
+//! (`crate::gear::build_pod_identity`); in a build without
+//! `runner-credentials` its fields are accepted and then ignored.
+//! [`QaEnvironmentsConfig::observation`] is read in every build, and the
+//! observation ticker spawns unconditionally.
 
 use serde::Deserialize;
 
@@ -45,13 +31,11 @@ pub struct QaEnvironmentsConfig {
     /// Max variables returned per env-assembly query.
     pub max_variables: usize,
 
-    /// How to reach the **Argo** cluster that
-    /// `KubeRunnerSecretWriter::ensure_runner_secret` writes each runner
-    /// `Secret` into — a different cluster from any environment's own. Only
-    /// *meaningful* in a build carrying
-    /// the `runner-secret` cargo feature — `crate::gear::build_runner_secret_writer`
-    /// is the sole reader — but present and parseable in every build, so one
-    /// config file works against either binary. See this module's header.
+    /// Where the runner pods run: the Argo namespace and the `ServiceAccount`
+    /// their tokens are verified against. Only *meaningful* in a build
+    /// carrying the `runner-credentials` cargo feature
+    /// (`crate::gear::build_pod_identity` is the sole reader) but present and
+    /// parseable in every build. See this module's header.
     pub argo: ArgoObserverConfig,
 
     /// The background observation ticker's own settings — how often it runs
@@ -81,44 +65,27 @@ impl Default for QaEnvironmentsConfig {
     }
 }
 
-/// Connection details for the Argo cluster D4's `Secret` writer targets.
-/// Mirrors `qa-runs`' `ArgoExecutorConfig` shape (`qa-runs/src/config.rs`),
-/// deliberately: both gears reach the same Argo cluster from the same
-/// deployment shapes (off-cluster with a mounted kubeconfig, or in-cluster
-/// with ambient service-account credentials), so there is no reason for the
-/// two knobs to disagree on what "unset" means.
+/// Where the runner pods run, for the runner-credential route's pod-identity
+/// verification (finding #94).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ArgoObserverConfig {
-    /// Path to a kubeconfig naming the Argo cluster. `None` (the default)
-    /// falls back to ambient credentials — in-cluster service-account
-    /// credentials, or `KUBECONFIG`/`~/.kube/config` — via `Config::infer()`,
-    /// which is correct once qa-platform runs inside the cluster the way
-    /// legacy does.
-    pub kubeconfig_path: Option<String>,
-    /// Namespace the runner's credential `Secret`s are written into — one per
-    /// stored credential, since an environment's plugin may declare more than
-    /// one. Default `argo`, matching `qa-runs`' own default and
-    /// `deploy/argo/provision-platform-kubeconfig-secret.sh`.
+    /// Namespace the runner pods run in. Default `argo`, matching `qa-runs`'
+    /// own default.
     pub namespace: String,
-    /// Prefix of the generated `Secret`'s name, before the sanitised
-    /// credstore reference. Default `qa-platform-` — see
-    /// `infra::runner_secret_writer`'s parity-oracle test module, which
-    /// pins this string against `qa-runs`' `argo/naming.rs` and the
-    /// provisioning script.
-    pub secret_prefix: String,
-    /// Key under which a credential's bytes are stored in the `Secret`'s
-    /// `data` map. Default `value`.
-    pub secret_key: String,
+    /// The `ServiceAccount` runner pods run as in [`Self::namespace`] (finding
+    /// #94). `POST /qa/v1/runner-credentials` refuses a token whose reviewed
+    /// username is not `system:serviceaccount:<namespace>:<this>`. Default
+    /// `qa-platform-runner`, the chart's `argo.workflowServiceAccount`. Read
+    /// only in a build carrying the `runner-credentials` feature.
+    pub runner_service_account: String,
 }
 
 impl Default for ArgoObserverConfig {
     fn default() -> Self {
         Self {
-            kubeconfig_path: None,
             namespace: "argo".to_owned(),
-            secret_prefix: "qa-platform-".to_owned(),
-            secret_key: "value".to_owned(),
+            runner_service_account: "qa-platform-runner".to_owned(),
         }
     }
 }
@@ -143,8 +110,8 @@ pub struct ObservationConfig {
     /// **Not gated on any cargo feature** — neither this struct nor the
     /// ticker spawn is. `crate::gear::QaEnvironments::serve_with_services`
     /// spawns the ticker in every build whenever this flag is `true`; a
-    /// build without `runner-secret` observes exactly the same way a build
-    /// with it does. This flag is the *only* on/off switch, for an operator
+    /// build without `runner-credentials` observes exactly the same way a
+    /// build with it does. This flag is the *only* on/off switch, for an operator
     /// who wants environments to stop refreshing on their own.
     pub enabled: bool,
     /// Seconds between cycles, before flooring. Read only through
@@ -207,30 +174,19 @@ impl ObservationConfig {
 mod observation_config_tests {
     use super::{ObservationConfig, QaEnvironmentsConfig};
 
-    /// Legacy clamps with `.max(60)` in both branches of its config load
-    /// (`platform_version_poller.rs`'s `load_config`). A 1-second poll would
-    /// hammer every registered cluster.
     /// The `deny_unknown_fields` + feature-gate trap, pinned in the build
     /// where it would have fired.
     ///
     /// This test compiles and runs in a **default** build (no
-    /// `runner-secret`). Before 2026-08-28 the two fields it names
-    /// existed only under the feature, so this exact document — the one an
-    /// `--argo` deployment renders — made a default binary fail
-    /// deserialization at boot with a message naming a field the operator had
-    /// correctly written. Now it parses everywhere, and the feature decides
-    /// only what is *done* with it.
-    ///
-    /// If a future change re-gates either field, this test stops compiling in
-    /// the default build rather than the failure being discovered on a
-    /// rollback.
+    /// `runner-credentials`): the document an `--argo` deployment renders must
+    /// parse everywhere, and the feature decides only what is done with it.
     #[test]
     fn a_config_naming_the_observation_fields_parses_in_every_build() {
         let yaml = "
 max_variables: 500
 argo:
-  kubeconfig_path: /etc/qa-platform/k3s-kubeconfig.yaml
   namespace: argo
+  runner_service_account: qa-runner
 observation:
   enabled: true
   poll_interval_seconds: 300
@@ -238,11 +194,8 @@ observation:
 ";
         let cfg: QaEnvironmentsConfig = serde_yaml::from_str(yaml)
             .expect("an --argo deployment's config must parse in ANY build");
-        assert_eq!(
-            cfg.argo.kubeconfig_path.as_deref(),
-            Some("/etc/qa-platform/k3s-kubeconfig.yaml")
-        );
         assert_eq!(cfg.argo.namespace, "argo");
+        assert_eq!(cfg.argo.runner_service_account, "qa-runner");
         assert!(cfg.observation.enabled);
         assert_eq!(cfg.observation.poll_interval_seconds, 300);
         assert_eq!(cfg.observation.observe_timeout_seconds, 90);
@@ -250,10 +203,15 @@ observation:
             cfg.observation.effective_observe_timeout(),
             std::time::Duration::from_secs(90)
         );
-        // The defaults still fill in what the document does not name, so
-        // `deny_unknown_fields` is doing typo-catching and nothing else.
-        assert_eq!(cfg.argo.secret_prefix, "qa-platform-");
-        assert_eq!(cfg.argo.secret_key, "value");
+    }
+
+    /// Unset, the runner account is the chart's default one.
+    #[test]
+    fn the_runner_service_account_defaults_to_the_charts() {
+        assert_eq!(
+            QaEnvironmentsConfig::default().argo.runner_service_account,
+            "qa-platform-runner"
+        );
     }
 
     /// The property `deny_unknown_fields` is kept for: a misspelled key is a
@@ -262,7 +220,7 @@ observation:
     fn a_misspelled_key_is_still_rejected() {
         let yaml = "
 argo:
-  kubeconfig_paht: /etc/qa-platform/k3s-kubeconfig.yaml
+  namespce: argo
 ";
         serde_yaml::from_str::<QaEnvironmentsConfig>(yaml)
             .expect_err("a typo must still be refused rather than ignored");

@@ -10227,7 +10227,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -10266,7 +10265,6 @@ dependencies = [
  "cf-gears-toolkit-security",
  "gts",
  "http",
- "hyper-util",
  "inventory",
  "k8s-openapi",
  "kube",
@@ -10275,8 +10273,7 @@ dependencies = [
  "qa-catalog-sdk",
  "qa-environments-sdk",
  "qa-product-sdk",
- "rcgen",
- "rustls",
+ "qa-runs-sdk",
  "schemars 1.2.1",
  "sea-orm",
  "sea-orm-migration",
@@ -10288,7 +10285,6 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
- "tokio-rustls",
  "tokio-util",
  "tracing",
  "tracing-subscriber",

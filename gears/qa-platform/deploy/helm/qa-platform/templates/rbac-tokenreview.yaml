@@ -1,0 +1,38 @@
+{{/* `tokenreviews: create` for qa-platform-gears (finding #94). qa-environments'
+     runner-credential route reviews a runner pod's projected ServiceAccount
+     token (audience qa-platform-runner-credentials) to learn which pod is
+     calling. TokenReview is cluster-scoped, so the grant is a ClusterRole. It
+     lets the holder ask the API server whether a token is valid and nothing
+     more: it reads no object and mints no token.
+
+     Cluster-scoped, so the name carries the release namespace, like the
+     admission policy's. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: qa-platform-gears-tokenreview-{{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: qa-platform-gears-tokenreview-{{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+    app.kubernetes.io/instance: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: qa-platform-gears-tokenreview-{{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: qa-platform-gears
+    namespace: {{ .Release.Namespace }}

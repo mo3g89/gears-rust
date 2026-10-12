@@ -15,19 +15,13 @@
      automatically, and the in-cluster API server address baked into every
      pod's environment (KUBERNETES_SERVICE_HOST/KUBERNETES_SERVICE_PORT).
 
-     THE qa-environments FRAGMENT DOES CARRY ONE (finding #94), and it is
-     still in-cluster -- just a different identity. qa-environments' only
-     Kubernetes client is the D4 runner-credential writer, which needs
-     create+patch on Secrets in the Argo namespace, and that grant now
-     belongs to `qa-platform-secret-writer`
-     (secret-writer-serviceaccount.yaml, rbac-argo.yaml), not to
-     qa-platform-gears. A projected token is always the pod's own account, so
-     the writer reads the second account's token from a mounted
-     `kubernetes.io/service-account-token` Secret through the
-     `secret-writer-kubeconfig.yaml` key below: server
-     https://kubernetes.default.svc, `certificate-authority` and `tokenFile`
-     under /var/run/secrets/qa-platform/secret-writer (gears-deployment.yaml
-     mounts both).
+     THE qa-environments FRAGMENT CARRIES NO `kubeconfig_path` EITHER
+     (finding #94). Runner credentials are no longer written into Kubernetes
+     Secrets: qa-environments hands a verified runner pod its credentials over
+     POST /qa/v1/runner-credentials, after a TokenReview of the pod's projected
+     token (the `tokenreviews: create` grant is rbac-tokenreview.yaml). Its
+     only Kubernetes use is that review and one pod read in the Argo
+     namespace, both on qa-platform-gears' own in-cluster identity.
 
      entrypoint.sh (gears/qa-platform/deploy/docker/entrypoint.sh) still
      refuses to start if QA_RUNS_ARGO_CONFIG is set without
@@ -117,20 +111,14 @@
       # ConfigMap are lost. Inserted into the gears' rendered config after
       # the QA_ENVIRONMENTS_ARGO_ANCHOR line by deploy/docker/entrypoint.sh.
       argo:
-        # The D4 writer's OWN identity, qa-platform-secret-writer, not the
-        # pod's qa-platform-gears -- see this file's header comment. The
-        # path is where gears-deployment.yaml mounts this ConfigMap's
-        # secret-writer-kubeconfig.yaml key.
-        kubeconfig_path: /etc/qa-platform/secret-writer-kubeconfig.yaml
         # Must equal the qa-runs fragment's argo.namespace: the runner pod's
-        # kubeconfig Secret has to land in the namespace its
-        # Workflow runs in.
+        # token is reviewed against the namespace its Workflow runs in.
         namespace: {{ .Values.argo.namespace }}
-        # Rendered, not left to the Rust default, because
-        # secret-writer-admission-policy.yaml denies the writer any Secret
-        # name outside it -- both read the qa-platform.runnerSecretPrefix
-        # helper, so they cannot drift apart.
-        secret_prefix: {{ include "qa-platform.runnerSecretPrefix" . | quote }}
+        # The account runner pods run as (finding #94). POST
+        # /qa/v1/runner-credentials refuses any token whose TokenReview names
+        # another ServiceAccount, so this must be the same value the qa-runs
+        # fragment renders as workflow_service_account.
+        runner_service_account: {{ .Values.argo.workflowServiceAccount | quote }}
 {{- end }}
 ---
 apiVersion: v1
@@ -152,26 +140,3 @@ metadata:
     app.kubernetes.io/component: gears
 data:
   qa-environments-argo.yaml: {{ include "qa-platform.gearsArgoQaEnvironmentsFragment" . | trimPrefix "\n" | toJson }}
-  # Read by qa-environments' D4 writer only (argo.kubeconfig_path above). No
-  # credential in it: both paths are files of the qa-platform-secret-writer-token
-  # Secret, which the token controller populates. kube-client re-reads
-  # tokenFile, so a rotated token needs no pod restart.
-  secret-writer-kubeconfig.yaml: |
-    apiVersion: v1
-    kind: Config
-    clusters:
-      - name: in-cluster
-        cluster:
-          server: https://kubernetes.default.svc
-          certificate-authority: /var/run/secrets/qa-platform/secret-writer/ca.crt
-    users:
-      - name: qa-platform-secret-writer
-        user:
-          tokenFile: /var/run/secrets/qa-platform/secret-writer/token
-    contexts:
-      - name: qa-platform-secret-writer
-        context:
-          cluster: in-cluster
-          user: qa-platform-secret-writer
-          namespace: {{ .Values.argo.namespace }}
-    current-context: qa-platform-secret-writer

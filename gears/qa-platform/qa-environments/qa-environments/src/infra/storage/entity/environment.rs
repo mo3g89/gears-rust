@@ -76,8 +76,7 @@ pub struct Model {
     /// through the plugin path.
     ///
     /// **There is no `value` field in that shape, ever**, which is what makes this column
-    /// structurally incapable of holding credential material — the rule
-    /// `infra::runner_secret_errors` exists to enforce elsewhere, applied here to a schema instead.
+    /// structurally incapable of holding credential material.
     /// Added by `m20260903_000011_environment_plugin_columns` (folded into
     /// `migrations::m20260812_000001_initial` by the docs squash), which backfilled it from the
     /// pre-plugin `kubeconfig_credstore_ref` (dropped by Task 19). Written by the create and update

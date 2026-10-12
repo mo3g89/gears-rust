@@ -22,9 +22,7 @@
 //! no error message ever carries the document or the client built from it —
 //! see `environments_kubeconfig_tests`'
 //! `the_document_never_reaches_a_log_line_a_debug_rendering_or_a_response_body`
-//! for the read path's half of that proof, and
-//! `infra::runner_secret_writer`'s
-//! `the_kubeconfig_material_never_reaches_an_error_message` for D4's write.
+//! for the read path's half of that proof.
 //!
 //! Three things keep it from leaving, and none of them is a convention
 //! someone has to remember:
@@ -53,14 +51,14 @@ use credstore_sdk::{
 };
 use tokio_util::sync::CancellationToken;
 use toolkit_macros::domain_model;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::domain::error::DomainError;
-use crate::domain::ports::RunnerSecretWriter;
 use crate::domain::ports::metrics::{
     CycleOutcome, EnvironmentOutcome, NoopMetrics, ObservationClass, ObservationMetrics,
     PluginCallClass, PluginMetrics,
 };
+use crate::domain::ports::{PodIdentityVerifier, RunnerPodResolver};
 use crate::domain::repos::{EnvironmentsRepository, LeasesRepository};
 use crate::domain::service::{DbProvider, emit};
 use crate::domain::system_actor;
@@ -73,7 +71,7 @@ use qa_product_sdk::QaProductPluginV1;
 // called the local function still calls this one. The plugin contract's
 // `ObservationOutcome`/`HealthOutcome` collide by name with this gear's own
 // (`crate::domain::ports`), which this file also uses --
-// `NoopRunnerSecretWriter`'s outcome, and the doubles in the tests. Different
+// the doubles in the tests. Different
 // types with different shapes: the local `Failed` carries a `String`, the SDK's
 // a `PluginFailure`. Aliased rather than shadowing, so no match arm in this file
 // is ambiguous to a reader.
@@ -104,6 +102,11 @@ use uuid::Uuid;
 /// `domain::service`.
 #[path = "environment_credentials.rs"]
 pub(super) mod credentials;
+
+/// `POST /qa/v1/runner-credentials`'s domain half (finding #94). A child for
+/// [`credentials`]' reason: it reads this service's private collaborators.
+#[path = "runner_credentials.rs"]
+pub(super) mod runner_credentials;
 
 const MAX_NAME_LEN: usize = 255;
 
@@ -161,19 +164,17 @@ pub struct EnvironmentsService<P: EnvironmentsRepository, L: LeasesRepository> {
     repo: Arc<P>,
     leases_repo: Arc<L>,
     credstore: Arc<dyn CredStoreClientV1>,
-    /// D4's runner-`Secret` writer, and **only** that: an environment is
-    /// observed through its product's plugin ([`Self::observe_through_plugin`]),
-    /// and Task 19 deleted the observation half of the old port outright. What
-    /// survives is [`RunnerSecretWriter::ensure_runner_secret`], called from
-    /// create, from update and from the ticker's self-heal — see
-    /// `domain::ports::runner_secret`'s header for why deleting this half too
-    /// would have left every workflow run hanging on `FailedMount`.
-    observer: Arc<dyn RunnerSecretWriter>,
     /// Turns an environment's product into the plugin that observes it.
     /// Resolved lazily from the `ClientHub` per call — see
     /// `infra::product_plugin` for why this gear must not fail to boot when
     /// `qa-catalog` is absent.
     product_plugins: Arc<dyn ProductPluginPort>,
+    /// Proves a runner pod's projected token (`TokenReview` + uid) for
+    /// [`Self::runner_credentials`], finding #94.
+    pod_identity: Arc<dyn PodIdentityVerifier>,
+    /// Asks qa-runs which environment a verified pod's live run targets, for
+    /// [`Self::runner_credentials`].
+    runner_pods: Arc<dyn RunnerPodResolver>,
     /// Where the observation cycle reports itself. `NoopMetrics` when no
     /// adapter was installed, never `None`: a service built without one emits
     /// every signal a wired one does and nothing observes, which is what makes
@@ -223,10 +224,9 @@ pub struct EnvironmentsService<P: EnvironmentsRepository, L: LeasesRepository> {
 /// wraps whatever the credstore client's `Display` produced, which is not a
 /// bounded string this crate controls.
 ///
-/// So neither is interpolated. This is the same rule
-/// `infra::runner_secret_errors` implements for kubeconfig-derived failures, applied
-/// one layer up, where the value at risk is the reference rather than the
-/// material. It says what an operator can act on without naming the secret.
+/// So neither is interpolated. The value at risk is the reference rather than
+/// the material, and this says what an operator can act on without naming the
+/// secret.
 const KUBECONFIG_UNRESOLVED: &str = "this environment's kubeconfig could not be read from the credential store, so no \
      observation was attempted: the stored reference names no secret, or the credential \
      store refused the read. qa-environments reads it as its system actor in the tenant that \
@@ -268,8 +268,9 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     #[allow(
         clippy::too_many_arguments,
         reason = "one argument per collaborator this service holds (the db provider, two \
-                  repositories, credstore, the runner-Secret writer, the product-plugin port, \
-                  the metrics port and the enforcer) plus the observation deadline. The DI \
+                  repositories, credstore, the product-plugin port, \
+                  the two runner-credential ports, the metrics port and the enforcer) plus \
+                  the observation deadline. The DI \
                   container's own constructor carries the same allowance for the same reason, \
                   and this one has exactly one caller (`AppServices::new`)."
     )]
@@ -278,8 +279,9 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         repo: Arc<P>,
         leases_repo: Arc<L>,
         credstore: Arc<dyn CredStoreClientV1>,
-        observer: Arc<dyn RunnerSecretWriter>,
         product_plugins: Arc<dyn ProductPluginPort>,
+        pod_identity: Arc<dyn PodIdentityVerifier>,
+        runner_pods: Arc<dyn RunnerPodResolver>,
         metrics: Option<Arc<dyn ObservationMetrics>>,
         plugin_metrics: Option<Arc<dyn PluginMetrics>>,
         policy_enforcer: PolicyEnforcer,
@@ -290,8 +292,9 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             repo,
             leases_repo,
             credstore,
-            observer,
             product_plugins,
+            pod_identity,
+            runner_pods,
             metrics: metrics.unwrap_or_else(|| Arc::new(NoopMetrics)),
             plugin_metrics: plugin_metrics.unwrap_or_else(|| Arc::new(NoopMetrics)),
             metrics_silenced: AtomicBool::new(false),
@@ -438,16 +441,6 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                     "Successfully created environment with id={}",
                     environment.id
                 );
-                // Decision D4, on the path that needs it most: without this a
-                // UI-created environment has no runner `Secret` until the next
-                // ticker cycle (default 300s), which IS the ~5-minute
-                // `FailedMount` window D4 exists to eliminate. Logged and
-                // swallowed - see `materialise_runner_secret`'s doc for why a
-                // failure here must not undo the create.
-                // The row was just created under `tenant_id`, so that is its
-                // owning tenant.
-                self.materialise_runner_secret(ctx, tenant_id, &environment, "create")
-                    .await;
                 Ok(environment)
             }
             Err(db_err) => {
@@ -535,20 +528,10 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         // the replacement does not change who owns the secret left behind.
         //
         // `stored` is `Some` exactly when the patch replaced at least one
-        // credential — the condition both cleanups and the D4 write below read.
-        // The tenant the environment's credential is read in, for the runner
-        // `Secret` write below: the row's own tenant, which no update changes.
-        // Read before anything is written, so a fault here fails the request
-        // with nothing written.
-        let owner_tenant = self
-            .repo
-            .owner_tenant(&conn, &scope, id)
-            .await?
-            .ok_or(DomainError::EnvironmentNotFound { id })?;
+        // credential — the condition both cleanups read.
         let stored = self
             .resolve_patch_credentials(ctx, &scope, &conn, id, &patch)
             .await?;
-        let replaced_credential = stored.is_some();
 
         // The submissions must not travel any further towards the repository
         // layer; only `PersistedCredentials` goes on.
@@ -619,18 +602,6 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
                 let generated = credentials::is_generated_ref(previous);
                 self.forget_owned_secret(ctx, previous, generated).await;
             }
-        }
-
-        // Decision D4, the other half of what `create_environment` does: a
-        // rotated kubeconfig whose `Secret` still carries the OLD material is
-        // worse than a missing one, because the runner mounts it happily and
-        // then fails against the environment's cluster. Only on the branch that
-        // actually replaced the kubeconfig: a patch that renamed the environment
-        // changes neither the `Secret`'s name (derived from the credstore
-        // reference) nor its contents, so there is nothing to converge.
-        if replaced_credential {
-            self.materialise_runner_secret(ctx, owner_tenant, &updated, "update")
-                .await;
         }
 
         info!("Successfully updated environment");
@@ -1036,7 +1007,7 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// — one this gear may have deleted from credstore outright, if it minted
     /// it (`forget_owned_secret`). Reading it would have given a plugin either
     /// a hard failure that never self-heals or, worse, *stale material*: the
-    /// exact failure decision D4 exists to prevent. That is why this read
+    /// exact failure the platform must not produce. That is why this read
     /// preferred the legacy column until then.
     ///
     /// Task 18b gave the column a writer: every create and every
@@ -1107,17 +1078,10 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
 
     /// Resolve `credstore_ref` back into the bytes it names.
     ///
-    /// Shared by [`Self::resolve_credential_slots`] and D4's `Secret` write
-    /// ([`Self::materialise_runner_secret`], reached from create, from update
-    /// and from the ticker's self-heal), which needs the same material for
-    /// [`RunnerSecretWriter::ensure_runner_secret`]. It is a second credstore
-    /// round trip rather than a shared one, which is an acceptable cost on a
-    /// create/update request and on a step that otherwise runs on a multi-minute
-    /// cadence. `environment_id` appears only in these two `Internal` messages,
-    /// so a `None` costs the operator the row id and nothing else. **Both call
-    /// sites pass `Some`**: Task 18b briefly had a third that read a submitted
-    /// reference on a create, and a later reversal deleted it — the write path
-    /// resolves no credential material at all.
+    /// Shared by [`Self::resolve_credential_slots`] (the observation cycle) and
+    /// the runner-credentials route. `environment_id` appears only in these two
+    /// `Internal` messages, so a `None` costs the operator the row id and
+    /// nothing else.
     ///
     /// # Both messages name the reference, and every caller must know it
     ///
@@ -1441,301 +1405,9 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
             emit(&self.metrics_silenced, || {
                 self.metrics.environment_observed(class, elapsed);
             });
-
-            // ── Unmeasured, and this is the disclosure rather than an oversight ──
-            //
-            // The self-heal below is the iteration's *second* round trip -- it
-            // writes decision D4's runner `Secret` into the Argo cluster,
-            // independently of how the observation above went, and it swallows
-            // its own failures into a log line exactly as the observation does.
-            // So a cycle whose self-heal is timing out on every environment
-            // shows up in this cycle's duration and in nothing finer, and the
-            // per-environment histogram above does not account for it: a
-            // cycle's duration is therefore larger than the sum of its
-            // per-environment samples, by the self-heal and by the enumeration.
-            //
-            // It is left open because this task measures the observation path
-            // and the self-heal is a different port with a different failure
-            // vocabulary (`RunnerSecretWriter` returns `Result<(), String>` --
-            // free text, which is precisely what may not become a label).
-            // Closing it is one more family with its own two-valued outcome and
-            // one emission around this call; it needs no new call site and no
-            // change to anything here.
-            self.self_heal_runner_secrets(&ctx, tenant_id, &environment)
-                .await;
         }
 
         (report, CycleOutcome::Completed)
-    }
-
-    /// The ticker's per-cycle call into [`Self::materialise_runner_secret`],
-    /// made **independently of whether this cycle's detection succeeded** —
-    /// the self-heal decision D4 exists for
-    /// (`crate::infra::runner_secret_writer`'s module doc): a pod stuck on
-    /// `FailedMount` needs the `Secret` fixed regardless of what the
-    /// environment's own cluster answered this cycle.
-    ///
-    /// It is a named wrapper rather than a direct call so the ticker's own
-    /// body reads as what it is (`observe`, then `self-heal`), and so the
-    /// `origin` tag every log line carries is written once here rather than
-    /// spelled at the call site.
-    async fn self_heal_runner_secrets(
-        &self,
-        ctx: &SecurityContext,
-        owner_tenant: Uuid,
-        environment: &Environment,
-    ) {
-        self.materialise_runner_secret(
-            ctx,
-            owner_tenant,
-            environment,
-            "observation cycle self-heal",
-        )
-        .await;
-    }
-
-    /// Resolve the material for a runner `Secret`, logging and returning
-    /// `None` when it cannot be read.
-    ///
-    /// Split out of [`Self::materialise_runner_secret`] purely to keep that
-    /// function under clippy's cognitive-complexity gate: Task 19 added a third
-    /// early exit there (an environment that stores no credential at all), and
-    /// three log-and-return arms in one function is over the line.
-    ///
-    /// **The gate is load-bearing, not incidental.** A later revision briefly
-    /// added a fourth decision to that same loop -- whether a name was
-    /// derivable at all, ahead of whether a derived name was already claimed
-    /// -- which retripped the gate at 26/20 and needed a second split
-    /// (`derive_or_report_secret_name`, since removed) to undo. That decision
-    /// went away entirely once `runner_secret_writer::secret_name` stopped
-    /// having a case where no name is derivable at all (see its own doc), so
-    /// the loop is back to the two decisions this split was originally for.
-    /// The point still stands: `materialise_runner_secret` is meant to stay
-    /// a loop over self-contained per-credential decisions, and clippy is
-    /// what notices when one of those decisions grows a log line and an
-    /// early exit of its own and stops being self-contained. The next one
-    /// that does belongs beside this split, not inlined back into the loop.
-    async fn runner_secret_material(
-        &self,
-        owner_tenant: Uuid,
-        environment: &Environment,
-        credstore_ref: &str,
-        origin: &'static str,
-    ) -> Option<credstore_sdk::SecretValue> {
-        match self
-            .fetch_credential_material(owner_tenant, Some(environment.id), credstore_ref)
-            .await
-        {
-            Ok(material) => Some(material),
-            Err(error) => {
-                warn!(
-                    environment_id = %environment.id,
-                    environment_name = %environment.name,
-                    origin,
-                    %error,
-                    "qa-environments: could not resolve this environment's credential, so its \
-                     runner Secret (D4) was left untouched; the observation ticker will try \
-                     again on its next cycle"
-                );
-                None
-            }
-        }
-    }
-
-    /// Decision D4's single write path: resolve `environment`'s credentials
-    /// out of credstore and ensure the `Secret`s a runner pod mounts exist in
-    /// the Argo cluster and carry that material.
-    ///
-    /// `origin` names which of the three callers asked — `create`, `update`,
-    /// or `observation cycle self-heal` — and is attached to every log line,
-    /// because "this environment's Secret could not be written" reads very
-    /// differently depending on whether it happened once at create time or is
-    /// repeating every cycle.
-    ///
-    /// # Called from all three places, deliberately
-    ///
-    /// The `Secret` is written on create, on update, and as a self-heal, and
-    /// until 2026-08-28 only the self-heal existed: the final whole-branch
-    /// review found the create/update half had been described in the plan
-    /// (Task 6, Step 3) but never assigned to a task. The consequence was
-    /// precisely the symptom D4 exists to remove — an environment created in the
-    /// UI sitting `Pending` for up to `poll_interval_seconds` and then failing
-    /// on `FailedMount` with no explanation.
-    ///
-    /// # A failure here never rolls anything back
-    ///
-    /// Logged and swallowed, exactly as [`Self::forget_owned_secret`] treats
-    /// its own partial failure. An environment whose row exists and whose `Secret`
-    /// is missing is *recoverable* — the ticker re-applies it on the next
-    /// cycle, which is what the self-heal is for — while an environment that
-    /// silently vanished because a write into a *different* cluster failed is
-    /// not. That asymmetry is the whole reason this returns `()`: there is no
-    /// `Err` for a caller to be tempted to unwind on.
-    ///
-    /// # The known `409` interaction
-    ///
-    /// `crate::infra::runner_secret_writer` applies without `force`, on
-    /// purpose: forcing would let this writer stomp a `Secret` an operator
-    /// deliberately created by hand (`kubectl create`, or the provisioning
-    /// shell script) rather than through server-side apply. When that
-    /// happens, the writer's own error text already names the `Secret`, the
-    /// namespace, and what an operator should do about it (delete the
-    /// hand-made `Secret` so this writer can own it) — see
-    /// `runner_secret_writer::describe_apply_failure`. This method's job is only to
-    /// make sure that text reaches the log **with the environment attached**,
-    /// so a self-heal that repeats every cycle reads as "environment X's Secret
-    /// needs an operator" rather than an anonymous, repeating error.
-    ///
-    /// # Why all of them, with no filter
-    ///
-    /// Until 2026-09-08 this took `credentials.first()`, and its comment said
-    /// there was "exactly one credential a runner `Secret` can be made from".
-    /// That was true while the only plugin was VHP's, whose schema has one
-    /// required secret. VHI's has two -- an SSH key and a vinfra password --
-    /// and under the old rule whichever sorted second was silently never
-    /// written, so every run mounting it hung on `FailedMount` with a
-    /// healthy-looking stack around it.
-    ///
-    /// No filter is needed on the way in: every entry in
-    /// `Environment::credentials` is there **because the plugin classified it
-    /// as a secret** (`qa-environments-sdk`'s `NewEnvironment::credentials`
-    /// doc) -- non-secret fields go to `Environment::config` and never reach
-    /// this path.
-    ///
-    /// Each credential is an independent decision, exactly as the single one
-    /// was: a `Secret` that cannot be written logs and does not fail the
-    /// operation that triggered it, and does not suppress its siblings.
-    ///
-    /// # Two credentials must not derive one `Secret` name
-    ///
-    /// The `Secret`'s name is derived from the credstore reference, and the
-    /// derivation is lossy — the writer sanitises and truncates to the longest
-    /// name an API server accepts. Gear-minted references are UUIDs and cannot
-    /// collide, but `CredentialSubmission::Reference` is a first-class,
-    /// caller-supplied path, and two path-style references sharing a long
-    /// enough prefix derive **one** name. Left alone, the second apply
-    /// overwrites the first's material and `qa-runs` then mounts that one
-    /// object at *both* mount paths, with no error on either gear: a run
-    /// reading the wrong credential at the right path.
-    ///
-    /// While an environment had exactly one credential this was structurally
-    /// impossible, which is why nothing guarded it. So each credential's name
-    /// is asked of the port *before* anything is written, and a second
-    /// claimant of a name is `error!`ed and skipped — the environment loses
-    /// one credential loudly rather than silently getting the wrong one. This
-    /// compares strings and nothing else; the rule that produced them stays in
-    /// the writer, which is what keeps ADR-0001's condition (that `domain/`
-    /// never learns Kubernetes exists) true.
-    ///
-    /// The name now also carries the environment's tenant, ahead of the
-    /// reference, so this same cross-*credential* collision cannot become a
-    /// cross-*tenant* one. The name ends in a fixed-width digest of the
-    /// whole `(prefix, tenant, reference)` tuple precisely so that holds
-    /// even after truncation -- see `runner_secret_writer::secret_name`'s own
-    /// doc for the construction and for the collision an earlier,
-    /// truncation-only version of this rule let through in production. That
-    /// digest makes a *second* collision -- one this loop's own `claimed`
-    /// check still exists to catch -- vanishingly unlikely rather than
-    /// impossible; the check stays as defense in depth.
-    async fn materialise_runner_secret(
-        &self,
-        ctx: &SecurityContext,
-        owner_tenant: Uuid,
-        environment: &Environment,
-        origin: &'static str,
-    ) {
-        if environment.credentials.is_empty() {
-            debug!(
-                environment_id = %environment.id,
-                origin,
-                "qa-environments: this environment stores no credential, so there is no \
-                 runner Secret (D4) to write"
-            );
-            return;
-        }
-
-        // The tenant this environment's runner Secrets are named under.
-        // Asked once, not per credential: every credential in this loop
-        // belongs to this one environment, which has exactly one tenant, and
-        // `ctx` is the tenant-bound context this method's every caller
-        // (create, update, the observation ticker's self-heal) already holds
-        // for exactly this environment. The material itself is read in
-        // `owner_tenant`, the environment's own tenant, as the system actor
-        // (`fetch_credential_material`).
-        let tenant_id = ctx.subject_tenant_id();
-
-        let mut claimed: std::collections::BTreeMap<String, String> =
-            std::collections::BTreeMap::new();
-        for credential in &environment.credentials {
-            let credstore_ref = credential.credstore_ref.clone();
-            let name = self.observer.derived_secret_name(tenant_id, &credstore_ref);
-            if let Some(claimed_by) = claimed.get(&name) {
-                error!(
-                    environment_id = %environment.id,
-                    environment_name = %environment.name,
-                    origin,
-                    secret_name = %name,
-                    claimed_by = %claimed_by,
-                    skipped = %credstore_ref,
-                    "qa-environments: two of this environment's credentials derive the same \
-                     runner Secret name (D4), so the second is SKIPPED rather than allowed to \
-                     overwrite the first; a run needing the skipped credential will hang on \
-                     FailedMount. Re-register it under a reference that differs earlier in \
-                     the string"
-                );
-                continue;
-            }
-            claimed.insert(name, credstore_ref.clone());
-            self.write_one_runner_secret(
-                owner_tenant,
-                tenant_id,
-                environment,
-                &credstore_ref,
-                origin,
-            )
-            .await;
-        }
-    }
-
-    /// One credential's half of [`Self::materialise_runner_secret`]: resolve
-    /// the material and apply the `Secret`, logging either failure and
-    /// returning either way.
-    ///
-    /// Returning `()` on both failure paths is the point, and is what makes
-    /// the loop above correct: this call cannot abort its siblings, however it
-    /// goes. It is a separate function partly to keep the loop under clippy's
-    /// cognitive-complexity gate and partly because "a credential that could
-    /// not be written does not suppress the next one" is easier to see when
-    /// the failing paths cannot reach the loop at all.
-    async fn write_one_runner_secret(
-        &self,
-        owner_tenant: Uuid,
-        tenant_id: Uuid,
-        environment: &Environment,
-        credstore_ref: &str,
-        origin: &'static str,
-    ) {
-        let Some(material) = self
-            .runner_secret_material(owner_tenant, environment, credstore_ref, origin)
-            .await
-        else {
-            return;
-        };
-        if let Err(message) = self
-            .observer
-            .ensure_runner_secret(tenant_id, credstore_ref, &material)
-            .await
-        {
-            warn!(
-                environment_id = %environment.id,
-                environment_name = %environment.name,
-                origin,
-                error = %message,
-                "qa-environments: failed to apply one of this environment's runner \
-                 Secrets (D4); a run dispatched before the observation ticker's next \
-                 cycle repairs it will hang on FailedMount"
-            );
-        }
     }
 
     // `resolve_kubeconfig_source` and `store_kubeconfig_source` were removed

@@ -265,11 +265,15 @@ async fn ls_refs_tells_a_refused_credential_from_an_unreachable_remote() {
         for stream in listener.incoming().take(8) {
             let Ok(mut stream) = stream else { continue };
             let mut request = [0u8; 4096];
-            let _ = stream.read(&mut request);
-            let _ = stream.write_all(
-                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"git\"\r\n\
+            // Best effort: the client may hang up first; the assertions below
+            // check what it received.
+            drop(stream.read(&mut request));
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"git\"\r\n\
                   Content-Length: 0\r\nConnection: close\r\n\r\n",
-            );
+                )
+                .ok();
         }
     });
     let url = format!("http://127.0.0.1:{port}/org/repo.git");

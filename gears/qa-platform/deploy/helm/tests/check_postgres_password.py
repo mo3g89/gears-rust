@@ -44,6 +44,7 @@ GENERATED = "guard-fixture-not-a-real-db-password"  # nosec: test fixture only
 
 def render(*extra):
     cmd = ["helm", "template", "pg-password", str(CHART),
+           "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy",
            "--namespace", "qa-platform", *BASE, *extra]
     return subprocess.run(cmd, capture_output=True, text=True, check=False)
 

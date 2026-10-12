@@ -58,8 +58,10 @@
 
      A REGEX LOCATION, on purpose, and that interacts with precedence.
      default.conf.template already carries one regex location
-     (`~ ^/qa/v1/runs/[^/]+/logs$`, the SSE stream), one prefix location
-     (`location /qa/v1/`), and a trailing-extension regex
+     (`~ ^/qa/v1/runs/[^/]+/logs$`, the SSE stream), the prefix locations
+     `location /qa/v1/` and `location ^~ /qa/v1/runner-credentials` (the
+     latter a 404, added for finding #94 and outside this regex's reach by
+     the same first-segment argument), and a trailing-extension regex
      (`~* \.(js|css|png|...)$`, the static-asset cache block at the bottom
      of the file), and its own comment block above the SSE regex warns that
      nginx gives a matching regex location precedence over a matching

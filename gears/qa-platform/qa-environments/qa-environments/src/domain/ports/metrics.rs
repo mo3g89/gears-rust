@@ -470,7 +470,16 @@ impl From<&DomainError> for ObservationClass {
             | DomainError::EnvironmentLeased { .. }
             | DomainError::Validation { .. }
             | DomainError::LeaseConflict
-            | DomainError::Forbidden => Self::Refused,
+            | DomainError::Forbidden
+            // The runner-credential route's three refusals, unreachable from
+            // the observation cycle. `Refused` rather than `Failed` even for
+            // the 503: `Failed` is pinned to exactly the variants the API
+            // renders as an opaque 500 (`api::rest::error`'s
+            // `the_metric_label_agrees_with_what_the_api_may_disclose`), and
+            // none of these is one.
+            | DomainError::RunnerUnauthenticated
+            | DomainError::RunnerForbidden
+            | DomainError::RunnerCredentialsUnavailable => Self::Refused,
         }
     }
 }

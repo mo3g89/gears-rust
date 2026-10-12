@@ -773,6 +773,52 @@ where
             .ok_or(DomainError::RunNotFound { id: run_id })
     }
 
+    /// See [`QaRunsClientV1::resolve_runner_pod`]. Every refusal is
+    /// `RunNotFound`, so the route behind it is no oracle.
+    ///
+    /// Three things bind the pod to the run, and all three must hold:
+    ///
+    /// * **The workflow.** `query.workflow_name` is the pod's controller
+    ///   `ownerReference` (qa-environments' `infra::pod_identity`), which the
+    ///   Argo controller sets and no `Workflow` spec can (a principal that can
+    ///   create pods directly can; ADR-0008 records that residue), and it must
+    ///   equal the run's recorded `execution_ref`. Workflow names are unique in
+    ///   the Argo namespace, so only pods of the workflow qa-runs submitted for
+    ///   this run pass. The pod's labels are not this binding: Argo applies template
+    ///   metadata labels after its own, so any `Workflow` author can set them.
+    /// * **The tenant.** The tenant label is compared to the run's owner, read
+    ///   with the row. The read's scope is not enough: under a PDP that grants
+    ///   `qa_runs.system` a covering scope it admits other tenants' runs too.
+    /// * **Liveness.** A terminal run gets nothing.
+    pub(crate) async fn resolve_runner_pod(
+        &self,
+        query: &qa_runs_sdk::RunnerPodQuery,
+    ) -> Result<qa_runs_sdk::RunnerPodRun, DomainError> {
+        let not_found = || DomainError::RunNotFound { id: query.run_id };
+        let Some(tenant) = TenantBound::new(query.tenant_id) else {
+            return Err(not_found());
+        };
+        let ctx = system_actor::for_runner_pod_resolution(tenant);
+        let scope = self
+            .run_scope(&ctx, actions::GET, Some(query.run_id))
+            .await?;
+        let conn = self.db.conn()?;
+        let (owner, run) = self
+            .runs
+            .get_with_owner(&conn, &scope, query.run_id)
+            .await?
+            .ok_or_else(not_found)?;
+        if owner != query.tenant_id
+            || is_terminal(run.state)
+            || run.execution_ref.as_deref() != Some(query.workflow_name.as_str())
+        {
+            return Err(not_found());
+        }
+        run.environment_id
+            .map(|environment_id| qa_runs_sdk::RunnerPodRun { environment_id })
+            .ok_or_else(not_found)
+    }
+
     /// **Every** single-row write the dispatcher makes on `qa_run_queue`, each as
     /// one fallible step.
     ///
@@ -2686,7 +2732,8 @@ where
         }
 
         // The rows are claims now, so this is where their run ids live.
-        let run_ids: HashMap<Uuid, Uuid> = match self.claims_for_platform(ctx, environment_id).await {
+        let run_ids: HashMap<Uuid, Uuid> = match self.claims_for_platform(ctx, environment_id).await
+        {
             Ok(claims) => claims
                 .into_iter()
                 .map(|claim| (claim.id, claim.run_id))

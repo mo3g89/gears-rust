@@ -6,10 +6,12 @@
 //! lives in `crate::domain::service`.
 
 mod environments;
+mod runner_credentials;
 mod variables;
 
 pub(crate) use environments::{
     create_environment, delete_environment, get_environment, get_environment_lease,
     list_environments, refresh_environment, update_environment,
 };
+pub(crate) use runner_credentials::runner_credentials;
 pub(crate) use variables::{delete_variable, list_variables, upsert_variable};

@@ -277,51 +277,52 @@ This is the same conversion `qa-platform-realm` went through earlier, for
 the same reason. `deploy/helm/tests/check_signing_secret_placement.py` is
 the guard that keeps it converted.
 
-## The runner-Secret writer has its own ServiceAccount (2026-09-30)
+## Runner credentials no longer live in the Argo namespace (finding #94)
 
-qa-environments' D4 runner-Secret writer now authenticates as a dedicated
-ServiceAccount, `qa-platform-secret-writer`. The `qa-platform-gears-executor`
-Role, bound to `qa-platform-gears`, loses its `secrets` `create`/`patch` rule
-in the Argo namespace (finding #94). qa-runs keeps running as
-`qa-platform-gears` and needs no Secret.
+Runner pods used to read their credentials from Kubernetes Secrets that
+qa-environments wrote into `argo.namespace`. They now fetch them from
+qa-environments with a projected, pod-bound ServiceAccount token, so no runner
+Secret exists any more.
 
-**No values change.** The upgrade creates these objects before the gears pod
-restarts:
-- in the release namespace, the `qa-platform-secret-writer` ServiceAccount
-  and its `kubernetes.io/service-account-token` Secret
-  `qa-platform-secret-writer-token`;
-- in the Argo namespace, the `qa-platform-secret-writer` Role and
-  RoleBinding;
-- on a cluster that serves `admissionregistration.k8s.io/v1`
-  ValidatingAdmissionPolicy (Kubernetes 1.30 and later), the cluster-scoped
-  policy and binding `qa-platform-secret-writer-guard-<release namespace>`.
-  They limit the writer to Opaque Secrets whose names start with
-  `qa-platform-`. On an older cluster neither renders, and the writer keeps
-  the whole namespace-wide grant (see ADR-0008, "Consequences").
+**No values change, but three things do:**
 
-The Kubernetes token controller then fills the token Secret. The token
-volume is `optional: true`, so a gears pod that starts before that happens
-still starts. Until the kubelet refreshes the volume (about a minute), only
-the D4 writer fails, with a named `failed to build config from argo
-kubeconfig` error, and the next observation cycle repairs it.
+1. **Kubernetes 1.30 or later is required.** The chart now renders a
+   cluster-scoped `ValidatingAdmissionPolicy` and binding,
+   `qa-platform-workflow-guard-<release namespace>`, which limits what
+   `qa-platform-gears` may create or update as a Workflow in `argo.namespace`
+   to the shape qa-runs emits. It is mandatory: the chart refuses to render
+   when the `admissionregistration.k8s.io/v1` `ValidatingAdmissionPolicy` API
+   is not served. A render with no cluster (GitOps, `helm template | kubeconform`)
+   must pass
+   `--api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy`.
+2. **The Secret writer is removed.** The upgrade deletes the
+   `qa-platform-secret-writer` ServiceAccount, its token Secret
+   `qa-platform-secret-writer-token` and its Role and RoleBinding, along with
+   the old `qa-platform-secret-writer-guard-<release namespace>` policy. The
+   gears Deployment loses the kubeconfig and token mounts, and the
+   qa-environments fragment loses `argo.kubeconfig_path` and
+   `argo.secret_prefix`. A new ClusterRole and ClusterRoleBinding,
+   `qa-platform-gears-tokenreview-<release namespace>`, give
+   `qa-platform-gears` `tokenreviews: create` and nothing else.
+3. **Runner Secrets that already exist in `argo.namespace` are left behind.**
+   Nothing reads them any more, but they still hold credential material. List
+   them with `deploy/argo/cleanup-runner-secrets.sh <argo.namespace>` and remove
+   them by adding `--delete`. The script selects only unlabelled Opaque Secrets
+   with the writer's name shape (`qa-platform-` + the tenant UUID cut to 34
+   characters + `-` + 16 hex digits), and refuses a namespace that holds the
+   qa-platform release. Older writer builds used other names (for example
+   `qa-platform-qa-environments-credential-<hex>`); the script does not select
+   them but prints every other unlabelled Opaque `qa-platform-*` Secret, which
+   you review and delete by hand.
 
-Between the old Role losing `secrets` and the new pod starting, a D4 write
-from the old pod is Forbidden. The next observation cycle repairs it, the
-same way it repairs any failed write.
+`argo.namespace` may now equal the release namespace: the render-time refusal
+that existed to protect the chart's own Secrets from the writer is gone.
+Separate namespaces are still recommended.
 
-To check it afterwards, run `deploy/remote/verify-k8s.sh`. Its `k8s 3/4`
-step requires
-`kubectl auth can-i create secrets -n argo --as=system:serviceaccount:<ns>:qa-platform-secret-writer`
-to say `yes`, and the same question for `qa-platform-gears` to say `no`.
-Where the policy API is served, it also dry-runs one allowed write and two
-denied ones as the writer.
-
-**To revoke the writer's credential, delete `qa-platform-secret-writer-token`.**
-The API server stops accepting that token at once. Because the volume is
-optional, the gears keep running and restarting normally, and only the D4
-writer fails, with the same named error, until a new token exists. The next
-`helm upgrade` recreates the Secret, and the controller fills it with a new
-token.
+To check it afterwards, `helm get manifest <release> | grep secret-writer`
+should print nothing, and
+`kubectl auth can-i create secrets -n <argo.namespace> --as=system:serviceaccount:<ns>:qa-platform-gears`
+should say `no`.
 
 ## Third-party images are digest-pinned (2026-09-30)
 

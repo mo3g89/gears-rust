@@ -445,24 +445,27 @@ pub struct ArgoExecutorConfig {
     /// promptly a terminal phase is noticed after the logs have drained.
     pub status_poll_seconds: u64,
 
-    /// Base URL a **workflow pod** uses to reach the gears' HTTP API, for
-    /// downloading a node's test bundle. `None` submits no `TEST_BUNDLE_URL`.
+    /// Base URL a **workflow pod** uses to reach the gears' HTTP API. `None`
+    /// submits no `TEST_BUNDLE_URL` and none of the runner-credential
+    /// variables.
     ///
-    /// # Not wired end to end, and the reason is not reachability
+    /// Two routes hang off it, both served by the gears deployment:
     ///
-    /// [`ExecutionNode::bundle_ref`](crate::domain::ports::run_executor::ExecutionNode::bundle_ref)
-    /// is qa-catalog's `TestBundle::storage_ref`, which its only bundle store
-    /// spells as an absolute path on qa-catalog's *own* filesystem
-    /// (`qa-catalog/.../infra/bundle_store/local_fs.rs:3-4`) — a path no pod
-    /// can read. The store writes `<uuid>.tar.gz`, so the bundle id is
-    /// recoverable from the basename and a URL can be derived; that is what
-    /// this knob does. What is **not** solved is authentication:
-    /// `GET /qa/v1/test-bundles/{id}` is `.authenticated()`
-    /// (`qa-catalog/.../api/rest/routes/bundles.rs:31`) where the source
-    /// system's equivalent had no middleware at all, and nothing in this
-    /// deployment specifies how a pod obtains a credential. See the adapter's
-    /// module docs for the recommendation and why `s2s_oauth` as configured is
-    /// not it.
+    /// * **The test bundle**, `GET {base}/qa/v1/test-bundles/{id}?sig=…`.
+    ///   That route is not `.authenticated()`: it authorises with the `?sig=`
+    ///   tag qa-catalog minted over the bundle and its tenant
+    ///   ([`ExecutionNode::bundle_token`](crate::domain::ports::run_executor::ExecutionNode::bundle_token)),
+    ///   so the pod needs no `IdP` credential to download it.
+    /// * **The runner credentials** (finding #94),
+    ///   `POST {base}/qa/v1/runner-credentials`, emitted as
+    ///   `QA_CREDENTIALS_URL` for a run that declares at least one credential
+    ///   mount (a collect or platformless run gets none, and the runner skips
+    ///   the call). The runner authenticates with its projected
+    ///   `ServiceAccount` token, which qa-environments verifies with a
+    ///   `TokenReview` before returning the files the run's mounts name.
+    ///
+    /// Unset, a run with credential mounts starts with empty credential
+    /// directories; `check_bundle_delivery` warns about that at startup.
     pub bundle_base_url: Option<String>,
 
     /// `spec.serviceAccountName` for the submitted workflow — the identity the
@@ -501,19 +504,6 @@ pub struct ArgoExecutorConfig {
     /// is reachable at all.
     pub workflow_service_account: Option<String>,
 
-    /// Kubernetes `Secret` name prefix used when a
-    /// [`SecretRef`](crate::domain::ports::run_executor::SecretRef) has to be
-    /// turned into a `secretKeyRef` or a secret volume. Default
-    /// `qa-platform-`.
-    ///
-    /// **The adapter never resolves a reference.** It derives a Secret name
-    /// from the reference and lets the kubelet resolve it, which is how the
-    /// source system does it (`argo.rs:504-521`) and what keeps
-    /// `run_executor.rs:85-86` — "qa-runs never reads a secret's contents" —
-    /// literally true of this adapter. Materialising those Secrets is somebody
-    /// else's job and is not done today; see the adapter's module docs.
-    pub secret_name_prefix: String,
-
     /// `spec.securityContext.runAsUser` (and the container's own) for the
     /// runner pod. Default `65534`, which is `nobody` on the runner image's
     /// Debian base.
@@ -530,6 +520,10 @@ pub struct ArgoExecutorConfig {
     /// runner image's Debian base, same as its uid.
     ///
     /// # Why this exists at all: fix round 8, a design field the code dropped
+    ///
+    /// (Written when credentials arrived as Secret volumes. Since finding #94
+    /// they are written by the runner itself into memory-backed `emptyDir`s,
+    /// owned by the runner's uid; `fsGroup` still sets those volumes' group.)
     ///
     /// A product plugin's `MountSpec::Secret` (`qa-vhi-product-plugin`'s SSH
     /// key and vinfra password, `qa-vhp-product-plugin`'s kubeconfig) lands
@@ -577,16 +571,6 @@ pub struct ArgoExecutorConfig {
     /// *admitted*, not what one consumes; without this, one tenant's heavy
     /// suite can evict its neighbours off the node.
     pub runner_resources: RunnerResources,
-
-    /// Key inside the derived `Secret` that carries the material. Default
-    /// `value`.
-    ///
-    /// One key for both shapes, unlike the source system's two (`token` for
-    /// the `ReportPortal` key, `kubeconfig` for a platform's kubeconfig): the
-    /// port's [`SecretRef`](crate::domain::ports::run_executor::SecretRef) is
-    /// one opaque string with no key component, so there is nothing to derive
-    /// a per-reference key from.
-    pub secret_key: String,
 
     /// How long a pod-log follow (`infra::executor::argo::watch::Watcher::follow`)
     /// may go **without a single line** before giving up on that pod. Default
@@ -769,11 +753,9 @@ impl Default for ArgoExecutorConfig {
             status_poll_seconds: 3,
             bundle_base_url: None,
             workflow_service_account: None,
-            secret_name_prefix: "qa-platform-".to_owned(),
             run_as_user: 65534,
             fs_group: 65534,
             runner_resources: RunnerResources::default(),
-            secret_key: "value".to_owned(),
             log_follow_idle_seconds: 600,
         }
     }
@@ -1126,7 +1108,7 @@ mod tests {
         assert_eq!(config.argo.status_poll_seconds, 1);
         // Untouched keys keep their defaults rather than being zeroed.
         assert_eq!(config.argo.workflow_ttl_seconds, 3600);
-        assert_eq!(config.argo.secret_key, "value");
+        assert_eq!(config.argo.run_as_user, 65534);
     }
 
     /// `0` is the documented disable, and clamping it to the floor would turn

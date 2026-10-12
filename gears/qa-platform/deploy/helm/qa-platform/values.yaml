@@ -38,9 +38,8 @@ seedTenantId: "00000000-df51-5b42-9538-d2b56b7ee953"
 clusterDns: ""
 
 argo:
-  # MUST DIFFER FROM THE RELEASE NAMESPACE, and the chart refuses to render
-  # otherwise: qa-platform-secret-writer may write any qa-platform-* Secret
-  # here, which in a shared namespace includes the chart's own (rbac-argo.yaml).
+  # The namespace Argo Workflows' runner pods and Workflows live in. It may
+  # equal the release namespace, though a separate one is still recommended.
   namespace: argo
   # THE KUBERNETES API SERVER'S IN-CLUSTER ADDRESS -- what
   #   kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'

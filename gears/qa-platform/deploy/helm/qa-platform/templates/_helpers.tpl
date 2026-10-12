@@ -46,23 +46,6 @@ app.kubernetes.io/component: {{ .component }}
 app.kubernetes.io/instance: {{ .root.Release.Name }}
 {{- end -}}
 
-{{/* The prefix of every runner-credential Secret name qa-environments' D4
-     writer derives (`secret_name` in runner_secret_writer.rs). ONE source for
-     two consumers that must agree: the qa-environments fragment's
-     `argo.secret_prefix` (gears-argo-configmaps.yaml) and the admission
-     policy that refuses any other name from the writer's identity
-     (secret-writer-admission-policy.yaml). Equal to qa-runs'
-     `secret_name_prefix` default, which the chart does not render -- the
-     parity test in runner_secret_writer.rs pins the two Rust defaults.
-
-     Not a value, on purpose: every legitimate name starts with this prefix
-     only because it is already lower-case `[a-z0-9-]`, does not start with
-     `-`, and is shorter than the 46-byte readable budget, so `sanitize` and
-     `truncate` leave it intact. check_secret_writer_rbac.py asserts that. */}}
-{{- define "qa-platform.runnerSecretPrefix" -}}
-qa-platform-
-{{- end -}}
-
 {{/* A third-party image reference: `repository:tag@digest` when `digest` is set,
      else `repository:tag`. Call as `include "qa-platform.image" .Values.images.postgres`.
      The tag stays beside the digest for the reader; the digest is what the

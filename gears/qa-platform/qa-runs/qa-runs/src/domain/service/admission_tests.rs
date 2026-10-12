@@ -1005,6 +1005,25 @@ pub(in crate::domain::service) mod fakes {
                 .map(|(_, run)| run.clone()))
         }
 
+        /// Same visibility rule as `get`, plus the row's owner.
+        async fn get_with_owner<C: DBRunner>(
+            &self,
+            _runner: &C,
+            scope: &AccessScope,
+            id: Uuid,
+        ) -> Result<Option<(Uuid, Run)>, DomainError> {
+            assert_scope_is_for(scope, resources::RUN_NAME, "get_with_owner");
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(tenant_id, run)| {
+                    run.id == id && scope.contains_uuid(OWNER_TENANT_ID, *tenant_id)
+                })
+                .map(|(tenant_id, run)| (*tenant_id, run.clone())))
+        }
+
         /// Scope-only; the `OData` query is ignored. See
         /// `test_support::MockRunsRepository::list_page` for why a `Vec`-backed
         /// double must not pretend to translate a filter.
@@ -3358,16 +3377,7 @@ pub(in crate::domain::service) mod fakes {
 
     /// A `BTreeMap` of environment values, for readable assertions.
     pub(in crate::domain::service) fn env_values(spec: &RunSpec) -> BTreeMap<String, String> {
-        spec.env
-            .entries()
-            .iter()
-            .filter_map(|(name, source)| match source {
-                crate::domain::ports::run_executor::EnvSource::Value(value) => {
-                    Some((name.clone(), value.clone()))
-                }
-                crate::domain::ports::run_executor::EnvSource::Secret(_) => None,
-            })
-            .collect()
+        spec.env.entries().clone()
     }
 }
 

@@ -660,10 +660,10 @@ where
     /// `observed_namespace` and `vhp_base_url` columns that the inline block
     /// Task 18 deleted used to read were dropped by Task 19, as was
     /// `kubeconfig_credstore_ref`, the single-reference column this read
-    /// used before `credentials`. The secrets map handed to
-    /// [`RunEnv::new`] is therefore **empty**, so `RP_API_KEY` is not bound.
-    /// Recorded as an obligation for Task 16 and feature 2.7, not as a silent
-    /// gap.
+    /// used before `credentials`. Nothing binds `RP_API_KEY`: [`RunEnv`]
+    /// carries literals only since finding #94 removed the secret-backed
+    /// variable it never had a producer for. Recorded as an obligation for
+    /// Task 16 and feature 2.7, not as a silent gap.
     ///
     /// **`normalize_test_path` is not applied to the node file lists.** Legacy
     /// trims, strips a leading `./` and `/`, and rewrites backslashes, in that
@@ -773,7 +773,7 @@ where
             tenant_id: ctx.subject_tenant_id(),
             run_name: run.name.clone(),
             nodes,
-            env: RunEnv::new(env, BTreeMap::new()),
+            env: RunEnv::new(env),
             access,
             runner,
             timeout_seconds: executor_deadline(run, OffsetDateTime::now_utc()),

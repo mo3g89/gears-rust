@@ -31,7 +31,7 @@ live in credstore; the environment row keeps references.
 
 The SSH transport forces two rules on the **observation path** (`qa-connector-ssh`), and the
 connector owns them there. The **run path** does not follow either rule: `prepare_run_access`
-(below) mounts both credentials into the run's pod as files, because the runner is a generic image
+(below) names both credentials as files in the run's pod, fetched by the runner at pod start and written to a memory-backed directory at the same path (ADR-0008), because the runner is a generic image
 driving `ssh`/`vinfra` itself, not `qa-connector-ssh`'s in-process agent.
 
 * **On the observation path, the private key never becomes a file.** It travels credstore → memory

@@ -255,6 +255,13 @@ struct FakeQaRuns {
 
 #[async_trait]
 impl QaRunsClientV1 for FakeQaRuns {
+    async fn resolve_runner_pod(
+        &self,
+        _query: &qa_runs_sdk::RunnerPodQuery,
+    ) -> Result<qa_runs_sdk::RunnerPodRun, qa_runs_sdk::QaRunsError> {
+        unimplemented!("qa-insights never resolves runner pods")
+    }
+
     async fn launch(
         &self,
         _ctx: &SecurityContext,

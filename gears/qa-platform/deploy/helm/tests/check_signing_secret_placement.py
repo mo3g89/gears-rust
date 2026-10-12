@@ -98,6 +98,7 @@ def render():
     """`helm template` with the minimum a default install needs."""
     cmd = [
         "helm", "template", "signing-placement", str(CHART),
+        "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy",
         "--namespace", "qa-platform",
         "--set", "publicOrigin=https://guard.example",
         "--set", f"keycloak.adminPassword={ADMIN_PASSWORD}",

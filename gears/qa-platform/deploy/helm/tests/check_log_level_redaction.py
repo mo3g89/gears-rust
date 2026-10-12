@@ -72,7 +72,8 @@ def verbosity(level):
 
 
 def helm_template(literals=()):
-    cmd = ["helm", "template", "qa-platform", str(CHART), "--namespace", "qa-platform"]
+    cmd = ["helm", "template", "qa-platform", str(CHART),
+    "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy", "--namespace", "qa-platform"]
     for s in SETS:
         cmd += ["--set", s]
     # `--set` splits on `,`, and a RUST_LOG list is comma-separated.

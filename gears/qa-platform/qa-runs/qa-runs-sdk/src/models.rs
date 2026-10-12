@@ -811,3 +811,24 @@ impl FinishedRunCursor {
         self.after_id
     }
 }
+
+/// What a runner pod's identity says about the run it belongs to, as
+/// qa-environments' runner-credential route read it off the pod: the tenant and
+/// run labels qa-runs stamped on the pod template, and the name of the Argo
+/// `Workflow` that is the pod's controller `ownerReference`.
+///
+/// The labels are routing hints, not proof. The binding is the run's recorded
+/// execution handle: a run answers only for the workflow it was submitted as,
+/// and only when `tenant_id` is the run's own tenant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunnerPodQuery {
+    pub tenant_id: Uuid,
+    pub run_id: Uuid,
+    pub workflow_name: String,
+}
+
+/// The one fact the runner-credential route needs about a live run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunnerPodRun {
+    pub environment_id: Uuid,
+}

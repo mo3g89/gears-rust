@@ -34,16 +34,17 @@ use toolkit_security::PlatformSecurityContext;
 use toolkit_security::{SecurityContext, pep_properties};
 use uuid::Uuid;
 
-use qa_product_sdk::access::{RunAccess, RunVarContract, RunnerSpec};
+use qa_product_sdk::access::{MountSpec, RunAccess, RunVarContract, RunnerSpec};
 use qa_product_sdk::descriptor::{FieldDesc, FieldKind, FieldRole};
-use qa_product_sdk::observation::{ObservedAttrs, PluginFailure, PluginObservation};
+use qa_product_sdk::observation::{FailureClass, ObservedAttrs, PluginFailure, PluginObservation};
 use qa_product_sdk::plugin::{
     CredentialClassification, CredentialInput, EnvironmentHandle, QaProductPluginV1,
 };
 
 use crate::domain::ports::metrics::{ObservationMetrics, PluginMetrics};
 use crate::domain::ports::{
-    NoopRunnerSecretWriter, PluginUnavailable, ProductPluginPort, RunnerSecretWriter,
+    DenyingPodIdentityVerifier, PluginUnavailable, PodIdentityRefusal, PodIdentityVerifier,
+    ProductPluginPort, RunnerPodRefusal, RunnerPodResolver, VerifiedRunnerPod,
 };
 use crate::domain::service::AppServices;
 use crate::gear::ConcreteAppServices;
@@ -324,6 +325,9 @@ pub struct RecordingCredStore {
     fail_creates_after: Option<usize>,
     /// Creates attempted so far, against `fail_creates_after`.
     creates: Mutex<usize>,
+    /// Every `get` so far, hit or miss — how a test proves a refused path
+    /// read nothing.
+    reads: Mutex<usize>,
 }
 
 /// One entry of [`RecordingCredStore`]'s store.
@@ -340,6 +344,7 @@ impl RecordingCredStore {
             failing: false,
             fail_creates_after: None,
             creates: Mutex::new(0),
+            reads: Mutex::new(0),
         }
     }
 
@@ -352,6 +357,7 @@ impl RecordingCredStore {
             failing: true,
             fail_creates_after: None,
             creates: Mutex::new(0),
+            reads: Mutex::new(0),
         }
     }
 
@@ -367,6 +373,7 @@ impl RecordingCredStore {
             failing: false,
             fail_creates_after: Some(n),
             creates: Mutex::new(0),
+            reads: Mutex::new(0),
         }
     }
 
@@ -393,6 +400,17 @@ impl RecordingCredStore {
             .unwrap()
             .get(raw_ref)
             .map(|entry| entry.sharing)
+    }
+
+    /// How many `get`s this store has answered (or refused), hit or miss.
+    #[must_use]
+    pub fn reads(&self) -> usize {
+        *self.reads.lock().unwrap()
+    }
+
+    /// Drop `raw_ref` as if it had been deleted behind this gear's back.
+    pub fn forget(&self, raw_ref: &str) {
+        self.secrets.lock().unwrap().remove(raw_ref);
     }
 
     /// Seed a secret as if some other system had registered it — the
@@ -442,6 +460,7 @@ impl CredStoreClientV1 for RecordingCredStore {
         _ctx: &SecurityContext,
         key: &SecretRef,
     ) -> Result<Option<GetSecretResponse>, CredStoreError> {
+        *self.reads.lock().unwrap() += 1;
         if self.failing {
             return Err(CredStoreError::Internal("backend failure".into()));
         }
@@ -519,204 +538,6 @@ impl CredStoreClientV1 for RecordingCredStore {
     }
 }
 
-/// `RunnerSecretWriter` test double that records every
-/// `ensure_runner_secret` call as `(credstore_ref, material bytes)`, in
-/// call order, and always succeeds.
-///
-/// Exists for D4's create/update half (the final review's I1): "the Secret was
-/// written" is not observable from the returned `Environment`, from the
-/// database, or from any DTO — the write goes into a *different cluster* — so
-/// the only place it can be asserted is at the port.
-pub struct RecordingSecretObserver {
-    calls: Mutex<Vec<(String, Vec<u8>)>>,
-}
-
-impl RecordingSecretObserver {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            calls: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Every `ensure_runner_secret` call so far, in order.
-    #[must_use]
-    pub fn secret_writes(&self) -> Vec<(String, Vec<u8>)> {
-        self.calls.lock().unwrap().clone()
-    }
-}
-
-impl Default for RecordingSecretObserver {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl RunnerSecretWriter for RecordingSecretObserver {
-    async fn ensure_runner_secret(
-        &self,
-        _tenant_id: Uuid,
-        credstore_ref: &str,
-        material: &SecretValue,
-    ) -> Result<(), String> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push((credstore_ref.to_owned(), material.as_bytes().to_vec()));
-        Ok(())
-    }
-}
-
-/// `RunnerSecretWriter` test double whose `ensure_runner_secret` always
-/// fails with a scripted message. Used to prove the observation ticker's
-/// self-heal failure is logged with the environment attached (Task 8's
-/// Addition 2).
-pub struct FailingSecretObserver {
-    message: String,
-}
-
-impl FailingSecretObserver {
-    #[must_use]
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-#[async_trait]
-impl RunnerSecretWriter for FailingSecretObserver {
-    async fn ensure_runner_secret(
-        &self,
-        _tenant_id: Uuid,
-        _credstore_ref: &str,
-        _material: &SecretValue,
-    ) -> Result<(), String> {
-        Err(self.message.clone())
-    }
-}
-
-/// A runner-`Secret` writer that refuses exactly one reference and records
-/// every write it was asked for, refusals included.
-///
-/// `FailingSecretObserver` fails everything, which cannot distinguish "the
-/// loop stopped at the first failure" from "the loop never ran" -- the
-/// property `a_failed_write_does_not_suppress_the_next_credential` is about.
-///
-/// **Deliberately not `Default`.** A derived one yields `failing_ref: ""`,
-/// which no real credstore reference equals, so it refuses nothing -- and a
-/// future `::default()` here would give a green test proving exactly the
-/// opposite of what its name claims. [`Self::failing_on`] is the only way to
-/// build one, and it demands the reference the double exists to refuse.
-#[derive(Debug)]
-pub struct SelectivelyFailingSecretObserver {
-    failing_ref: String,
-    attempted: Mutex<Vec<String>>,
-}
-
-impl SelectivelyFailingSecretObserver {
-    #[must_use]
-    pub fn failing_on(credstore_ref: &str) -> Self {
-        Self {
-            failing_ref: credstore_ref.to_owned(),
-            attempted: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Every reference the service tried to write, in order.
-    #[must_use]
-    pub fn attempted(&self) -> Vec<String> {
-        self.attempted.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl RunnerSecretWriter for SelectivelyFailingSecretObserver {
-    async fn ensure_runner_secret(
-        &self,
-        _tenant_id: Uuid,
-        credstore_ref: &str,
-        _material: &SecretValue,
-    ) -> Result<(), String> {
-        self.attempted
-            .lock()
-            .unwrap()
-            .push(credstore_ref.to_owned());
-        if credstore_ref == self.failing_ref {
-            return Err("refused by the test double".to_owned());
-        }
-        Ok(())
-    }
-}
-
-/// A `RunnerSecretWriter` whose derived `Secret` name is the reference
-/// **truncated**, so two distinct references can be made to derive one name.
-///
-/// # Why a double is the right place to prove this
-///
-/// The real writer's rule is `truncate(sanitize(prefix + reference), 63)`,
-/// which leaves 51 characters of the reference under the default prefix.
-/// `infra::runner_secret_writer`'s own
-/// `two_long_path_style_references_can_derive_one_secret_name` pins that the
-/// collision is reachable with real, plausible references. What the *service*
-/// has to prove is a different thing -- that it refuses the second claimant
-/// rather than letting it overwrite the first -- and that is a property of
-/// the loop, not of the truncation length. So this double truncates at a
-/// length a test can write two short references against, and the service is
-/// driven through exactly the port method the real writer overrides.
-///
-/// Records every reference it was actually asked to write, so a test can
-/// assert the skipped one never reached the writer at all.
-#[derive(Debug)]
-pub struct TruncatingSecretObserver {
-    keep: usize,
-    written: Mutex<Vec<String>>,
-}
-
-impl TruncatingSecretObserver {
-    /// Derive names from the first `keep` characters of each reference.
-    #[must_use]
-    pub fn truncating_at(keep: usize) -> Self {
-        Self {
-            keep,
-            written: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Every reference `ensure_runner_secret` was actually called with, in
-    /// order.
-    #[must_use]
-    pub fn written(&self) -> Vec<String> {
-        self.written.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl RunnerSecretWriter for TruncatingSecretObserver {
-    async fn ensure_runner_secret(
-        &self,
-        _tenant_id: Uuid,
-        credstore_ref: &str,
-        _material: &SecretValue,
-    ) -> Result<(), String> {
-        self.written.lock().unwrap().push(credstore_ref.to_owned());
-        Ok(())
-    }
-
-    /// `tenant_id` is deliberately ignored: this double exists to reproduce
-    /// the *reference* collision
-    /// (`two_long_path_style_references_now_derive_distinct_names` pins that
-    /// the real writer no longer has it), which is orthogonal to the tenant
-    /// -- every credential the service loop asks this about belongs to the
-    /// one environment under test, so a real writer's tenant contribution
-    /// would be identical for all of them and could not itself be what
-    /// distinguishes -- or fails to distinguish -- two names here.
-    fn derived_secret_name(&self, _tenant_id: Uuid, credstore_ref: &str) -> String {
-        credstore_ref.chars().take(self.keep).collect()
-    }
-}
-
 /// Build the real `ConcreteAppServices` DI container — `SeaORM`-backed
 /// repositories, not mocks — wired to `db` and `authz`, using the gear's
 /// configured default `max_variables` cap (see `QaEnvironmentsConfig`).
@@ -740,25 +561,22 @@ pub fn build_services_with_limit(
         db,
         authz,
         Arc::new(RecordingCredStore::new()),
-        Arc::new(NoopRunnerSecretWriter),
         max_variables,
     )
 }
 
 /// The full wiring, for tests that need to hold on to the credstore double
-/// and assert against it (and, now, to supply a [`RunnerSecretWriter`] double).
+/// and assert against it.
 pub fn build_services_full(
     db: Db,
     authz: Arc<dyn AuthZResolverApi>,
     credstore: Arc<dyn CredStoreClientV1>,
-    observer: Arc<dyn RunnerSecretWriter>,
     max_variables: usize,
 ) -> Arc<ConcreteAppServices> {
     build_services_with_plugin_port(
         db,
         authz,
         credstore,
-        observer,
         vhp_shaped_plugin_port(),
         max_variables,
     )
@@ -771,7 +589,6 @@ pub fn build_services_with_plugin_port(
     db: Db,
     authz: Arc<dyn AuthZResolverApi>,
     credstore: Arc<dyn CredStoreClientV1>,
-    observer: Arc<dyn RunnerSecretWriter>,
     product_plugins: Arc<dyn ProductPluginPort>,
     max_variables: usize,
 ) -> Arc<ConcreteAppServices> {
@@ -779,7 +596,6 @@ pub fn build_services_with_plugin_port(
         db,
         authz,
         credstore,
-        observer,
         product_plugins,
         None,
         None,
@@ -807,8 +623,61 @@ pub fn build_services_with_plugin_port_and_metrics(
     db: Db,
     authz: Arc<dyn AuthZResolverApi>,
     credstore: Arc<dyn CredStoreClientV1>,
-    observer: Arc<dyn RunnerSecretWriter>,
     product_plugins: Arc<dyn ProductPluginPort>,
+    metrics: Option<Arc<dyn ObservationMetrics>>,
+    plugin_metrics: Option<Arc<dyn PluginMetrics>>,
+    max_variables: usize,
+    observe_timeout: Duration,
+) -> Arc<ConcreteAppServices> {
+    build_services_wired(
+        db,
+        authz,
+        credstore,
+        product_plugins,
+        RunnerCredentialPorts::refusing(),
+        metrics,
+        plugin_metrics,
+        max_variables,
+        observe_timeout,
+    )
+}
+
+/// The two runner-credential ports (finding #94), carried as one argument so
+/// the funnel below does not grow two positional `Arc<dyn _>`s every other
+/// helper would have to spell.
+pub struct RunnerCredentialPorts {
+    pub pod_identity: Arc<dyn PodIdentityVerifier>,
+    pub runner_pods: Arc<dyn RunnerPodResolver>,
+}
+
+impl RunnerCredentialPorts {
+    /// What every test that is not about the runner-credential route gets:
+    /// no pod verifies, and qa-runs vouches for no run. Refusing, not
+    /// permissive, for the reason [`no_plugin_port`] gives.
+    #[must_use]
+    pub fn refusing() -> Self {
+        Self {
+            pod_identity: Arc::new(DenyingPodIdentityVerifier),
+            runner_pods: Arc::new(ScriptedRunnerPods(Err(RunnerPodRefusal::NotFound))),
+        }
+    }
+}
+
+/// The one place this module calls `AppServices::new`: every helper above
+/// routes here, defaulting the runner-credential ports to
+/// [`RunnerCredentialPorts::refusing`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one argument per collaborator `AppServices::new` wires, plus the two scalar \
+              knobs; the container's own constructor carries the same allowance for the same \
+              reason"
+)]
+pub fn build_services_wired(
+    db: Db,
+    authz: Arc<dyn AuthZResolverApi>,
+    credstore: Arc<dyn CredStoreClientV1>,
+    product_plugins: Arc<dyn ProductPluginPort>,
+    runner_ports: RunnerCredentialPorts,
     metrics: Option<Arc<dyn ObservationMetrics>>,
     plugin_metrics: Option<Arc<dyn PluginMetrics>>,
     max_variables: usize,
@@ -823,13 +692,41 @@ pub fn build_services_with_plugin_port_and_metrics(
         db,
         authz,
         credstore,
-        observer,
         product_plugins,
+        runner_ports.pod_identity,
+        runner_ports.runner_pods,
         metrics,
         plugin_metrics,
         max_variables,
         observe_timeout,
     ))
+}
+
+/// Services for `runner_credentials`' own tests: a fresh in-memory database,
+/// [`TenantScopedAuthZ`] (so an environment outside the pod's tenant is
+/// genuinely invisible), a [`RecordingCredStore`] the caller keeps to seed,
+/// forget and count reads against, and the two runner-credential ports.
+pub async fn build_services_for_runner_credentials(
+    plugin_port: Arc<dyn ProductPluginPort>,
+    pod_identity: Arc<dyn PodIdentityVerifier>,
+    runner_pods: Arc<dyn RunnerPodResolver>,
+) -> (Arc<ConcreteAppServices>, Arc<RecordingCredStore>) {
+    let credstore = Arc::new(RecordingCredStore::new());
+    let services = build_services_wired(
+        inmem_db().await,
+        Arc::new(TenantScopedAuthZ),
+        Arc::clone(&credstore) as Arc<dyn CredStoreClientV1>,
+        plugin_port,
+        RunnerCredentialPorts {
+            pod_identity,
+            runner_pods,
+        },
+        None,
+        None,
+        crate::config::QaEnvironmentsConfig::default().max_variables,
+        crate::config::ObservationConfig::default().effective_observe_timeout(),
+    );
+    (services, credstore)
 }
 
 /// Services wired with [`TenantScopedAuthZ`], a caller-supplied product-plugin
@@ -844,7 +741,6 @@ pub fn build_services_tenant_scoped_with_plugin_and_metrics(
         db,
         Arc::new(TenantScopedAuthZ),
         Arc::new(RecordingCredStore::new()),
-        Arc::new(NoopRunnerSecretWriter),
         product_plugins,
         Some(metrics),
         None,
@@ -870,7 +766,6 @@ pub fn build_services_tenant_scoped_with_plugin_and_plugin_metrics(
         db,
         Arc::new(TenantScopedAuthZ),
         Arc::new(RecordingCredStore::new()),
-        Arc::new(NoopRunnerSecretWriter),
         product_plugins,
         None,
         Some(plugin_metrics),
@@ -880,9 +775,8 @@ pub fn build_services_tenant_scoped_with_plugin_and_plugin_metrics(
 }
 
 /// Services wired with [`TenantScopedAuthZ`], a fresh [`RecordingCredStore`]
-/// (so a seeded credential reference resolves), a [`NoopRunnerSecretWriter`]
-/// and a caller-supplied product-plugin port — the shape every observation test
-/// wants.
+/// (so a seeded credential reference resolves) and a caller-supplied
+/// product-plugin port — the shape every observation test wants.
 pub fn build_services_tenant_scoped_with_plugin(
     db: Db,
     product_plugins: Arc<dyn ProductPluginPort>,
@@ -891,7 +785,6 @@ pub fn build_services_tenant_scoped_with_plugin(
         db,
         Arc::new(TenantScopedAuthZ),
         Arc::new(RecordingCredStore::new()),
-        Arc::new(NoopRunnerSecretWriter),
         product_plugins,
         crate::config::QaEnvironmentsConfig::default().max_variables,
     )
@@ -910,7 +803,6 @@ pub fn build_services_tenant_scoped_with_plugin_and_observe_timeout(
         db,
         Arc::new(TenantScopedAuthZ),
         Arc::new(RecordingCredStore::new()),
-        Arc::new(NoopRunnerSecretWriter),
         product_plugins,
         None,
         Some(plugin_metrics),
@@ -930,7 +822,6 @@ pub fn build_services_tenant_scoped_with_plugin_and_credstore(
         db,
         Arc::new(TenantScopedAuthZ),
         credstore,
-        Arc::new(NoopRunnerSecretWriter),
         product_plugins,
         crate::config::QaEnvironmentsConfig::default().max_variables,
     )
@@ -950,37 +841,6 @@ pub fn build_services_tenant_scoped_with_limit(
     build_services_with_limit(db, Arc::new(TenantScopedAuthZ), max_variables)
 }
 
-/// Convenience: build services with [`TenantScopedAuthZ`], a fresh
-/// [`RecordingCredStore`] (so a seeded credential reference resolves),
-/// and a caller-supplied [`RunnerSecretWriter`] double — for tests exercising
-/// `EnvironmentsService::observe_environment`/`refresh_environment`.
-pub fn build_services_tenant_scoped_with_observer(
-    db: Db,
-    observer: Arc<dyn RunnerSecretWriter>,
-) -> Arc<ConcreteAppServices> {
-    build_services_tenant_scoped_with_observer_and_port(db, observer, vhp_shaped_plugin_port())
-}
-
-/// [`build_services_tenant_scoped_with_observer`] plus a caller-supplied
-/// plugin port, for the tests that need a product whose plugin declares more
-/// than VHP's one required secret — VHI's two are what
-/// `materialise_runner_secret` exists to serve, and the VHP-shaped port
-/// this module otherwise defaults to cannot express that case.
-pub fn build_services_tenant_scoped_with_observer_and_port(
-    db: Db,
-    observer: Arc<dyn RunnerSecretWriter>,
-    product_plugins: Arc<dyn ProductPluginPort>,
-) -> Arc<ConcreteAppServices> {
-    build_services_with_plugin_port(
-        db,
-        Arc::new(TenantScopedAuthZ),
-        Arc::new(RecordingCredStore::new()),
-        observer,
-        product_plugins,
-        crate::config::QaEnvironmentsConfig::default().max_variables,
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Product-plugin doubles
 // ---------------------------------------------------------------------------
@@ -996,8 +856,7 @@ pub fn build_services_tenant_scoped_with_observer_and_port(
 /// slot is `resolved` and not `reference_only`, `config` is passed verbatim,
 /// and `observed` is `None` for a never-observed environment. None of those
 /// is visible from the outcome, from the database, or from any DTO, so the
-/// port is the only place they can be asserted. Same reasoning as
-/// [`RecordingSecretObserver`]'s.
+/// port is the only place they can be asserted.
 ///
 /// The recorded slots keep the credential **bytes**, because
 /// `an_undeclared_attribute_never_reaches_storage` and its siblings need to
@@ -1027,7 +886,24 @@ pub struct ScriptedPlugin {
     /// only at the end. `Mutex<Option<_>>` rather than a plain field so
     /// `observe` (which takes `&self`) can `take()` it and fire exactly once.
     cancel_after_first_observe: Mutex<Option<CancellationToken>>,
+    /// `(credential key, path, mode)` per secret mount `prepare_run_access`
+    /// answers, the way a real plugin maps its declared keys onto paths.
+    /// `None` keeps `prepare_run_access` unimplemented, as every test that is
+    /// not about the runner-credential route expects.
+    run_mounts: Option<Vec<RunMount>>,
+    /// Whether any `prepare_run_access` handle carried a resolved slot. The
+    /// contract says it works from references alone, and handing it bytes
+    /// would be a needless plaintext copy.
+    run_access_saw_material: Mutex<bool>,
+    /// `(credstore reference, path)` of one extra secret mount
+    /// `prepare_run_access` answers with a reference no slot holds: a
+    /// misbehaving plugin, for the route's "only the environment's own
+    /// credentials" guard.
+    foreign_mount: Option<(String, String)>,
 }
+
+/// One mount [`ScriptedPlugin::mounting`] answers: credential key, path, mode.
+pub type RunMount = (String, String, Option<i32>);
 
 /// One `CredentialSlot` as a test can compare it: the key, the reference,
 /// and the resolved bytes — `None` for a `reference_only` slot, which
@@ -1060,13 +936,15 @@ impl ScriptedPlugin {
             extra_classification: None,
             validated: Mutex::new(Vec::new()),
             cancel_after_first_observe: Mutex::new(None),
+            run_mounts: None,
+            run_access_saw_material: Mutex::new(false),
+            foreign_mount: None,
         }
     }
 
     /// A plugin declaring VHI's shape: **two** required secrets (an SSH key
     /// and a vinfra password) plus non-secret configuration. The two-secret
-    /// case is what `materialise_runner_secret` exists to serve and what
-    /// `vhp_shaped` cannot express.
+    /// case is what `vhp_shaped` cannot express.
     #[must_use]
     pub fn vhi_shaped(outcome: PluginObservation) -> Self {
         Self {
@@ -1078,7 +956,40 @@ impl ScriptedPlugin {
             extra_classification: None,
             validated: Mutex::new(Vec::new()),
             cancel_after_first_observe: Mutex::new(None),
+            run_mounts: None,
+            run_access_saw_material: Mutex::new(false),
+            foreign_mount: None,
         }
+    }
+
+    /// Make `prepare_run_access` answer one [`MountSpec::Secret`] per
+    /// `(key, path, mode)`, naming the slot's own reference — the shape the
+    /// VHP and VHI plugins answer with. A key the environment has no slot for
+    /// is a `NotFound` failure, as a real plugin's missing credential is.
+    #[must_use]
+    pub fn mounting(mut self, mounts: &[(&str, &str, Option<i32>)]) -> Self {
+        self.run_mounts = Some(
+            mounts
+                .iter()
+                .map(|(key, path, mode)| ((*key).to_owned(), (*path).to_owned(), *mode))
+                .collect(),
+        );
+        self
+    }
+
+    /// Make `prepare_run_access` also answer a secret mount at `path` naming
+    /// `raw_ref`, which is none of the environment's own references. Only
+    /// meaningful together with [`Self::mounting`].
+    #[must_use]
+    pub fn mounting_foreign_reference(mut self, raw_ref: &str, path: &str) -> Self {
+        self.foreign_mount = Some((raw_ref.to_owned(), path.to_owned()));
+        self
+    }
+
+    /// Whether `prepare_run_access` was ever handed a slot carrying material.
+    #[must_use]
+    pub fn run_access_saw_material(&self) -> bool {
+        *self.run_access_saw_material.lock().unwrap()
     }
 
     /// Make `validate_credentials` refuse with `failure`.
@@ -1319,9 +1230,42 @@ impl QaProductPluginV1 for ScriptedPlugin {
 
     async fn prepare_run_access(
         &self,
-        _env: &EnvironmentHandle<'_>,
+        env: &EnvironmentHandle<'_>,
     ) -> Result<RunAccess, PluginFailure> {
-        unimplemented!("dispatch is qa-runs' side of the contract, not this gear's")
+        let Some(ref run_mounts) = self.run_mounts else {
+            unimplemented!(
+                "this double answers prepare_run_access only when built `mounting(..)`, \
+                 for the runner-credential route's tests"
+            )
+        };
+        if env.slots.iter().any(|slot| slot.value.is_some()) {
+            *self.run_access_saw_material.lock().unwrap() = true;
+        }
+        let mut mounts = Vec::with_capacity(run_mounts.len());
+        for (key, path, mode) in run_mounts {
+            let slot = env.slot(key).ok_or_else(|| {
+                PluginFailure::classified(
+                    FailureClass::NotFound,
+                    "the environment declares no credential this run mounts",
+                )
+            })?;
+            mounts.push(MountSpec::Secret {
+                credstore_ref: slot.credstore_ref.clone(),
+                path: path.clone(),
+                mode: *mode,
+            });
+        }
+        if let Some((raw_ref, path)) = &self.foreign_mount {
+            mounts.push(MountSpec::Secret {
+                credstore_ref: raw_ref.clone(),
+                path: path.clone(),
+                mode: Some(0o400),
+            });
+        }
+        Ok(RunAccess {
+            mounts,
+            ..RunAccess::default()
+        })
     }
 
     fn runner(&self, _observed: Option<&ObservedAttrs>) -> RunnerSpec {
@@ -1330,6 +1274,104 @@ impl QaProductPluginV1 for ScriptedPlugin {
 
     fn env_contract(&self) -> RunVarContract {
         unimplemented!("dispatch is qa-runs' side of the contract, not this gear's")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runner-credential doubles (finding #94)
+// ---------------------------------------------------------------------------
+
+/// A [`PodIdentityVerifier`] that answers one scripted result and records the
+/// tokens it saw.
+pub struct ScriptedPodIdentity {
+    answer: Result<VerifiedRunnerPod, PodIdentityRefusal>,
+    seen: Mutex<Vec<String>>,
+}
+
+impl ScriptedPodIdentity {
+    /// Every token proves `pod`.
+    #[must_use]
+    pub fn proving(pod: VerifiedRunnerPod) -> Self {
+        Self {
+            answer: Ok(pod),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Every token is refused with `refusal`.
+    #[must_use]
+    pub fn refusing(refusal: PodIdentityRefusal) -> Self {
+        Self {
+            answer: Err(refusal),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Every token this verifier was handed, in call order.
+    #[must_use]
+    pub fn seen(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl PodIdentityVerifier for ScriptedPodIdentity {
+    async fn verify(&self, token: &str) -> Result<VerifiedRunnerPod, PodIdentityRefusal> {
+        self.seen.lock().unwrap().push(token.to_owned());
+        self.answer.clone()
+    }
+}
+
+/// A [`PodIdentityVerifier`] that never answers: an API server that accepted
+/// the connection and then hung, for the route's overall deadline.
+pub struct HangingPodIdentity;
+
+#[async_trait]
+impl PodIdentityVerifier for HangingPodIdentity {
+    async fn verify(&self, _token: &str) -> Result<VerifiedRunnerPod, PodIdentityRefusal> {
+        std::future::pending().await
+    }
+}
+
+/// A [`RunnerPodResolver`] that counts how often it was asked and vouches
+/// for nothing, for the refusals that must happen before qa-runs is asked.
+#[derive(Default)]
+pub struct CountingRunnerPods(Mutex<usize>);
+
+impl CountingRunnerPods {
+    /// How many times qa-runs was asked.
+    #[must_use]
+    pub fn asked(&self) -> usize {
+        *self.0.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl RunnerPodResolver for CountingRunnerPods {
+    async fn environment_of(&self, _pod: &VerifiedRunnerPod) -> Result<Uuid, RunnerPodRefusal> {
+        *self.0.lock().unwrap() += 1;
+        Err(RunnerPodRefusal::NotFound)
+    }
+}
+
+/// A [`RunnerPodResolver`] with one scripted answer.
+pub struct ScriptedRunnerPods(pub Result<Uuid, RunnerPodRefusal>);
+
+#[async_trait]
+impl RunnerPodResolver for ScriptedRunnerPods {
+    async fn environment_of(&self, _pod: &VerifiedRunnerPod) -> Result<Uuid, RunnerPodRefusal> {
+        self.0
+    }
+}
+
+/// A verified runner pod labelled with `tenant_id`.
+#[must_use]
+pub fn a_runner_pod(tenant_id: Uuid) -> VerifiedRunnerPod {
+    VerifiedRunnerPod {
+        pod_name: "qa-run-1-abcde-n-0-1234".to_owned(),
+        tenant_id,
+        run_id: Uuid::from_u128(0x7777),
+        workflow_name: "qa-run-1-abcde".to_owned(),
     }
 }
 

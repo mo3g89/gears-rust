@@ -85,6 +85,29 @@ pub enum DomainError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// The runner-credential route got no `X-QA-Runner-Token` header. Becomes 401.
+    ///
+    /// A unit variant on purpose: it carries nothing, so nothing a caller sent
+    /// can reach the response through it.
+    #[error("runner token missing")]
+    RunnerUnauthenticated,
+
+    /// The runner-credential route refused a token, a pod or a run. Every cause
+    /// shares this one variant and one body, so the route is no oracle. Becomes 403.
+    ///
+    /// Carries nothing: the cause is logged under
+    /// `qa_environments.runner_credentials`, never returned.
+    #[error("runner credentials denied")]
+    RunnerForbidden,
+
+    /// The runner-credential route could not ask Kubernetes, qa-runs, the
+    /// plugin or credstore. Becomes 503.
+    ///
+    /// Carries nothing, so neither an API server's message nor a credstore
+    /// reference can reach a response or a `Debug` rendering through it.
+    #[error("runner credentials unavailable")]
+    RunnerCredentialsUnavailable,
 }
 
 impl DomainError {

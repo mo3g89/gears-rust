@@ -3351,6 +3351,44 @@
         ],
         "type": "object"
       },
+      "RunnerCredentialsResp": {
+        "description": "`POST /qa/v1/runner-credentials`' answer (finding #94): the files a runner\npod writes before any test code runs.",
+        "properties": {
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerFileDto"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "type": "object"
+      },
+      "RunnerFileDto": {
+        "description": "One file of [`RunnerCredentialsResp`]: where to write it, with which\npermission bits, and its bytes as standard base64.",
+        "properties": {
+          "content_b64": {
+            "type": "string"
+          },
+          "mode": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content_b64"
+        ],
+        "type": "object"
+      },
       "SavedViewDto": {
         "description": "A stored saved view, with the same plan-identity pair and `owner_id` still a\ncaller-visible field: it is the caller's own id\nin every case this gear can construct (the repository narrows every read and\nwrite to the caller's [`toolkit_security::AccessScope::ensure_owner`]-ed\nscope), so echoing it back is inert rather than a cross-owner leak.",
         "properties": {
@@ -7938,6 +7976,68 @@
         "summary": "Force-start a queued row",
         "tags": [
           "QA Runs"
+        ]
+      }
+    },
+    "/qa/v1/runner-credentials": {
+      "post": {
+        "description": "Internal: not registered in the gateway and not proxied by the UI nginx, so reachable in-cluster only. Called by the Argo runner pod with its projected ServiceAccount token in X-QA-Runner-Token. Answers the credential files of the environment the pod's live run targets. A missing token is a 401; every refusal is the same 403; a dependency that cannot answer is a 503. See ADR-0008.",
+        "operationId": "qa_environments.runner_credentials",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerCredentialsResp"
+                }
+              }
+            },
+            "description": "The files to write"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Hand a runner pod its run's credentials",
+        "tags": [
+          "QA Environments"
         ]
       }
     },

@@ -331,7 +331,7 @@ re-validate them when a run is re-run. Validation covers the permitted character
 list, rejection of duplicates, and caps on the number of parameters and on the length of a name and
 of a value. Parameters are stored in plain text and MUST NOT be used for tokens or passwords.
 
-**The reserved floor.** A run parameter may not be named `APP_BUILD`, `APP_VERSION`, `E2E_K8S_NAMESPACE`, `KUBECONFIG`, `PRODUCT_KEY`, `QA_RUNNER_PYTEST_ARGS`, `RP_API_KEY`, `RP_PROJECT`, `SKIP_TESTS_WITH_BUGS`, `TEST_BUNDLE_URL`, `TEST_FILES` or `TEST_VERSION`, on any product. Each names something the platform itself sets in the runner's environment, and `QA_RUNNER_PYTEST_ARGS` would let a parameter pass pytest flags that deselect failing tests. A product plugin may reserve more names through its run-variable contract; it can add to this floor and never remove from it.
+**The reserved floor.** A run parameter may not be named `APP_BUILD`, `APP_VERSION`, `E2E_K8S_NAMESPACE`, `KUBECONFIG`, `PRODUCT_KEY`, `QA_CREDENTIALS_TOKEN_FILE`, `QA_CREDENTIALS_URL`, `QA_CREDENTIAL_DIRS`, `QA_RUNNER_PYTEST_ARGS`, `RP_API_KEY`, `RP_PROJECT`, `SKIP_TESTS_WITH_BUGS`, `TEST_BUNDLE_URL`, `TEST_FILES` or `TEST_VERSION`, on any product. Each names something the platform itself sets in the runner's environment, and `QA_RUNNER_PYTEST_ARGS` would let a parameter pass pytest flags that deselect failing tests. The three `QA_CREDENTIAL*` names steer the runner's credential fetch: where it sends its pod token, which file it reads as the token, and where credential files may land. A product plugin may reserve more names through its run-variable contract; it can add to this floor and never remove from it.
 
 Pipeline and environment variables are refused under the same names (qa-environments' `RESERVED_VARIABLE_NAMES`), because they reach the same runner environment.
 
@@ -475,7 +475,7 @@ say so rather than presenting an unscoped list as scoped.
 
 The system MUST ship a Helm chart deploying the gears, the UI, Postgres with per-gear databases,
 Keycloak with its realm, TLS material, database migrations, tenant seeding, and the RBAC the
-execution backend requires.
+execution backend requires. The target cluster MUST run Kubernetes 1.30 or later: the Workflow admission guard needs ValidatingAdmissionPolicy v1 (ADR-0008).
 
 - **Actors**: `cpt-cf-qa-actor-operator`
 

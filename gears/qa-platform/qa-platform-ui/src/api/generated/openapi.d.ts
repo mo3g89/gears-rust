@@ -624,6 +624,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/qa/v1/runner-credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Hand a runner pod its run's credentials
+         * @description Internal: not registered in the gateway and not proxied by the UI nginx, so reachable in-cluster only. Called by the Argo runner pod with its projected ServiceAccount token in X-QA-Runner-Token. Answers the credential files of the environment the pod's live run targets. A missing token is a 401; every refusal is the same 403; a dependency that cannot answer is a 503. See ADR-0008.
+         */
+        post: operations["qa_environments.runner_credentials"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/qa/v1/runs": {
         parameters: {
             query?: never;
@@ -3676,6 +3696,23 @@ export interface components {
              *     not ingested yet, which asynchronous ingest makes a normal state.
              */
             tests_total: number;
+        };
+        /**
+         * @description `POST /qa/v1/runner-credentials`' answer (finding #94): the files a runner
+         *     pod writes before any test code runs.
+         */
+        RunnerCredentialsResp: {
+            files: components["schemas"]["RunnerFileDto"][];
+        };
+        /**
+         * @description One file of [`RunnerCredentialsResp`]: where to write it, with which
+         *     permission bits, and its bytes as standard base64.
+         */
+        RunnerFileDto: {
+            content_b64: string;
+            /** Format: int32 */
+            mode?: number | null;
+            path: string;
         };
         /**
          * @description A stored saved view, with the same plan-identity pair and `owner_id` still a
@@ -6949,6 +6986,62 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    "qa_environments.runner_credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The files to write */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunnerCredentialsResp"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

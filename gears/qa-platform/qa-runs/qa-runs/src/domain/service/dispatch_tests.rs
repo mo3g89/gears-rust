@@ -1434,6 +1434,134 @@ async fn a_reconciled_claim_releases_its_lease_and_frees_the_platform() {
 // The timeout sweep
 // ---------------------------------------------------------------------------
 
+fn runner_pod_query(tenant: Uuid, workflow: &str) -> qa_runs_sdk::RunnerPodQuery {
+    qa_runs_sdk::RunnerPodQuery {
+        tenant_id: tenant,
+        run_id: RUN_1,
+        workflow_name: workflow.to_owned(),
+    }
+}
+
+async fn fakes_with_running_run() -> fakes::Fakes {
+    let runs = Arc::new(FakeRuns::with(vec![(
+        OTHER_TENANT,
+        run_fixture(RUN_1, Some(PLATFORM_A), true, RunState::Running),
+    )]));
+    runs.seed_execution_ref(RUN_1, "qa-run-1-abcde", RunState::Running);
+    Builder::new().runs(runs).build().await
+}
+
+/// The pod's workflow is the run's recorded handle, the run is live, and the
+/// environment comes back. Nothing else is returned.
+#[tokio::test]
+async fn a_live_runs_own_workflow_resolves_to_its_environment() {
+    let fakes = fakes_with_running_run().await;
+    let resolved = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query(OTHER_TENANT, "qa-run-1-abcde"))
+        .await
+        .expect("a live run's own workflow resolves");
+    assert_eq!(resolved.environment_id, PLATFORM_A);
+}
+
+/// Another workflow claiming the same run id is refused: the handle is the binding.
+#[tokio::test]
+async fn a_workflow_that_is_not_the_runs_handle_is_not_found() {
+    let fakes = fakes_with_running_run().await;
+    let refused = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query(OTHER_TENANT, "qa-run-1-zzzzz"))
+        .await;
+    assert!(
+        matches!(refused, Err(DomainError::RunNotFound { id }) if id == RUN_1),
+        "{refused:?}"
+    );
+}
+
+/// The pod's tenant label must be the run's own tenant. Under a policy that
+/// grants `qa_runs.system` a covering scope, the read alone would return
+/// another tenant's run; the tenant comparison is what refuses it.
+#[tokio::test]
+async fn a_pod_claiming_another_tenant_is_not_found_even_under_a_covering_scope() {
+    let runs = Arc::new(FakeRuns::with(vec![(
+        OTHER_TENANT,
+        run_fixture(RUN_1, Some(PLATFORM_A), true, RunState::Running),
+    )]));
+    runs.seed_execution_ref(RUN_1, "qa-run-1-abcde", RunState::Running);
+    let covering = Arc::new(fakes::CoveringSystemAuthZ::default());
+    let fakes = Builder::new()
+        .runs(runs)
+        .authz(Arc::clone(&covering) as Arc<dyn authz_resolver_sdk::AuthZResolverApi>)
+        .build()
+        .await;
+    let refused = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query(OWNER_TENANT, "qa-run-1-abcde"))
+        .await;
+    assert!(
+        matches!(refused, Err(DomainError::RunNotFound { id }) if id == RUN_1),
+        "{refused:?}"
+    );
+    let resolved = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query(OTHER_TENANT, "qa-run-1-abcde"))
+        .await
+        .expect("the run's own tenant still resolves under the covering scope");
+    assert_eq!(resolved.environment_id, PLATFORM_A);
+}
+
+/// A finished run's pod gets nothing, even with the right handle.
+#[tokio::test]
+async fn a_terminal_run_is_not_found() {
+    let runs = Arc::new(FakeRuns::with(vec![(
+        OTHER_TENANT,
+        run_fixture(RUN_1, Some(PLATFORM_A), true, RunState::Succeeded),
+    )]));
+    runs.seed_execution_ref(RUN_1, "qa-run-1-abcde", RunState::Succeeded);
+    let fakes = Builder::new().runs(runs).build().await;
+    let refused = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query(OTHER_TENANT, "qa-run-1-abcde"))
+        .await;
+    assert!(
+        matches!(refused, Err(DomainError::RunNotFound { .. })),
+        "{refused:?}"
+    );
+}
+
+/// The nil tenant is the platform sentinel, never a tenant; no lookup happens.
+#[tokio::test]
+async fn a_nil_tenant_is_not_found() {
+    let fakes = fakes_with_running_run().await;
+    let refused = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query(Uuid::nil(), "qa-run-1-abcde"))
+        .await;
+    assert!(
+        matches!(refused, Err(DomainError::RunNotFound { .. })),
+        "{refused:?}"
+    );
+}
+
+/// A platformless run has no credentials to hand out.
+#[tokio::test]
+async fn a_run_without_an_environment_is_not_found() {
+    let runs = Arc::new(FakeRuns::with(vec![(
+        OTHER_TENANT,
+        run_fixture(RUN_1, None, true, RunState::Running),
+    )]));
+    runs.seed_execution_ref(RUN_1, "qa-run-1-abcde", RunState::Running);
+    let fakes = Builder::new().runs(runs).build().await;
+    let refused = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query(OTHER_TENANT, "qa-run-1-abcde"))
+        .await;
+    assert!(
+        matches!(refused, Err(DomainError::RunNotFound { .. })),
+        "{refused:?}"
+    );
+}
+
 /// `cpt-cf-qa-fr-runs-timeout`, enforced in the control plane. The run is
 /// cancelled, moved to `TimedOut`, its claim released and its platform freed —
 /// and all of it under the **run's own tenant**, never the enumeration identity.

@@ -674,12 +674,20 @@ pub struct NewVariable {
 /// failing tests. See `qa_runs::domain::params::RESERVED_NAMES` for the full
 /// rationale; it must stay a member here too, or
 /// `the_two_reserved_name_lists_must_stay_identical` fails.
-pub const RESERVED_VARIABLE_NAMES: [&str; 12] = [
+///
+/// **The three `QA_CREDENTIAL*` names added by finding #94**, for the reason
+/// `qa_runs::domain::params::RESERVED_NAMES` gives: they steer the runner's
+/// credential fetch (where its token is sent, which file is read as the token,
+/// where files may land).
+pub const RESERVED_VARIABLE_NAMES: [&str; 15] = [
     "APP_BUILD",
     "APP_VERSION",
     "E2E_K8S_NAMESPACE",
     "KUBECONFIG",
     "PRODUCT_KEY",
+    "QA_CREDENTIALS_TOKEN_FILE",
+    "QA_CREDENTIALS_URL",
+    "QA_CREDENTIAL_DIRS",
     "QA_RUNNER_PYTEST_ARGS",
     "RP_API_KEY",
     "RP_PROJECT",

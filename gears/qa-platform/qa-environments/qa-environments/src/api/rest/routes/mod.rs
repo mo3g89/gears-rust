@@ -5,6 +5,8 @@
 //! Routes are organized by resource:
 //! - `environments` - target environment endpoints (5 CRUD + 1 read-only lease view)
 //! - `variables` - variable endpoints (list, upsert, delete)
+//! - `runner_credentials` - the internal, anonymous route a runner pod fetches
+//!   its run's credential files from (finding #94)
 //!
 //! Lease acquire/release are intentionally **not** registered here — they
 //! are SDK-only operations for the qa-runs dispatcher (see
@@ -25,6 +27,7 @@ use toolkit::api::operation_builder::{CORE_GLOBAL_BASE_LICENSE_FEATURE, LicenseF
 use crate::gear::ConcreteAppServices;
 
 mod environments;
+mod runner_credentials;
 mod variables;
 
 pub(super) struct License;
@@ -59,6 +62,7 @@ pub(crate) fn register_routes(
 /// Same shape as qa-runs' and qa-insights' `register_operations`.
 pub fn register_operations(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = environments::register_environment_routes(router, openapi);
+    router = runner_credentials::register_runner_credentials_routes(router, openapi);
     variables::register_variable_routes(router, openapi)
 }
 
@@ -88,13 +92,14 @@ mod tests {
     use axum::Router;
     use toolkit::api::{OpenApiInfo, OpenApiRegistryImpl};
 
-    use super::{environments, variables};
+    use super::{environments, runner_credentials, variables};
 
     /// The real document, built the way `RestApiCapability` builds it.
     fn published_document() -> serde_json::Value {
         let openapi = OpenApiRegistryImpl::new();
         let mut router = Router::new();
         router = environments::register_environment_routes(router, &openapi);
+        router = runner_credentials::register_runner_credentials_routes(router, &openapi);
         let _router = variables::register_variable_routes(router, &openapi);
         let doc = openapi
             .build_openapi(&OpenApiInfo::default())
@@ -233,6 +238,44 @@ mod tests {
                     "{wanted} on GET {path} is optional: {parameter}"
                 );
             }
+        }
+    }
+
+    /// **The runner-credential route is published, internal, and answers
+    /// `RunnerCredentialsResp`.** Internal is the security property: a route
+    /// marked exposed would be reverse-proxied by the gateway, handing the
+    /// world a place to present stolen runner tokens.
+    #[test]
+    fn the_runner_credential_route_is_internal_and_answers_its_files() {
+        let rendered = published_document();
+        let operation = &rendered["paths"]["/qa/v1/runner-credentials"]["post"];
+
+        assert_eq!(
+            operation["operationId"],
+            serde_json::json!("qa_environments.runner_credentials"),
+            "{operation}"
+        );
+        assert!(
+            operation.get("x-toolkit-visibility").is_none(),
+            "the route must not be exposed through the gateway: {operation}"
+        );
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            schema_ref("RunnerCredentialsResp"),
+            "{operation}"
+        );
+        for status in ["401", "403", "503"] {
+            assert!(
+                operation["responses"].get(status).is_some(),
+                "the route documents its {status}: {operation}"
+            );
+        }
+        let file = &rendered["components"]["schemas"]["RunnerFileDto"];
+        for field in ["path", "mode", "content_b64"] {
+            assert!(
+                file["properties"].get(field).is_some(),
+                "RunnerFileDto must carry {field}: {file}"
+            );
         }
     }
 }

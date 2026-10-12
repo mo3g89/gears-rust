@@ -36,7 +36,7 @@ use toolkit_db::{DBProvider, DbError};
 use toolkit_macros::domain_model;
 
 use crate::domain::ports::metrics::{ObservationMetrics, PluginMetrics};
-use crate::domain::ports::{ProductPluginPort, RunnerSecretWriter};
+use crate::domain::ports::{PodIdentityVerifier, ProductPluginPort, RunnerPodResolver};
 use crate::domain::repos::{EnvironmentsRepository, LeasesRepository, VariablesRepository};
 
 /// The `(resource_type, action)` pairs this gear's PEP enforces, and the
@@ -48,6 +48,7 @@ mod leases;
 mod variables;
 
 pub use environments::EnvironmentsService;
+pub use environments::runner_credentials::RunnerFile;
 pub use leases::LeasesService;
 pub use variables::VariablesService;
 
@@ -62,6 +63,10 @@ mod environments_tests;
 
 #[cfg(test)]
 mod environments_kubeconfig_tests;
+
+/// What `runner_credentials` hands a pod, and every way it refuses.
+#[cfg(test)]
+mod runner_credentials_tests;
 
 /// Task 18b's own tests: what a submitted credential form reaches, and where
 /// each classified field lands.
@@ -300,8 +305,9 @@ where
         clippy::too_many_arguments,
         reason = "the DI container's constructor takes one argument per collaborator it wires \
                   (three repositories, the db provider, authz, credstore, the observation \
-                  port, the product-plugin port, the two metrics ports, and the two scalar \
-                  knobs). Grouping them into a parameter struct would move the same twelve \
+                  port, the product-plugin port, the two runner-credential ports, the two \
+                  metrics ports, and the two scalar knobs). Grouping them into a parameter \
+                  struct would move the same fourteen \
                   names one indirection away without removing any of them, and \
                   `AppServices::new` has exactly one caller (`gear.rs`'s `init`)."
     )]
@@ -312,8 +318,9 @@ where
         db: Arc<DbProvider>,
         authz: Arc<dyn AuthZResolverApi>,
         credstore: Arc<dyn CredStoreClientV1>,
-        observer: Arc<dyn RunnerSecretWriter>,
         product_plugins: Arc<dyn ProductPluginPort>,
+        pod_identity: Arc<dyn PodIdentityVerifier>,
+        runner_pods: Arc<dyn RunnerPodResolver>,
         metrics: Option<Arc<dyn ObservationMetrics>>,
         plugin_metrics: Option<Arc<dyn PluginMetrics>>,
         max_variables: usize,
@@ -327,8 +334,9 @@ where
                 Arc::clone(&environments_repo),
                 Arc::clone(&leases_repo),
                 credstore,
-                observer,
                 product_plugins,
+                pod_identity,
+                runner_pods,
                 metrics,
                 plugin_metrics,
                 enforcer.clone(),

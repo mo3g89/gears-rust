@@ -79,3 +79,21 @@ if grep -qE '^ {0,4}error_log +[^ ]+ +crit;' "$rendered"; then
     exit 1
 fi
 echo "PASS: SSE location suppresses upstream-failure error-log entries, and only that location"
+
+# The runner-credential route (finding #94) is internal: runner pods reach the
+# gears Service directly, in-cluster. The generic `location /qa/v1/` would
+# otherwise proxy it from the public origin, so a `^~` prefix location must
+# answer 404 for it and everything under it (a trailing slash included). `^~`
+# on the longest matching prefix also skips the regex locations, so its
+# position in the file does not matter to nginx; the check pins the directive
+# and that it proxies nothing.
+block=$(awk '/^    location \^~ \/qa\/v1\/runner-credentials \{/,/^    }/' "$rendered")
+if ! printf '%s\n' "$block" | grep -qE '^ +return 404;'; then
+    echo "FAIL: /qa/v1/runner-credentials is not answered 404 by a ^~ prefix location -- the public origin would proxy the internal runner-credential route"
+    exit 1
+fi
+if printf '%s\n' "$block" | grep -q 'proxy_pass'; then
+    echo "FAIL: the /qa/v1/runner-credentials location proxies to the gears"
+    exit 1
+fi
+echo "PASS: the internal runner-credential route is 404 at the public origin"

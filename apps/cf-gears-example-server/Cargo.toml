@@ -76,7 +76,7 @@ bss-pricing = ["dep:bss_pricing"]
 # unconditionally by exactly one qa-platform crate (`qa-connector-k8s`) and
 # reaches a binary only through a product plugin that links it. Not "by one
 # crate in the workspace" — `qa-environments` and `qa-runs` still name it
-# behind `runner-secret` and `argo` respectively, and `--features
+# behind `runner-credentials` and `argo` respectively, and `--features
 # "$(cat gears/qa-platform/deploy/cargo-features.argo)"` puts all three in the
 # tree today. `qa-platform` is still off by default here (`default = []`), so
 # ADR-0001's Confirmation criterion (`kube` reaches `qa-runs`' tree only under
@@ -101,12 +101,12 @@ qa-platform = ["dep:qa-environments", "dep:qa-catalog", "dep:qa-runs", "dep:qa-i
 # the canonical list gears/qa-platform/deploy/cargo-features.argo (it names
 # `qa-runs-argo`) into the image's CARGO_FEATURES build arg, and by nothing else.
 qa-runs-argo = ["qa-runs?/argo"]
-# Decision D4's runner-`Secret` writer in qa-environments
-# (`infra::runner_secret_writer`) -- the only Kubernetes client left in that
-# gear, since Task 19b deleted the observer this used to gate. Same shape as `qa-runs-argo` above: `qa-environments?/`
-# (with the `?`) does NOT pull qa-environments in on its own, so naming this
-# feature without `qa-platform` compiles nothing extra.
-runner-secret = ["qa-environments?/runner-secret"]
+# Finding #94's runner-credential verifier in qa-environments
+# (`infra::pod_identity`): a `TokenReview` + `GET pod` of the runner pod
+# calling `POST /qa/v1/runner-credentials`. Without it the route answers 503
+# to every pod. Same shape as `qa-runs-argo` above: the `?` does NOT pull
+# qa-environments in on its own.
+runner-credentials = ["qa-environments?/runner-credentials"]
 
 [dependencies]
 mimalloc = { version = "0.1" }

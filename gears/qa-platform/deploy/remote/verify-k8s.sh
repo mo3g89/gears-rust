@@ -27,8 +27,8 @@
 #   ARGO_NAMESPACE  optional, default "argo" -- must equal values.yaml's
 #                   argo.namespace (rbac-argo.yaml's two Role/RoleBinding
 #                   pairs live there, not in NAMESPACE: qa-platform-gears'
-#                   workflows/pods grant and qa-platform-secret-writer's
-#                   secrets grant).
+#                   workflows/pods grant, and the Workflow guard's
+#                   target namespace).
 #   IMAGE_TAG       optional. The tag deploy-k8s.sh built and passed to Helm
 #                   as images.gears.tag / images.ui.tag. If unset, the first
 #                   new check below (every Deployment rolled to it) is
@@ -556,6 +556,20 @@ case "$api_code" in
         exit 1 ;;
 esac
 
+# The runner-credential route is internal (finding #94): runner pods reach the
+# gears Service in-cluster, and the UI nginx answers 404 for it rather than
+# proxying it (default.conf.template's `location ^~ /qa/v1/runner-credentials`).
+# A 403 here would mean the public origin reaches the route's verifier.
+rc=0
+rc_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 --cacert "$CA_CRT" -X POST \
+    -H 'X-QA-Runner-Token: verify-k8s-not-a-token' \
+    "$PUBLIC_ORIGIN/qa/v1/runner-credentials" 2>"$WORKDIR/rc.err") || rc=$?
+if [ "$rc" -ne 0 ] || [ "$rc_code" != "404" ]; then
+    echo "FAIL: POST $PUBLIC_ORIGIN/qa/v1/runner-credentials answered '$rc_code' (curl exit $rc), expected nginx's 404: the internal runner-credential route is reachable from the public origin. $(cat "$WORKDIR/rc.err" 2>/dev/null)" >&2
+    exit 1
+fi
+echo "PASS: the public origin answers 404 for the internal runner-credential route"
+
 step "7: the gears' rendered config selects the persistent credstore backend"
 # THE THREE-PLACE SWITCH: the Dockerfile's ARG CARGO_FEATURES default,
 # deploy/cargo-features.argo, and credstore.config.vendor in
@@ -587,8 +601,8 @@ step "9: the deployed binary carries the VHP product plugin"
 # **REWRITTEN BY TASK 19b, and the old check had to go rather than be fixed.**
 # It read two strings out of the binary to prove the `platform-observation`
 # cargo feature was selected. Task 19 deleted that feature's observation half:
-# observation runs through the product plugin now, and the feature was renamed
-# `runner-secret` for the one thing it still gates. Both strings the old check
+# observation runs through the product plugin now, and the feature was removed.
+# Both strings the old check
 # counted went with the code that logged them, so it had no correct outcome
 # left -- delete the #[cfg] arms and it FAILS, keep the ticker and drop its
 # gate (which is what happened) and it PASSES while asserting a cargo feature
@@ -923,125 +937,8 @@ else
     exit 1
 fi
 
-step "14: qa-environments' runner-credential Secret write into \$ARGO_NAMESPACE actually succeeds"
-# RESTORED in review round 1 -- this is the check that would have caught
-# that round's other Critical: rbac-argo.yaml withheld `secrets` entirely,
-# which is right for qa-runs' executor (ADR-0001) but wrong for
-# qa-environments, a DIFFERENT gear in the SAME pod that legitimately writes
-# a Secret by design (decision D4,
-# `runner_secret_writer::ensure_runner_secret` in
-# qa-environments/src/infra/runner_secret_writer.rs --
-# `Api::<Secret>::namespaced(client, argo_namespace)` then a server-side
-# apply `patch`). Since finding #94 that write authenticates as
-# qa-platform-secret-writer, not the pod's qa-platform-gears. A deployment
-# whose gears hold a cluster-admin kubeconfig never surfaces a missing grant;
-# with these scoped ServiceAccounts the write is Forbidden on every cycle,
-# and the documented symptom is every workflow run hanging on FailedMount
-# while observation (checks 10/11 above)
-# keeps working and the stack otherwise looks healthy -- nothing in checks
-# 2/3/13/15 touches this code path at all, since qa-environments is not
-# qa-runs.
-#
-# THERE IS DELIBERATELY NO `kubeconfig_path` ASSERTION HERE. The chart's
-# qa-environments fragment sets it to the qa-platform-secret-writer kubeconfig
-# (gears-argo-configmaps.yaml's header), and check_secret_writer_rbac.py pins
-# that statically. What is worth checking is the RUNTIME half below: does the
-# Secret write actually SUCCEED. A kubeconfig or token-file failure reaches
-# the log inside the 'failed to apply ...' line's error field, so the second
-# string below catches it; the 'failed to infer' string only fires on a
-# deployment that leaves kubeconfig_path unset.
-#
-# FIRST, PROVE THE TWO FAILURE STRINGS ARE STILL ALIVE IN THE BINARY, same
-# idiom as check 2/9's absence-and-presence pairs: an absence check whose
-# pattern has drifted from the source string passes forever and reports
-# nothing, this project's own documented failure mode. Both strings are
-# compiled in whether or not they are ever logged, so grepping the binary
-# for them first proves the two log-absence checks below can still match
-# something.
-#
-# BOTH reads go through grep_count() -- unlike checks 2/9 this pair is
-# SYMMETRIC (both halves require >=1, neither is an "absence" half), so an
-# unread value defaulting to 0 was already safe here (0 < 1 correctly FAILs
-# either way; there was never a false-PASS path). Still routed through
-# grep_count() rather than left as the old bare `${n:-0}` form, so this file
-# has exactly ONE way to turn a binary-grep exec into a count, not two --
-# see this file's header for the invariant that is the point of doing so.
-if ! grep_count deploy/qa-platform-gears 'failed to infer a Kubernetes config for the Argo cluster' /usr/local/bin/cf-gears-example-server "gears binary: 'failed to infer...' D4 string count"; then
-    exit 1
-fi
-n_infer_str="$GREP_COUNT_VAL"
-if ! grep_count deploy/qa-platform-gears 'failed to apply one of this environment.s runner Secrets' /usr/local/bin/cf-gears-example-server "gears binary: 'failed to apply...' D4 string count"; then
-    exit 1
-fi
-n_apply_str="$GREP_COUNT_VAL"
-if [ "$n_infer_str" -lt 1 ] || [ "$n_apply_str" -lt 1 ]; then
-    echo "FAIL: a D4 failure string is not in the deployed binary (infer=$n_infer_str apply=$n_apply_str; wanted both >=1). The wording in qa-environments' runner_secret_writer.rs has drifted from what this check greps the log for below, so the two absence checks would pass vacuously without this guard -- update them together." >&2
-    exit 1
-fi
-
-# THE LOG FETCH ITSELF MUST BE VERIFIED, SEPARATELY FROM SEARCHING IT --
-# fixed in review round 2, a genuine Important this check introduced. The
-# previous form (`kubectl logs ... | grep '...' | tail -n1 || true`) is safe
-# ONLY for a check whose PASS branch requires the searched-for text to be
-# PRESENT (check 15 below is that shape, and stays as-is -- see its own
-# comment). It is NOT safe here, because THIS check's PASS branch is "NEITHER
-# string was found" -- and `tail -n1` on EMPTY INPUT EXITS 0 no matter what
-# fed it that empty input: a real absence of the error strings, `kubectl
-# logs` itself failing (a typo'd deployment name, a namespace mismatch, an
-# API-server hiccup on the logs endpoint, an evicted log buffer), all look
-# identical to this pipeline -- empty stdout, exit 0 -- so it took the PASS
-# branch and printed "D4 writer is reaching $ARGO_NAMESPACE and succeeding"
-# having verified nothing. `pipefail` does not save this either: `tail`'s own
-# exit status (0) is what the pipeline reports regardless of what `kubectl
-# logs`/`grep` did upstream. Fixed by capturing `kubectl logs`' own exit
-# status separately, the same `cmd > file || rc=$?` idiom used throughout
-# this file (CA extraction, PVC list, `can-i`) -- FAIL if the log read itself
-# did not succeed, and only search the file, now safely on disk, once that
-# is confirmed. "Logs unreadable" and "logs read fine, string found" are
-# reported as two distinct FAILs with different remedies, not folded
-# together.
-# THE LOG HALF IS VACUOUS ON A COLD STACK, AND IS NOW GATED ON THAT --
-# the fourth false green found in the final review. `materialise_runner_secret`
-# (qa-environments/.../environments.rs:1026-1066) runs PER REGISTERED
-# ENVIRONMENT: on create, on update, and on every self-heal cycle. The cutover
-# starts against an EMPTY database, so there are zero environments, the writer
-# never runs, and neither failure string is ever logged -- at which point this
-# check's PASS branch ("neither string appears") fires having exercised
-# nothing at all and reports the D4 writer as working. Checks 10 and 11 above
-# already treat this exact precondition as a NOTE rather than a pass; this one
-# now does too.
-#
-# The STATIC half of the same concern -- can qa-platform-secret-writer even
-# create/patch a Secret in $ARGO_NAMESPACE, and is qa-platform-gears refused?
-# -- does NOT need an environment to exist, and is checked unconditionally in
-# "k8s 3/4" below alongside the workflows grant. That is what actually
-# covers a cold stack; this check is the runtime confirmation once there is
-# something to observe.
-if ! psql_count qa_environments "select count(*) from qa_environments" "qa_environments row count (D4 precondition)"; then
-    exit 1
-fi
-n_d4_platforms="$PSQL_COUNT_VAL"
-if [ "$n_d4_platforms" -eq 0 ]; then
-    echo "NOTE: qa_environments has no rows -- materialise_runner_secret runs per registered environment, so on a cold-start deployment the D4 writer has never run and the log CANNOT contain either failure string. Reporting PASS here would be reporting on nothing. The RBAC that this writer needs is checked statically in 'k8s 3/4' below, which works on an empty stack; re-run this check once an environment exists."
-else
-    rc=0
-    kubectl -n "$NAMESPACE" logs deploy/qa-platform-gears > "$WORKDIR/gears-d4.log" 2>"$WORKDIR/gears-d4.err" || rc=$?
-    if [ "$rc" -ne 0 ]; then
-        echo "FAIL: could not read the gears' log (exit $rc): $(cat "$WORKDIR/gears-d4.err" 2>/dev/null). This check cannot tell 'D4 is working' from 'the log is unreadable' -- an unreadable log is a FAIL here, not the silent PASS it would otherwise become." >&2
-        exit 1
-    fi
-    infer_line="$(grep 'failed to infer a Kubernetes config for the Argo cluster' "$WORKDIR/gears-d4.log" | tail -n1 || true)"
-    secret_line="$(grep 'failed to apply one of this environment.s runner Secrets' "$WORKDIR/gears-d4.log" | tail -n1 || true)"
-    if [ -n "$infer_line" ]; then
-        echo "FAIL: the gears' log contains '$infer_line' -- qa-environments could not construct ANY Kubernetes client for the Argo cluster (the in-cluster ServiceAccount token or the API server itself is unreachable), independent of RBAC. The chart sets argo.kubeconfig_path, so this string means the qa-environments fragment lost it: check the qa-platform-gears-argo-qa-environments ConfigMap." >&2
-        exit 1
-    elif [ -n "$secret_line" ]; then
-        echo "FAIL: the gears' log contains '$secret_line' -- qa-environments has a client but the Secret write itself is failing. If the error names the argo kubeconfig, the qa-platform-secret-writer-token Secret is unpopulated or unmounted (secret-writer-serviceaccount.yaml, gears-deployment.yaml). Otherwise check the qa-platform-secret-writer ServiceAccount's RBAC for 'secrets' create/patch in namespace $ARGO_NAMESPACE (rbac-argo.yaml's qa-platform-secret-writer Role -- NOT qa-platform-gears, which must not hold it), a missing namespace, or a hand-made Secret this writer does not own (see runner_secret_writer.rs's own 409-conflict message)." >&2
-        exit 1
-    else
-        echo "PASS: with $n_d4_platforms environment(s) registered, the gears' log (read successfully, $(wc -l < "$WORKDIR/gears-d4.log" | tr -d ' ') lines) carries neither the Config::infer() failure nor a failed runner-credential Secret write -- qa-environments' D4 writer is reaching $ARGO_NAMESPACE and succeeding"
-    fi
-fi
+step "14: (deleted with the runner-Secret writer, finding #94)"
+echo "NOTE: check 14 grepped the gears' log for the runner-Secret writer's failure strings. The writer is gone: runners fetch credentials over POST /qa/v1/runner-credentials, and 'k8s 3/4' plus the closing no-new-Secrets check cover what it guarded."
 
 step "15: the gears' log shows the argo executor actually connected"
 # The adapter lists Workflow during connect, so this line proves the
@@ -1513,134 +1410,129 @@ if grep -qv ' Bound$' "$WORKDIR/pvc.txt"; then
 fi
 echo "PASS: every PVC Bound ($(wc -l < "$WORKDIR/pvc.txt" | tr -d ' ') total)"
 
-step "k8s 3/4: the gears SA can submit Workflows, the secret-writer SA (and ONLY it) can write runner-credential Secrets into argo"
-# rbac-argo.yaml's two Role/RoleBinding pairs live in $ARGO_NAMESPACE:
-# qa-platform-gears-executor grants system:serviceaccount:$NAMESPACE:
-# qa-platform-gears create/get/list/watch/patch on workflows.argoproj.io (and
-# pods, pods/log); qa-platform-secret-writer grants
-# system:serviceaccount:$NAMESPACE:qa-platform-secret-writer create/patch on
-# secrets (finding #94). This is the one check that actually exercises the
-# cross-namespace RoleBindings rather than just reading their manifests back.
-#
-# THE `secrets` VERBS ARE HERE, NOT ONLY IN CHECK 14, AND THAT IS THE POINT.
-# Check 14 confirms the D4 writer at RUNTIME, from the gears' log -- which
-# says nothing at all until an environment has been registered, so on the cold
-# stack this cutover starts from it reports a NOTE and exercises nothing.
-# `kubectl auth can-i` needs no environment, no workflow and no traffic: it asks
-# the API server's authorizer directly, so it is the half of the D4 RBAC
-# question that is answerable on an empty database. If the writer half fails,
-# every runner-credential Secret write is Forbidden and every workflow run will
-# hang on FailedMount, while observation keeps working and the stack
-# otherwise looks healthy. If the qa-platform-gears half fails, the grant was
-# copied rather than moved and every gear in the pod can write Argo's Secrets
-# again.
+step "k8s 3/4: qa-platform-gears has no Secret rights, can review tokens, and the Workflow guard admits only qa-runs' shape"
+# rbac-argo.yaml's qa-platform-gears-executor Role (in $ARGO_NAMESPACE) grants
+# the gears create/get/list/watch/patch on workflows.argoproj.io, pods and
+# pods/log, and nothing on secrets: since finding #94 the runner fetches its
+# credentials from POST /qa/v1/runner-credentials, which the gears authorise by
+# TokenReview (rbac-tokenreview.yaml). workflows:create would still let a
+# compromised gears process submit a Workflow that mounts any Secret, which is
+# what the qa-platform-workflow-guard ValidatingAdmissionPolicy closes.
 rc=0
 kubectl auth can-i create workflows.argoproj.io -n "$ARGO_NAMESPACE" \
-    --as="system:serviceaccount:$NAMESPACE:qa-platform-gears" > "$WORKDIR/cani.txt" 2>&1 || rc=$?
+    --as="system:serviceaccount:$NAMESPACE:qa-platform-gears" > "$WORKDIR/cani.txt" 2> "$WORKDIR/cani.err" || rc=$?
 if [ "$rc" -ne 0 ] || ! grep -qx 'yes' "$WORKDIR/cani.txt"; then
-    echo "FAIL: the cross-namespace RoleBinding is not effective for workflows: $(cat "$WORKDIR/cani.txt" 2>/dev/null)" >&2
+    echo "FAIL: the cross-namespace RoleBinding is not effective for workflows: $(cat "$WORKDIR/cani.txt" "$WORKDIR/cani.err" 2>/dev/null)" >&2
     exit 1
 fi
 echo "PASS: qa-platform-gears can create workflows in namespace $ARGO_NAMESPACE"
 
-# Both verbs, checked separately: qa-environments' runner_secret_writer.rs
-# does a server-side-apply `patch` on an existing Secret and a `create` on a
-# new one, so a Role granting only one of the two fails on exactly half the
-# environments (the new ones, or the updated ones) with no pattern an
-# operator would spot.
-for verb in create patch; do
-    rc=0
-    kubectl auth can-i "$verb" secrets -n "$ARGO_NAMESPACE" \
-        --as="system:serviceaccount:$NAMESPACE:qa-platform-secret-writer" > "$WORKDIR/cani-secrets-$verb.txt" 2>&1 || rc=$?
-    if [ "$rc" -ne 0 ] || ! grep -qx 'yes' "$WORKDIR/cani-secrets-$verb.txt"; then
-        echo "FAIL: qa-platform-secret-writer CANNOT '$verb' secrets in namespace $ARGO_NAMESPACE: $(cat "$WORKDIR/cani-secrets-$verb.txt" 2>/dev/null). qa-environments writes each of an environment's credentials there as a Secret (decision D4, runner_secret_writer::ensure_runner_secret), authenticating as this account; without this grant every workflow run hangs on FailedMount while the rest of the stack looks healthy. rbac-argo.yaml's qa-platform-secret-writer Role is what grants it." >&2
-        exit 1
+GEARS="system:serviceaccount:$NAMESPACE:qa-platform-gears"
+for verb in create patch get list; do
+    # stdout only: kubectl may print warnings to stderr, which is kept for the message.
+    out=$(kubectl auth can-i "$verb" secrets -n "$ARGO_NAMESPACE" --as="$GEARS" 2> "$WORKDIR/cani-$verb.err" || true)
+    if ! printf '%s\n' "$out" | grep -qx 'no'; then
+        echo "FAIL: qa-platform-gears can $verb secrets in $ARGO_NAMESPACE (got: $out $(cat "$WORKDIR/cani-$verb.err"))" >&2; exit 1
     fi
 done
-echo "PASS: qa-platform-secret-writer can create AND patch secrets in namespace $ARGO_NAMESPACE (the D4 runner-credential write, checked statically -- works on a cold stack, unlike check 14's log half)"
-
-# THE NEGATIVE HALF. `kubectl auth can-i` prints `no` AND exits 1 for a
-# denied request, so a non-zero rc is expected here; what is NOT accepted is
-# anything other than an exact `no` -- an error talking to the API server
-# prints neither word and must not read as "refused".
-for verb in create patch; do
-    rc=0
-    kubectl auth can-i "$verb" secrets -n "$ARGO_NAMESPACE" \
-        --as="system:serviceaccount:$NAMESPACE:qa-platform-gears" > "$WORKDIR/cani-gears-secrets-$verb.txt" 2>&1 || rc=$?
-    if grep -qx 'yes' "$WORKDIR/cani-gears-secrets-$verb.txt"; then
-        echo "FAIL: qa-platform-gears CAN '$verb' secrets in namespace $ARGO_NAMESPACE. That grant belongs to qa-platform-secret-writer alone (finding #94): qa-platform-gears is the ambient identity of every gear in the pod, and qa-runs never needs a Secret. Look for a leftover secrets rule on rbac-argo.yaml's qa-platform-gears-executor Role, or any other Role/ClusterRole bound to qa-platform-gears (kubectl get rolebindings,clusterrolebindings -A -o wide | grep qa-platform-gears)." >&2
-        exit 1
-    fi
-    if ! grep -qx 'no' "$WORKDIR/cani-gears-secrets-$verb.txt"; then
-        echo "FAIL: could not tell whether qa-platform-gears can '$verb' secrets in namespace $ARGO_NAMESPACE (exit $rc): $(cat "$WORKDIR/cani-gears-secrets-$verb.txt" 2>/dev/null)" >&2
-        exit 1
-    fi
-done
-echo "PASS: qa-platform-gears can NOT create or patch secrets in namespace $ARGO_NAMESPACE"
-
-# THE ADMISSION HALF (finding #94, fix round 1). RBAC leaves the writer a
-# namespace-wide create/patch; secret-writer-admission-policy.yaml narrows it
-# to Opaque Secrets named with the runner prefix, wherever the cluster serves
-# admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy (Kubernetes
-# 1.30+). A server-side dry run goes through admission but persists nothing,
-# so these three requests prove the policy is live without leaving an object
-# behind. Where the API is not served the chart renders no policy, and this
-# is a NOTE naming the wider grant, not a PASS.
-rc=0
-kubectl get --raw /apis/admissionregistration.k8s.io/v1 > "$WORKDIR/admreg-v1.json" 2>"$WORKDIR/admreg-v1.err" || rc=$?
-if [ "$rc" -ne 0 ]; then
-    echo "FAIL: could not read API discovery for admissionregistration.k8s.io/v1 (exit $rc): $(cat "$WORKDIR/admreg-v1.err" 2>/dev/null)" >&2
-    exit 1
+echo "PASS: qa-platform-gears has no create/patch/get/list on secrets in $ARGO_NAMESPACE"
+# stdout only: kubectl 1.36 warns "resource 'tokenreviews' is not namespace scoped" on stderr.
+out=$(kubectl auth can-i create tokenreviews.authentication.k8s.io --as="$GEARS" 2> "$WORKDIR/cani-tr.err" || true)
+[ "$out" = "yes" ] || { echo "FAIL: qa-platform-gears cannot create tokenreviews (got: $out $(cat "$WORKDIR/cani-tr.err"))" >&2; exit 1; }
+echo "PASS: qa-platform-gears can create tokenreviews"
+if kubectl get sa qa-platform-secret-writer -n "$NAMESPACE" >/dev/null 2>&1; then
+    echo "FAIL: the qa-platform-secret-writer ServiceAccount still exists" >&2; exit 1
 fi
-rc=0
-jq -e '[.resources[].kind] | index("ValidatingAdmissionPolicy") != null' "$WORKDIR/admreg-v1.json" > /dev/null 2>&1 || rc=$?
-if [ "$rc" -eq 1 ]; then
-    echo "NOTE: this cluster does not serve admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy, so the chart rendered no qa-platform-secret-writer-guard policy. qa-platform-secret-writer then holds the WHOLE namespace-wide grant in $ARGO_NAMESPACE, including minting a service-account-token Secret for any account there (ADR-0008, Consequences)."
-elif [ "$rc" -ne 0 ]; then
-    echo "FAIL: could not parse admissionregistration.k8s.io/v1 discovery (jq exit $rc)" >&2
-    exit 1
+kubectl get validatingadmissionpolicies.v1.admissionregistration.k8s.io "qa-platform-workflow-guard-$NAMESPACE" >/dev/null \
+    || { echo "FAIL: the Workflow guard policy is missing" >&2; exit 1; }
+
+RUNNER_SA=$(kubectl get cm qa-platform-gears-argo-qa-runs -n "$NAMESPACE" -o json \
+    | jq -r '.data[]' | sed -n 's/^ *workflow_service_account: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' | head -1)
+[ -n "$RUNNER_SA" ] || { echo "FAIL: workflow_service_account not found in the qa-platform-gears-argo-qa-runs ConfigMap" >&2; exit 1; }
+guard_case() {  # $1 = label, $2 = expect admit|deny, stdin = Workflow YAML
+    local label=$1 expect=$2 rc=0
+    kubectl create -f - --dry-run=server --as="$GEARS" -n "$ARGO_NAMESPACE" > "$WORKDIR/guard-$label.txt" 2>&1 || rc=$?
+    if [ "$expect" = admit ] && [ "$rc" -ne 0 ]; then
+        echo "FAIL: guard denied the qa-runs-shaped Workflow ($label):" >&2; cat "$WORKDIR/guard-$label.txt" >&2; exit 1
+    fi
+    if [ "$expect" = deny ] && { [ "$rc" -eq 0 ] || ! grep -q "workflow-guard:" "$WORKDIR/guard-$label.txt"; }; then
+        echo "FAIL: guard admitted $label:" >&2; cat "$WORKDIR/guard-$label.txt" >&2; exit 1
+    fi
+    echo "PASS: workflow guard ${expect}s $label"
+}
+wf() {  # $1 = extra spec YAML (indented 2), $2 = extra volume YAML (indented 4)
+cat <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata: {generateName: verify-k8s-guard-}
+spec:
+  entrypoint: main
+  serviceAccountName: $RUNNER_SA
+  securityContext: {runAsNonRoot: true, runAsUser: 1000}
+  templates:
+    - name: main
+      container:
+        image: busybox:1.36
+        command: ["true"]
+        securityContext: {allowPrivilegeEscalation: false}
+  volumes:
+    - {name: tmp, emptyDir: {}}
+    - name: runner-credentials
+      projected: {sources: [{serviceAccountToken: {audience: qa-platform-runner-credentials, expirationSeconds: 600, path: token}}]}
+$2
+$1
+EOF
+}
+wf "" "" | guard_case qa-runs-shape admit
+wf "" "    - {name: s, secret: {secretName: anything}}" | guard_case secret-volume deny
+wf "  podSpecPatch: '{}'" "" | guard_case podSpecPatch deny
+wf "" "" | sed "s/serviceAccountName: $RUNNER_SA/serviceAccountName: default/" | guard_case other-service-account deny
+wf "" "" | sed 's/      container:/      script:/' | guard_case script-template deny
+# Status is the Argo controller's. Only meaningful while the Workflow CRD has no
+# status subresource (Argo's CRDs do not declare one): with one, the API server
+# drops status from a main-resource write before admission ever sees it.
+STATUS_SUBRESOURCE=$(kubectl get crd workflows.argoproj.io \
+    -o jsonpath='{.spec.versions[?(@.name=="v1alpha1")].subresources.status}' 2>/dev/null || true)
+if [ -z "$STATUS_SUBRESOURCE" ]; then
+    { wf "" ""; echo "status: {phase: Succeeded}"; } | guard_case status-on-create deny
 else
-    WRITER="system:serviceaccount:$NAMESPACE:qa-platform-secret-writer"
-    rc=0
-    kubectl get validatingadmissionpolicies.v1.admissionregistration.k8s.io "qa-platform-secret-writer-guard-$NAMESPACE" > "$WORKDIR/vap.txt" 2>&1 || rc=$?
-    if [ "$rc" -ne 0 ]; then
-        echo "FAIL: the cluster serves ValidatingAdmissionPolicy but qa-platform-secret-writer-guard-$NAMESPACE does not exist: $(cat "$WORKDIR/vap.txt" 2>/dev/null). Helm renders it only when its discovery saw the API -- re-run the helm upgrade." >&2
-        exit 1
-    fi
-    # Allowed: an Opaque Secret under the runner prefix, the writer's own shape.
-    rc=0
-    kubectl create secret generic qa-platform-verify-k8s-dryrun -n "$ARGO_NAMESPACE" \
-        --from-literal=value=x --dry-run=server --as="$WRITER" > "$WORKDIR/vap-allow.txt" 2>&1 || rc=$?
-    if [ "$rc" -ne 0 ]; then
-        echo "FAIL: the admission policy refuses the writer's OWN shape (a prefixed Opaque Secret), so every D4 write would be denied (exit $rc): $(cat "$WORKDIR/vap-allow.txt" 2>/dev/null)" >&2
-        exit 1
-    fi
-    # Denied: a name outside the prefix.
-    rc=0
-    kubectl create secret generic verify-k8s-not-prefixed -n "$ARGO_NAMESPACE" \
-        --from-literal=value=x --dry-run=server --as="$WRITER" > "$WORKDIR/vap-name.txt" 2>&1 || rc=$?
-    if [ "$rc" -eq 0 ] || ! grep -q "qa-platform-secret-writer-guard-$NAMESPACE" "$WORKDIR/vap-name.txt"; then
-        echo "FAIL: qa-platform-secret-writer was NOT denied by qa-platform-secret-writer-guard-$NAMESPACE creating an unprefixed Secret in $ARGO_NAMESPACE (exit $rc): $(cat "$WORKDIR/vap-name.txt" 2>/dev/null)" >&2
-        exit 1
-    fi
-    # Denied: a prefixed service-account-token Secret -- the minting route.
-    rc=0
-    kubectl create -f - --dry-run=server --as="$WRITER" > "$WORKDIR/vap-type.txt" 2>&1 <<EOF_TOKEN || rc=$?
-apiVersion: v1
-kind: Secret
-metadata:
-  name: qa-platform-verify-k8s-token-dryrun
-  namespace: $ARGO_NAMESPACE
-  annotations:
-    kubernetes.io/service-account.name: default
-type: kubernetes.io/service-account-token
-EOF_TOKEN
-    if [ "$rc" -eq 0 ] || ! grep -q "qa-platform-secret-writer-guard-$NAMESPACE" "$WORKDIR/vap-type.txt"; then
-        echo "FAIL: qa-platform-secret-writer was NOT denied by qa-platform-secret-writer-guard-$NAMESPACE creating a service-account-token Secret in $ARGO_NAMESPACE (exit $rc): $(cat "$WORKDIR/vap-type.txt" 2>/dev/null). That is a token for any account in the namespace." >&2
-        exit 1
-    fi
-    echo "PASS: qa-platform-secret-writer-guard-$NAMESPACE admits the writer's prefixed Opaque Secret and denies an unprefixed name and a service-account-token Secret (server-side dry runs)"
+    echo "NOTE: workflows.argoproj.io serves a status subresource; the API server itself keeps status out of a gears CREATE/UPDATE, so the guard's status rules are not exercised"
 fi
+
+# UPDATE: a server-side dry run of an update needs an existing object, so make
+# one real Workflow (deadline 1s, so it cannot run for long) and delete it as
+# the operator whatever the outcome.
+rc=0
+GUARD_WF=$(wf "  activeDeadlineSeconds: 1" "" | kubectl create -f - -o name --as="$GEARS" -n "$ARGO_NAMESPACE" 2> "$WORKDIR/guard-update-create.txt") || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$GUARD_WF" ]; then
+    echo "FAIL: could not create the Workflow the UPDATE cases patch:" >&2; cat "$WORKDIR/guard-update-create.txt" >&2; exit 1
+fi
+upd_rc=0
+kubectl patch "$GUARD_WF" -n "$ARGO_NAMESPACE" --type merge -p '{"spec":{"volumes":[{"name":"x","emptyDir":{}}]}}' \
+    --dry-run=server --as="$GEARS" > "$WORKDIR/guard-update-deny.txt" 2>&1 || upd_rc=$?
+upd_status_rc=0
+if [ -z "$STATUS_SUBRESOURCE" ]; then
+    kubectl patch "$GUARD_WF" -n "$ARGO_NAMESPACE" --type merge -p '{"status":{"phase":"Succeeded","message":"verify-k8s"}}' \
+        --dry-run=server --as="$GEARS" > "$WORKDIR/guard-update-status.txt" 2>&1 || upd_status_rc=$?
+fi
+upd_ok_rc=0
+kubectl patch "$GUARD_WF" -n "$ARGO_NAMESPACE" --type merge -p '{"spec":{"shutdown":"Terminate"}}' \
+    --dry-run=server --as="$GEARS" > "$WORKDIR/guard-update-admit.txt" 2>&1 || upd_ok_rc=$?
+kubectl delete "$GUARD_WF" -n "$ARGO_NAMESPACE" --wait=false >/dev/null 2>&1 || echo "NOTE: could not delete $GUARD_WF in $ARGO_NAMESPACE; its 1s deadline and Argo's cleanup will retire it" >&2
+if [ "$upd_rc" -eq 0 ] || ! grep -q "workflow-guard: an update may only set spec.shutdown" "$WORKDIR/guard-update-deny.txt"; then
+    echo "FAIL: guard admitted an update that changes spec.volumes (exit $upd_rc):" >&2; cat "$WORKDIR/guard-update-deny.txt" >&2; exit 1
+fi
+echo "PASS: workflow guard denies an update that changes anything but spec.shutdown"
+if [ -z "$STATUS_SUBRESOURCE" ]; then
+    if [ "$upd_status_rc" -eq 0 ] || ! grep -q "workflow-guard: an update may not change status" "$WORKDIR/guard-update-status.txt"; then
+        echo "FAIL: guard admitted an update that changes status (exit $upd_status_rc):" >&2; cat "$WORKDIR/guard-update-status.txt" >&2; exit 1
+    fi
+    echo "PASS: workflow guard denies an update that changes status"
+fi
+if [ "$upd_ok_rc" -ne 0 ]; then
+    echo "FAIL: guard denied the cancel patch (spec.shutdown):" >&2; cat "$WORKDIR/guard-update-admit.txt" >&2; exit 1
+fi
+echo "PASS: workflow guard admits the cancel patch (spec.shutdown)"
 
 step "k8s 4/4: /realms serves Keycloak's discovery document through the UI nginx"
 # THIS CHECK ALSO COVERS "Keycloak's own advertised issuer": a deployment that
@@ -1673,5 +1565,23 @@ if [ "$iss" != "$PUBLIC_ORIGIN/realms/qa-platform" ]; then
 fi
 echo "PASS: discovery served at one origin through the UI nginx, issuer '$iss'"
 
+
+step "no runner Secrets were created in \$ARGO_NAMESPACE by this deploy (finding #94)"
+if [ -z "${DEPLOY_STARTED:-}" ]; then
+    echo "NOTE: DEPLOY_STARTED is unset (deploy-k8s.sh exports it), so Secrets created by this deploy cannot be told from older ones. Skipping the count."
+else
+    new_secrets=$(kubectl get secrets -n "$ARGO_NAMESPACE" -o json | jq -r --arg since "$DEPLOY_STARTED" '
+        .items[]
+        | select(.type == "Opaque")
+        | select(.metadata.name | startswith("qa-platform-"))
+        | select((.metadata.labels // {}) | has("app.kubernetes.io/managed-by") | not)
+        | select(.metadata.creationTimestamp >= $since)
+        | .metadata.name')
+    if [ -n "$new_secrets" ]; then
+        echo "FAIL: Opaque Secret(s) named qa-platform-* were created in $ARGO_NAMESPACE since $DEPLOY_STARTED -- something is still writing runner credentials as Secrets:" >&2
+        printf '%s\n' "$new_secrets" >&2; exit 1
+    fi
+    echo "PASS: no unlabelled Opaque qa-platform-* Secrets were created in $ARGO_NAMESPACE since $DEPLOY_STARTED"
+fi
 echo
 echo "VERIFY-K8S: every check above passed individually"

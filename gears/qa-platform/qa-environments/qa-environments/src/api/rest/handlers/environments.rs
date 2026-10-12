@@ -139,7 +139,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{Extension, Path, refresh_environment};
-    use crate::domain::ports::{NoopRunnerSecretWriter, ProductPluginPort};
+    use crate::domain::ports::ProductPluginPort;
     use crate::domain::service::actions;
     use crate::gear::ConcreteAppServices;
     use crate::test_support::{
@@ -273,7 +273,6 @@ mod tests {
             inmem_db().await,
             Arc::new(RecordingAuthZ::new()),
             Arc::new(RecordingCredStore::new()),
-            Arc::new(NoopRunnerSecretWriter),
             port_scripted([]),
             crate::config::QaEnvironmentsConfig::default().max_variables,
         )
@@ -370,7 +369,6 @@ mod tests {
             inmem_db().await,
             authz.clone(),
             Arc::new(RecordingCredStore::new()),
-            Arc::new(NoopRunnerSecretWriter),
             port_scripted([plugin_detected("26.5", Some("0"))]),
             crate::config::QaEnvironmentsConfig::default().max_variables,
         );

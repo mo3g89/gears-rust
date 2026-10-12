@@ -83,50 +83,102 @@ derived from our credential material, and suppressing it would leave operators d
   leaked root.
 
   *(Added 2026-09-29, second review, finding #62; condition stated 2026-09-30.)*
-* Bad, because **a compromised gears process can still read any Secret in the Argo namespace, and
-  the runner-`Secret` writer is contained only where the cluster supports admission policies**
-  (second review, finding #94).
+* Bad, because **a runner pod's credentials are fetched, not mounted, and residues remain** (listed
+  under "What remains" below)
+  (second review, finding #94; **decision amendment, 2026-10-09**).
 
-  The writer is qa-environments' runner-`Secret` writer (labelled `D4` in code comments). It needs `create` and `patch` on Secrets in
-  the Argo namespace, which also holds Argo's own Secrets. RBAC cannot narrow that grant: `create`
-  ignores `resourceNames`, and the names `patch` would need are derived per tenant and per
-  credential at runtime.
+  **Decision amendment (2026-10-09, finding #94).** Gears write no Kubernetes Secrets at all: a
+  runner pod fetches its credentials when it starts, proving who it is with a ServiceAccount token
+  bound to that pod, and a mandatory admission policy limits the Workflows `qa-platform-gears` may
+  submit to the shape qa-runs generates. This replaces the entry of 2026-09-30, which accepted that a
+  compromised gears process could read any Secret in the Argo namespace through the runner-`Secret`
+  writer (labelled `D4` in code comments) and through `workflows: create`. That writer needed
+  `create` and `patch` on Secrets in a namespace that also holds Argo's own, and RBAC could not narrow
+  the grant (`create` ignores `resourceNames`).
 
-  What changed is who holds the grant:
-  - It used to belong to `qa-platform-gears`, the ambient ServiceAccount of every gear in the pod,
-    qa-runs included, even though qa-runs never needs a Secret.
-  - It now belongs to a single-purpose `qa-platform-secret-writer` ServiceAccount, whose token only
-    the D4 writer is configured to read. Its requests are distinguishable in the API server's audit
-    log, and its token Secret can be deleted to revoke it on its own.
+  How it works:
+  - qa-runs renders a projected `serviceAccountToken` volume (audience
+    `qa-platform-runner-credentials`, `expirationSeconds: 600`) into every runner pod, plus a
+    memory-backed `emptyDir` on the parent directory of each credential mount, and stamps the
+    `qa-platform/run-id` and `qa-platform/tenant-id` labels on each node template.
+    `QA_CREDENTIALS_URL`, `QA_CREDENTIALS_TOKEN_FILE` and `QA_CREDENTIAL_DIRS` are set only for runs
+    whose plugin access has credential mounts, and all three are reserved names: no run parameter,
+    pipeline variable or environment variable may set them.
+  - Before the tenant's code runs, the runner POSTs the token in `X-QA-Runner-Token` to
+    `POST /qa/v1/runner-credentials`, an internal route: not registered in the gateway and not
+    proxied by the UI nginx (which answers 404 for it), so reachable in-cluster only. It is
+    anonymous at the toolkit layer
+    (a bearer header would be re-validated by the auth middleware and a ServiceAccount token
+    refused). It writes the returned files into the directories it declared.
+  - qa-environments runs a `TokenReview` for that audience and accepts only the pinned runner
+    ServiceAccount carrying the pod-name and pod-uid claims, then reads the pod and requires the
+    same uid and a non-terminal phase. The pod's workflow is its controller `ownerReference`
+    (exactly one, `argoproj.io` `Workflow`), which the Argo controller sets and no `Workflow` spec
+    can; a pod without one is refused. The `workflows.argoproj.io/workflow` label is not used: Argo
+    applies template metadata labels after its own, so a `Workflow` author could overwrite it. The
+    tenant and run labels only say where to look. qa-environments then asks qa-runs
+    (`resolve_runner_pod`) for that run, and qa-runs answers only when the run is live, its owning
+    tenant equals the pod's tenant label, and its execution handle (`execution_ref`) equals the
+    owner workflow's name. The binding is therefore the controller ownerReference plus
+    `execution_ref`: workflow names are unique in the namespace, so only pods of the Workflow
+    qa-runs submitted for that run pass.
+  - Only the mounts that the environment's plugin returns from `prepare_run_access` are resolved
+    through credstore, and only refs among the environment's own stored credentials are served. A
+    nil pod tenant, a foreign ref, or a call over its 30 s deadline is refused. Every 403 has one
+    body, and each grant or denial is logged on `qa_environments.runner_credentials` with a file
+    count, never refs or material.
 
-  That token is mounted into the same gears container, so a compromised gears process holds the
-  writer's grant too. What the grant allows depends on the cluster:
-  - Where `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy is served (Kubernetes 1.30
-    and later), the chart's `qa-platform-secret-writer-guard-<release namespace>` policy admits only
-    `Opaque` Secrets whose names start with the runner prefix `qa-platform-`. The writer can still
-    create such a Secret, or overwrite any tenant's runner-credential Secret by name, because they
-    all share that prefix. It cannot touch any other Secret, and cannot read, list or delete one.
-    That holds only while the Argo namespace is not the release namespace: every Secret the chart
-    owns (`qa-platform-realm`, `qa-platform-gears-config`, …) carries the same prefix, so in a
-    shared namespace the writer could overwrite them. The chart therefore refuses to render when
-    `argo.namespace` equals the release namespace (`rbac-argo.yaml`). The prefix was not renamed,
-    because that would orphan every live runner Secret. *(Added 2026-10-08, re-verification of
-    #94.)*
-  - Where the API is not served, the policy does not render, and the writer can create any Secret
-    in the namespace or overwrite any existing one by name. That includes minting a
-    `kubernetes.io/service-account-token` Secret for any ServiceAccount there, Argo's controller and
-    server accounts included, which the token controller then fills with a working token.
+  Deleted: the `RunnerSecretWriter` port and adapter, the `runner-secret` feature, the
+  `qa-platform-secret-writer` ServiceAccount, Role, token Secret and admission policy, the writer's
+  kubeconfig and mounts, qa-runs' `secret` volumes and `secretKeyRef` path, and the config keys
+  `argo.secret_prefix`, `argo.secret_key`, `argo.kubeconfig_path` and qa-runs'
+  `secret_name_prefix` and `secret_key`. The refusal of `argo.namespace` equal to the release
+  namespace went with them, because its only reason was the writer. `qa-platform-gears` now holds no
+  rights on Secrets and `tokenreviews: create` through its own ClusterRole.
 
-  **The remaining gap is `qa-platform-gears`' own `workflows` `create`.** qa-runs needs that grant to
-  submit runs, so it stays with the pod's identity. A compromised gears process can use it to submit
-  a Workflow whose pod mounts any Secret in the Argo namespace and runs as any ServiceAccount there.
-  Through that Workflow it can read every Secret in the namespace, including any token the writer
-  minted. This change does not close that. Closing it needs admission control over the Workflows
-  qa-runs submits (a pinned `serviceAccountName`, and Secret volumes limited to the runner prefix),
-  or the writer and executor in separate processes with separate identities.
+  The Workflow guard is the chart's `qa-platform-workflow-guard-<release namespace>`
+  ValidatingAdmissionPolicy and binding, `failurePolicy: Fail`, matching only
+  `qa-platform-gears` in the Argo namespace. It is an allowlist, not a denylist, because Argo has
+  many fields that widen rights and later releases add more. On CREATE it admits only the spec and
+  template keys qa-runs emits (one source of truth in qa-runs, checked against the chart's CEL by a
+  Helm test), the pinned `argo.workflowServiceAccount`, `runAsNonRoot`, only `emptyDir` and
+  audience-pinned projected volumes, and containers with no `envFrom` or `valueFrom` and no
+  privilege escalation. The shape rules apply to CREATE only: the Argo controller adds
+  `spec.arguments` and template `inputs` and `outputs` after creation (measured on the stand), so an
+  UPDATE may change `spec.shutdown` and nothing else, which is all the cancel path writes. `status`
+  is the Argo controller's alone: a CREATE may carry none and an UPDATE must leave it unchanged (the
+  cancel merge-patch leaves it equal; the controller writes status as its own ServiceAccount, which
+  the policy does not match). The chart refuses to render where the API is not served.
 
-  Accepted, and recorded here for the same reason as the entry above.
-
+  What remains:
+  * Bad, because tenant test code can re-request its own run's credentials while its pod is alive.
+    This is not a widening: the same files are already in the pod's tmpfs.
+  * Bad, because the guard does not restrict the runner image, its command or the container's
+    capabilities beyond privilege escalation.
+  * Bad, because Kubernetes 1.30 or later is required (ValidatingAdmissionPolicy v1).
+  * Bad, because `qa-platform-gears` can create a `TokenReview` for any token. That tells it whether
+    a token is valid, and nothing more.
+  * Bad, because a product plugin's `access.service_account` override would now be denied by the
+    pinned-ServiceAccount rule. No in-tree plugin uses it.
+  * Bad, because the guard matches `qa-platform-gears` only. Any other principal allowed to create
+    Workflows in the Argo namespace can still run arbitrary pods as the runner ServiceAccount and
+    mount a token for the runner audience. Such a pod cannot claim another tenant's run: its
+    controller ownerReference names that principal's own Workflow, never the Workflow qa-runs
+    recorded as the run's `execution_ref`, and template metadata cannot set ownerReferences.
+    What remains is narrower: a principal that can create **pods** directly in the Argo namespace
+    can write any `ownerReferences` it likes (the API server accepts them; the
+    `OwnerReferencesPermissionEnforcement` plugin gates only `blockOwnerDeletion`), so it could name
+    a live run's Workflow and claim that run's credentials while the run is live. That principal can
+    already run any image as any ServiceAccount in the namespace; `qa-platform-gears` cannot create
+    pods. Closing it would mean also checking the pod against the owner Workflow's `status.nodes`,
+    which is not done.
+  * Bad, because credentials and the runner's token now cross the pod network in plain HTTP to the
+    gears Service. Before, a mounted Secret travelled API server to kubelet over TLS. The runner
+    NetworkPolicy limits who the runner talks to, not who can observe that traffic on the node or
+    the CNI.
+  * Bad, because a product whose `RunnerSpec` sets a custom image or `command` that bypasses
+    `entrypoint.sh` must run `fetch_credentials.py` itself, or its credential directories stay
+    empty (documented on `RunnerSpec`).
   *(Added 2026-09-30, second review, finding #94.)*
 
 ### Confirmation
@@ -135,3 +187,26 @@ derived from our credential material, and suppressing it would leave operators d
 * `assert_no_leak` runs against both shipped plugins.
 * `postgres-credstore-plugin`'s `leak_tests.rs` and `sea_orm_trace_exposure.rs` cover the storage
   side, where an ORM trace is the other way material escapes.
+* `deploy/helm/tests/check_workflow_guard.py`: the chart refuses to render without the
+  ValidatingAdmissionPolicy API, renders the guard and binding, gives `qa-platform-gears` no rights
+  on Secrets, and keeps the CEL allowlist equal to qa-runs' set.
+* `deploy/remote/verify-k8s.sh` `k8s 3/4`: as `qa-platform-gears`, a legitimate Workflow is
+  admitted and a `secret` volume, `podSpecPatch`, another ServiceAccount, a `script` template, a
+  CREATE carrying `status`, and an UPDATE of `volumes` or of `status` are denied (the two status
+  cases only while the Workflow CRD has no status subresource); no new runner Secret appears in the
+  Argo namespace. Check 6b's follow-up: the public origin answers 404 for
+  `POST /qa/v1/runner-credentials`.
+* `deploy/helm/tests/test_nginx_template.sh` pins the UI nginx's `location ^~
+  /qa/v1/runner-credentials { return 404; }`.
+* qa-environments' `pod_identity` tests: the workflow name comes from the one controller
+  `argoproj.io` `Workflow` ownerReference, and a pod with none, a non-controller one, the wrong
+  kind or group, two, or only the label is refused. qa-runs'
+  `a_pod_claiming_another_tenant_is_not_found_even_under_a_covering_scope` pins the tenant
+  comparison.
+* qa-runs' `every_rendered_key_is_inside_the_admission_allowlist` renders three synthetic run
+  shapes (a two-node DAG with a credential mount, a single node, and a collect-shaped run with no
+  mounts) with the runner ServiceAccount configured, and checks every spec, template, DAG-task and
+  volume key against the allowlist and that `spec.serviceAccountName` is present. It does not render
+  the shipped plugins' own specs.
+* qa-environments' `runner_credentials_tests`: every row of the error table, only the plugin's
+  mounts returned, and no material in any error or log.

@@ -96,10 +96,9 @@ metadata:
      the hook was ever applied.
 
      WHY THAT SURVIVED THREE REVIEWS, so the next reader does not repeat the
-     mistake: the identical `create,patch` reasoning IS correct for the GEARS'
-     Role, whose writer performs a server-side `Patch::Apply`
-     (runner_secret_writer::ensure_runner_secret). The sentence was transplanted
-     from there to this Role, whose container ran a different mechanism, and
+     mistake: a `create,patch` justification was written for a server-side
+     `Patch::Apply` (the former runner Secret writer, since deleted) and
+     transplanted to this Role, whose container ran a different mechanism, and
      every review checked the verbs against the SENTENCE instead of against
      the command the container actually executes. The correct repair was to
      move the container onto the mechanism the verbs already described -- NOT

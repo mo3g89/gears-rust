@@ -7,20 +7,14 @@
 /// process-global no-op provider. See the module's own header.
 pub mod metrics;
 pub mod product_plugin;
+/// [`crate::domain::ports::RunnerPodResolver`] over qa-runs'
+/// `resolve_runner_pod`. Not feature-gated: it is a `ClientHub` lookup and
+/// pulls no Kubernetes client in.
+pub mod runner_pod_resolver;
 pub mod storage;
 
-/// The only place in this crate that builds a Kubernetes client, and since
-/// Task 19b the only thing that needs one: decision **D4**'s runner-`Secret`
-/// writer.
-///
-/// Behind the non-default `runner-secret` cargo feature — renamed from
-/// `platform-observation` by Task 19b, because after Task 19 it gates a
-/// `Secret` writer and nothing observational, and a feature named for work it
-/// no longer does is this branch's signature defect in cargo form. See
-/// ADR-0001's Amendments section, which records this adapter and confirms
-/// that a default build of `qa-environments` still carries no Kubernetes
-/// dependency.
-#[cfg(feature = "runner-secret")]
-pub mod runner_secret_errors;
-#[cfg(feature = "runner-secret")]
-pub mod runner_secret_writer;
+/// Finding #94's `TokenReview` + `GET pod` verifier, behind the non-default
+/// `runner-credentials` feature for ADR-0001's reason: it is the second
+/// place this crate builds a Kubernetes client.
+#[cfg(feature = "runner-credentials")]
+pub mod pod_identity;

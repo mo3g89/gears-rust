@@ -467,6 +467,24 @@ pub trait RunsRepository: Send + Sync {
         id: Uuid,
     ) -> Result<Option<Run>, DomainError>;
 
+    /// [`Self::get`], together with the tenant that owns the row.
+    ///
+    /// For a caller that must compare the owner to a tenant it was *told*
+    /// rather than one its scope was compiled for: a covering scope (a policy
+    /// that grants a system subject several tenants) admits rows of every
+    /// tenant it covers, so the scope alone does not say whose row came back.
+    /// `DispatchService::resolve_runner_pod` is that caller.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get`].
+    async fn get_with_owner<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<(Uuid, Run)>, DomainError>;
+
     /// Every run in scope. `OData` filtering is applied at the API layer, not
     /// here.
     ///

@@ -4,8 +4,7 @@
 //! Named types are `Uuid`, `SecurityContext` and
 //! `qa_product_sdk::QaProductPluginV1` — never `qa-catalog`'s SDK client, and
 //! never a `ClientHub`. `infra::product_plugin` is the only impl that knows
-//! either exists, exactly as `infra::runner_secret_writer` is the only impl
-//! that knows Kubernetes does.
+//! either exists.
 
 use std::sync::Arc;
 

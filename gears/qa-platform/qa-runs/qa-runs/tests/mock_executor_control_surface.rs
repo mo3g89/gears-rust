@@ -36,7 +36,7 @@ fn spec_for(run_id: Uuid) -> RunSpec {
             bundle_token: String::new(),
             test_files: vec!["tests/test_smoke.py".to_owned()],
         }],
-        env: RunEnv::new(BTreeMap::new(), BTreeMap::new()),
+        env: RunEnv::new(BTreeMap::new()),
         access: RunAccess::default(),
         runner: RunnerSpec::default(),
         timeout_seconds: 3600,

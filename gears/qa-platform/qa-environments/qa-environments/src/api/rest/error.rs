@@ -134,6 +134,26 @@ impl From<DomainError> for CanonicalError {
                 tracing::error!(error = ?e, "Internal error occurred");
                 CanonicalError::internal("An internal error occurred").create()
             }
+
+            // The runner-credential route (`POST /qa/v1/runner-credentials`,
+            // finding #94). None of the three carries text from the caller or
+            // from Kubernetes, and each renders one fixed body: the domain
+            // logged the cause, the response never names it.
+            DomainError::RunnerUnauthenticated => CanonicalError::unauthenticated()
+                .with_reason("RUNNER_TOKEN_MISSING")
+                .create(),
+
+            // The same `permission_denied` as `Forbidden`, with its own reason,
+            // and the same body for every cause: a refused token, a dead pod,
+            // a run qa-runs does not vouch for and an environment outside the
+            // pod's tenant are indistinguishable to the caller.
+            DomainError::RunnerForbidden => PlatformResourceError::permission_denied()
+                .with_reason("RUNNER_CREDENTIALS_DENIED")
+                .create(),
+
+            DomainError::RunnerCredentialsUnavailable => CanonicalError::service_unavailable()
+                .with_detail("runner credentials are temporarily unavailable")
+                .create(),
         };
 
         if let Some(diag) = ce.diagnostic() {
@@ -163,7 +183,7 @@ mod tests {
     /// Bumping this without adding a value to that array is a **compile**
     /// error: the array literal would then be one element short of its declared
     /// length. That is the one link in the chain the compiler holds on its own.
-    const DOMAIN_ERROR_VARIANTS: usize = 12;
+    const DOMAIN_ERROR_VARIANTS: usize = 15;
 
     /// One of every `DomainError` variant.
     ///
@@ -215,6 +235,9 @@ mod tests {
             DomainError::CredStore("sealed".to_owned()),
             DomainError::database("connection reset"),
             DomainError::Internal("boom".to_owned()),
+            DomainError::RunnerUnauthenticated,
+            DomainError::RunnerForbidden,
+            DomainError::RunnerCredentialsUnavailable,
         ]
     }
 
@@ -244,7 +267,10 @@ mod tests {
             DomainError::Forbidden => 8,
             DomainError::CredStore(_) => 9,
             DomainError::Database { .. } => 10,
-            DomainError::Internal(_) => DOMAIN_ERROR_VARIANTS - 1,
+            DomainError::Internal(_) => 11,
+            DomainError::RunnerUnauthenticated => 12,
+            DomainError::RunnerForbidden => 13,
+            DomainError::RunnerCredentialsUnavailable => DOMAIN_ERROR_VARIANTS - 1,
         }
     }
 
@@ -382,6 +408,44 @@ mod tests {
         assert!(
             !format!("{ce:?}").contains("10.0.0.5"),
             "credstore detail text must not be surfaced: {ce:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_runner_token_maps_to_unauthenticated_401() {
+        let ce: CanonicalError = DomainError::RunnerUnauthenticated.into();
+        assert_eq!(ce.status_code(), 401);
+        assert!(
+            matches!(ce, CanonicalError::Unauthenticated { .. }),
+            "expected Unauthenticated, got {ce:?}"
+        );
+    }
+
+    #[test]
+    fn a_runner_refusal_maps_to_permission_denied_403_with_its_own_reason() {
+        let ce: CanonicalError = DomainError::RunnerForbidden.into();
+        assert_eq!(ce.status_code(), 403);
+        assert!(
+            matches!(ce, CanonicalError::PermissionDenied { .. }),
+            "expected PermissionDenied, got {ce:?}"
+        );
+        assert!(
+            format!("{ce:?}").contains("RUNNER_CREDENTIALS_DENIED"),
+            "the runner route's 403 carries its own reason: {ce:?}"
+        );
+    }
+
+    #[test]
+    fn runner_credentials_unavailable_maps_to_service_unavailable_503_with_fixed_detail() {
+        let ce: CanonicalError = DomainError::RunnerCredentialsUnavailable.into();
+        assert_eq!(ce.status_code(), 503);
+        assert!(
+            matches!(ce, CanonicalError::ServiceUnavailable { .. }),
+            "expected ServiceUnavailable, got {ce:?}"
+        );
+        assert!(
+            format!("{ce:?}").contains("runner credentials are temporarily unavailable"),
+            "the 503 carries one fixed detail: {ce:?}"
         );
     }
 

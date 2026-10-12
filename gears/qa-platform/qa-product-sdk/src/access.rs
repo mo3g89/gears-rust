@@ -107,7 +107,15 @@ pub struct RunnerSpec {
     /// `qa-runs.argo.runner_image` survives as a deployment-wide default a
     /// plugin may inherit, so a plugin indifferent to its image declares
     /// nothing.
+    ///
+    /// **A custom image or `command` owns the credential fetch.** The stock
+    /// runner's `deploy/runner/entrypoint.sh` runs `fetch_credentials.py`
+    /// before the suite (finding #94): no credential is mounted any more, so a
+    /// runner that bypasses that entrypoint must run `fetch_credentials.py`
+    /// (or an equivalent `POST` of its projected token to
+    /// `QA_CREDENTIALS_URL`) itself, or its credential directories stay empty.
     pub image: Option<String>,
+    /// See [`Self::image`] on what a custom command must still do.
     pub command: Vec<String>,
     pub image_pull_policy: Option<String>,
 }

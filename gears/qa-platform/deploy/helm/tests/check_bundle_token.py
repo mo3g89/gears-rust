@@ -85,6 +85,7 @@ def render():
     proc = subprocess.run(
         [
             "helm", "template", "guard", str(CHART),
+            "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy",
             "--set", "publicOrigin=https://guard.example",
             # keycloak.adminPassword has no default -- any value
             # renders; this one is obviously not a real credential.

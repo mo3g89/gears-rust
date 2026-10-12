@@ -144,9 +144,10 @@ const RESOURCE_TYPES: &[&str] = &[
 /// **It moves whenever a call site is added or removed**, including one that
 /// enforces a pair already listed above. Re-run the scan and take the number
 /// from its failure message; do not adjust it to make a red test green without
-/// checking what changed.
+/// checking what changed. 19 → 20 with `runner_credentials`' read of the
+/// environment (`qa.platform` `get`, a pair already listed), finding #94.
 #[cfg(test)]
-const EXPECTED_ACCESS_SCOPE_SITES: usize = 19;
+const EXPECTED_ACCESS_SCOPE_SITES: usize = 20;
 
 #[cfg(test)]
 #[path = "authz_surface_tests.rs"]

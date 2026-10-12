@@ -21,10 +21,8 @@
 //! it was wrong and shipped: **this is the only qa-platform crate that names
 //! those types unconditionally**, and only the product plugins that actually
 //! target clusters link it. It is *not* the only crate in the workspace that
-//! names them — `qa-environments` does behind `runner-secret` (the feature
-//! Task 19b renamed `platform-observation` to), `qa-runs` behind `argo` for as
-//! long as the Argo adapter
-//! lives, and outside qa-platform so do `libs/toolkit-k8s-auth`,
+//! names them — `qa-environments` does behind `runner-credentials`, `qa-runs`
+//! behind `argo` for as long as the Argo adapter lives, and outside qa-platform so do `libs/toolkit-k8s-auth`,
 //! `chat-engine` and `mini-chat`.
 //!
 //! Containment here stops being a convention a reviewer has to remember and
@@ -44,9 +42,9 @@
 //! Every module here was lifted from `qa-environments/src/infra/observer/`,
 //! then behind its `platform-observation` feature. It was a **copy**: Phase C
 //! must not change `qa-environments`' behaviour, so both paths existed side by
-//! side until the one-way door in Phase E. Task 19b deleted the observer and
-//! moved its runner-`Secret` writer out of that directory. Each module's
-//! header names its origin and what is left of it.
+//! side until the one-way door in Phase E. Task 19b deleted the observer, and
+//! the runner-`Secret` writer that outlived it has since been removed too.
+//! Each module's header names its origin and what is left of it.
 //!
 //! What did **not** come along: the VHP install-topology rules
 //! (`core-install-metadata`, `vp-gateway-hostnames`, `platformVersion`). Those
@@ -68,7 +66,6 @@
 
 pub mod errors;
 pub mod kube_client;
-pub mod secret_writer;
 
 // Test doubles for the API server. Public rather than `cfg(test)` because
 // ADR-0001 makes them impossible to build anywhere else; the module's own
@@ -82,4 +79,3 @@ pub use errors::{classify, classify_kubeconfig};
 pub use kube_client::{
     ClusterHealth, ClusterStatus, ConfigMapData, KubeClient, LabelSelector, NodeSummary,
 };
-pub use secret_writer::SecretWriter;

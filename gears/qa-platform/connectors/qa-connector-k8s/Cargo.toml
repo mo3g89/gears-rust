@@ -5,7 +5,7 @@ publish = false
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Kubernetes transport for QA Platform product plugins whose target is a cluster: client construction from kubeconfig material, ConfigMap and node reads, Secret materialisation, and the failure classifier that keeps credential bytes off every published surface. A library, not a plugin -- no gear, no GTS identity, nothing resolves it at runtime; product plugins link it."
+description = "Kubernetes transport for QA Platform product plugins whose target is a cluster: client construction from kubeconfig material, ConfigMap and node reads, and the failure classifier that keeps credential bytes off every published surface. A library, not a plugin -- no gear, no GTS identity, nothing resolves it at runtime; product plugins link it."
 
 [lints]
 workspace = true
@@ -14,18 +14,11 @@ workspace = true
 qa-product-sdk = { path = "../../qa-product-sdk" }
 credstore-sdk = { workspace = true }
 tracing = { workspace = true }
-# The tenant a runner Secret's name is derived under (`secret_writer`). Not
-# Kubernetes-shaped and not covered by ADR-0001's containment note above --
-# every qa-platform crate already names this type.
-uuid = { workspace = true }
 
 # ── Kubernetes, and why there is no feature gate ──────────────────────────────
 #
 # ADR-0001 forbids `kube`/`k8s-openapi` in a default build of any qa-platform
-# gear. Its Amendments section permits `qa-environments`' Secret writer behind
-# a non-default feature (`platform-observation`, renamed `runner-secret` when
-# Task 19b deleted the observer half). ADR-0001's Amendments section is the
-# only amendment there is.
+# gear; its Amendments section is the record of what it permits.
 # The containment here is structural rather than conventional, so the feature
 # gate has nothing left to buy — a build that does not want Kubernetes simply
 # does not depend on this crate. (The `test-support` feature further down gates
@@ -36,9 +29,8 @@ uuid = { workspace = true }
 # shipped: **this crate is the only qa-platform crate that names these types
 # UNCONDITIONALLY**, and its only dependent is a product plugin whose target is
 # a cluster. It is not the only crate that names them. `qa-environments` still
-# does behind `runner-secret` -- Task 19b renamed it and cut it down to
-# decision D4's runner-`Secret` writer -- and `qa-runs` still does
-# behind `argo` (which nothing in the plan removes — it is the ADR's own
+# does behind `runner-credentials` (its pod-identity verifier), and
+# `qa-runs` still does behind `argo` (which nothing in the plan removes — it is the ADR's own
 # Decision Outcome and stays until the serverless runtime exists). Outside
 # qa-platform and outside that ADR's scope, `libs/toolkit-k8s-auth` names them
 # unconditionally and `chat-engine`/`mini-chat` name them behind their own
@@ -47,8 +39,7 @@ uuid = { workspace = true }
 # * `kube` — the API client. `client` for HTTP and `rustls-tls`/`aws-lc-rs`
 #   for TLS, matching `qa-runs`' `argo` feature so both agree on one TLS
 #   stack. No `runtime`: nothing here watches or streams.
-# * `k8s-openapi` — `core::v1::{ConfigMap, Namespace, Node}` (observation) and
-#   `core::v1::Secret` (decision D4's writer).
+# * `k8s-openapi` — `core::v1::{ConfigMap, Namespace, Node}` (observation).
 # * `hyper-util`/`rustls` — not called directly for requests (`kube` owns the
 #   client); `errors` downcasts through them to classify a transport failure
 #   (connect vs. TLS/certificate) by the *type* of the error `kube` returns,

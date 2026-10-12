@@ -1024,13 +1024,13 @@ test-qa-catalog-pg: install-tools
 test-qa-environments-pg: install-tools
 	cargo nextest run -p qa-environments --features postgres --lib --retries 1
 
-## Run the unit tier of the two feature-gated adapters the shipped image
-## enables (`deploy/cargo-features.argo`: runner-secret, qa-runs-argo).
+## Run the unit tier of the feature-gated adapters the shipped image
+## enables (`deploy/cargo-features.argo`: runner-credentials, qa-runs-argo).
 ## `make test-no-macros` is `cargo nextest run --workspace` with per-crate
 ## DEFAULT features, so `#[cfg(feature = "argo")]` and
-## `#[cfg(feature = "runner-secret")]` code is neither compiled nor run there.
-## 39 tests under qa-runs::infra::executor::argo and 13 under
-## qa-environments' runner-secret writer are what this adds.
+## `#[cfg(feature = "runner-credentials")]` code is neither compiled nor run there.
+## The tests under qa-runs::infra::executor::argo and qa-environments'
+## runner-credentials pod-identity adapter are what this adds.
 ## `--lib` only: `qa-runs/tests/argo_cluster.rs`'s 4 are `#[ignore]`d and want
 ## a live cluster.
 ##
@@ -1058,7 +1058,7 @@ test-qa-environments-pg: install-tools
 ## `--workspace` run, which does not set the variable.
 test-qa-platform-features: install-tools
 	QA_REQUIRE_SSH_TOOLS=1 cargo nextest run -p qa-runs --features argo --lib
-	QA_REQUIRE_SSH_TOOLS=1 cargo nextest run -p qa-environments --features runner-secret --lib
+	QA_REQUIRE_SSH_TOOLS=1 cargo nextest run -p qa-environments --features runner-credentials --lib
 	QA_REQUIRE_SSH_TOOLS=1 cargo nextest run -p qa-connector-ssh -p qa-vhi-product-plugin
 	QA_REQUIRE_SSH_TOOLS=1 cargo nextest run -p cf-gears-example-server --test qa_product_plugin_boot --features qa-platform
 
@@ -1171,7 +1171,7 @@ helm-tests:
 	python3 gears/qa-platform/deploy/helm/tests/check_image_pins.py
 	python3 gears/qa-platform/deploy/helm/tests/check_log_level_redaction.py
 	python3 gears/qa-platform/deploy/helm/tests/check_runner_service_account.py
-	python3 gears/qa-platform/deploy/helm/tests/check_secret_writer_rbac.py
+	python3 gears/qa-platform/deploy/helm/tests/check_workflow_guard.py
 	python3 gears/qa-platform/deploy/helm/tests/check_runner_networkpolicy.py
 	python3 gears/qa-platform/deploy/helm/tests/check_release_isolation.py
 	python3 gears/qa-platform/deploy/helm/tests/check_replica_guard.py
@@ -1190,7 +1190,6 @@ helm-tests:
 	bash gears/qa-platform/deploy/helm/tests/check_no_password_in_argv.sh
 	bash gears/qa-platform/deploy/helm/tests/check_deploy_secrets_not_in_argv.sh
 	bash gears/qa-platform/deploy/helm/tests/test_runner_pytest_args.sh
-	bash gears/qa-platform/deploy/helm/tests/check_secret_name_parity.sh
 
 ## Re-resolve every pinned base-image digest and re-fetch every published
 ## binary checksum the qa-platform Dockerfiles carry (finding #95). Needs

@@ -365,6 +365,17 @@ server {
         proxy_connect_timeout 10s;
     }
 
+    # The runner-credential route (finding #94) is internal: runner pods POST
+    # their projected ServiceAccount token to the gears Service in-cluster, and
+    # nothing outside the cluster has a reason to reach it. Without this block
+    # the prefix `location /qa/v1/` below would proxy it from the public
+    # origin. `^~`, not `=`: an exact match would let `.../runner-credentials/`
+    # and any longer path fall through to the proxy, and `^~` as the longest
+    # matching prefix also stops nginx from trying the regex locations.
+    location ^~ /qa/v1/runner-credentials {
+        return 404;
+    }
+
     # Proxy API requests to the gears service (`$gears`, set above -- see there
     # for why it is a variable rather than a literal). It carries no URI part,
     # so the request URI is passed through unchanged; the gears serve these

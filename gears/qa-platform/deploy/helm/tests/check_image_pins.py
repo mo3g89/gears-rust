@@ -79,7 +79,8 @@ def args_of(path):
 
 def chart_images():
     """Every `image:` the rendered chart carries, as (template, reference)."""
-    cmd = ["helm", "template", "qa-platform", str(CHART), "--namespace", "qa-platform"]
+    cmd = ["helm", "template", "qa-platform", str(CHART),
+    "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy", "--namespace", "qa-platform"]
     for v in RENDER_SETS:
         cmd += ["--set", v]
     r = subprocess.run(cmd, capture_output=True, text=True)

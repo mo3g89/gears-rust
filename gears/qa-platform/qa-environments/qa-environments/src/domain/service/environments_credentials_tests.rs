@@ -39,13 +39,12 @@ use toolkit_odata::ODataQuery;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::ports::{NoopRunnerSecretWriter, PluginUnavailable, ProductPluginPort};
+use crate::domain::ports::{PluginUnavailable, ProductPluginPort};
 use crate::domain::system_actor;
 use crate::test_support::{
-    CapturedLogs, FixedPluginPort, RecordingCredStore, RecordingSecretObserver, ScriptedPlugin,
-    SharingCredStore, StoredSecret, TenantScopedAuthZ, UnavailablePluginPort,
-    build_services_tenant_scoped_with_plugin_and_credstore, build_services_with_plugin_port, ctx,
-    field, inmem_db, no_plugin_port,
+    CapturedLogs, FixedPluginPort, RecordingCredStore, ScriptedPlugin, SharingCredStore,
+    StoredSecret, UnavailablePluginPort, build_services_tenant_scoped_with_plugin_and_credstore,
+    build_services_with_plugin_port, ctx, field, inmem_db, no_plugin_port,
 };
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::{PlatformSecurityContext, pep_properties};
@@ -565,61 +564,6 @@ async fn a_refresh_and_the_observation_cycle_read_the_credential_as_one_identity
     }
 }
 
-/// The runner `Secret` write on create reads the credential as the system
-/// actor too — the identity the observation ticker's self-heal reads it as. So
-/// a reference to a `private` secret owned by the very creator writes no
-/// `Secret` on create, rather than writing one the self-heal could never
-/// refresh; a `tenant`-shared one is written.
-#[tokio::test]
-async fn the_runner_secret_write_on_create_reads_the_credential_as_the_system_actor() {
-    for sharing in [SharingMode::Private, SharingMode::Tenant] {
-        let tenant = Uuid::new_v4();
-        let user = ctx(tenant);
-        let observer = Arc::new(RecordingSecretObserver::new());
-        let services = build_services_with_plugin_port(
-            inmem_db().await,
-            Arc::new(TenantScopedAuthZ),
-            Arc::new(SharingCredStore::new(vec![StoredSecret {
-                reference: "team-a-prod-cluster",
-                value: "apiVersion: v1\n",
-                tenant,
-                owner: user.subject_id(),
-                sharing,
-            }])),
-            Arc::clone(&observer) as Arc<_>,
-            port(Arc::new(ScriptedPlugin::vhp_shaped(detection()))),
-            crate::config::QaEnvironmentsConfig::default().max_variables,
-        );
-        services
-            .environments
-            .create_environment(
-                &user,
-                submitting(
-                    "prod",
-                    vec![(
-                        "kubeconfig",
-                        CredentialSubmission::Reference("team-a-prod-cluster".to_owned()),
-                    )],
-                ),
-            )
-            .await
-            .expect("a reference is stored unresolved");
-
-        let written: Vec<String> = observer
-            .secret_writes()
-            .into_iter()
-            .map(|(reference, _)| reference)
-            .collect();
-        match sharing {
-            SharingMode::Private => assert!(
-                written.is_empty(),
-                "a private secret is not readable by the system actor: {written:?}"
-            ),
-            _ => assert_eq!(written, vec!["team-a-prod-cluster".to_owned()]),
-        }
-    }
-}
-
 /// `AuthZ` double that grants every subject a scope over a fixed set of
 /// tenants: the shape of a caller whose scope spans a tenant hierarchy, a
 /// parent tenant over its child.
@@ -672,7 +616,6 @@ async fn a_refresh_by_a_parent_scoped_caller_reads_the_credential_in_the_owning_
             tenants: vec![parent, child],
         }),
         credstore,
-        Arc::new(NoopRunnerSecretWriter),
         port(Arc::new(ScriptedPlugin::vhp_shaped(detection()))),
         crate::config::QaEnvironmentsConfig::default().max_variables,
     );
@@ -699,80 +642,6 @@ async fn a_refresh_by_a_parent_scoped_caller_reads_the_credential_in_the_owning_
     assert_eq!(
         refreshed.version_detect_error, None,
         "the owning tenant's secret is read: {refreshed:?}"
-    );
-}
-
-/// The runner `Secret` write on an update reads the credential in the tenant
-/// that **owns** the environment too. A parent-scoped caller replaces a child
-/// environment's reference with one that names the child's `tenant`-shared
-/// secret; the write reads it in the child's tenant, as the self-heal would,
-/// and so writes the `Secret`. Bound to the caller's tenant, the read misses
-/// and nothing is written.
-#[tokio::test]
-async fn a_parent_scoped_update_reads_the_replaced_credential_in_the_owning_tenant() {
-    let parent = Uuid::new_v4();
-    let child = Uuid::new_v4();
-    let observer = Arc::new(RecordingSecretObserver::new());
-    let services = build_services_with_plugin_port(
-        inmem_db().await,
-        Arc::new(GrantsTenantsAuthZ {
-            tenants: vec![parent, child],
-        }),
-        Arc::new(SharingCredStore::new(vec![StoredSecret {
-            reference: "child-rotated-cluster",
-            value: "apiVersion: v1\n",
-            tenant: child,
-            owner: Uuid::new_v4(),
-            sharing: SharingMode::Tenant,
-        }])),
-        Arc::clone(&observer) as Arc<_>,
-        port(Arc::new(ScriptedPlugin::vhp_shaped(detection()))),
-        crate::config::QaEnvironmentsConfig::default().max_variables,
-    );
-    let created = services
-        .environments
-        .create_environment(
-            &ctx(child),
-            submitting(
-                "prod",
-                vec![(
-                    "kubeconfig",
-                    CredentialSubmission::Reference("child-original-cluster".to_owned()),
-                )],
-            ),
-        )
-        .await
-        .expect("a reference is stored unresolved");
-    assert!(
-        observer.secret_writes().is_empty(),
-        "the original reference names no secret, so the create writes nothing"
-    );
-
-    services
-        .environments
-        .update_environment(
-            &ctx(parent),
-            created.id,
-            EnvironmentPatch {
-                credentials: BTreeMap::from([(
-                    "kubeconfig".to_owned(),
-                    CredentialSubmission::Reference("child-rotated-cluster".to_owned()),
-                )]),
-                ..EnvironmentPatch::default()
-            },
-        )
-        .await
-        .expect("the parent's scope reaches the child's environment");
-
-    let written: Vec<String> = observer
-        .secret_writes()
-        .into_iter()
-        .map(|(reference, _)| reference)
-        .collect();
-    assert_eq!(
-        written,
-        vec!["child-rotated-cluster".to_owned()],
-        "the replaced credential is read in the owning child tenant"
     );
 }
 

@@ -31,7 +31,16 @@
 #        TEST_BUNDLE_REF            qa-catalog's opaque storage_ref. Logged for
 #                                   correlation; not fetchable from a pod.
 #        KUBECONFIG                 present when the run targets a platform.
-#                                   Passed through to pytest, untouched here.
+#                                   Passed through to pytest, untouched here;
+#                                   the file it names is written by
+#                                   fetch_credentials.py, below.
+#        QA_CREDENTIALS_URL         qa-environments' runner-credentials route
+#                                   (finding #94). Unset: the run mounts no
+#                                   credentials.
+#        QA_CREDENTIALS_TOKEN_FILE  the projected ServiceAccount token the
+#                                   route verifies. NEVER echoed.
+#        QA_CREDENTIAL_DIRS         ':'-separated memory-backed directories the
+#                                   credential files may be written into.
 #        COLLECT_ONLY               "true" selects the collect branch below:
 #                                   count cases, execute nothing.
 #        VHP_COLLECT_URL            where that branch POSTs each exact count.
@@ -77,7 +86,8 @@ else
     bundle_url_state="${TEST_BUNDLE_URL:-<unset>}"
 fi
 echo "runner: TEST_BUNDLE_URL=$bundle_url_state"
-echo "runner: KUBECONFIG=${KUBECONFIG:-<unset>}"
+echo "runner: QA_CREDENTIALS_URL=${QA_CREDENTIALS_URL:-<unset>}"
+echo "runner: QA_CREDENTIAL_DIRS=${QA_CREDENTIAL_DIRS:-<unset>}"
 
 # NO BUNDLE URL IS A HARD FAILURE, not a fall back to "run whatever is in the
 # image". There is nothing in the image to run, and a runner that exits 0 with
@@ -88,6 +98,12 @@ if [[ -z "${TEST_BUNDLE_URL:-}" ]]; then
 fi
 
 mkdir -p "$WORK"
+# Credentials first, before any tenant-authored code exists in the pod
+# (finding #94): the bundle is that code.
+if ! python3 "$RUNNER_DIR/fetch_credentials.py"; then
+    echo "runner: credential fetch failed (its own diagnostic is above) -- no tests were run" >&2
+    exit 1
+fi
 if ! python3 "$RUNNER_DIR/fetch_bundle.py" "$WORK"; then
     echo "runner: bundle fetch failed (its own diagnostic is above) -- no tests were run" >&2
     exit 1

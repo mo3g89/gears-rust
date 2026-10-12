@@ -23,5 +23,6 @@ pub use errors::QaRunsError;
 pub use models::{
     ExclusiveTier, FinishedRunCursor, LaunchOutcome, LaunchRequest, NewSchedule, QueueEntry,
     QueueState, Run, RunKind, RunParameter, RunResult, RunSource, RunState, RunTarget,
-    RunTestResult, SLACK_NOTIFICATION_EVENTS, Schedule, ScheduleNotificationSettings, ScheduleTick,
+    RunTestResult, RunnerPodQuery, RunnerPodRun, SLACK_NOTIFICATION_EVENTS, Schedule,
+    ScheduleNotificationSettings, ScheduleTick,
 };

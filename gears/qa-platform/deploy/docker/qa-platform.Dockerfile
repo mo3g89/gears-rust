@@ -48,7 +48,7 @@ FROM rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f9
 # the REST API of the server that just exited. That circle is broken by
 # deploy/helm/qa-platform/files/seed-tenant.sh, which the chart runs as a
 # `tenant-seed` hook Job; see its header for the ordering.
-ARG CARGO_FEATURES=qa-platform,oidc-authn,static-authz,tenant-resolver-rg,static-credstore,postgres-credstore,runner-secret
+ARG CARGO_FEATURES=qa-platform,oidc-authn,static-authz,tenant-resolver-rg,static-credstore,postgres-credstore,runner-credentials
 #
 # `postgres-credstore` compiles in the database-backed credstore plugin, which
 # is what makes a stored secret survive this container being recreated. It is

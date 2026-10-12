@@ -20,11 +20,23 @@
 #   * `cronworkflows` is dropped: qa-runs owns its own leader-elected scheduler
 #     (ADR-0001, "Consequences"), so it never creates a `CronWorkflow`.
 #   * `configmaps` is dropped: nothing in the adapter reads one.
-#   * `secrets` is dropped, and that is a decision rather than an omission. The
-#     adapter derives a `Secret` *name* from a credstore reference and lets the
-#     kubelet resolve it; it never reads or writes secret material, which is
-#     what keeps `run_executor.rs:85-86` true. Whoever materialises those
-#     Secrets needs these verbs; qa-runs does not.
+#   * `secrets` is dropped, and that is a decision rather than an omission.
+#     Since finding #94 no runner credential is a Kubernetes `Secret`: the
+#     runner pod fetches its files from qa-environments'
+#     `POST /qa/v1/runner-credentials` with a projected ServiceAccount token.
+#     Nothing in qa-platform reads or writes Secrets in this namespace.
+#
+# NOT EQUIVALENT TO THE CHART. The Helm chart also renders, and a deployment
+# made from this file alone LACKS:
+#   * the `tokenreviews: create` ClusterRole and binding
+#     (`templates/rbac-tokenreview.yaml`), without which qa-environments refuses
+#     every runner-credential request with 503, so credentialed runs cannot
+#     start;
+#   * the mandatory Workflow admission guard
+#     (`templates/workflow-guard-admission-policy.yaml`), without which this
+#     Role's `workflows: create` lets the holder submit a Workflow that mounts
+#     any Secret in the namespace or runs as any ServiceAccount there.
+# Apply both by hand, adapted to this ServiceAccount, or use the chart.
 #
 # `delete` on `workflows` is deliberately absent: the adapter never deletes one
 # — `ttlStrategy.secondsAfterCompletion` is what reclaims them. Note that

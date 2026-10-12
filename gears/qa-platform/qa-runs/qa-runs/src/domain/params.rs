@@ -109,13 +109,10 @@ use qa_runs_sdk::RunParameter;
 /// while `qa_environments_sdk::RESERVED_VARIABLE_NAMES` covers pipeline and
 /// platform variables. They must stay identical, name for name and in order —
 /// a name reserved on one environment write path and not the others is a name
-/// an operator can use to replace a secret **reference** with a literal, which
-/// is the premise
-/// [`crate::domain::ports::run_executor::RunEnv::new`]'s precedence rests on.
-/// `the_two_reserved_name_lists_must_stay_identical` fails on any divergence.
-/// It lives beside that precedence rather than here, because that is the
-/// correctness argument which breaks — but editing this array is what will
-/// fail it, and nothing else would tell you where to look.
+/// an operator can set on the other.
+/// `the_two_reserved_name_lists_must_stay_identical` (in
+/// `domain::ports::run_executor`) fails on any divergence — editing this array
+/// is what will fail it, and nothing else would tell you where to look.
 ///
 /// # The platform **floor** since Task 18
 ///
@@ -156,12 +153,25 @@ use qa_runs_sdk::RunParameter;
 /// that list would just move a plan author's access from the run-parameter
 /// path to the platform-variable path. `the_two_reserved_name_lists_must_stay_identical`
 /// (`domain::ports::run_executor`) is what would have caught a one-sided edit.
-pub const RESERVED_NAMES: [&str; 12] = [
+///
+/// # Three more, added by finding #94: the runner-credential controls
+///
+/// `QA_CREDENTIALS_URL`, `QA_CREDENTIALS_TOKEN_FILE` and `QA_CREDENTIAL_DIRS`
+/// steer `deploy/runner/fetch_credentials.py`: where it sends the pod's
+/// projected `ServiceAccount` token, which file it reads as that token, and
+/// which directories it may write credential files into. The Argo adapter
+/// appends its own values after the shared environment, so a same-named run
+/// parameter would lose today; reserving them makes that ordering a belt rather
+/// than the only thing between a launch parameter and the runner's token.
+pub const RESERVED_NAMES: [&str; 15] = [
     "APP_BUILD",
     "APP_VERSION",
     "E2E_K8S_NAMESPACE",
     "KUBECONFIG",
     "PRODUCT_KEY",
+    "QA_CREDENTIALS_TOKEN_FILE",
+    "QA_CREDENTIALS_URL",
+    "QA_CREDENTIAL_DIRS",
     "QA_RUNNER_PYTEST_ARGS",
     "RP_API_KEY",
     "RP_PROJECT",
@@ -502,15 +512,16 @@ mod tests {
         }
     }
 
-    /// The twelve reserved names — eleven legacy, plus the platform's own
-    /// `QA_RUNNER_PYTEST_ARGS` — rejected case-insensitively. Enumerated in
+    /// The fifteen reserved names — eleven legacy, plus the platform's own
+    /// `QA_RUNNER_PYTEST_ARGS` and three runner-credential controls — rejected
+    /// case-insensitively. Enumerated in
     /// full rather than sampled: the legacy eleven are a frozen contract with
     /// the runner (`routes/settings.rs:15-27`, matched at `:80-83`) and a
     /// missing entry is a silent hole.
     ///
     /// This test iterates [`RESERVED_NAMES`], so it cannot police the list's
     /// *contents* — shrink the constant and it still passes. That is
-    /// `the_reserved_list_is_eleven_legacy_names_plus_one_platform_reservation`'s
+    /// `the_reserved_list_is_eleven_legacy_names_plus_four_platform_reservations`'s
     /// job, and it writes the literal.
     #[test]
     fn every_reserved_name_is_rejected_case_insensitively() {
@@ -529,7 +540,7 @@ mod tests {
         }
     }
 
-    /// Exactly these twelve, written as a literal so this test is not its own
+    /// Exactly these fifteen, written as a literal so this test is not its own
     /// oracle. Pins the list itself so a future addition is a deliberate spec
     /// amendment rather than a quiet edit.
     ///
@@ -548,7 +559,7 @@ mod tests {
     /// other: that one proves the rule is *applied*, this one proves the list
     /// is *right*.
     #[test]
-    fn the_reserved_list_is_eleven_legacy_names_plus_one_platform_reservation() {
+    fn the_reserved_list_is_eleven_legacy_names_plus_four_platform_reservations() {
         assert_eq!(
             RESERVED_NAMES,
             [
@@ -557,6 +568,9 @@ mod tests {
                 "E2E_K8S_NAMESPACE",
                 "KUBECONFIG",
                 "PRODUCT_KEY",
+                "QA_CREDENTIALS_TOKEN_FILE",
+                "QA_CREDENTIALS_URL",
+                "QA_CREDENTIAL_DIRS",
                 "QA_RUNNER_PYTEST_ARGS",
                 "RP_API_KEY",
                 "RP_PROJECT",
@@ -582,6 +596,27 @@ mod tests {
             matches!(err, ParamError::Reserved { .. }),
             "QA_RUNNER_PYTEST_ARGS must be rejected as reserved, got {err:?}"
         );
+    }
+
+    /// The three runner-credential control variables (finding #94), named for
+    /// the same reason as `qa_runner_pytest_args_is_reserved`. Each steers
+    /// `deploy/runner/fetch_credentials.py`: where it sends the pod's token,
+    /// which file it reads as the token, and where it may write credential
+    /// files.
+    #[test]
+    fn the_runner_credential_variables_are_reserved() {
+        for (name, value) in [
+            ("QA_CREDENTIALS_URL", "http://attacker.example/collect"),
+            ("QA_CREDENTIALS_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
+            ("QA_CREDENTIAL_DIRS", "/workspace"),
+            ("qa_credentials_url", "http://attacker.example/collect"),
+        ] {
+            let err = floor(&[p(name, value)]).unwrap_err();
+            assert!(
+                matches!(err, ParamError::Reserved { .. }),
+                "{name} must be rejected as reserved, got {err:?}"
+            );
+        }
     }
 
     /// Duplicates collide on the uppercased name (`routes/settings.rs:93-94`),
@@ -763,8 +798,7 @@ mod tests {
     /// This is the property the reserved-name floor rests on — a plugin can
     /// add reserved names but never remove one: a plugin that could
     /// un-reserve a name could let a run parameter overwrite the bundle URL,
-    /// the file list, or the credential reference `RunEnv::new`'s precedence
-    /// argument depends on.
+    /// or the file list.
     #[test]
     fn a_plugin_that_reserves_nothing_still_cannot_take_test_files() {
         let empty = contract(&[]);
@@ -828,7 +862,8 @@ mod tests {
             .step_by(2)
             .filter(|t| {
                 !t.is_empty()
-                    && t.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                    && t.bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
             })
             .collect();
         let floor: BTreeSet<&str> = RESERVED_NAMES.into_iter().collect();

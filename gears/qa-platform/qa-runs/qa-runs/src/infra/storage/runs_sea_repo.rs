@@ -371,6 +371,27 @@ impl RunsRepository for OrmRunsRepository {
         found.map(run_to_sdk).transpose()
     }
 
+    async fn get_with_owner<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<(Uuid, Run)>, DomainError> {
+        let found = RunEntity::find()
+            .filter(by_id(id))
+            .secure()
+            .scope_with(scope)
+            .one(runner)
+            .await
+            .map_err(db_err)?;
+        found
+            .map(|m| {
+                let tenant_id = m.tenant_id;
+                run_to_sdk(m).map(|run| (tenant_id, run))
+            })
+            .transpose()
+    }
+
     async fn list<C: DBRunner>(
         &self,
         runner: &C,

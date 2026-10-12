@@ -349,6 +349,16 @@ pub fn for_timeout_enforcement(tenant: TenantBound) -> SecurityContext {
     build_inner(Some(tenant))
 }
 
+/// qa-environments' runner-credential route, per request: reading the one run
+/// a runner pod claims to belong to. Tenant-bound to the tenant label on the
+/// pod. That label is only a hint, so the caller also requires the run's
+/// recorded execution handle to equal the pod's workflow.
+#[must_use]
+pub fn for_runner_pod_resolution(tenant: TenantBound) -> SecurityContext {
+    log_site("runner_pod_resolution", tenant.get());
+    build_inner(Some(tenant))
+}
+
 /// Watcher re-attachment, enumeration step —
 /// `RunsRepository::list_watch_candidates` across every tenant.
 /// Platform-scoped (nil tenant).
@@ -509,6 +519,7 @@ mod tests {
             ("claim_release", for_claim_release(tenant)),
             ("ttl_expiry", for_ttl_expiry(tenant)),
             ("timeout_enforcement", for_timeout_enforcement(tenant)),
+            ("runner_pod_resolution", for_runner_pod_resolution(tenant)),
             ("result_ingest", for_result_ingest(tenant)),
             ("schedule_fire", for_schedule_fire(tenant)),
             ("log_archive", for_log_archive(tenant)),
@@ -611,7 +622,7 @@ mod tests {
         let declared = declared_factories();
         assert_eq!(
             declared.len(),
-            13,
+            14,
             "the parser found {} `for_*` factories in this module's source; if a \
              factory was genuinely added, classify it below - do not raise this \
              number on its own: {declared:?}",

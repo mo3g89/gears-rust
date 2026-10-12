@@ -54,37 +54,23 @@
 //! secret volume (`argo.rs:504-521`). [`crate::domain::runvars`]
 //! deliberately models neither, and records why: resolving a secret in the
 //! control plane widens the blast radius of any log line
-//! (`runvars.rs`, composition obligation 4). This port is the other half
-//! of that decision — it is where the references travel.
+//! (`runvars.rs`, composition obligation 4).
 //!
-//! Two shapes carry them, and the split is not cosmetic: **their
-//! missing-secret behaviour differs, and it differs in the source system.**
+//! What crosses this port is a [`MountSpec::Secret`]: a credstore reference
+//! and the file path it must land at, never the material. Since finding #94
+//! the Argo adapter renders it as a memory-backed directory, and the runner
+//! pod fetches the file from qa-environments with its own projected
+//! `ServiceAccount` token; no Kubernetes `Secret` is involved. A missing
+//! credential fails the runner before any test runs.
 //!
-//! * [`EnvSource::Secret`] — an environment variable backed by a reference.
-//!   The source system marks it `"optional": true` (`argo.rs:449`), so a
-//!   reference that does not resolve leaves the variable **unset and the
-//!   execution proceeds**.
-//! * [`MountSpec::Secret`] — a credential mounted into the run's filesystem,
-//!   the target environment's kubeconfig among them. The source system mounts
-//!   it as a plain secret volume with no `optional` flag (`argo.rs:506-511`),
-//!   whose Kubernetes default is required: an unresolvable reference means the
-//!   workload never starts.
+//! The environment ([`RunEnv`]) carries literals only. The secret-backed
+//! environment variable this port once modelled (`EnvSource::Secret`, for
+//! `RP_API_KEY`) had no producer — the dispatcher always passed an empty
+//! binding map — and was deleted with the Secret rendering it needed.
 //!
-//! A per-reference `optional: bool` was considered and rejected. Both
-//! behaviours are attached to *which* reference it is, in the only two
-//! datapoints that exist, so a flag would generalise past the evidence while
-//! leaving 2.7 free to set it wrongly. Encoded in the types, neither can be
-//! configured into the other.
-//!
-//! **What this does and does not prove.** It does not prove that secret
-//! material cannot reach an executor: [`SecretRef::new`] takes a `String`, and
-//! nothing stops a caller from putting the wrong `String` in it. What it proves
-//! is that no *accident* does it — there is no `From<String>`, no `Deref`, and
-//! no `Display` by which a plain value flows into a reference position, and the
-//! reverse (a reference read as a value) cannot be expressed at all, because
-//! [`EnvSource`] forces every consumer to match both arms. The load-bearing
-//! guarantee is upstream of the types anyway: **qa-runs never reads a secret's
-//! contents**, so there is no material in scope to pass by mistake.
+//! **The load-bearing guarantee is upstream of the types**: qa-runs never
+//! reads a secret's contents, so there is no material in scope to pass by
+//! mistake.
 //!
 //! # What is deliberately not carried
 //!
@@ -215,154 +201,37 @@ impl ExecutionRef {
     }
 }
 
-/// A reference to secret material the **execution plane** resolves. Never the
-/// material.
-///
-/// Deliberately one opaque string rather than the source system's
-/// `{name, key, optional}` triple (`argo.rs:446-450`): that triple is the shape
-/// of a Kubernetes `secretKeyRef`, and ADR-0001 removes Kubernetes. The
-/// new-world spelling is credstore's, and qa-environments models an
-/// environment's credentials exactly this way —
-/// `EnvironmentCredential::credstore_ref: String`, a reference and never the
-/// material itself. Two representations of the same reference across one
-/// subsystem boundary would need a translation nobody owns.
-///
-/// There is intentionally no `From<String>`, no `Deref<Target = str>` and no
-/// `Display`. Each of the three would let a plain value slide into a reference
-/// position, or a reference into a log line that reads like a value.
-#[domain_model]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SecretRef(String);
-
-impl SecretRef {
-    /// Wrap a credstore reference — e.g. an
-    /// `EnvironmentCredential::credstore_ref`, or the `ReportPortal` API-key
-    /// reference from this gear's own config.
-    #[must_use]
-    pub fn new(reference: impl Into<String>) -> Self {
-        Self(reference.into())
-    }
-
-    /// The reference, for the adapter that will resolve it.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Where one environment variable's value comes from.
-///
-/// The source system's environment is a single heterogeneous list: `RP_API_KEY`
-/// is an entry in the *same* `env_vars` vector as `TEST_FILES`, distinguished
-/// only by carrying `valueFrom` instead of `value` (`argo.rs:436-452`). One map
-/// of this enum is that list; two parallel maps — one of values, one of
-/// references — would not be, and would invent a name-collision question the
-/// source system does not have.
-///
-/// Being an enum is what makes a reference and a value unconfusable in the
-/// direction that matters: a backend cannot read a [`Self::Secret`] as though
-/// it were text without matching the arm and deciding what to do about it, and
-/// a new arm added later fails compilation at every consumer.
-#[domain_model]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EnvSource {
-    /// A literal value, as assembled by [`crate::domain::runvars`].
-    Value(String),
-    /// A reference the execution plane resolves at start. If it does not
-    /// resolve, the variable is left unset and the execution proceeds —
-    /// the source system's `"optional": true` (`argo.rs:449`).
-    Secret(SecretRef),
-}
-
-/// The environment one run executes with, values and secret references
-/// together.
-///
-/// A newtype rather than a bare `BTreeMap<String, EnvSource>` for one reason:
-/// the precedence between a secret binding and a literal of the same name has
-/// exactly one home, [`RunEnv::new`], instead of being re-decided at each
-/// dispatch site. Read access is unrestricted ([`RunEnv::entries`]) — it is
-/// construction that needs the rule.
+/// The environment one run executes with: literal values, by name.
 ///
 /// `BTreeMap`, matching [`crate::domain::runvars::assemble`]'s own choice
 /// and for the reason stated there: a run and its re-run are compared by this
 /// map, and the tests assert on it entry by entry, so a per-process iteration
 /// order makes both unreadable. **Not** because it is logged — it is not, and
 /// that function's doc says why the absence is worth keeping.
+///
+/// Literals only. No credential travels through a run's environment: since
+/// finding #94 the runner fetches its credential files itself (see
+/// [`MountSpec::Secret`]).
 #[domain_model]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RunEnv(BTreeMap<String, EnvSource>);
+pub struct RunEnv(BTreeMap<String, String>);
 
 impl RunEnv {
-    /// Combine the assembled literals with the run's secret bindings.
-    ///
-    /// **A literal of the same name wins over a secret binding**, which is the
-    /// source system's order and not an arbitrary tie-break: the `RP_API_KEY`
-    /// `secretKeyRef` is pushed at tier 1, third entry in the list
-    /// (`argo.rs:443-452`), and every later tier appends after it. Two of the
-    /// three later tiers do it by removing any existing entry of that name
-    /// first — platform variables (`argo.rs:246-259`) and run parameters
-    /// (`:267-272`, literally a call to the former). The pipeline tier does
-    /// **not**: `append_pipeline_variables` is a bare `extend`
-    /// (`argo.rs:230-240`) that removes nothing, so it leaves two entries and
-    /// lets the container runtime's last-wins resolve them — the asymmetry
-    /// [`crate::domain::runvars`] documents at length. Either route
-    /// delivers the same order, which is why a map is behaviour-preserving. So
-    /// in the source system a platform variable named `RP_API_KEY` really would
-    /// replace the reference with a literal.
-    ///
-    /// In the source system that direction is safe because it is
-    /// **unreachable**: every secret-backed name is on the reserved list
-    /// (`manager/src/routes/settings.rs:15-27`), rejected case-insensitively
-    /// (`routes/settings.rs:82`), on all three env write paths — run parameters
-    /// (`routes/settings.rs:153`), pipeline variables (`:105-108`) and
-    /// **platform** variables, which reach the same check indirectly
-    /// (`routes/platforms.rs:473` → `:505 merge_pipeline_variables` →
-    /// `routes/settings.rs:243` → `:108`).
-    ///
-    /// **The port needs two enforcement sites where the source system has one**,
-    /// because one process became two gears. Both exist:
-    ///
-    /// * **Run parameters** — [`crate::domain::params::RESERVED_NAMES`], applied
-    ///   by `params::validate`.
-    /// * **Pipeline and platform variables** —
-    ///   `qa_environments_sdk::RESERVED_VARIABLE_NAMES`, applied by
-    ///   qa-environments' `VariablesService::validate_name`.
-    ///
-    /// The second was **missing until Task 11b** (2026-08-13): an earlier
-    /// revision of this paragraph claimed the check was simply "ported", and
-    /// Task 11's spec review found that `RESERVED_NAMES` had exactly one
-    /// consumer while qa-environments enforced charset and length only — so an
-    /// operator with variable-write permission really could have replaced the
-    /// credstore reference with a literal, on the very precedence this function
-    /// implements. Recorded here because a premise that was false once is worth
-    /// naming: two lists in two crates hold this up, and
-    /// `the_two_reserved_name_lists_must_stay_identical` is what stops them
-    /// drifting apart again.
-    ///
-    /// The two rules are a pair, which is why
-    /// `a_literal_of_the_same_name_replaces_a_secret_binding` asserts the
-    /// direction here rather than leaving it implicit in insertion order.
+    /// Wrap the assembled environment.
     #[must_use]
-    pub fn new(values: BTreeMap<String, String>, secrets: BTreeMap<String, SecretRef>) -> Self {
-        let mut env: BTreeMap<String, EnvSource> = secrets
-            .into_iter()
-            .map(|(name, secret)| (name, EnvSource::Secret(secret)))
-            .collect();
-        for (name, value) in values {
-            env.insert(name, EnvSource::Value(value));
-        }
-        Self(env)
+    pub fn new(values: BTreeMap<String, String>) -> Self {
+        Self(values)
     }
 
-    /// One variable's source, if the run has it.
+    /// One variable's value, if the run has it.
     #[must_use]
-    pub fn get(&self, name: &str) -> Option<&EnvSource> {
-        self.0.get(name)
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
     }
 
     /// Every variable, in name order.
     #[must_use]
-    pub fn entries(&self) -> &BTreeMap<String, EnvSource> {
+    pub fn entries(&self) -> &BTreeMap<String, String> {
         &self.0
     }
 }
@@ -489,10 +358,10 @@ pub struct RunSpec {
     /// the executor performs no scoped access and would only be laundering the
     /// token's meaning.
     pub run_id: Uuid,
-    /// The run's owning tenant, carried **only** so an adapter can fold it
-    /// into a derived name — the Kubernetes `Secret` name this executor and
-    /// `qa-environments`' writer must independently compute to the same
-    /// string (`infra::executor::argo::naming::secret_name`). It is a plain
+    /// The run's owning tenant, carried **only** so an adapter can label the
+    /// run's pods with it — the Argo adapter writes it as the pod label
+    /// `qa-platform/tenant-id`, which qa-environments reads off a runner pod
+    /// to scope its runner-credential lookup (finding #94). It is a plain
     /// `Uuid`, not [`OwnedRunId`](crate::domain::repos::OwnedRunId).
     ///
     /// This looks like it contradicts [`RunExecutor::list_active`]'s own
@@ -506,8 +375,7 @@ pub struct RunSpec {
     /// token proves a tenant-scoped *read already happened* in the
     /// repository, and handing it to the executor would let the executor
     /// present that proof for something it never checked. A tenant id used
-    /// only to derive a name, and to mint a run-scoped credential `Secret`
-    /// under it, is neither: it proves nothing (it is not evidence of
+    /// only as a label is neither: it proves nothing (it is not evidence of
     /// authorization) and it grants nothing (it opens no scoped read or
     /// write). [`RunExecutor::list_active`]'s own claim — that it answers
     /// across every tenant — stays true and is untouched by this field.
@@ -524,7 +392,7 @@ pub struct RunSpec {
     /// [`DomainError::CorruptState`] exists to prevent one layer down.
     /// [`RunExecutor::start`] rejects it.
     pub nodes: Vec<ExecutionNode>,
-    /// The assembled environment plus the run's secret bindings.
+    /// The assembled environment.
     pub env: RunEnv,
     /// How this run reaches its target environment: the credentials to mount,
     /// and the service account (if any) its pod assumes.
@@ -986,87 +854,18 @@ mod tests {
     use crate::domain::state_machine::derive_terminal_state;
     use qa_runs_sdk::{RunResult, RunState};
 
-    fn values(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-            .collect()
-    }
-
-    /// The precedence [`RunEnv::new`] documents, asserted rather than left to
-    /// insertion order: the source system pushes the `RP_API_KEY` reference at
-    /// tier 1 (`argo.rs:443-452`) and every later tier retains-then-pushes over
-    /// it (`argo.rs:246-259`).
-    #[test]
-    fn a_literal_of_the_same_name_replaces_a_secret_binding() {
-        let env = RunEnv::new(
-            values(&[("RP_API_KEY", "operator-supplied")]),
-            [("RP_API_KEY".to_owned(), SecretRef::new("rp-api-key"))]
-                .into_iter()
-                .collect(),
-        );
-        assert_eq!(
-            env.get("RP_API_KEY"),
-            Some(&EnvSource::Value("operator-supplied".to_owned())),
-            "parity with the source system's list order; unreachable only \
-             because RP_API_KEY is reserved"
-        );
-    }
-
-    /// The direction that actually matters: a secret binding is *never*
-    /// flattened into a value on its way through the port, so nothing that
-    /// walks the environment as text can print the material — there is none to
-    /// print.
-    #[test]
-    fn a_secret_binding_stays_a_reference_in_the_assembled_environment() {
-        let env = RunEnv::new(
-            values(&[("TEST_FILES", "a.py,b.py")]),
-            [("RP_API_KEY".to_owned(), SecretRef::new("rp-api-key"))]
-                .into_iter()
-                .collect(),
-        );
-        assert_eq!(
-            env.get("RP_API_KEY"),
-            Some(&EnvSource::Secret(SecretRef::new("rp-api-key")))
-        );
-        assert!(
-            !env.entries()
-                .values()
-                .any(|source| matches!(source, EnvSource::Value(value) if value.contains("rp"))),
-            "no literal carries the reference's text, let alone the material"
-        );
-    }
-
-    /// A secret-backed name the assembled environment does not mention is
-    /// carried through untouched — the ordinary case, since every such name is
-    /// reserved.
-    #[test]
-    fn a_secret_binding_survives_when_no_literal_shares_its_name() {
-        let env = RunEnv::new(
-            values(&[("TEST_FILES", "")]),
-            [("RP_API_KEY".to_owned(), SecretRef::new("rp-api-key"))]
-                .into_iter()
-                .collect(),
-        );
-        assert_eq!(env.entries().len(), 2);
-        assert!(matches!(
-            env.get("RP_API_KEY"),
-            Some(EnvSource::Secret(secret)) if secret.as_str() == "rp-api-key"
-        ));
-    }
-
-    /// The drift guard for [`RunEnv::new`]'s safety premise, which rests on
-    /// **two** reserved-name lists in two crates: qa-runs' own
-    /// [`crate::domain::params::RESERVED_NAMES`] (run parameters) and
-    /// `qa_environments_sdk::RESERVED_VARIABLE_NAMES` (pipeline and platform
-    /// variables). The source system has one list for all three write paths
-    /// (`../testrunner/manager/src/routes/settings.rs:15-27`); splitting one
-    /// process into two gears is what made it two, and nothing but this
-    /// assertion connects them.
+    /// The drift guard for the **two** reserved-name lists in two crates:
+    /// qa-runs' own [`crate::domain::params::RESERVED_NAMES`] (run
+    /// parameters) and `qa_environments_sdk::RESERVED_VARIABLE_NAMES`
+    /// (pipeline and platform variables). The source system has one list for
+    /// all three write paths (`../testrunner/manager/src/routes/settings.rs:15-27`);
+    /// splitting one process into two gears is what made it two, and nothing
+    /// but this assertion connects them.
     ///
-    /// It lives here rather than beside either list because *this* is the
-    /// function whose correctness argument fails when they diverge — a reader
-    /// of that paragraph finds the test that keeps it true.
+    /// It used to guard `RunEnv::new`'s literal-beats-secret precedence too;
+    /// that precedence went with `EnvSource::Secret` (finding #94). The lists
+    /// still keep a run's environment from shadowing the runner's own control
+    /// variables, so they must still agree.
     ///
     /// Order-sensitive on purpose: both are documented as the source system's
     /// list "name for name and in the same order", so a reordering is a
@@ -1077,15 +876,8 @@ mod tests {
             crate::domain::params::RESERVED_NAMES.as_slice(),
             qa_environments_sdk::RESERVED_VARIABLE_NAMES.as_slice(),
             "the two gears' reserved-name lists have drifted; a name enforced on \
-             one env write path and not the others is a name an operator can use \
-             to replace a secret reference with a literal"
-        );
-        // Not implied by the equality above: the two lists could be changed
-        // together to drop the one name this module's precedence actually
-        // depends on, and stay equal. This names the stake.
-        assert!(
-            crate::domain::params::RESERVED_NAMES.contains(&"RP_API_KEY"),
-            "RP_API_KEY is the name RunEnv::new's precedence argument rests on"
+             one env write path and not the others is a name an operator can set \
+             on the other"
         );
     }
 

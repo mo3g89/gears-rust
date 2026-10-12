@@ -7,7 +7,8 @@ use uuid::Uuid;
 use crate::errors::QaRunsError;
 use crate::models::{
     FinishedRunCursor, LaunchOutcome, LaunchRequest, NewSchedule, QueueEntry, Run, RunResult,
-    RunTestResult, Schedule, ScheduleNotificationSettings, ScheduleTick,
+    RunTestResult, RunnerPodQuery, RunnerPodRun, Schedule, ScheduleNotificationSettings,
+    ScheduleTick,
 };
 
 /// The most rows one page of a qa-runs collection holds, whatever `limit` asks
@@ -265,4 +266,22 @@ pub trait QaRunsClientV1: Send + Sync {
         ctx: &SecurityContext,
         schedule_id: Uuid,
     ) -> Result<Vec<ScheduleTick>, QaRunsError>;
+
+    /// Resolve a runner pod to its live run's environment.
+    ///
+    /// **System-level, with no caller context.** The only caller is
+    /// qa-environments' `POST /qa/v1/runner-credentials`. It has already proved
+    /// the pod's identity with a Kubernetes `TokenReview` and the pod's uid,
+    /// and it has no user to act for. qa-runs reads the run as its own
+    /// tenant-bound system actor (`for_runner_pod_resolution`) and returns
+    /// nothing but the environment id.
+    ///
+    /// # Errors
+    ///
+    /// `not_found` for every refusal, deliberately indistinguishable: a nil
+    /// tenant, a run that is absent or outside the tenant, a terminal run, a
+    /// `workflow_name` that is not the run's recorded execution handle, or a
+    /// run with no environment.
+    async fn resolve_runner_pod(&self, query: &RunnerPodQuery)
+    -> Result<RunnerPodRun, QaRunsError>;
 }

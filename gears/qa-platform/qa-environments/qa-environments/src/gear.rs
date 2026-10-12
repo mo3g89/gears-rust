@@ -25,40 +25,37 @@ use qa_environments_sdk::QaEnvironmentsClientV1;
 use crate::api::rest::routes;
 use crate::config::QaEnvironmentsConfig;
 use crate::domain::local_client::QaEnvironmentsLocalClient;
-#[cfg(not(feature = "runner-secret"))]
-use crate::domain::ports::NoopRunnerSecretWriter;
+#[cfg(not(feature = "runner-credentials"))]
+use crate::domain::ports::DenyingPodIdentityVerifier;
 use crate::domain::ports::metrics::ObservationMetrics;
-use crate::domain::ports::{ProductPluginPort, RunnerSecretWriter};
+use crate::domain::ports::{PodIdentityVerifier, ProductPluginPort, RunnerPodResolver};
 use crate::domain::service::AppServices;
 use crate::infra::metrics::build_default_adapter;
 use crate::infra::product_plugin::HubProductPluginResolver;
+use crate::infra::runner_pod_resolver::HubRunnerPodResolver;
 use crate::infra::storage::{
     OrmEnvironmentsRepository, OrmLeasesRepository, OrmVariablesRepository,
 };
 
-/// Build the [`RunnerSecretWriter`] collaborator: a real Kubernetes-backed
-/// `KubeRunnerSecretWriter` when this build carries the `runner-secret` cargo
-/// feature, or [`NoopRunnerSecretWriter`] otherwise.
+/// Build the runner-credential route's [`PodIdentityVerifier`] (finding #94):
+/// the `TokenReview` + `GET pod` adapter when this build carries the
+/// `runner-credentials` cargo feature, or [`DenyingPodIdentityVerifier`]
+/// otherwise, which refuses every pod as unavailable (503).
 ///
-/// Named entirely in terms of the **port**, never a concrete Kubernetes type,
-/// so a default build pulls none of `kube`/`k8s-openapi` in through this
-/// function's signature — which is what
-/// `kube_reaches_this_crate_only_through_the_runner_secret_writer` asserts.
-#[cfg(feature = "runner-secret")]
-fn build_runner_secret_writer(cfg: &QaEnvironmentsConfig) -> Arc<dyn RunnerSecretWriter> {
-    Arc::new(
-        crate::infra::runner_secret_writer::KubeRunnerSecretWriter::new(
-            cfg.argo.kubeconfig_path.clone(),
-            cfg.argo.namespace.clone(),
-            cfg.argo.secret_prefix.clone(),
-            cfg.argo.secret_key.clone(),
-        ),
-    )
+/// Named in terms of the port only, so a default build pulls none of
+/// `kube`/`k8s-openapi` in through this function's signature, which is what
+/// `kube_reaches_this_crate_only_through_its_feature_gated_adapters` asserts.
+#[cfg(feature = "runner-credentials")]
+fn build_pod_identity(cfg: &QaEnvironmentsConfig) -> Arc<dyn PodIdentityVerifier> {
+    Arc::new(crate::infra::pod_identity::KubePodIdentityVerifier::new(
+        cfg.argo.namespace.clone(),
+        &cfg.argo.runner_service_account,
+    ))
 }
 
-#[cfg(not(feature = "runner-secret"))]
-fn build_runner_secret_writer(_cfg: &QaEnvironmentsConfig) -> Arc<dyn RunnerSecretWriter> {
-    Arc::new(NoopRunnerSecretWriter)
+#[cfg(not(feature = "runner-credentials"))]
+fn build_pod_identity(_cfg: &QaEnvironmentsConfig) -> Arc<dyn PodIdentityVerifier> {
+    Arc::new(DenyingPodIdentityVerifier)
 }
 
 /// Concrete instantiation of the generic `AppServices<P, V, L>` DI container,
@@ -79,10 +76,7 @@ pub struct QaEnvironments {
     // Keep the domain service behind OnceLock for set-once access.
     service: OnceLock<Arc<ConcreteAppServices>>,
     /// The observation ticker's own config, read once at `init` and consumed
-    /// by `serve` when it decides whether to spawn the ticker. Only exists in
-    /// a build carrying the `runner-secret` cargo feature — see
-    /// `QaEnvironmentsConfig::observation`'s doc for why that field itself is
-    /// feature-gated.
+    /// by `serve` when it decides whether to spawn the ticker.
     observation: OnceLock<crate::config::ObservationConfig>,
 }
 
@@ -120,8 +114,6 @@ impl Gear for QaEnvironments {
             .get::<dyn CredStoreClientV1>()
             .map_err(|e| anyhow::anyhow!("failed to get credstore client: {e}"))?;
 
-        let observer = build_runner_secret_writer(&cfg);
-
         // The product-plugin resolver is NOT fetched from the hub here, and
         // that is the point: the adapter holds the hub and resolves per call,
         // so a deployment where `qa-catalog` initialises after this gear — or
@@ -132,6 +124,14 @@ impl Gear for QaEnvironments {
         // types-registry client lazily for the same reason.
         let product_plugins: Arc<dyn ProductPluginPort> =
             Arc::new(HubProductPluginResolver::new(ctx.client_hub()));
+
+        // Finding #94's runner-credential route. The verifier is the
+        // `TokenReview` adapter in a `runner-credentials` build and a 503
+        // otherwise. The resolver asks qa-runs per call, never here: qa-runs
+        // depends on this gear, so its client is not in the hub yet.
+        let pod_identity = build_pod_identity(&cfg);
+        let runner_pods: Arc<dyn RunnerPodResolver> =
+            Arc::new(HubRunnerPodResolver::new(ctx.client_hub()));
 
         self.observation
             .set(cfg.observation.clone())
@@ -159,8 +159,9 @@ impl Gear for QaEnvironments {
             db,
             authz,
             credstore,
-            observer,
             product_plugins,
+            pod_identity,
+            runner_pods,
             Some(observation_metrics),
             Some(metrics),
             cfg.max_variables,

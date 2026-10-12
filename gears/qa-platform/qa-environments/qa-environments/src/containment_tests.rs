@@ -1,24 +1,14 @@
 //! ADR-0001's containment, asserted rather than assumed.
 //!
-//! **The plan asked for a stronger claim than is true, and this asserts the
-//! true one**. Task 19 Step 4 wanted
-//! `cargo tree -p qa-environments --all-features -i kube` to error — no
-//! Kubernetes anywhere in this crate's graph. That is unachievable while this
-//! gear writes decision D4's runner `Secret`, and the only way to make such a
-//! test pass would have been to delete a production feature that
-//! `deploy/remote/verify-k8s.sh` says every workflow run depends on ("every
-//! workflow run hangs on `FailedMount` while the rest of the stack looks
-//! healthy"). A containment test that passes because a feature was deleted is
-//! worse than no test.
-//!
-//! So two claims, both measured:
+//! Two claims, both measured:
 //!
 //! 1. **a default build has no Kubernetes at all** - which is what an operator
-//!    deploying without `runner-secret` gets, and what ADR-0001 is really
+//!    deploying without `runner-credentials` gets, and what ADR-0001 is really
 //!    about;
 //! 2. **under `--all-features`, `kube` reaches this crate directly and only
-//!    through the runner-`Secret` writer** — no transitive path, so nothing
-//!    else in the graph can quietly acquire one.
+//!    through its feature-gated adapter** - the runner pod's `TokenReview`
+//!    verifier (`runner-credentials`, finding #94) - with no transitive path,
+//!    so nothing else in the graph can quietly acquire one.
 //!
 //! # Why the default-feature form alone would prove nothing
 //!
@@ -58,13 +48,15 @@ fn a_default_build_has_no_kubernetes_in_its_dependency_graph() {
 }
 
 /// With every feature on, `kube` is a **direct** dependency of this crate and
-/// of nothing else in its graph.
+/// of nothing else in its graph: `runner-credentials` enables the optional
+/// `kube`, so the crate is its one dependant.
+/// `qa-runs-sdk`, added for the runner-credential route, must not change that.
 ///
 /// The shape `cargo tree -i` prints is the reverse graph: `kube` at the root,
 /// and beneath it every crate that depends on it. Exactly one line under the
 /// root means exactly one dependant.
 #[test]
-fn kube_reaches_this_crate_only_through_the_runner_secret_writer() {
+fn kube_reaches_this_crate_only_through_its_feature_gated_adapters() {
     let output = cargo_tree(&["--all-features"]);
     let dependants: Vec<&str> = output
         .lines()
@@ -78,8 +70,8 @@ fn kube_reaches_this_crate_only_through_the_runner_secret_writer() {
     assert_eq!(
         dependants.len(),
         1,
-        "`kube` must have exactly one dependant: this crate, for decision D4's \
-         runner-Secret writer. A second one means something else acquired a \
+        "`kube` must have exactly one dependant: this crate, for finding #94's \
+         TokenReview verifier. A second one means something else acquired a \
          Kubernetes client, which is what ADR-0001 forbids. Got:\n{output}"
     );
     assert!(

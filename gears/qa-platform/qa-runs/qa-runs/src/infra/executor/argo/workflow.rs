@@ -16,10 +16,8 @@ use serde_json::{Value, json};
 
 use crate::config::ArgoExecutorConfig;
 use crate::domain::error::DomainError;
-use crate::domain::ports::run_executor::{EnvSource, ExecutionNode, MountSpec, RunSpec};
-use crate::infra::executor::argo::naming::{
-    label_value, mount_volume_name, secret_name, task_name,
-};
+use crate::domain::ports::run_executor::{ExecutionNode, MountSpec, RunSpec};
+use crate::infra::executor::argo::naming::{label_value, mount_volume_name, task_name};
 
 /// Label every workflow this adapter submits carries, and the selector
 /// [`list_active`](crate::domain::ports::run_executor::RunExecutor::list_active)
@@ -94,10 +92,77 @@ pub const NETWORK_ISOLATION_LABEL: &str = "qa-platform/network-isolated";
 /// rendered once at chart-install time and cannot vary per run.
 pub const NETWORK_ISOLATION_LABEL_VALUE: &str = "true";
 
+/// The audience the runner's projected `ServiceAccount` token is minted for,
+/// and the only one qa-environments' `TokenReview` accepts (finding #94).
+pub const RUNNER_CREDENTIALS_AUDIENCE: &str = "qa-platform-runner-credentials";
+/// Pod-internal volume name of the projected runner token.
+const RUNNER_TOKEN_VOLUME: &str = "runner-credentials";
+/// Where the projected runner token is mounted; the token itself is the
+/// `token` file inside it.
+pub const RUNNER_TOKEN_DIR: &str = "/var/run/secrets/qa-platform/runner-credentials";
+/// The projected token's lifetime. The kubelet refreshes it well before
+/// expiry; the runner reads it once, before any tenant code starts.
+const RUNNER_TOKEN_TTL_SECONDS: i64 = 600;
+/// Pod label carrying [`RunSpec::tenant_id`]. qa-environments reads it off
+/// the pod a `TokenReview` names, to scope its run lookup.
+const TENANT_ID_LABEL: &str = "qa-platform/tenant-id";
+/// Pod label carrying [`RunSpec::run_id`] — the pod-level twin of
+/// [`RUN_ID_LABEL`], which sits on the `Workflow` object and never reaches
+/// the pod.
+const POD_RUN_ID_LABEL: &str = "qa-platform/run-id";
+
+/// The variable naming the runner-credentials route. This and the next two
+/// are emitted only for a run with at least one credential mount and a
+/// configured `bundle_base_url` (see `node_env`).
+const CREDENTIALS_URL_VAR: &str = "QA_CREDENTIALS_URL";
+/// The variable naming the projected token's file.
+const CREDENTIALS_TOKEN_FILE_VAR: &str = "QA_CREDENTIALS_TOKEN_FILE";
+/// The `:`-separated directories `fetch_credentials.py` may write into.
+const CREDENTIAL_DIRS_VAR: &str = "QA_CREDENTIAL_DIRS";
+
+/// The admission policy's allowlist (`workflow-guard-admission-policy.yaml`).
+/// Widening one of these means widening the chart's CEL in the same commit:
+/// `check_workflow_guard.py` reads these lines.
+///
+/// Exactly what [`build`] emits on CREATE. The keys the Argo controller adds
+/// afterwards (`arguments`, `inputs`, `outputs`) are deliberately absent: the
+/// policy's shape rules apply to CREATE only.
+#[allow(
+    dead_code,
+    reason = "read by the allowlist test and, as source text, by the chart's check_workflow_guard.py"
+)]
+pub const ADMITTED_SPEC_KEYS: &[&str] = &[
+    "entrypoint",
+    "activeDeadlineSeconds",
+    "ttlStrategy",
+    "securityContext",
+    "templates",
+    "volumes",
+    "serviceAccountName",
+];
+/// See [`ADMITTED_SPEC_KEYS`].
+#[allow(
+    dead_code,
+    reason = "read by the allowlist test and, as source text, by the chart's check_workflow_guard.py"
+)]
+pub const ADMITTED_TEMPLATE_KEYS: &[&str] = &["name", "metadata", "dag", "container"];
+/// See [`ADMITTED_SPEC_KEYS`].
+#[allow(
+    dead_code,
+    reason = "read by the allowlist test and, as source text, by the chart's check_workflow_guard.py"
+)]
+pub const ADMITTED_DAG_TASK_KEYS: &[&str] = &["name", "template"];
+/// See [`ADMITTED_SPEC_KEYS`].
+#[allow(
+    dead_code,
+    reason = "read by the allowlist test and, as source text, by the chart's check_workflow_guard.py"
+)]
+pub const ADMITTED_VOLUME_KEYS: &[&str] = &["name", "emptyDir", "projected"];
+
 /// Pod-internal volume name for the `/tmp` `emptyDir` every runner container
 /// mounts.
 ///
-/// Not derived from [`mount_volume_name`], which numbers *secret* mounts by
+/// Not derived from [`mount_volume_name`], which numbers *credential* mounts by
 /// their index in `RunAccess::mounts` — this volume exists whether or not a
 /// run declares any, so it needs a name no such index can collide with. See
 /// [`build`]'s own doc on why the volume exists at all.
@@ -231,26 +296,25 @@ fn non_blank(value: Option<&str>) -> Option<&str> {
 /// Every [`MountSpec::Secret`] in a run's access, paired with the pod-internal
 /// volume name it renders as.
 ///
+/// Since finding #94 a mount renders as a memory-backed `emptyDir` at the
+/// file's directory, which the runner's `fetch_credentials.py` fills from
+/// qa-environments' `POST /qa/v1/runner-credentials` before any tenant code
+/// runs. The credstore reference no longer travels in the workflow at all.
+///
 /// A [`MountSpec::ConfigValue`] is not here, and cannot reach this function:
 /// [`reject_unrenderable_mounts`] refuses the submission before [`build`] is
 /// called. Skipping one silently would be the dangerous outcome — a run that
 /// starts with a credential it was told to mount simply absent — which is why
 /// the refusal is a hard error and not a `warn!`.
-fn secret_mounts(spec: &RunSpec) -> Vec<RenderedMount<'_>> {
+fn credential_mounts(spec: &RunSpec) -> Vec<RenderedMount<'_>> {
     spec.access
         .mounts
         .iter()
         .enumerate()
         .filter_map(|(index, mount)| match mount {
-            MountSpec::Secret {
-                credstore_ref,
-                path,
-                mode,
-            } => Some(RenderedMount {
+            MountSpec::Secret { path, .. } => Some(RenderedMount {
                 volume: mount_volume_name(index),
-                credstore_ref,
                 path,
-                mode: *mode,
             }),
             MountSpec::ConfigValue { .. } => None,
         })
@@ -259,21 +323,14 @@ fn secret_mounts(spec: &RunSpec) -> Vec<RenderedMount<'_>> {
 
 /// One [`MountSpec::Secret`] and the volume name it renders as.
 ///
-/// A named struct rather than the tuple this started as, and not only because
-/// `clippy::type_complexity` said so: `credstore_ref` and `path` are both
-/// `&str`, so a tuple lets a caller read one where the other belongs and
-/// produce a workflow that mounts a `Secret` named after a filesystem path.
+/// The file's mode is not here: qa-environments returns it with the file, and
+/// `fetch_credentials.py` applies it.
 struct RenderedMount<'a> {
     /// Pod-internal volume name; see
     /// [`mount_volume_name`](crate::infra::executor::argo::naming::mount_volume_name).
     volume: String,
-    /// The credstore reference the `Secret`'s name is derived from. Never
-    /// material.
-    credstore_ref: &'a str,
     /// The **file** path the material must land at, inside the container.
     path: &'a str,
-    /// File permissions the plugin asked for, if any.
-    mode: Option<i32>,
 }
 
 /// Refuse a spec this adapter cannot render faithfully.
@@ -303,7 +360,7 @@ struct RenderedMount<'a> {
 ///
 /// # 2. Two mounts cannot share a directory
 ///
-/// A secret volume mounts the *directory* containing the file (`split_mount_path`
+/// A credential volume mounts the *directory* containing the file (`split_mount_path`
 /// below), so two mounts whose paths share a parent render two
 /// `volumeMounts` at one `mountPath` — which the API server rejects for the
 /// whole workflow. Refusing here says which two paths collided.
@@ -329,11 +386,11 @@ pub fn reject_unrenderable_mounts(spec: &RunSpec) -> Result<(), DomainError> {
     }
 
     let mut directories: BTreeSet<String> = BTreeSet::new();
-    for mount in secret_mounts(spec) {
+    for mount in credential_mounts(spec) {
         let directory = split_mount_path(mount.path).0;
         if !directories.insert(directory.clone()) {
             return Err(DomainError::ExecutorFailed(format!(
-                "run {} declares two mounts under {directory}: a secret volume mounts \
+                "run {} declares two mounts under {directory}: a credential volume mounts \
                  the enclosing directory, so the two would render as one mountPath",
                 spec.run_id
             )));
@@ -346,45 +403,21 @@ pub fn reject_unrenderable_mounts(spec: &RunSpec) -> Result<(), DomainError> {
 /// own runner control variables.
 ///
 /// Node variables are appended **last**, so a same-named entry in the shared
-/// environment loses. That direction is deliberate and it is not the port's
-/// literal-beats-secret rule (which is settled inside `RunEnv::new`): a
-/// pipeline variable called `TEST_FILES` must not be able to replace the file
-/// list this node was built to run. It is also unreachable — every such name is
-/// on both reserved lists (`domain::params::RESERVED_NAMES`) — so this is a
-/// belt to that braces.
+/// environment loses: a pipeline variable called `TEST_FILES` must not be
+/// able to replace the file list this node was built to run. It is also
+/// unreachable — every such name is on both reserved lists
+/// (`domain::params::RESERVED_NAMES`) — so this is a belt to that braces.
+///
+/// Every entry is a literal `{"name", "value"}`. No `valueFrom`: since
+/// finding #94 no credential reaches the pod through its environment or a
+/// Kubernetes `Secret`; the runner fetches its files itself (see
+/// [`RUNNER_CREDENTIALS_AUDIENCE`]).
 fn node_env(spec: &RunSpec, node: &ExecutionNode, cfg: &ArgoExecutorConfig) -> Vec<Value> {
     let mut env: Vec<Value> = spec
         .env
         .entries()
         .iter()
-        .map(|(name, source)| match source {
-            EnvSource::Value(value) => json!({ "name": name, "value": value }),
-            // A reference, never the material — the kubelet resolves it.
-            // `optional: true` was the source system's own flag (`argo.rs:449`),
-            // and the port once made it contractual: an `EnvSource::Secret`
-            // that did not resolve left the variable unset and the run
-            // proceeded, failing the suite the way a broken product fails —
-            // the operator read a red test, not a missing credential.
-            //
-            // `optional: false` inverts that on purpose: the kubelet refuses
-            // to start the pod, and Argo reports `CreateContainerConfigError`
-            // naming the missing `Secret` in the pod's events. A pre-flight
-            // check that asked the API server whether the Secret exists first
-            // is not the fix available here — ADR-0008 cut `secrets` out of
-            // qa-runs' RBAC by construction, so this gear cannot ask that
-            // question — and the pod's own refusal is the achievable form of
-            // the same outcome.
-            EnvSource::Secret(reference) => json!({
-                "name": name,
-                "valueFrom": {
-                    "secretKeyRef": {
-                        "name": secret_name(&cfg.secret_name_prefix, spec.tenant_id, reference.as_str()),
-                        "key": cfg.secret_key,
-                        "optional": false,
-                    }
-                }
-            }),
-        })
+        .map(|(name, value)| json!({ "name": name, "value": value }))
         .collect();
 
     // Pushed unconditionally, blank included: the source system pushes
@@ -420,6 +453,35 @@ fn node_env(spec: &RunSpec, node: &ExecutionNode, cfg: &ArgoExecutorConfig) -> V
                 node.bundle_id, node.bundle_token,
             ),
         }));
+        // Finding #94: where and how the runner fetches its credentials. The
+        // same base as the bundle URL — both routes are served by the gears
+        // deployment — and all three are emitted together or not at all.
+        // Nothing here is credential material: a URL, a file path and a list
+        // of directories.
+        //
+        // Only when the run declares a credential mount. A run with none —
+        // every collect run, every platformless run — has no environment, so
+        // qa-runs' `resolve_runner_pod` answers not-found for it and the route
+        // answers 403; calling it would fail a run that needs nothing. With
+        // no URL the runner says so and goes on to the bundle.
+        let directories: Vec<String> = credential_mounts(spec)
+            .iter()
+            .map(|mount| split_mount_path(mount.path).0)
+            .collect();
+        if !directories.is_empty() {
+            env.push(json!({
+                "name": CREDENTIALS_URL_VAR,
+                "value": format!("{base}/qa/v1/runner-credentials"),
+            }));
+            env.push(json!({
+                "name": CREDENTIALS_TOKEN_FILE_VAR,
+                "value": format!("{RUNNER_TOKEN_DIR}/token"),
+            }));
+            env.push(json!({
+                "name": CREDENTIAL_DIRS_VAR,
+                "value": directories.join(":"),
+            }));
+        }
     }
     // `HOME` then `PATH` — order matters: `PATH`'s value references `$(HOME)`,
     // and Kubernetes only resolves a `$(VAR)` reference against an entry
@@ -480,17 +542,16 @@ fn template(spec: &RunSpec, node: &ExecutionNode, index: usize, cfg: &ArgoExecut
     });
 
     // The port carries each mount's **file** path so the caller can assert
-    // equality with the variable that names it; a secret volume mounts a
-    // **directory**. So the directory is the path's parent and `items` maps the
-    // configured key onto the file name, which is what puts the material at
-    // exactly the path the plugin asked for.
-    let mut mounts: Vec<Value> = secret_mounts(spec)
+    // equality with the variable that names it; the volume is the file's
+    // **directory**, a memory-backed emptyDir. Writable, not `readOnly`:
+    // `fetch_credentials.py` writes the file into it before any tenant code
+    // runs (finding #94).
+    let mut mounts: Vec<Value> = credential_mounts(spec)
         .into_iter()
         .map(|mount| {
             json!({
                 "name": mount.volume,
                 "mountPath": split_mount_path(mount.path).0,
-                "readOnly": true,
             })
         })
         .collect();
@@ -507,6 +568,13 @@ fn template(spec: &RunSpec, node: &ExecutionNode, index: usize, cfg: &ArgoExecut
     // creates `/work` as root with no `USER`, and the pod's non-root,
     // non-zero `run_as_user` cannot write into it otherwise.
     mounts.push(json!({ "name": WORK_VOLUME_NAME, "mountPath": "/work" }));
+    // The projected runner token, read-only: the runner presents it to
+    // qa-environments, which verifies it with a `TokenReview`.
+    mounts.push(json!({
+        "name": RUNNER_TOKEN_VOLUME,
+        "mountPath": RUNNER_TOKEN_DIR,
+        "readOnly": true,
+    }));
     container["volumeMounts"] = json!(mounts);
 
     json!({
@@ -514,16 +582,23 @@ fn template(spec: &RunSpec, node: &ExecutionNode, index: usize, cfg: &ArgoExecut
         // Argo copies a template's metadata onto its pod, which is how `watch`
         // recovers the un-sanitised node name (`NODE_ANNOTATION`) and how the
         // isolation label reaches the pod for `runner-networkpolicy.yaml`'s
-        // `podSelector` to select on (`NETWORK_ISOLATION_LABEL`).
+        // `podSelector` to select on (`NETWORK_ISOLATION_LABEL`). The run and
+        // tenant labels are what qa-environments reads off the pod a
+        // `TokenReview` names, to find the run whose credentials it may hand
+        // out (finding #94).
         "metadata": {
             "annotations": { NODE_ANNOTATION: node.name },
-            "labels": { NETWORK_ISOLATION_LABEL: NETWORK_ISOLATION_LABEL_VALUE },
+            "labels": {
+                NETWORK_ISOLATION_LABEL: NETWORK_ISOLATION_LABEL_VALUE,
+                POD_RUN_ID_LABEL: spec.run_id.to_string(),
+                TENANT_ID_LABEL: spec.tenant_id.to_string(),
+            },
         },
         "container": container,
     })
 }
 
-/// Split a kubeconfig **file** path into the directory a secret volume mounts
+/// Split a credential **file** path into the directory a volume mounts
 /// and the file name inside it.
 ///
 /// `/.kube/kubeconfig` → `("/.kube", "kubeconfig")`, which is the source
@@ -599,12 +674,11 @@ pub fn build(spec: &RunSpec, cfg: &ArgoExecutorConfig, name: &str) -> Value {
             "runAsUser": cfg.run_as_user,
             // Fix round 8: the fourth field this pod's design specified
             // alongside the three above, dropped between design and code and
-            // caught only on a live cluster — a Secret volume (a product
-            // plugin's `MountSpec::Secret`, e.g. `qa-vhi-product-plugin`'s
-            // SSH key) is root-owned unless `fsGroup` is set, and
-            // `runAsUser` alone does not change that. See `fs_group`'s own
-            // doc (`config.rs`) for the measurement that the mounted file's
-            // declared mode does not also need to change.
+            // caught only on a live cluster — a Secret volume was root-owned
+            // unless `fsGroup` was set. Credential files now arrive through
+            // `fetch_credentials.py` into emptyDirs (finding #94), but the
+            // volumes' group ownership still comes from here. See
+            // `fs_group`'s own doc (`config.rs`).
             "fsGroup": cfg.fs_group,
             "seccompProfile": { "type": "RuntimeDefault" },
         },
@@ -636,39 +710,35 @@ pub fn build(spec: &RunSpec, cfg: &ArgoExecutorConfig, name: &str) -> Value {
         workflow_spec["serviceAccountName"] = json!(account.trim());
     }
 
-    let mut volumes: Vec<Value> = secret_mounts(spec)
+    // One memory-backed emptyDir per credential directory: the material
+    // lives in tmpfs, never on the node's disk, and leaves with the pod.
+    // `fetch_credentials.py` writes it there (finding #94); no Kubernetes
+    // `Secret` holds it.
+    let mut volumes: Vec<Value> = credential_mounts(spec)
         .into_iter()
-        .map(|mount| {
-            let (_, file) = split_mount_path(mount.path);
-            let mut item = json!({ "key": cfg.secret_key, "path": file });
-            // Absent unless the plugin asked for one, so a mount that says
-            // nothing about permissions gets Kubernetes' default — which is
-            // what the source system's kubeconfig volume gets
-            // (`argo.rs:506-511` sets no mode).
-            if let Some(mode) = mount.mode {
-                item["mode"] = json!(mode);
-            }
-            // No `optional` flag, so Kubernetes' default applies and the pod
-            // never starts if the Secret is absent. That is the required
-            // behaviour, not an oversight: a credential that does not resolve
-            // must fail the execution rather than silently target nothing
-            // (`run_executor.rs`' `MountSpec` doc, `argo.rs:506-511`).
-            json!({
-                "name": mount.volume,
-                "secret": {
-                    "secretName": secret_name(&cfg.secret_name_prefix, spec.tenant_id, mount.credstore_ref),
-                    "items": [item],
-                }
-            })
-        })
+        .map(|mount| json!({ "name": mount.volume, "emptyDir": { "medium": "Memory" } }))
         .collect();
-    // Present on every workflow, secrets or not — every runner container
+    // Present on every workflow, credentials or not — every runner container
     // mounts it (`template`, above).
     volumes.push(json!({ "name": TMP_VOLUME_NAME, "emptyDir": {} }));
     // Fix round 4: same reasoning as `/tmp`, above, for `/work` —
     // `WORK_VOLUME_NAME`'s own doc has the measured failure. Starts empty;
     // `fetch_bundle.py` populates it after the mount exists.
     volumes.push(json!({ "name": WORK_VOLUME_NAME, "emptyDir": {} }));
+    // The runner's own identity for `POST /qa/v1/runner-credentials`: a
+    // short-lived token bound to this pod and minted for one audience, so
+    // it is useless against the API server or any other service. Present
+    // on every workflow, mounts or not, so the pod shape does not vary with
+    // the run; only a run with credential mounts is told to use it
+    // (`node_env`).
+    volumes.push(json!({
+        "name": RUNNER_TOKEN_VOLUME,
+        "projected": { "sources": [ { "serviceAccountToken": {
+            "audience": RUNNER_CREDENTIALS_AUDIENCE,
+            "expirationSeconds": RUNNER_TOKEN_TTL_SECONDS,
+            "path": "token",
+        } } ] }
+    }));
     workflow_spec["volumes"] = json!(volumes);
 
     json!({
@@ -700,7 +770,7 @@ mod tests {
     };
     use crate::config::ArgoExecutorConfig;
     use crate::domain::ports::run_executor::{
-        ExecutionNode, MountSpec, RunAccess, RunEnv, RunSpec, RunnerSpec, SecretRef,
+        ExecutionNode, MountSpec, RunAccess, RunEnv, RunSpec, RunnerSpec,
     };
 
     /// A secret mount, the only variant any plugin emits today.
@@ -740,10 +810,8 @@ mod tests {
         }
     }
 
-    /// The fixed tenant every golden test in this module runs under — its
-    /// 36-character form is what actually consumes most of the `Secret` name
-    /// budget these tests exercise, and matching `naming.rs`'s own test
-    /// tenant keeps the two files' derived-name expectations comparable.
+    /// The fixed tenant every golden test in this module runs under; it
+    /// reaches the pod as the `qa-platform/tenant-id` label.
     const TENANT: Uuid = uuid::uuid!("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
     fn spec(nodes: Vec<ExecutionNode>) -> RunSpec {
@@ -805,19 +873,21 @@ mod tests {
         // a dedicated writable volume rather than sharing it), so "no
         // secrets" no longer means "no volumes at all". Fix round 4 added a
         // second always-present volume, `/work` (`WORK_VOLUME_NAME`'s own
-        // doc has the measured failure without it) — so "no secrets" now
-        // means exactly these two, not one.
+        // doc has the measured failure without it), and finding #94 added a
+        // third, the projected runner-credentials token — so "no credential
+        // mounts" now means exactly these three.
         let volumes = workflow["spec"]["volumes"].as_array().expect("volumes");
         assert_eq!(
             volumes.len(),
-            2,
-            "no kubeconfig means no secret volume, but /tmp and /work are \
-             always present"
+            3,
+            "no kubeconfig means no credential directory, but /tmp, /work and \
+             the runner token are always present"
         );
         assert_eq!(volumes[0]["name"], "tmp");
         assert_eq!(volumes[0]["emptyDir"], json!({}));
         assert_eq!(volumes[1]["name"], "work");
         assert_eq!(volumes[1]["emptyDir"], json!({}));
+        assert_eq!(volumes[2]["name"], "runner-credentials");
     }
 
     /// The un-sanitised node name has to survive onto the pod, because `watch`
@@ -989,104 +1059,250 @@ mod tests {
         assert_eq!(env_of(&workflow, 0)["TEST_FILES"]["value"], "");
     }
 
-    /// The invariant the port is built around, asserted on the actual submitted
-    /// object: a secret-backed variable appears as a reference and its text
-    /// never appears as a literal anywhere in the workflow.
-    ///
-    /// `optional` used to assert `true`, the source system's own flag
-    /// (`argo.rs:449`), which the port once made contractual: an unresolvable
-    /// reference left the variable unset and the run proceeded as though the
-    /// product itself were broken. It now asserts `false` — the pod refuses
-    /// to start and Argo reports `CreateContainerConfigError` naming the
-    /// Secret, which is the achievable form of a pre-flight check: ADR-0008
-    /// cut `secrets` out of qa-runs' RBAC by construction, so this gear
-    /// cannot ask the API server whether the Secret exists first.
+    /// The kubeconfig pair, after finding #94: the mount is a **memory-backed,
+    /// writable** directory the runner's `fetch_credentials.py` fills, never a
+    /// Kubernetes `Secret` volume.
     #[test]
-    fn a_secret_arm_emits_a_reference_and_never_a_literal() {
-        let mut run = spec(vec![node("a")]);
-        run.env = RunEnv::new(
-            BTreeMap::new(),
-            [("RP_API_KEY".to_owned(), SecretRef::new("rp-token"))]
-                .into_iter()
-                .collect(),
-        );
-        let workflow = build(&run, &cfg(), "w");
-
-        let entry = &env_of(&workflow, 0)["RP_API_KEY"];
-        assert!(entry.get("value").is_none(), "no literal for a reference");
-        let secret = &entry["valueFrom"]["secretKeyRef"];
-        assert_eq!(
-            secret["name"], "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-fdb73ddbdba9b931",
-            "the Secret name is the readable head plus a digest suffix derived from the \
-             tenant and the reference; the suffix is what keeps the mapping injective"
-        );
-        assert_eq!(secret["key"], "value");
-        assert_eq!(
-            secret["optional"], false,
-            "an unresolvable reference must stop the pod, not leave the \
-             variable unset: CreateContainerConfigError names the Secret, \
-             which is the achievable substitute for the pre-flight check \
-             ADR-0008 makes unavailable to this gear"
-        );
-        assert!(
-            !serde_json::to_string(&workflow)
-                .expect("serialisable")
-                .contains("rp-token"),
-            "the reference's own text must not appear as a value anywhere either"
-        );
-    }
-
-    /// The kubeconfig pair: a **required** secret volume mounted at the
-    /// directory, with `items` putting the file at exactly the path the mount
-    /// asked for.
-    #[test]
-    fn a_secret_mount_is_a_required_volume_landing_at_the_mounts_path() {
+    fn a_credential_mount_is_a_memory_backed_writable_directory_not_a_secret() {
         let mut run = spec(vec![node("a")]);
         run.access.mounts = vec![secret_mount("platform/9f2c", "/.kube/kubeconfig", None)];
         let workflow = build(&run, &cfg(), "w");
-
-        let volume = &workflow["spec"]["volumes"][0];
-        assert_eq!(volume["name"], "mount-0");
-        assert_eq!(
-            volume["secret"]["secretName"],
-            "qa-platform-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee-4a90e664f3e346d1"
-        );
-        assert_eq!(volume["secret"]["items"][0]["key"], "value");
-        assert_eq!(
-            volume["secret"]["items"][0]["path"], "kubeconfig",
-            "the file name comes from the mount's path, so the material lands \
-             where the assembled KUBECONFIG variable says it will"
-        );
+        let volumes = workflow["spec"]["volumes"].as_array().unwrap();
         assert!(
-            volume["secret"]["items"][0].get("mode").is_none(),
-            "the mount declared none, so Kubernetes' default applies, which is \
-             what the source system's kubeconfig volume gets (argo.rs:506-511)"
+            volumes.iter().all(|v| v.get("secret").is_none()),
+            "no Secret volume may remain: {volumes:?}"
         );
-        assert!(
-            volume["secret"].get("optional").is_none(),
-            "no optional flag: Kubernetes' default is required, and a \
-             kubeconfig that does not resolve must stop the execution"
-        );
-
-        let mount = &workflow["spec"]["templates"][0]["container"]["volumeMounts"][0];
+        let volume = volumes
+            .iter()
+            .find(|v| v["name"] == "mount-0")
+            .expect("mount-0");
+        assert_eq!(volume["emptyDir"]["medium"], "Memory");
+        let mount = workflow["spec"]["templates"][0]["container"]["volumeMounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "mount-0")
+            .unwrap()
+            .clone();
         assert_eq!(mount["mountPath"], "/.kube", "the directory, not the file");
-        assert_eq!(mount["readOnly"], true);
+        assert!(
+            mount.get("readOnly").is_none(),
+            "the runner writes the file into it"
+        );
     }
 
-    /// A mount's `mode` reaches the secret's `items` entry, and only when it
-    /// was asked for.
-    ///
-    /// The value that matters is `0o400`: `qa-vhp-product-plugin` declares it,
-    /// so this is the line that carries an owner-read-only kubeconfig into the
-    /// pod once Task 18 dispatches through the plugin.
     #[test]
-    fn a_mounts_mode_reaches_the_secret_item() {
-        let mut run = spec(vec![node("a")]);
-        run.access.mounts = vec![secret_mount("p/1", "/.kube/kubeconfig", Some(0o400))];
-        let workflow = build(&run, &cfg(), "w");
+    fn every_node_mounts_the_projected_runner_token_and_nothing_else_projected() {
+        let workflow = build(&spec(vec![node("a"), node("b")]), &cfg(), "w");
+        let token = workflow["spec"]["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "runner-credentials")
+            .expect("runner-credentials volume")
+            .clone();
+        let sources = token["projected"]["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 1);
         assert_eq!(
-            workflow["spec"]["volumes"][0]["secret"]["items"][0]["mode"], 256,
-            "0o400, as the decimal Kubernetes takes"
+            sources[0]["serviceAccountToken"]["audience"],
+            "qa-platform-runner-credentials"
+        );
+        assert_eq!(sources[0]["serviceAccountToken"]["expirationSeconds"], 600);
+        assert_eq!(sources[0]["serviceAccountToken"]["path"], "token");
+        for template in workflow["spec"]["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t.get("container").is_some())
+        {
+            let mounts = template["container"]["volumeMounts"].as_array().unwrap();
+            let mount = mounts
+                .iter()
+                .find(|m| m["name"] == "runner-credentials")
+                .expect("mounted");
+            assert_eq!(
+                mount["mountPath"],
+                "/var/run/secrets/qa-platform/runner-credentials"
+            );
+            assert_eq!(mount["readOnly"], true);
+        }
+    }
+
+    #[test]
+    fn every_pod_carries_its_run_and_tenant_labels() {
+        let mut run = spec(vec![node("a")]);
+        run.run_id = Uuid::from_u128(0x1234);
+        let workflow = build(&run, &cfg(), "w");
+        let labels = &workflow["spec"]["templates"][0]["metadata"]["labels"];
+        assert_eq!(labels["qa-platform/run-id"], run.run_id.to_string());
+        assert_eq!(labels["qa-platform/tenant-id"], TENANT.to_string());
+    }
+
+    #[test]
+    fn the_runner_learns_where_and_how_to_fetch_its_credentials() {
+        let mut run = spec(vec![node("a")]);
+        run.access.mounts = vec![
+            secret_mount("r1", "/etc/qa/vhi-ssh/id", Some(0o400)),
+            secret_mount("r2", "/etc/qa/vhi-vinfra/password", Some(0o400)),
+        ];
+        let mut config = cfg();
+        config.bundle_base_url = Some("http://gears.ns.svc:8080/".to_owned());
+        let env = env_of(&build(&run, &config, "w"), 0);
+        assert_eq!(
+            env["QA_CREDENTIALS_URL"]["value"],
+            "http://gears.ns.svc:8080/qa/v1/runner-credentials"
+        );
+        assert_eq!(
+            env["QA_CREDENTIALS_TOKEN_FILE"]["value"],
+            "/var/run/secrets/qa-platform/runner-credentials/token"
+        );
+        assert_eq!(
+            env["QA_CREDENTIAL_DIRS"]["value"],
+            "/etc/qa/vhi-ssh:/etc/qa/vhi-vinfra"
+        );
+        assert!(
+            env.values().all(|e| e.get("valueFrom").is_none()),
+            "no secretKeyRef or any valueFrom"
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_credential_mounts_gets_none_of_the_three_variables() {
+        // Collect runs and platformless runs have no environment, so the route
+        // would answer 403 for them: the runner must not call it at all. It
+        // prints "no QA_CREDENTIALS_URL" and goes on to the bundle.
+        let mut config = cfg();
+        config.bundle_base_url = Some("http://g:1".to_owned());
+        let workflow = build(&spec(vec![node("a")]), &config, "w");
+        let env = env_of(&workflow, 0);
+        for name in [
+            "QA_CREDENTIALS_URL",
+            "QA_CREDENTIALS_TOKEN_FILE",
+            "QA_CREDENTIAL_DIRS",
+        ] {
+            assert!(!env.contains_key(name), "{name} without a credential mount");
+        }
+        assert!(
+            env.contains_key("TEST_BUNDLE_URL"),
+            "premise: the base URL is set"
+        );
+        assert!(
+            workflow["spec"]["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["name"] == "runner-credentials"),
+            "the projected token volume stays on every workflow"
+        );
+    }
+
+    /// No base URL means no credential URL either: the three variables are
+    /// emitted together or not at all (`check_bundle_delivery` warns about an
+    /// unset base URL at startup).
+    #[test]
+    fn no_base_url_means_none_of_the_three_credential_variables() {
+        let mut run = spec(vec![node("a")]);
+        run.access.mounts = vec![secret_mount("r", "/.kube/kubeconfig", None)];
+        let env = env_of(&build(&run, &cfg(), "w"), 0);
+        for name in [
+            "QA_CREDENTIALS_URL",
+            "QA_CREDENTIALS_TOKEN_FILE",
+            "QA_CREDENTIAL_DIRS",
+        ] {
+            assert!(!env.contains_key(name), "{name} without a base URL");
+        }
+    }
+
+    /// The admission policy's allowlist is these constants; this is the half that
+    /// proves qa-runs emits nothing outside them. The Helm half is
+    /// `deploy/helm/tests/check_workflow_guard.py`.
+    ///
+    /// Three synthetic shapes, the ones whose differences reach the rendered
+    /// keys: a two-node DAG with a credential mount (a `main-dag` template and
+    /// `dag.tasks`), a single node (no DAG), and a collect-shaped run (one
+    /// node, no mounts, `COLLECT_ONLY` in its environment). Each is rendered
+    /// with the deployment's runner `ServiceAccount` configured, as the chart
+    /// always configures it, and must carry `spec.serviceAccountName`: the
+    /// guard refuses a CREATE without it.
+    #[test]
+    fn every_rendered_key_is_inside_the_admission_allowlist() {
+        use super::{
+            ADMITTED_DAG_TASK_KEYS, ADMITTED_SPEC_KEYS, ADMITTED_TEMPLATE_KEYS,
+            ADMITTED_VOLUME_KEYS,
+        };
+        let mut multi_node = spec(vec![node("a"), node("b")]);
+        multi_node.access.mounts = vec![secret_mount("r", "/.kube/kubeconfig", Some(0o400))];
+        let single_node = spec(vec![node("a")]);
+        let mut collect = spec(vec![node("collect")]);
+        collect.env = RunEnv::new(BTreeMap::from([
+            ("COLLECT_ONLY".to_owned(), "true".to_owned()),
+            (
+                "VHP_COLLECT_URL".to_owned(),
+                "http://qa-platform-gears.qa-platform.svc:8087/collect".to_owned(),
+            ),
+        ]));
+        let mut config = cfg();
+        config.workflow_service_account = Some("qa-platform-runner".to_owned());
+        let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        for (shape, run) in [
+            ("multi-node", &multi_node),
+            ("single-node", &single_node),
+            ("collect", &collect),
+        ] {
+            let workflow = build(run, &config, "w");
+            assert_eq!(
+                workflow["spec"]["serviceAccountName"], "qa-platform-runner",
+                "{shape}: spec.serviceAccountName is the configured runner account"
+            );
+            for key in keys(&workflow["spec"]) {
+                assert!(
+                    ADMITTED_SPEC_KEYS.contains(&key.as_str()),
+                    "{shape}: spec.{key}"
+                );
+            }
+            let templates = workflow["spec"]["templates"].as_array().unwrap();
+            assert!(!templates.is_empty(), "{shape}: premise: templates render");
+            for template in templates {
+                for key in keys(template) {
+                    assert!(
+                        ADMITTED_TEMPLATE_KEYS.contains(&key.as_str()),
+                        "{shape}: template.{key}"
+                    );
+                }
+                assert!(
+                    template.get("dag").is_some() != template.get("container").is_some(),
+                    "{shape}: a template is a dag or a container, never both or neither"
+                );
+                if let Some(tasks) = template["dag"]["tasks"].as_array() {
+                    for task in tasks {
+                        for key in keys(task) {
+                            assert!(
+                                ADMITTED_DAG_TASK_KEYS.contains(&key.as_str()),
+                                "{shape}: dag task.{key}"
+                            );
+                        }
+                    }
+                }
+            }
+            for volume in workflow["spec"]["volumes"].as_array().unwrap() {
+                for key in keys(volume) {
+                    assert!(
+                        ADMITTED_VOLUME_KEYS.contains(&key.as_str()),
+                        "{shape}: volume.{key}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            build(&multi_node, &config, "w")["spec"]["entrypoint"],
+            "main-dag",
+            "premise: the multi-node shape is the DAG one"
+        );
+        assert!(
+            build(&single_node, &config, "w")["spec"]["templates"][0]
+                .get("dag")
+                .is_none(),
+            "premise: the single-node shape has no DAG"
         );
     }
 
@@ -1097,7 +1313,7 @@ mod tests {
     /// a product's credentials are the product's to declare, and a rendering
     /// that quietly handled only the first would lose the rest.
     #[test]
-    fn several_secret_mounts_render_one_volume_and_one_mount_each() {
+    fn several_credential_mounts_render_one_volume_and_one_mount_each() {
         let mut run = spec(vec![node("a")]);
         run.access.mounts = vec![
             secret_mount("p/kubeconfig", "/.kube/kubeconfig", None),
@@ -1105,19 +1321,21 @@ mod tests {
         ];
         let workflow = build(&run, &cfg(), "w");
 
-        // 2 secret volumes plus the always-present /tmp and /work emptyDirs.
+        // 2 credential directories plus the always-present /tmp, /work and
+        // projected runner-token volumes.
         let volumes = workflow["spec"]["volumes"].as_array().expect("volumes");
-        assert_eq!(volumes.len(), 4);
+        assert_eq!(volumes.len(), 5);
         assert_eq!(volumes[0]["name"], "mount-0");
         assert_eq!(volumes[1]["name"], "mount-1");
-        assert_eq!(volumes[1]["secret"]["items"][0]["path"], "license.key");
+        assert_eq!(volumes[1]["emptyDir"]["medium"], "Memory");
         assert_eq!(volumes[2]["name"], "tmp");
         assert_eq!(volumes[3]["name"], "work");
+        assert_eq!(volumes[4]["name"], "runner-credentials");
 
         let mounts = workflow["spec"]["templates"][0]["container"]["volumeMounts"]
             .as_array()
             .expect("volumeMounts");
-        assert_eq!(mounts.len(), 4);
+        assert_eq!(mounts.len(), 5);
         assert_eq!(mounts[0]["name"], "mount-0");
         assert_eq!(mounts[0]["mountPath"], "/.kube");
         assert_eq!(mounts[1]["name"], "mount-1");
@@ -1126,6 +1344,7 @@ mod tests {
         assert_eq!(mounts[2]["mountPath"], "/tmp");
         assert_eq!(mounts[3]["name"], "work");
         assert_eq!(mounts[3]["mountPath"], "/work");
+        assert_eq!(mounts[4]["name"], "runner-credentials");
     }
 
     /// The run's own service account wins over the deployment's; a run that
@@ -1214,16 +1433,17 @@ mod tests {
         let volumes = workflow["spec"]["volumes"].as_array().expect("volumes");
         assert_eq!(
             volumes.len(),
-            2,
+            3,
             "premise: build renders nothing for the refused mount -- only the \
-             always-present /tmp and /work volumes -- which is exactly why \
-             the refusal has to come first"
+             always-present /tmp, /work and runner-token volumes -- which is \
+             exactly why the refusal has to come first"
         );
         assert_eq!(volumes[0]["name"], "tmp");
         assert_eq!(volumes[1]["name"], "work");
+        assert_eq!(volumes[2]["name"], "runner-credentials");
     }
 
-    /// Two mounts under one directory are refused, because a secret volume
+    /// Two mounts under one directory are refused, because a credential volume
     /// mounts the directory: the two would render as one `mountPath` and the
     /// API server would reject the whole workflow.
     #[test]
@@ -1429,7 +1649,6 @@ mod tests {
             [("TEST_FILES".to_owned(), "tests/attacker.py".to_owned())]
                 .into_iter()
                 .collect(),
-            BTreeMap::new(),
         );
         let workflow = build(&run, &cfg(), "w");
         let entries = workflow["spec"]["templates"][0]["container"]["env"]

@@ -1,0 +1,127 @@
+{{/* The Workflows qa-platform-gears may create or update in argo.namespace
+     (finding #94). qa-runs needs `workflows: create`, and without this policy
+     that grant lets a compromised gears process submit a Workflow that mounts
+     any Secret in the namespace or runs as any ServiceAccount there.
+
+     ALLOWLIST, NOT DENYLIST. Argo has many fields that widen what a pod can
+     do (podSpecPatch, resource/script/containerSet templates, sidecars,
+     initContainers, a template's own serviceAccountName, workflowTemplateRef,
+     executor, volumeClaimTemplates, ...), and new Argo releases add more. So
+     every key is checked against exactly what qa-runs emits. The lists are
+     the ADMITTED_*_KEYS constants in qa-runs' workflow.rs, and
+     check_workflow_guard.py fails if the two drift.
+
+     UPDATE may change nothing but spec.shutdown. That is the only write qa-runs
+     makes to a submitted Workflow: the cancel merge-patch.
+
+     STATUS is the Argo controller's alone. A CREATE may carry none, and an
+     UPDATE must leave it exactly as it was. The cancel merge-patch touches
+     spec.shutdown only, so status stays equal; the controller's own status
+     writes come from its ServiceAccount, which matchConditions does not match.
+
+     MANDATORY. The chart refuses to render without the
+     admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy API, which
+     means Kubernetes 1.30 or later. A GitOps render with no cluster must pass
+     `--api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy`.
+
+     Cluster-scoped, so the name carries the release namespace. */}}
+{{- if not (.Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy") }}
+{{- fail "qa-platform requires Kubernetes 1.30 or later: the admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy API is not served (or, for a render with no cluster, pass --api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy). The Workflow guard (finding #94) is what stops the gears' workflows:create grant from mounting arbitrary Secrets." }}
+{{- end }}
+{{- $runnerSa := .Values.argo.workflowServiceAccount }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: qa-platform-workflow-guard-{{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.argo.namespace }}
+    resourceRules:
+      - apiGroups: ["argoproj.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["workflows"]
+  matchConditions:
+    - name: from-the-gears
+      expression: 'request.userInfo.username == "system:serviceaccount:{{ .Release.Namespace }}:qa-platform-gears"'
+  # Every shape rule is CREATE-only. The Argo controller adds keys after
+  # creation (spec.arguments, template inputs/outputs: measured on the stand,
+  # 2026-10-09 spike). An UPDATE is held instead by the last two rules: status
+  # unchanged, and nothing but spec.shutdown may differ from the object already
+  # admitted.
+  validations:
+    - expression: >-
+        request.operation != 'CREATE' ||
+        object.spec.all(k, k in ['entrypoint','activeDeadlineSeconds','ttlStrategy','securityContext','templates','volumes','serviceAccountName'])
+      message: "workflow-guard: spec key not in the qa-runs allowlist"
+    - expression: >-
+        request.operation != 'CREATE' ||
+        (has(object.spec.serviceAccountName) && object.spec.serviceAccountName == "{{ $runnerSa }}")
+      message: "workflow-guard: spec.serviceAccountName must be the runner ServiceAccount"
+    - expression: >-
+        request.operation != 'CREATE' ||
+        (has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) && object.spec.securityContext.runAsNonRoot == true)
+      message: "workflow-guard: spec.securityContext.runAsNonRoot must be true"
+    - expression: >-
+        request.operation != 'CREATE' ||
+        object.spec.templates.all(t, t.all(k, k in ['name','metadata','dag','container'])
+        && (has(t.dag) != has(t.container)))
+      message: "workflow-guard: template key not in the qa-runs allowlist"
+    - expression: >-
+        request.operation != 'CREATE' ||
+        object.spec.templates.all(t, !has(t.dag) || t.dag.tasks.all(x, x.all(k, k in ['name','template'])))
+      message: "workflow-guard: dag task key not in the qa-runs allowlist"
+    - expression: >-
+        request.operation != 'CREATE' ||
+        !has(object.spec.volumes) || object.spec.volumes.all(v, v.all(k, k in ['name','emptyDir','projected'])
+        && (has(v.emptyDir) != has(v.projected))
+        && (!has(v.projected) || (v.projected.all(k, k == 'sources')
+            && v.projected.sources.all(s, s.all(k, k == 'serviceAccountToken')
+               && s.serviceAccountToken.audience == 'qa-platform-runner-credentials'))))
+      message: "workflow-guard: volume not in the qa-runs allowlist"
+    - expression: >-
+        request.operation != 'CREATE' ||
+        object.spec.templates.all(t, !has(t.container) || (
+          !has(t.container.envFrom)
+          && (!has(t.container.env) || t.container.env.all(e, !has(e.valueFrom)))
+          && has(t.container.securityContext)
+          && has(t.container.securityContext.allowPrivilegeEscalation)
+          && t.container.securityContext.allowPrivilegeEscalation == false
+          && (!has(t.container.securityContext.privileged) || t.container.securityContext.privileged == false)))
+      message: "workflow-guard: container env or securityContext outside the qa-runs shape"
+    - expression: >-
+        request.operation != 'CREATE' || !has(object.status)
+      message: "workflow-guard: a created Workflow may not carry a status"
+    - expression: >-
+        request.operation != 'UPDATE' ||
+        (has(object.status) == has(oldObject.status)
+         && (!has(object.status) || object.status == oldObject.status))
+      message: "workflow-guard: an update may not change status"
+    - expression: >-
+        request.operation != 'UPDATE' ||
+        (object.spec.all(k, k == 'shutdown' || (k in oldObject.spec && object.spec[k] == oldObject.spec[k]))
+         && oldObject.spec.all(k, k == 'shutdown' || k in object.spec))
+      message: "workflow-guard: an update may only set spec.shutdown"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: qa-platform-workflow-guard-{{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  policyName: qa-platform-workflow-guard-{{ .Release.Namespace }}
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.argo.namespace }}

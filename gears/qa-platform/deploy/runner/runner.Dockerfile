@@ -155,6 +155,7 @@ RUN set -eux; \
 
 WORKDIR /opt/qa-runner
 COPY gears/qa-platform/deploy/runner/fetch_bundle.py /opt/qa-runner/fetch_bundle.py
+COPY gears/qa-platform/deploy/runner/fetch_credentials.py /opt/qa-runner/fetch_credentials.py
 COPY gears/qa-platform/deploy/runner/pytest_markers.py /opt/qa-runner/pytest_markers.py
 COPY gears/qa-platform/deploy/runner/collect_reporter.py /opt/qa-runner/collect_reporter.py
 COPY gears/qa-platform/deploy/runner/bundle_layout.py /opt/qa-runner/bundle_layout.py

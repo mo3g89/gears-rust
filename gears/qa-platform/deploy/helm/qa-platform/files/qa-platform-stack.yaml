@@ -570,30 +570,21 @@ gears:
       max_variables: 500
       #
       # THE ARGO BLOCK IS NOT WRITTEN HERE, AND THE ANCHOR BELOW IS WHY.
-      # `qa-environments.argo.kubeconfig_path` names the kubeconfig this gear
-      # uses to write each platform's runner `Secret` into the ARGO cluster
-      # -- a different cluster from any platform's own. Its path
-      # is a per-deployment fact, and this file is baked into the image, so it
-      # cannot be edited per deployment. Committing a path here would point
-      # every non-argo stack at a file that is not mounted.
+      # `qa-environments.argo` names the Argo namespace the runner pods run in
+      # and the ServiceAccount they run as (`namespace`,
+      # `runner_service_account`), which
+      # `POST /qa/v1/runner-credentials` checks a pod's token against. Both are
+      # per-deployment facts, and this file is baked into the image, so it
+      # cannot be edited per deployment.
       #
       # `deploy/docker/entrypoint.sh` therefore INSERTS a YAML fragment after
       # the anchor line below when $QA_ENVIRONMENTS_ARGO_CONFIG names one,
       # exactly as it does for qa-runs twenty lines down. In-cluster that
       # fragment comes from the ConfigMap
-      # `deploy/helm/qa-platform/templates/gears-argo-configmaps.yaml` renders
-      # -- which sets `kubeconfig_path` to a kubeconfig for the dedicated
-      # `qa-platform-secret-writer` ServiceAccount, because the pod's own
-      # `qa-platform-gears` account holds no `secrets` grant in the Argo
-      # namespace (finding #94). Read that file's header.
+      # `deploy/helm/qa-platform/templates/gears-argo-configmaps.yaml` renders.
       #
-      # WITHOUT IT, D4 IS INERT AND SILENT: `kubeconfig_path` defaults to
-      # `None`, `runner_secret_writer::argo_client` falls back to `Config::infer()`,
-      # and inside this container there is no service-account token, no
-      # $KUBECONFIG and no ~/.kube/config -- so every Secret write fails, every
-      # cycle, forever, while observation (which uses each platform's OWN
-      # kubeconfig) keeps working and makes the stack look healthy. That is the
-      # 2026-08-28 final review's finding I2.
+      # WITHOUT IT the code defaults apply (`argo`, `qa-platform-runner`),
+      # which match the chart's defaults.
       #
       # DO NOT DELETE OR REINDENT THE NEXT LINE. entrypoint.sh requires it to
       # appear exactly once and refuses to start if it does not.

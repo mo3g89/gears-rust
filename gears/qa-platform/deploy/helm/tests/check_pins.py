@@ -21,6 +21,7 @@ HOST = "example-pin-test.invalid"
 def render(origin):
     out = subprocess.run(
         ["helm", "template", "qa-platform", str(CHART),
+         "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy",
          "--namespace", "qa-platform", "--set", f"publicOrigin={origin}",
          # keycloak.adminPassword has no default -- any value
          # that is not the literal "admin" satisfies the render.

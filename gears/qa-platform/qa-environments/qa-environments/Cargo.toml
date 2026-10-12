@@ -15,42 +15,13 @@ ignored = ["testcontainers", "testcontainers-modules"]
 [features]
 default = []
 
-# Decision D4's runner-`Secret` writer (`infra::runner_secret_writer`).
-#
-# **Renamed from `platform-observation` by Task 19b.** It used to
-# gate an adapter that observed an environment's own cluster AND wrote the
-# runner `Secret`; Task 15 moved observation to the product plugin and Task 19
-# deleted what was left of it, so this now gates the `Secret` writer and
-# nothing else. A feature named for work it no longer does is this branch's
-# signature defect in cargo form.
-#
-# Off by default. ADR-0001 forbids `kube`/`k8s-openapi` in a default build of
-# any qa-platform gear; its Amendments section permits this adapter only
-# behind a non-default feature, so a default build still has no Kubernetes in
-# its tree.
-# Verify with:
-#   cargo tree -p qa-environments -i kube                    # errors
-#   cargo tree -p qa-environments --all-features -i kube     # kube <- this crate
-#
-# **The containment claim is narrower than Task 19 originally promised, and
-# deliberately so.** The plan wanted `--all-features` to show no `kube` at all;
-# that is unachievable while this gear writes a Kubernetes `Secret`, and the
-# only way to make such a test pass would have been to delete a production
-# feature `deploy/remote/verify-k8s.sh` says every workflow run depends on.
-# `kube_reaches_this_crate_only_through_the_runner_secret_writer` asserts what
-# is true instead.
-#
-# * `kube` — the API client. `client` for HTTP and `rustls-tls`/`aws-lc-rs` for
-#   TLS, matching qa-runs' `argo` feature so both gears agree on one TLS stack.
-#   No `runtime`: nothing here watches or streams.
-# * `k8s-openapi` — `core::v1::Secret`. `ConfigMap` went with detection.
-# * `hyper-util`/`rustls` — not called directly for requests (`kube` owns the
-#   client); the writer downcasts through them to classify a transport failure
-#   (connect vs. TLS/certificate) by the *type* of the error `kube` returns,
-#   never by matching its message text. Both already resolve to the exact
-#   versions `kube`'s own `rustls-tls` stack uses (one entry each in
-#   Cargo.lock), which is what makes the downcast succeed.
-runner-secret = ["dep:kube", "dep:k8s-openapi", "dep:hyper-util", "dep:rustls"]
+# Finding #94's pod-bound runner credentials (`infra::pod_identity`): a
+# `TokenReview` of the runner pod's projected ServiceAccount token, then a
+# `GET pod` whose uid must equal the reviewed one. Off by default (ADR-0001):
+# a default build carries no Kubernetes client at all.
+# * `kube` -- `client` + `rustls-tls`; no `runtime`: nothing here watches.
+# * `k8s-openapi` -- `authentication.k8s.io/v1::TokenReview`, `core::v1::Pod`.
+runner-credentials = ["dep:kube", "dep:k8s-openapi"]
 # Gates the real-Postgres tier (Docker required; `test_support::pg_db` starts one
 # container per test). The unit tier is in-memory SQLite with one connection, so
 # two writers of one variable can never overlap there, with a fix or without one.
@@ -71,6 +42,11 @@ qa-product-sdk = { path = "../../qa-product-sdk" }
 # `init` (see `infra::product_plugin`). Not a `deps = [...]` gear token --
 # qa-catalog is not required for this gear to BOOT, only to observe.
 qa-catalog-sdk = { path = "../../qa-catalog/qa-catalog-sdk" }
+# `QaRunsClientV1::resolve_runner_pod` only (`infra::runner_pod_resolver`),
+# resolved from the `ClientHub` per call, never at `init`: qa-runs declares
+# `deps = [qa_environments]`, so the reverse `deps` token would be a cycle.
+# The SDK is kube-free, so ADR-0001's containment is unaffected.
+qa-runs-sdk = { path = "../../qa-runs/qa-runs-sdk" }
 
 authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", path = "../../../system/authz-resolver/authz-resolver-sdk" }
 authz-resolver = { workspace = true }
@@ -129,20 +105,13 @@ gts = { workspace = true }
 # code against (`src/gts/authz_types.rs`). Same pairing account-management-sdk
 # and qa-product-sdk's Cargo.toml carry alongside `toolkit-gts`.
 schemars = { workspace = true }
+# `POST /qa/v1/runner-credentials` answers each file's bytes as `content_b64`
+# (`api::rest::dto::RunnerFileDto`).
+base64 = { workspace = true }
 
-# ── The `runner-secret` feature's dependencies, all optional ──────────────────
+# ── The `runner-credentials` feature's dependencies, all optional ─────────────
 kube = { workspace = true, features = ["client", "rustls-tls", "aws-lc-rs"], optional = true }
 k8s-openapi = { workspace = true, features = ["latest"], optional = true }
-# `client-legacy` is the feature that exposes `client::legacy::Error` — the
-# concrete type kube's own HTTP stack raises for every connect-time failure,
-# and the only reliable way to ask "was this actually a connect failure"
-# (`Error::is_connect()`) without matching on `kube::Error`'s message text.
-hyper-util = { workspace = true, features = ["client-legacy"], optional = true }
-# Referenced only to downcast a transport failure's cause chain and check
-# for `rustls::Error` — the type `kube`'s TLS stack (`hyper-rustls` +
-# `tokio-rustls`) raises a certificate/handshake failure as. Never used to
-# build a TLS config or connection of our own.
-rustls = { workspace = true, optional = true }
 
 # Only under `--features postgres`; see `[features]`. Same placement as
 # qa-catalog, qa-insights and qa-runs (Cargo has no optional dev-dependencies).
@@ -150,6 +119,10 @@ testcontainers = { workspace = true, optional = true }
 testcontainers-modules = { workspace = true, optional = true }
 
 [dev-dependencies]
+# `test-util` for `tokio::time::pause`: the runner-credential route's deadline
+# test drives a verifier that never answers on a paused clock, so it proves
+# the 30 s bound without waiting 30 s.
+tokio = { workspace = true, features = ["test-util"] }
 # The in-memory metric pipeline `infra::metrics::probe` builds: an adapter test
 # has to read back what was really exported, and the SDK is the only thing that
 # can produce that. Declared here rather than relied on through feature
@@ -164,22 +137,10 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # rather than a hand-rolled string keeps the two suites testing the same thing.
 qa-product-sdk = { path = "../../qa-product-sdk", features = ["test-util"] }
 
-# Only exercised by `infra::runner_secret_errors`' TLS-classification tests,
-# which need a real (self-signed, deliberately SAN-mismatched) TLS server to
-# fail a real handshake against — `hyper_util::client::legacy::Error` and
-# `rustls::Error` are both raised deep inside `kube`'s own HTTP stack with no
-# public constructor, so the only way to produce a genuine one is to make a
-# real connection that really fails that way.
-rcgen = { workspace = true }
-tokio-rustls = { workspace = true }
-# Only for base64-encoding a test cert into a test kubeconfig's
-# `certificate-authority-data`; not a general-purpose helper.
-base64 = { workspace = true }
 # Parses a config document in the format it really arrives in, so
 # `config::observation_config_tests` can pin that an `--argo` deployment's
-# YAML deserializes in a build WITHOUT `runner-secret` too (the
-# `deny_unknown_fields` + feature-gated-field trap the 2026-08-28 review
-# flagged). A JSON stand-in would exercise the same serde attributes but not
+# YAML deserializes in a build WITHOUT `runner-credentials` too (the
+# `deny_unknown_fields` + feature-gated-field trap). A JSON stand-in would exercise the same serde attributes but not
 # the same document.
 serde_yaml = { workspace = true }
 

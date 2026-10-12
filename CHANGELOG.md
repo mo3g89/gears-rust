@@ -11,6 +11,21 @@ release-plz updates this file in the Release PR.
 
 ### Breaking
 
+- **qa-platform**: runner credentials are fetched by the pod; the runner-Secret
+  writer is removed; Kubernetes 1.30 or later is required (finding #94). A
+  runner pod now POSTs a projected, pod-bound ServiceAccount token to
+  `POST /qa/v1/runner-credentials` and writes the returned files into
+  memory-backed directories, so gears create no Secrets. The chart renders a
+  mandatory `qa-platform-workflow-guard-<release namespace>`
+  ValidatingAdmissionPolicy and refuses to render where
+  `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy is not served.
+  Removed: the `runner-secret` cargo feature (now `runner-credentials`), the
+  `qa-platform-secret-writer` ServiceAccount, Role, token and policy, the
+  qa-environments `argo.secret_prefix`, `argo.secret_key` and
+  `argo.kubeconfig_path` keys, and qa-runs' `secret_name_prefix` and
+  `secret_key`. **Operator action**: delete the runner Secrets left in the Argo
+  namespace with `deploy/argo/cleanup-runner-secrets.sh`; see the chart's
+  UPGRADING.md.
 - **qa-platform**: the qa-runs Argo runner pod now runs as a chart-provisioned
   ServiceAccount, `qa-platform-runner` in the Argo namespace, instead of
   `argo-workflow` — a name this chart never created and merely assumed a

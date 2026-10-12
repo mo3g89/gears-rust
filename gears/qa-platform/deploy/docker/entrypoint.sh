@@ -262,7 +262,7 @@ QA_ENVIRONMENTS_ARGO_CONFIG="${QA_ENVIRONMENTS_ARGO_CONFIG:-}"
 # with nothing in any log naming the missing config, so the message below says
 # exactly that.
 if [[ -n "$QA_RUNS_ARGO_CONFIG" && -z "$QA_ENVIRONMENTS_ARGO_CONFIG" ]]; then
-    echo "entrypoint: QA_RUNS_ARGO_CONFIG is set but QA_ENVIRONMENTS_ARGO_CONFIG is not. An Argo deployment needs BOTH -- qa-runs submits the Workflow, and qa-environments writes the runner credential Secrets that Workflow's pod mounts. With only the first, every run hangs on FailedMount and nothing says why. Under the Helm chart both come from gears-argo-configmaps.yaml, which always renders the pair -- if only one is present the ConfigMap or its volumeMounts have been edited apart. Refusing to start." >&2
+    echo "entrypoint: QA_RUNS_ARGO_CONFIG is set but QA_ENVIRONMENTS_ARGO_CONFIG is not. An Argo deployment needs BOTH -- qa-runs submits the Workflow, and qa-environments serves the runner credentials that Workflow's pod fetches. With only the first, every run fails at its credential fetch. Under the Helm chart both come from gears-argo-configmaps.yaml, which always renders the pair -- if only one is present the ConfigMap or its volumeMounts have been edited apart. Refusing to start." >&2
     exit 1
 fi
 
@@ -279,9 +279,6 @@ fi
 #                            `gears.qa-environments.config`.
 #   no `executor:` line   -> a fragment that configures `argo:` without
 #                            selecting it leaves the mock in place.
-#   no `kubeconfig_path:` -> a qa-environments fragment without it leaves the
-#                            D4 writer on `Config::infer()`, which is the exact
-#                            state this fragment exists to fix.
 if [[ -n "$QA_RUNS_ARGO_CONFIG" ]]; then
     validate_fragment QA_RUNS_ARGO_CONFIG "$QA_RUNS_ARGO_CONFIG" 'gears.qa-runs.config' \
         '^      executor:[[:space:]]*argo[[:space:]]*$' \
@@ -289,52 +286,10 @@ if [[ -n "$QA_RUNS_ARGO_CONFIG" ]]; then
     echo "entrypoint: will insert $(grep -c '' "$QA_RUNS_ARGO_CONFIG") line(s) from '$QA_RUNS_ARGO_CONFIG' after the QA_RUNS_ARGO_ANCHOR line"
 fi
 
-# WHETHER kubeconfig_path IS REQUIRED DEPENDS ON WHERE THIS CONTAINER RUNS,
-# and this is the one fact that decides it. qa-environments' D4 Secret writer
-# (`argo_client` in qa-environments/src/infra/runner_secret_writer.rs) treats an
-# absent/empty kubeconfig_path as "use Config::infer()", which tries
-# in-cluster ServiceAccount credentials, then $KUBECONFIG, then
-# ~/.kube/config, in that order. Inside a plain Docker container NONE of those
-# three exist, so a fragment missing kubeconfig_path is unconditionally a
-# misconfiguration there -- that is the premise the `validate_fragment` call
-# below was written against, and it still holds at full strength off-cluster.
-#
-# Inside a Kubernetes POD, the FIRST of those three is real: the kubelet
-# projects a ServiceAccount token at IN_CLUSTER_TOKEN_FILE in every pod
-# (whether or not anything reads it), so a fragment that omits
-# kubeconfig_path to let Config::infer() pick up that very token is not the
-# failure this check exists to catch. The Helm chart's own fragment no longer
-# relies on this (finding #94): it sets kubeconfig_path to a kubeconfig for
-# the dedicated `qa-platform-secret-writer` account
-# (gears-argo-configmaps.yaml), because the pod's own `qa-platform-gears`
-# account no longer holds `secrets` create/patch in the `argo` namespace --
-# an inferred client would authenticate but be Forbidden. The branch stays
-# for any in-cluster deployment that grants the pod's own account instead,
-# and because it costs the chart nothing: a fragment that DOES carry
-# kubeconfig_path passes either way.
-#
-# NOT OVERRIDABLE, deliberately, unlike GEARS_CONFIG_FILE/PUBLIC_HOST
-# elsewhere in this script. The kubelet's projected-token path is fixed by
-# Kubernetes, so no real deployment ever needs to relocate it -- an
-# ordinary-looking env var that could is a standing way to disable a guard
-# whose whole purpose is preventing a silent, total failure of the D4 Secret
-# writer, the kind of knob that gets set during an incident and never unset.
-# A test that needs this path present creates it at this literal location
-# inside its own disposable container/filesystem instead of relocating the
-# check.
-IN_CLUSTER_TOKEN_FILE=/var/run/secrets/kubernetes.io/serviceaccount/token
-
 if [[ -n "$QA_ENVIRONMENTS_ARGO_CONFIG" ]]; then
     validate_fragment QA_ENVIRONMENTS_ARGO_CONFIG "$QA_ENVIRONMENTS_ARGO_CONFIG" 'gears.qa-environments.config' \
         '^      # QA_ENVIRONMENTS_ARGO_FRAGMENT$' \
         "A fragment without its marker line cannot be told apart from the qa-runs fragment in the rendered file, so the post-condition below could not prove it was inserted"
-    if [[ -f "$IN_CLUSTER_TOKEN_FILE" ]]; then
-        echo "entrypoint: '$IN_CLUSTER_TOKEN_FILE' exists -- an absent kubeconfig_path in '$QA_ENVIRONMENTS_ARGO_CONFIG' is treated as the in-cluster path (Config::infer() will use the projected ServiceAccount token), not a misconfiguration"
-    else
-        validate_fragment QA_ENVIRONMENTS_ARGO_CONFIG "$QA_ENVIRONMENTS_ARGO_CONFIG" 'gears.qa-environments.config' \
-            '^        kubeconfig_path:[[:space:]]*[^[:space:]]' \
-            "A fragment without a kubeconfig_path leaves qa-environments' D4 Secret writer on Config::infer(), which finds no service-account token ('$IN_CLUSTER_TOKEN_FILE' does not exist), no \$KUBECONFIG and no ~/.kube/config inside this container -- so every runner-credential Secret write fails, on every cycle, while observation keeps working and the stack looks healthy"
-    fi
     echo "entrypoint: will insert $(grep -c '' "$QA_ENVIRONMENTS_ARGO_CONFIG") line(s) from '$QA_ENVIRONMENTS_ARGO_CONFIG' after the QA_ENVIRONMENTS_ARGO_ANCHOR line"
 fi
 
@@ -480,13 +435,13 @@ fi
 # the first: the two insertions use two different anchors, so one can land
 # while the other does not.
 if [[ -n "$QA_ENVIRONMENTS_ARGO_CONFIG" ]]; then
-    # The MARKER, not `kubeconfig_path:` -- the qa-runs fragment carries a line
-    # of that name at the same depth, so grepping for it here would pass on the
-    # qa-runs insertion alone and prove nothing about this one.
+    # The MARKER, not a config key: the two fragments can share key names at
+    # this depth, so a key grep could pass on the qa-runs insertion alone and
+    # prove nothing about this one.
     if grep -qE '^      # QA_ENVIRONMENTS_ARGO_FRAGMENT$' "$RENDERED_CONFIG_FILE"; then
         echo "entrypoint: rendered $RENDERED_CONFIG_FILE with the qa-environments argo block inserted (QA_ENVIRONMENTS_ARGO_FRAGMENT marker is present)"
     else
-        echo "entrypoint: the qa-environments argo fragment was validated but its QA_ENVIRONMENTS_ARGO_FRAGMENT marker is NOT in $RENDERED_CONFIG_FILE -- the insertion did not happen. Decision D4's Secret write would fall back to Config::infer() and fail on every cycle. Refusing to start." >&2
+        echo "entrypoint: the qa-environments argo fragment was validated but its QA_ENVIRONMENTS_ARGO_FRAGMENT marker is NOT in $RENDERED_CONFIG_FILE -- the insertion did not happen, so the two fragments' rendered config would disagree. Refusing to start." >&2
         exit 1
     fi
 fi

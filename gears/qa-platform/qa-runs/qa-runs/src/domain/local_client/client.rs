@@ -26,8 +26,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use qa_runs_sdk::{
     FinishedRunCursor, LaunchOutcome, LaunchRequest, NewSchedule, QaRunsClientV1, QaRunsError,
-    QueueEntry, Run, RunResult, RunTestResult, Schedule, ScheduleNotificationSettings,
-    ScheduleTick,
+    QueueEntry, Run, RunResult, RunTestResult, RunnerPodQuery, RunnerPodRun, Schedule,
+    ScheduleNotificationSettings, ScheduleTick,
 };
 use toolkit_odata::ODataQuery;
 use toolkit_security::SecurityContext;
@@ -320,6 +320,17 @@ impl QaRunsClientV1 for QaRunsLocalClient {
             .into_iter()
             .map(ScheduleTick::from)
             .collect())
+    }
+
+    async fn resolve_runner_pod(
+        &self,
+        query: &RunnerPodQuery,
+    ) -> Result<RunnerPodRun, QaRunsError> {
+        self.services
+            .dispatch
+            .resolve_runner_pod(query)
+            .await
+            .map_err(Into::into)
     }
 }
 

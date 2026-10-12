@@ -7,10 +7,10 @@ replays each CI invocation's --set list through `helm template` locally.
 
 It replays `--api-versions` too, and requires the kubeconform render (the
 `helm template` invocation) to contain the ValidatingAdmissionPolicy and its
-binding (finding #94). secret-writer-admission-policy.yaml renders only when
-the API is advertised, and a CI-side `helm template` has no cluster to
-discover it from -- without `--api-versions` kubeconform validated a chart
-with the policy silently missing and never schema-checked it."""
+binding (finding #94). workflow-guard-admission-policy.yaml is MANDATORY: the
+chart `fail`s unless the API is advertised, and a CI-side `helm template` has
+no cluster to discover it from -- so without `--api-versions` the render fails
+outright, and a render that omitted the policy must never be accepted."""
 import pathlib
 import re
 import subprocess
@@ -31,9 +31,10 @@ def invocations(text):
                    re.findall(r"--api-versions(?:=|\s+)(\S+)", line))
 
 
-# Kinds the kubeconform render must carry. Each is capability-gated, so a
-# render that omits it passes kubeconform by validating less.
-CAPABILITY_GATED_KINDS = ("ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding")
+# Kinds the kubeconform render must carry. The Workflow guard is mandatory
+# (the chart refuses to render without the API), so a render that omits them
+# was not given the API version and kubeconform validates less than it should.
+MANDATORY_POLICY_KINDS = ("ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding")
 
 
 def main():
@@ -60,6 +61,12 @@ def main():
             cmd += ["--set", s]
         for a in api_versions:
             cmd += ["--api-versions", a]
+        if verb == "lint":
+            # `helm lint` has no --api-versions and tolerates the chart's
+            # mandatory-API `fail` (it logs it and still exits 0), so CI's lint
+            # carries no flag. The replay is a `template`, which does not
+            # tolerate it, and is here only to check the --set list renders.
+            cmd += ["--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy"]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             failed += 1
@@ -67,7 +74,7 @@ def main():
             continue
         if verb == "template":
             kinds = set(re.findall(r"^kind:\s*(\S+)", r.stdout, re.M))
-            for kind in CAPABILITY_GATED_KINDS:
+            for kind in MANDATORY_POLICY_KINDS:
                 if kind not in kinds:
                     failed += 1
                     print(f"FAIL: CI's kubeconform render has no {kind}: pass "

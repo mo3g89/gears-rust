@@ -52,11 +52,12 @@ reserved, at parity with the source system (which let a run parameter override t
 plugin supplies), so a run parameter of either name overrides what the plugin
 supplies. Closing that is a product decision, not something to change from this plugin's side.
 
-`qa-connector-k8s`'s secret writer is what materialises the referenced secret into the cluster the
-runner executes in.
+The runner does not mount a Kubernetes Secret: it fetches the referenced credential from
+qa-environments when its pod starts, with a pod-bound token, and writes it to a memory-backed
+directory at the same path (`/.kube/kubeconfig`). See ADR-0008.
 
 ## Verification
 
 * Plugin boot and resolution in `qa_product_plugin_boot.rs`.
 * `assert_no_leak` with planted kubeconfig material.
-* Connector-level tests for the Kubernetes client, its error taxonomy and the secret writer.
+* Connector-level tests for the Kubernetes client, its error taxonomy.

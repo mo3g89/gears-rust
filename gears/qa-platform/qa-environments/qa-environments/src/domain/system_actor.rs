@@ -99,9 +99,9 @@ pub fn for_observation(tenant_id: Uuid) -> SecurityContext {
         .expect("QA_ENVIRONMENTS_SYSTEM_ACTOR_UUID + tenant_id are always present")
 }
 
-/// The credential-store read of an environment's credential, on every path
-/// that resolves one: an observation (refresh or cycle) and the runner
-/// `Secret` write (create, update, self-heal). Bound to the tenant that
+/// The credential-store read of an environment's credential for an
+/// observation (refresh or cycle). The runner-credential route has its own
+/// factory, below. Bound to the tenant that
 /// **owns** the environment, read off its row — the tenant [`for_observation`]
 /// is bound to — never the tenant of the caller, which for a caller whose
 /// scope spans a tenant hierarchy is not the owner.
@@ -130,6 +130,29 @@ pub fn for_credential_read(tenant_id: Uuid) -> SecurityContext {
         .expect("QA_ENVIRONMENTS_SYSTEM_ACTOR_UUID + tenant_id are always present")
 }
 
+/// The runner-credential route's read of one environment and its
+/// credentials, bound to the tenant label of a pod that `TokenReview` and
+/// qa-runs have both vouched for. Its own factory, not `for_credential_read`,
+/// so a log or a policy can tell a pod-driven read from an observation.
+///
+/// # Panics
+///
+/// Never in practice: both required builder fields are set unconditionally
+/// below.
+#[must_use]
+#[allow(
+    clippy::expect_used,
+    reason = "both builder fields are statically set, as in for_observation"
+)]
+pub fn for_runner_credentials(tenant_id: Uuid) -> SecurityContext {
+    SecurityContext::builder()
+        .subject_id(QA_ENVIRONMENTS_SYSTEM_ACTOR_UUID)
+        .subject_type(QA_ENVIRONMENTS_SYSTEM_SUBJECT_TYPE)
+        .subject_tenant_id(tenant_id)
+        .build()
+        .expect("QA_ENVIRONMENTS_SYSTEM_ACTOR_UUID + tenant_id are always present")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +169,15 @@ mod tests {
     fn the_credential_read_context_is_the_observation_identity_in_the_tenant_it_was_given() {
         let tenant = Uuid::new_v4();
         let ctx = for_credential_read(tenant);
+        assert_eq!(ctx.subject_tenant_id(), tenant);
+        assert_eq!(ctx.subject_id(), QA_ENVIRONMENTS_SYSTEM_ACTOR_UUID);
+        assert_eq!(ctx.subject_type(), for_observation(tenant).subject_type());
+    }
+
+    #[test]
+    fn the_runner_credentials_context_is_the_system_actor_in_the_pods_tenant() {
+        let tenant = Uuid::new_v4();
+        let ctx = for_runner_credentials(tenant);
         assert_eq!(ctx.subject_tenant_id(), tenant);
         assert_eq!(ctx.subject_id(), QA_ENVIRONMENTS_SYSTEM_ACTOR_UUID);
         assert_eq!(ctx.subject_type(), for_observation(tenant).subject_type());

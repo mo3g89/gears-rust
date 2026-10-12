@@ -115,7 +115,7 @@ use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::domain::ports::run_executor::{EnvSource, MountSpec, RunSpec};
+use crate::domain::ports::run_executor::{MountSpec, RunSpec};
 use crate::domain::service::admission::tests::fakes::{
     self, Builder, FakeCatalog, FakeEnvironments, FakeProductPlugins, FakeRuns, PLATFORM_A,
     run_fixture,
@@ -243,11 +243,10 @@ fn golden_run() -> qa_runs_sdk::Run {
 /// assertion below for why). So the same run of this function can serialise in
 /// sorted order or in struct-declaration order depending on which command built
 /// the test binary. That is harmless here because the fixture is compared as a
-/// parsed [`Value`], whose map equality does not consult order either way. The
-/// env entry keeps its **variant**: a literal renders as `{"value": …}` and a
-/// secret binding as `{"secret": …}`, so a value silently replacing a
-/// reference — the direction `RunEnv::new` documents at length — changes the
-/// fixture instead of hiding in it.
+/// parsed [`Value`], whose map equality does not consult order either way. An
+/// env entry renders as `{"value": …}`: the shape is kept from when the port
+/// also carried secret bindings (`{"secret": …}`, deleted with finding #94),
+/// so the fixture did not have to change when they went.
 ///
 /// # The access half is projected by *effect*, not by the port's field names
 ///
@@ -282,13 +281,7 @@ fn spec_as_json(spec: &RunSpec) -> Value {
         .env
         .entries()
         .iter()
-        .map(|(name, source)| {
-            let rendered = match source {
-                EnvSource::Value(value) => json!({ "value": value }),
-                EnvSource::Secret(reference) => json!({ "secret": reference.as_str() }),
-            };
-            (name.clone(), rendered)
-        })
+        .map(|(name, value)| (name.clone(), json!({ "value": value })))
         .collect();
     let nodes: Vec<Value> = spec
         .nodes

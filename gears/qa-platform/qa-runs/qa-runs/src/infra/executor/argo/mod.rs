@@ -30,38 +30,19 @@
 //!
 //! # What this first cut does not do, stated rather than left to be discovered
 //!
-//! 1. **It does not materialise any Kubernetes `Secret`.** A
-//!    [`SecretRef`](crate::domain::ports::run_executor::SecretRef) is turned
-//!    into a `secretKeyRef` or a secret volume by *name derivation*
-//!    ([`naming::secret_name`]) and the kubelet does the resolving — which is
-//!    exactly how the source system works (`argo.rs:504-521`) and what keeps
-//!    "qa-runs never reads a secret's contents" (`run_executor.rs:85-86`)
-//!    literally true of this code. It also means **a run with a platform will
-//!    not start until somebody creates that Secret**: the volume is required,
-//!    so the pod stays `Pending`. Who does that is qa-environments'
-//!    runner-`Secret` writer (decision D4, ADR-0001), not this
-//!    adapter, because taking the other option — resolving credstore
-//!    material here — would falsify the port's central claim.
-//! 2. **It does not solve bundle download authentication.**
-//!    `GET /qa/v1/test-bundles/{id}` is `.authenticated()`
-//!    (`qa-catalog/.../api/rest/routes/bundles.rs:31`) where the source
-//!    system's equivalent had no middleware at all. `TEST_BUNDLE_URL` is
+//! 1. **It does not materialise any Kubernetes `Secret`, and no longer
+//!    references one.** Since finding #94 a run's credential mounts render as
+//!    memory-backed `emptyDir`s plus a projected `ServiceAccount` token
+//!    (audience [`workflow::RUNNER_CREDENTIALS_AUDIENCE`]). The runner's
+//!    `fetch_credentials.py` presents that token to qa-environments'
+//!    `POST /qa/v1/runner-credentials`, which verifies the pod and its live
+//!    run and returns the files. qa-runs still never reads a secret's contents
+//!    (`run_executor.rs`), and nothing it submits names one.
+//! 2. **Bundle download is authorised by the URL itself.**
+//!    `TEST_BUNDLE_URL` carries qa-catalog's per-bundle `?sig=` tag
+//!    ([`ExecutionNode::bundle_token`](crate::domain::ports::run_executor::ExecutionNode::bundle_token)),
 //!    emitted when [`crate::config::ArgoExecutorConfig::bundle_base_url`] is
-//!    set, and a pod fetching it today gets a 401.
-//!
-//!    **`s2s_oauth` is not the answer as things stand, measured rather than
-//!    assumed**: the stack's config sets it, and the comment above that setting
-//!    says why it cannot be used — "Nothing in this build ever calls it … It is
-//!    therefore configured to be *valid*, not to be used, and no Keycloak
-//!    client backs it" (`gears/qa-platform/config/qa-platform-stack.yaml:313-325`).
-//!    So a pod presenting client credentials has no client to present.
-//!
-//!    The recommendation, consistent with (1) and with the no-material rule: a
-//!    Keycloak service-account client for the runner, its secret stored in a
-//!    Kubernetes `Secret`, and the workflow given a `secretKeyRef` to it — a
-//!    reference the adapter derives and never resolves, the same shape as every
-//!    other secret here. That needs a realm client created, which is a human's
-//!    decision, so it is recorded and not guessed at.
+//!    set. No `IdP` credential reaches the pod.
 //! 3. **Per-test log slices are not carried**, because `TestObservation` has no
 //!    field for them and the port is frozen. The UI's "Per-test logs are not
 //!    available in this deployment" notice stays true. See [`markers`].
@@ -200,7 +181,8 @@ impl ArgoRunExecutor {
             warn!(
                 "qa-runs.argo.bundle_base_url is unset: runner pods receive \
                  TEST_BUNDLE_REF (a path on the qa-catalog gear's own \
-                 filesystem) and no way to fetch the bundle"
+                 filesystem) and no way to fetch the bundle, nor \
+                 QA_CREDENTIALS_URL, so their credential directories stay empty"
             );
         }
     }

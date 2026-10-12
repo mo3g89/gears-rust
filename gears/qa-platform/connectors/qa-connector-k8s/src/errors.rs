@@ -1,9 +1,7 @@
 //! Lifted from `qa-environments/src/infra/observer/errors.rs`. It was a copy,
 //! not a move: Phase C must not change `qa-environments`' behaviour, so both
 //! paths existed side by side until the one-way door in Phase E. Task 19b
-//! deleted the observation half of the original and kept what the gear's
-//! runner-`Secret` writer needs as `qa-environments/src/infra/runner_secret_errors.rs`,
-//! which classifies with its own copy of the same fixed texts.
+//! deleted the observation half of the original.
 //!
 //! What changed in the copy, and only this: the classification table's arms
 //! return [`qa_product_sdk::observation::PluginFailure`] instead of a bare
@@ -89,17 +87,6 @@
 //! matches on. Neither type has a public constructor outside that stack, so
 //! this module's tests produce them the only way that is possible: by
 //! actually failing a real connection and a real TLS handshake.
-//!
-//! # One string here names a config key this crate does not own
-//!
-//! `INFER_FAILURE` (private to this module) tells the operator to set
-//! `qa-environments.argo.kubeconfig_path`, which is a `qa-environments`
-//! configuration key quoted from inside a product-agnostic crate. It is
-//! correct verbatim today — that is still where the key lives — and changing
-//! it now would be inventing a key that does not exist. Whichever task
-//! relocates that key out of `qa-environments` has to re-derive this string
-//! with it; nothing in the compiler or the test suite will notice if it
-//! doesn't.
 //!
 //! # Why all three transport buckets share one [`FailureClass`]
 //!
@@ -204,17 +191,6 @@ pub fn classify_kubeconfig(error: &KubeconfigError) -> PluginFailure {
 pub(crate) const CLIENT_BUILD_FAILURE: &str = "its credentials could not be turned into a working Kubernetes client (check that \
      `client-certificate-data`/`client-key-data` are valid PEM and that the \
      `certificate-authority` is a certificate)";
-
-/// Fixed explanation for `Config::infer()`'s failure.
-///
-/// `InferConfigError`'s `Display` embeds a [`KubeconfigError`] for whatever
-/// ambient kubeconfig it tried, so it is never formatted either. The fixed
-/// text names the three places `infer` looks, which is the whole diagnostic
-/// value the formatted error would have carried.
-pub(crate) const INFER_FAILURE: &str = "no Kubernetes configuration could be inferred: this process is not running in-cluster \
-     (no service-account token at /var/run/secrets/kubernetes.io/serviceaccount), $KUBECONFIG \
-     is unset or unusable, and there is no readable ~/.kube/config. Set \
-     `qa-environments.argo.kubeconfig_path` to a kubeconfig for the Argo cluster";
 
 /// Fixed explanation for a response body past `kube_client::MAX_RESPONSE_BYTES`.
 pub(crate) const RESPONSE_TOO_LARGE: &str = "the API server's answer was larger than this \

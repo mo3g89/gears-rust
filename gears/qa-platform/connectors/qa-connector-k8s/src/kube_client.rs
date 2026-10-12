@@ -305,9 +305,7 @@ impl KubeClient {
 
     /// Wrap an already-built `kube::Client`.
     ///
-    /// The seam an in-process `tower::Service` double is handed through, and
-    /// the seam a caller that inferred its own config (see
-    /// [`crate::secret_writer`]) comes back in through.
+    /// The seam an in-process `tower::Service` double is handed through.
     #[must_use]
     pub const fn from_client(client: Client) -> Self {
         Self { client }

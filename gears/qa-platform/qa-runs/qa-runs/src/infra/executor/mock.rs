@@ -29,9 +29,8 @@
 //!    directions (no lines lost, no lines duplicated) testable at once
 //!    (`watch_resumes_without_duplicating_or_dropping_log_lines`).
 //! 4. **Records what it was given** — `MockRunExecutor::submitted` is how
-//!    environment assembly, node grouping and the
-//!    reference-not-material rule get verified end to end
-//!    (`the_recorded_spec_carries_the_secret_as_a_reference_and_never_a_value`).
+//!    environment assembly and node grouping get verified end to end
+//!    (`the_recorded_spec_carries_the_assembled_environment_verbatim`).
 //! 5. **Injectable failures** — `start`, `watch` and `list_active` can each be
 //!    made to fail, so the fail-safe directions have something to fail against
 //!    (`start_reports_the_injected_failure`,
@@ -429,9 +428,7 @@ impl RunExecutor for MockRunExecutor {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::domain::ports::run_executor::{
-        EnvSource, ExecutionNode, RunAccess, RunEnv, RunnerSpec, SecretRef,
-    };
+    use crate::domain::ports::run_executor::{ExecutionNode, RunAccess, RunEnv, RunnerSpec};
     use crate::domain::runvars::{self, RunVar, RunVarInputs};
 
     /// A FIXED id, not `Uuid::new_v4()`: `start_records_the_spec_and_returns_a_reference`
@@ -966,13 +963,13 @@ mod tests {
         ));
     }
 
-    /// The end-to-end form of the port's one security rule: what the executor
-    /// is handed carries the `RP_API_KEY` **reference**, and no literal in the
-    /// environment holds it. `runvars` never models the secret at all
-    /// (its composition obligation 4), so this is the only place the two halves
-    /// meet.
+    /// What the executor is handed is the assembled environment, verbatim
+    /// and literal-only: `runvars` never models a secret (its composition
+    /// obligation 4), and since finding #94 neither does the port — credential
+    /// files reach the runner pod through qa-environments' runner-credentials
+    /// route, not through the environment.
     #[tokio::test]
-    async fn the_recorded_spec_carries_the_secret_as_a_reference_and_never_a_value() {
+    async fn the_recorded_spec_carries_the_assembled_environment_verbatim() {
         let executor = MockRunExecutor::new();
         let assembled = runvars::assemble(RunVarInputs {
             statics: vec![RunVar {
@@ -982,38 +979,17 @@ mod tests {
             ..RunVarInputs::default()
         });
         let mut submission = spec_for(Uuid::new_v4());
-        submission.env = RunEnv::new(
-            assembled,
-            [(
-                "RP_API_KEY".to_owned(),
-                SecretRef::new("reportportal-token"),
-            )]
-            .into_iter()
-            .collect(),
-        );
+        submission.env = RunEnv::new(assembled.clone());
 
         executor.start(submission).await.unwrap();
 
         let recorded = executor.submitted();
-        assert_eq!(
-            recorded[0].env.get("RP_API_KEY"),
-            Some(&EnvSource::Secret(SecretRef::new("reportportal-token")))
-        );
-        // Independent of the assertion above rather than implied by it: that
-        // one pins the entry under its own name, this one sweeps *every*
-        // literal for the reference's text, so a spec that leaked the
-        // credstore ref into some other variable's value still fails.
-        assert!(
-            !recorded[0].env.entries().values().any(|source| matches!(
-                source,
-                EnvSource::Value(value) if value.contains("reportportal-token")
-            )),
-            "no literal in the environment carries the reference, let alone the material"
-        );
+        assert_eq!(recorded[0].env.entries(), &assembled);
         assert_eq!(
             recorded[0].env.get("TEST_FILES"),
-            Some(&EnvSource::Value("tests/test_smoke.py".to_owned()))
+            Some("tests/test_smoke.py")
         );
+        assert_eq!(recorded[0].env.get("RP_API_KEY"), None);
     }
 
     // ── DELETED at the Phase E review (finding I-7) ────────────────────────

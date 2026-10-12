@@ -753,6 +753,15 @@ CHART_SECRETS=(keycloak.adminPassword "$ADMIN_PASSWORD"
                argo.workflowClientSecret "$WORKFLOW_CLIENT_SECRET"
                postgres.password "$POSTGRES_PASSWORD")
 
+# Taken before the first helm call so verify-k8s.sh's last check can tell a
+# runner Secret created by THIS deploy (there must be none, finding #94) from
+# one an older release left behind. Passed into the remote environment
+# explicitly: each remote_sh is its own ssh session. Local clock, compared with
+# the cluster's creationTimestamp -- a skew of more than the deploy's duration
+# would blur the comparison, and NTP-synced dev hosts are the norm.
+DEPLOY_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+export DEPLOY_STARTED
+
 if [[ "$HOSTALIASES_ENABLED" == "true" ]]; then
     step "hostAliases.enabled=true: first helm upgrade to create the UI Service, then resolving its ClusterIP"
     # On a first install the ui Service does not exist yet -- run once WITHOUT
@@ -820,6 +829,20 @@ echo "=== helm upgrade --install starting \$(date -Is) ==="
 helm ${HELM_ARGS[@]@Q} "\${SECRET_SET_FILE_ARGS[@]}"
 echo "=== helm upgrade --install returned 0 at \$(date -Is) -- post-install/post-upgrade hooks have already run to completion at this point ==="
 HELM2
+
+# Report, never delete: the runner Secrets qa-environments' retired writer left
+# in the Argo namespace still hold live credentials, and removing them is the
+# operator's decision (UPGRADING.md names the --delete command).
+step "leftover runner-credential Secrets in the Argo namespace (report only)"
+remote_sh "list leftover runner Secrets" "$REMOTE_PATH" "${ARGO_NAMESPACE:-argo}" <<'LEFTOVER'
+set -euo pipefail
+cd "$1"
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+# Report only, so its refusal (an Argo namespace that holds the release) or a
+# failed listing must not fail the deploy; the reason is printed above.
+bash gears/qa-platform/deploy/argo/cleanup-runner-secrets.sh "$2" \
+    || echo "NOTE: cleanup-runner-secrets did not list (see above); the deploy continues"
+LEFTOVER
 
 # ============================================================== rollout ==
 # THIS STEP IS LOAD-BEARING, NOT A SECOND OPINION. `--wait` is deliberately
@@ -918,7 +941,7 @@ step "deploy/remote/verify-k8s.sh"
 # the remote. Without it, that one check has no expected value to compare
 # against and has to skip itself (see verify-k8s.sh's own handling of an
 # unset IMAGE_TAG).
-remote_sh "verify-k8s.sh" "$REMOTE_PATH" "$PUBLIC_ORIGIN" "$NAMESPACE" "$IMAGE_TAG" <<'VERIFYK8S'
+remote_sh "verify-k8s.sh" "$REMOTE_PATH" "$PUBLIC_ORIGIN" "$NAMESPACE" "$IMAGE_TAG" "$DEPLOY_STARTED" <<'VERIFYK8S'
 set -euo pipefail
 cd "$1"
 VERIFY_SCRIPT="gears/qa-platform/deploy/remote/verify-k8s.sh"
@@ -930,7 +953,7 @@ if [ ! -e "$VERIFY_SCRIPT" ]; then
     echo "deploy-k8s: FAIL: $VERIFY_SCRIPT does not exist on the remote, so this deploy cannot be verified. It is part of this repository and is rsynced with it: a missing copy means the rsync or the checkout is broken. Check by hand with 'kubectl -n $3 get pods' and $2, then fix that before trusting this stack." >&2
     exit 1
 fi
-PUBLIC_ORIGIN="$2" NAMESPACE="$3" IMAGE_TAG="$4" bash "$VERIFY_SCRIPT"
+PUBLIC_ORIGIN="$2" NAMESPACE="$3" IMAGE_TAG="$4" DEPLOY_STARTED="$5" bash "$VERIFY_SCRIPT"
 VERIFYK8S
 
 step "Done"

@@ -117,13 +117,14 @@ per-product.
 
 ## Amendments
 
-**`qa-environments`' runner-`Secret` writer.** After this ADR's original acceptance,
-`qa-environments` gained a second Kubernetes-touching adapter: `KubeRunnerSecretWriter::ensure_runner_secret`
-(the runner-`Secret` writer, labelled `D4` in code comments) writes each runner's credential `Secret` into the Argo cluster, which may differ from
-any environment's own. It needs a Kubernetes client for that write alone. This is gated behind
-`qa-environments`' own non-default `runner-secret` cargo feature — a second, independently-switched
-gate beside `qa-runs`' `argo`, not a relaxation of this ADR's Confirmation criterion: a default
-build of `qa-environments` still carries no Kubernetes dependency
+**`qa-environments`' pod-identity verifier.** After this ADR's original acceptance,
+`qa-environments` gained a second Kubernetes-touching adapter: `KubePodIdentityVerifier`, which runs
+a `TokenReview` of a runner pod's projected ServiceAccount token and reads the pod
+(`POST /qa/v1/runner-credentials`, ADR-0008, finding #94). It replaced an earlier runner-`Secret`
+writer, which is gone together with its `runner-secret` feature. The verifier is gated behind
+`qa-environments`' own non-default `runner-credentials` cargo feature — a second,
+independently-switched gate beside `qa-runs`' `argo`, not a relaxation of this ADR's Confirmation
+criterion: a default build of `qa-environments` still carries no Kubernetes dependency
 (`qa-environments/Cargo.toml`'s `[features]` block and `containment_tests.rs` are the authority).
 
 **`qa-connector-k8s` is unconditional, not feature-gated, and that is consistent with this ADR.**

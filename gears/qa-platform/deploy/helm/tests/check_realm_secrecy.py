@@ -111,6 +111,7 @@ def render(extra_sets=None, workflow=GENERATED_WORKFLOW_SECRET, literals=None,
     """Return (docs, stdout, stderr, returncode). Never asserts -- callers
     decide."""
     cmd = ["helm", "template", RELEASE, str(CHART),
+           "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy",
            "--namespace", "qa-platform", "--set", f"publicOrigin={ORIGIN}",
            # The two signing secrets have no default (2026-09-21) and are not
            # what any check here is about -- they go in the BASE command so

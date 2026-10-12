@@ -80,20 +80,14 @@ COVERED = {
 # It is not a template: certs-job.yaml creates and refreshes that Secret inside
 # the cluster, so there is nothing for `include` to render and its contents are
 # not knowable at render time. Rotating it is that Job's business.
-#
-# `qa-platform-secret-writer-token` (secret-writer-serviceaccount.yaml) IS
-# rendered, but with no `data`: the token controller fills it in-cluster, so
-# its rendered form never changes and a checksum of it would never roll
-# anything. It is mounted as a directory (no subPath), so the kubelet
-# refreshes the files if the controller rewrites it, and kube-client re-reads
-# the tokenFile -- no roll is needed for the running process to see it.
-NOT_A_TEMPLATE = {"qa-platform-tls", "qa-platform-secret-writer-token"}
+NOT_A_TEMPLATE = {"qa-platform-tls"}
 
 
 def render(extra=(), release=RELEASE):
     """`helm template` with the minimum a default install needs."""
     cmd = [
         "helm", "template", release, str(CHART),
+        "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy",
         "--namespace", "qa-platform",
         "--set", f"publicOrigin={ORIGIN}",
         "--set", f"keycloak.adminPassword={ADMIN_PASSWORD}",
@@ -267,6 +261,7 @@ def check_the_signing_secrets_have_no_default(failures):
     for value in ("bundleDownloadSigningSecret", "collectReportSigningSecret"):
         cmd = [
             "helm", "template", RELEASE, str(CHART),
+            "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy",
             "--namespace", "qa-platform",
             "--set", f"publicOrigin={ORIGIN}",
             "--set", f"keycloak.adminPassword={ADMIN_PASSWORD}",

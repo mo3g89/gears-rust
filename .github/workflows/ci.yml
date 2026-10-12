@@ -506,7 +506,7 @@ jobs:
       - name: Test qa-catalog with the real git transport (integration)
         run: make test-qa-catalog-git
 
-      - name: Test qa-platform feature-gated adapters (argo, runner-secret)
+      - name: Test qa-platform feature-gated adapters (argo, runner-credentials)
         run: make test-qa-platform-features
 
       - name: Test toolkit-db (sqlite integration)
@@ -909,11 +909,11 @@ jobs:
           sudo mv /tmp/kubeconform /usr/local/bin/kubeconform
           chmod +x /usr/local/bin/kubeconform
 
-      # `--api-versions` because secret-writer-admission-policy.yaml renders
-      # only where the ValidatingAdmissionPolicy API is advertised, and this
-      # render has no cluster to discover it from: without the flag the policy
-      # and its binding are absent and kubeconform never schema-checks them
-      # (finding #94). check_ci_render_values.py requires both in this render.
+      # `--api-versions` because workflow-guard-admission-policy.yaml refuses
+      # to render unless the ValidatingAdmissionPolicy API is advertised
+      # (mandatory gate, Kubernetes 1.30+), and this render has no cluster to
+      # discover it from (finding #94). check_ci_render_values.py requires the
+      # policy and its binding in this render.
       - name: kubeconform (rendered qa-platform manifests)
         run: |
           helm template qa-platform gears/qa-platform/deploy/helm/qa-platform \

@@ -52,6 +52,7 @@ def render(extra_set=None):
     """Return (docs, stderr, returncode). Never asserts -- callers
     decide."""
     cmd = ["helm", "template", RELEASE, str(CHART),
+           "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy",
            "--namespace", "qa-platform", "--set", f"publicOrigin={ORIGIN}",
            # keycloak.adminPassword has no default -- any value
            # that is not the literal "admin" satisfies the render.

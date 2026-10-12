@@ -76,6 +76,7 @@ def render(chart=CHART, *extra):
     """Return (docs, stderr, returncode). Never asserts -- one caller wants a failure."""
     out = subprocess.run(
         ["helm", "template", "qa-platform", str(chart),
+         "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy",
          "--namespace", "qa-platform", "--set", f"publicOrigin={ORIGIN}",
          "--set", "keycloak.adminPassword=guard-fixture-not-a-real-password",
          # argo.workflowClientSecret is `required` too (2026-09-29): it is the

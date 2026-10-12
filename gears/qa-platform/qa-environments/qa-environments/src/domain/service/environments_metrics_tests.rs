@@ -34,10 +34,10 @@ use crate::domain::metrics::{
     QA_ENVIRONMENTS_OBSERVATION, QA_ENVIRONMENTS_OBSERVATION_CYCLE,
     QA_ENVIRONMENTS_OBSERVATION_CYCLE_DURATION, QA_ENVIRONMENTS_OBSERVATION_DURATION,
 };
+use crate::domain::ports::ProductPluginPort;
 use crate::domain::ports::metrics::{
     CycleOutcome, EnvironmentOutcome, ObservationClass, ObservationMetrics,
 };
-use crate::domain::ports::{NoopRunnerSecretWriter, ProductPluginPort};
 use crate::domain::repos::{EnvironmentsRepository, PersistedCredentials};
 use crate::infra::metrics::probe::MetricsProbe;
 use crate::infra::storage::OrmEnvironmentsRepository;
@@ -210,7 +210,6 @@ async fn a_cycle_that_cannot_list_its_environments_is_unstarted_not_completed() 
         unmigrated_db().await,
         Arc::new(TenantScopedAuthZ),
         Arc::new(RecordingCredStore::new()),
-        Arc::new(NoopRunnerSecretWriter),
         port_detecting(),
         Some(probe.adapter()),
         None,
@@ -523,7 +522,6 @@ async fn a_refused_observation_is_not_a_detected_one() {
         db,
         Arc::new(DenyAllAuthZ),
         Arc::new(RecordingCredStore::new()),
-        Arc::new(NoopRunnerSecretWriter),
         port_detecting(),
         Some(probe.adapter()),
         None,
@@ -900,7 +898,6 @@ async fn an_unresolvable_plugin_is_observed_but_never_timed() {
         db,
         Arc::new(TenantScopedAuthZ),
         Arc::new(RecordingCredStore::new()),
-        Arc::new(NoopRunnerSecretWriter),
         no_plugin_port(),
         Some(probe.adapter()),
         Some(probe.adapter()),
@@ -963,7 +960,6 @@ async fn a_plugin_call_and_its_observation_are_two_series_over_one_event() {
         inmem_db().await,
         Arc::new(TenantScopedAuthZ),
         Arc::new(RecordingCredStore::new()),
-        Arc::new(NoopRunnerSecretWriter),
         port_detecting(),
         Some(probe.adapter()),
         Some(probe.adapter()),
@@ -1171,7 +1167,6 @@ async fn every_recorded_duration_tracks_the_work_it_measures() {
         inmem_db().await,
         Arc::new(TenantScopedAuthZ),
         Arc::new(RecordingCredStore::new()),
-        Arc::new(NoopRunnerSecretWriter),
         Arc::new(FixedPluginPort::new(Arc::new(SlowPlugin {
             inner: ScriptedPlugin::vhp_shaped(detected()),
             delay,

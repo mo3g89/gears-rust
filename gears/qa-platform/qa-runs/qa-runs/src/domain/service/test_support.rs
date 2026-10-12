@@ -508,6 +508,24 @@ impl RunsRepository for MockRunsRepository {
             .map(|(_, run)| run.clone()))
     }
 
+    /// Same visibility rule as `get`, plus the row's owner.
+    async fn get_with_owner<C: DBRunner>(
+        &self,
+        _runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<(Uuid, Run)>, DomainError> {
+        Ok(self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(tenant_id, run)| {
+                run.id == id && scope.contains_uuid(OWNER_TENANT_ID, *tenant_id)
+            })
+            .map(|(tenant_id, run)| (*tenant_id, run.clone())))
+    }
+
     /// **Scope-only, and the `OData` query is ignored.**
     ///
     /// Filtering, ordering and cursors are SQL translation, and translating

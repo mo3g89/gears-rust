@@ -7,10 +7,13 @@
 
 use std::collections::BTreeMap;
 
+use base64::Engine as _;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use qa_environments_sdk as sdk;
+
+use crate::domain::service::RunnerFile;
 
 // ==================== Environment DTOs ====================
 
@@ -543,6 +546,44 @@ impl From<sdk::LeaseState> for LeaseDto {
             sdk::LeaseState::Free => Self::Free,
             sdk::LeaseState::HeldParallel { holders } => Self::HeldParallel { holders },
             sdk::LeaseState::HeldExclusive { holder } => Self::HeldExclusive { holder },
+        }
+    }
+}
+
+// ==================== Runner credential DTOs ====================
+
+/// `POST /qa/v1/runner-credentials`' answer (finding #94): the files a runner
+/// pod writes before any test code runs.
+// `content_b64` is credential material, so neither DTO derives `Debug`, and
+// neither is ever logged.
+#[toolkit_macros::api_dto(response)]
+pub struct RunnerCredentialsResp {
+    pub files: Vec<RunnerFileDto>,
+}
+
+/// One file of [`RunnerCredentialsResp`]: where to write it, with which
+/// permission bits, and its bytes as standard base64.
+#[toolkit_macros::api_dto(response)]
+pub struct RunnerFileDto {
+    pub path: String,
+    pub mode: Option<i32>,
+    pub content_b64: String,
+}
+
+impl From<RunnerFile> for RunnerFileDto {
+    fn from(file: RunnerFile) -> Self {
+        Self {
+            path: file.path,
+            mode: file.mode,
+            content_b64: base64::engine::general_purpose::STANDARD.encode(file.content.as_bytes()),
+        }
+    }
+}
+
+impl From<Vec<RunnerFile>> for RunnerCredentialsResp {
+    fn from(files: Vec<RunnerFile>) -> Self {
+        Self {
+            files: files.into_iter().map(RunnerFileDto::from).collect(),
         }
     }
 }

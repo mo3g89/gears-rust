@@ -72,8 +72,8 @@ from log text. Backends sit behind the internal `RunExecutor` port (`start` / `w
 in-memory `MockRunExecutor`, which is the default, and `ArgoRunExecutor`, which submits Argo
 `Workflow` objects and is compiled only under the non-default `argo` cargo feature. A default build
 of every qa-platform **gear** therefore has no Kubernetes dependency in its tree. `qa-environments`
-carries a second, independently-switched Kubernetes-touching adapter — the runner-`Secret` writer —
-behind its own non-default `runner-secret` feature (not `argo`; the two gears toggle the same target
+carries a second, independently-switched Kubernetes-touching adapter — the pod-identity verifier
+(`TokenReview` and a pod read) — behind its own non-default `runner-credentials` feature (not `argo`; the two gears toggle the same target
 cluster independently). `qa-connector-k8s`, the transport library the VHP plugin links, carries
 `kube`/`k8s-openapi` **unconditionally**: it is the one crate in the subsystem not covered by a
 feature gate, because it is not a gear and is linked only by the plugins that need a cluster. §2.2
@@ -122,7 +122,7 @@ states the boundary precisely.
 | `cpt-cf-qa-nfr-log-latency` | A log line reaches a viewer ≤ 2 s p95 | qa-runs + `SseBroadcaster` | Executor log stream bridged to SSE with no buffering threshold | e2e streaming test |
 | `cpt-cf-qa-nfr-tenant-isolation` | No row crosses a tenant boundary | every gear, infra/storage | `SecureORM` with a tenant column on every table; per-gear `tests_tenant_scoping` suites | Tenant-scoping test module per gear |
 | `cpt-cf-qa-nfr-credential-containment` | Credential material never reaches a published surface | `qa-product-sdk`, plugins, connectors | Nothing derived from credential material is formatted; `PluginFailure::detail` is `&'static str`; keys travel credstore → memory → pipe → short-lived ssh-agent; secrets reach remote commands on stdin | `assert_no_leak` drives every plugin with planted material and fails the build if any of it surfaces |
-| `cpt-cf-qa-nfr-infra-agnostic` | A default build has no Kubernetes dependency | qa-runs, qa-environments, qa-connector-k8s | The Argo adapter is behind qa-runs' non-default `argo` feature and the runner-`Secret` writer is behind qa-environments' own, independently-switched, non-default `runner-secret` feature; `qa-connector-k8s` carries `kube`/`k8s-openapi` unconditionally but is linked only by the plugins that need a cluster, not by a default gear build | `cargo tree -p qa-runs -i kube -e normal` prints nothing, and `cargo tree -p qa-environments -i kube` errors (`kube` is not in the graph at all) without `--features runner-secret` |
+| `cpt-cf-qa-nfr-infra-agnostic` | A default build has no Kubernetes dependency | qa-runs, qa-environments, qa-connector-k8s | The Argo adapter is behind qa-runs' non-default `argo` feature and the pod-identity verifier is behind qa-environments' own, independently-switched, non-default `runner-credentials` feature; `qa-connector-k8s` carries `kube`/`k8s-openapi` unconditionally but is linked only by the plugins that need a cluster, not by a default gear build | `cargo tree -p qa-runs -i kube -e normal` prints nothing, and `cargo tree -p qa-environments -i kube` errors (`kube` is not in the graph at all) without `--features runner-credentials` |
 | `cpt-cf-qa-nfr-ingest-recovery` | Ingestion recovers within 60 s of a control-plane restart | qa-insights | `qa_ingest_watermarks` records the last reconciled `finished_at`; the reconcile sweep resumes from it | Restart test asserting watermark advance |
 
 #### Key Decisions (ADRs)
@@ -233,11 +233,11 @@ paths make no call into qa-insights.
 - [ ] `p1` - **ID**: `cpt-cf-qa-constraint-no-kube`
 
 `kube` and `k8s-openapi` may appear in the dependency tree only under three gates: the `argo` cargo
-feature of `qa-runs`, the `runner-secret` cargo feature of `qa-environments`, and unconditionally in
+feature of `qa-runs`, the `runner-credentials` cargo feature of `qa-environments`, and unconditionally in
 `qa-connector-k8s`, which is linked only by the VHP plugin. Verified with
 `cargo tree -p qa-runs -i kube -e normal` (nothing for a default build) and
 `cargo tree -p qa-environments -i kube` (errors — `kube` is not in the graph at all — without
-`--features runner-secret`).
+`--features runner-credentials`).
 
 #### Host-key verification is disabled
 
@@ -366,6 +366,7 @@ Registry of the places tests run, and the only gear that talks to a live product
 | Service | Responsibility |
 |---------|----------------|
 | `environments` | CRUD, product scoping, `is_default` resolution per product, observation orchestration |
+| `runner_credentials` | Serves a live runner pod its credential files (see "Runner credential flow" below) |
 | `environment_credentials` | Validates a submitted credential form through the product plugin, then writes secret fields to credstore and keeps only references |
 | `leases` | Acquire / release / inspect, shared and exclusive, optimistic on `version` |
 | `variables` | Per-environment and subsystem-wide variable CRUD. An upsert of one name that races another both succeed, and the later value wins. |
@@ -375,8 +376,61 @@ Registry of the places tests run, and the only gear that talks to a live product
 | Port | Implementation |
 |------|----------------|
 | `ProductPlugin` | `infra/product_plugin.rs` — resolves `dyn QaProductPluginV1` from `ClientHub` by the product's `plugin_instance_id` |
-| `RunnerSecret` | `infra/runner_secret_writer.rs` — materialises the secret a runner will mount, through the plugin's declared `MountSpec` |
+| `PodIdentityVerifier` | `infra/pod_identity.rs` — `TokenReview` of a runner pod's projected token plus a pod read (kube adapter under `runner-credentials`; without it a denying verifier answers 503) |
+| `RunnerPodResolver` | `infra/runner_pod_resolver.rs` — asks qa-runs (`resolve_runner_pod`, resolved from `ClientHub` per call, because qa-runs depends on qa-environments) which environment a live runner pod's run belongs to |
 | `Metrics` | `infra/metrics.rs` |
+
+#### Runner credential flow
+
+Runner pods fetch their credentials; no Kubernetes `Secret` holds them (ADR-0008, finding #94).
+
+1. qa-runs renders each Workflow with a `projected` volume whose only source is a
+   `serviceAccountToken` (audience `qa-platform-runner-credentials`, `expirationSeconds: 600`, mounted
+   at `/var/run/secrets/qa-platform/runner-credentials/token` in every container, on every node), a
+   memory-backed `emptyDir` on the parent directory of each `MountSpec::Secret`, the
+   `qa-platform/run-id` and `qa-platform/tenant-id` labels on each node template, and, only for runs
+   whose plugin access has credential mounts, `QA_CREDENTIALS_URL` (`bundle_base_url` +
+   `/qa/v1/runner-credentials`), `QA_CREDENTIALS_TOKEN_FILE` and `QA_CREDENTIAL_DIRS`
+   (colon-separated). Collect and platformless runs get no variables and the runner skips the fetch.
+2. Before the bundle download, `entrypoint.sh` runs `fetch_credentials.py`: `POST` with the token in
+   `X-QA-Runner-Token`, receiving `{"files":[{"path","mode","content_b64"}]}`. It writes each file
+   atomically with its mode, only under `QA_CREDENTIAL_DIRS`, and exits 1 unless every declared
+   directory received exactly one file. It retries 403 and 502/503/504/network errors within a
+   bounded backoff (about 17 s in total); 401 is final. It never logs the token.
+3. The route is anonymous at the toolkit layer, not registered in the gateway and not proxied by the
+   UI nginx (which answers 404 for it), so it is reachable inside the cluster only; the runner
+   NetworkPolicy already allows egress to gears. qa-environments:
+   - runs a `TokenReview` for the audience and accepts only an authenticated
+     `system:serviceaccount:<argo ns>:<argo.runner_service_account>` whose `user.extra` carries the
+     pod name and uid;
+   - reads the pod in the Argo namespace and requires the same uid and a non-terminal phase, then
+     takes the run and tenant from its labels and the workflow from its one controller
+     `ownerReference` to an `argoproj.io` `Workflow` (never from the `workflows.argoproj.io/workflow`
+     label, which a `Workflow` author can overwrite). A pod without exactly one such owner, or a nil
+     tenant, is refused (403) before qa-runs is asked;
+   - calls qa-runs' `resolve_runner_pod(tenant, run, workflow)`, which succeeds only for a
+     non-terminal run whose owning tenant equals the pod's tenant label and whose execution handle
+     equals the workflow, and yields the `environment_id`;
+   - calls the plugin's `prepare_run_access` and resolves each `MountSpec::Secret` through credstore
+     as the system actor. A ref that is not among the environment's own stored credentials is refused
+     (503), so only that environment's mounts can ever be returned;
+   - bounds the whole call by a 30 s deadline (503), and logs each grant and denial on target
+     `qa_environments.runner_credentials` with a file count, never refs or material.
+
+   Labels are not the root of trust: the pod (`TokenReview`, uid and controller ownerReference) and
+   the run (qa-runs) are. ADR-0008 records what remains (a principal that can create pods directly
+   in the Argo namespace can write any ownerReference).
+
+| Situation | HTTP |
+|-----------|------|
+| No `X-QA-Runner-Token` header | 401 |
+| `TokenReview` refuses (audience, user, no pod claims); pod missing, uid mismatch, terminal, unlabelled or not controlled by exactly one Workflow; nil tenant; qa-runs: not found, tenant mismatch, terminal or handle mismatch | 403, one fixed body for all |
+| Kubernetes or qa-runs API error; plugin or credstore failure; a mount ref outside the environment's credentials; deadline exceeded | 503 |
+| Success | 200 |
+
+The Workflow submitted by qa-runs is constrained by the chart's admission guard
+(`qa-platform-workflow-guard-<release namespace>`, §3.12): CREATE-only shape rules, and an
+UPDATE that may change `spec.shutdown` only. Kubernetes 1.30 or later is required.
 
 #### Observation
 
@@ -400,7 +454,7 @@ submitted key (which fields are secret), never anything credstore-shaped, becaus
 before that write happens and cannot know a reference.
 
 Every read of an environment's credential — an observation, whether a refresh or the background
-cycle, and the runner `Secret` write on create, update and self-heal — runs as the qa-environments
+cycle, and the runner credential fetch (`POST /qa/v1/runner-credentials`) — runs as the qa-environments
 system actor, bound to the tenant that owns the environment (the tenant the background cycle binds
 to), not to the caller's. A refresh therefore cannot succeed on a secret the background cycle cannot
 read: a reference to a secret with `private` sharing, which only its owner can read, fails both, and
@@ -417,6 +471,7 @@ own context.
 | POST | `/qa/v1/environments/{id}/refresh` | Force an observation |
 | GET, PUT | `/qa/v1/variables` | Pipeline and per-environment variables: list, and create or update by natural key |
 | DELETE | `/qa/v1/variables/{id}` | Delete a variable |
+| POST | `/qa/v1/runner-credentials` | Internal and anonymous (not registered in the gateway and not proxied by the UI nginx, which answers 404; reachable in-cluster only): a runner pod presents its projected ServiceAccount token in `X-QA-Runner-Token` and receives its live run's credential files (ADR-0008) |
 
 ### 3.3 qa-catalog
 
@@ -1831,12 +1886,12 @@ The Helm chart at `deploy/helm/qa-platform` deploys the subsystem onto Kubernete
 | `job-db-migrate.yaml` | migrations, run as a post-install hook after the gears have started — see "A fresh install CrashLoops, and that is expected" below |
 | `job-tenant-seed.yaml`, `seed-scripts-configmap.yaml` | the designated tenant |
 | `certs-job.yaml`, `certs-scripts-configmap.yaml` | TLS material for Keycloak and the UI |
-| `rbac-argo.yaml`, `deploy/argo/qa-runs-rbac.yaml` | the RBAC the Argo executor needs to submit and watch workflows (`qa-platform-gears-executor`, bound to `qa-platform-gears`, with no `secrets` verb), and the separate `qa-platform-secret-writer` Role — exactly `create`/`patch` on Secrets in the Argo namespace — for the runner-`Secret` writer |
+| `rbac-argo.yaml`, `deploy/argo/qa-runs-rbac.yaml` | the RBAC the Argo executor needs to submit and watch workflows (`qa-platform-gears-executor`, bound to `qa-platform-gears`, with no `secrets` verb). `deploy/argo/qa-runs-rbac.yaml` is the standalone, non-chart equivalent, and carries neither the TokenReview grant nor the Workflow guard |
+| `rbac-tokenreview.yaml` | the `qa-platform-gears-tokenreview-<release namespace>` ClusterRole and binding — `tokenreviews: create` only — for the runner credential route |
 | `argo-runner-serviceaccount.yaml`, `rbac-argo-runner.yaml` | the runner pod's declared identity in the Argo namespace (`argo.workflowServiceAccount`, named as `spec.serviceAccountName` on every Workflow qa-runs submits), and its `qa-platform-runner` Role and RoleBinding — `create`/`patch` on `workflowtaskresults` only, which is what Argo's executor container needs to report a step's result |
 | `runner-networkpolicy.yaml` | `qa-platform-runner-isolation`, in the Argo namespace: default-deny ingress, and egress limited to DNS, the gears Service, the Kubernetes API server (`argo.apiServerClusterIP`) and addresses outside the cluster's own pod and Service CIDRs (the run's target environment is tenant-supplied and cannot be named statically). Selects on the `qa-platform/network-isolated` label qa-runs stamps on every runner pod |
-| `secret-writer-serviceaccount.yaml` | the `qa-platform-secret-writer` ServiceAccount the runner-`Secret` writer authenticates as, and its `kubernetes.io/service-account-token` Secret; the gears Deployment mounts that token and `gears-argo-configmaps.yaml` renders the kubeconfig that reads it. See ADR-0008 for what this separation does and does not contain |
-| `secret-writer-admission-policy.yaml` | a cluster-scoped ValidatingAdmissionPolicy and binding, `qa-platform-secret-writer-guard-<release namespace>`, limiting that ServiceAccount to `Opaque` Secrets named with the runner prefix. Rendered only where `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy is served (Kubernetes 1.30+) |
-| `_helpers.tpl`, `NOTES.txt` | shared template helpers (public host, issuer, selector labels, runner `Secret` prefix, and the image reference helper that pins every image by digest) and the post-install notes; neither renders a Kubernetes object |
+| `workflow-guard-admission-policy.yaml` | a cluster-scoped ValidatingAdmissionPolicy and binding, `qa-platform-workflow-guard-<release namespace>`, limiting `qa-platform-gears` in the Argo namespace to the Workflow shape qa-runs emits (CREATE) and to changing `spec.shutdown` (UPDATE). Mandatory: the chart fails to render where `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy is not served (Kubernetes 1.30+) |
+| `_helpers.tpl`, `NOTES.txt` | shared template helpers (public host, issuer, selector labels, and the image reference helper that pins every image by digest) and the post-install notes; neither renders a Kubernetes object |
 
 #### A fresh install CrashLoops, and that is expected
 
@@ -1880,8 +1935,7 @@ limitation awaiting a fix.
 Every object the chart creates in the release namespace carries a hardcoded `qa-platform-*` name —
 the PVC (`deploy/helm/qa-platform/templates/gears-pvc.yaml:12`), the Postgres Secret
 (`templates/postgres-secret.yaml:4`), the gears ServiceAccount
-(`templates/gears-serviceaccount.yaml`), the runner-`Secret` writer's ServiceAccount
-(`templates/secret-writer-serviceaccount.yaml`; its admission policy is cluster-scoped and carries the release namespace in its name), the Argo RBAC (`templates/rbac-argo.yaml`) and
+(`templates/gears-serviceaccount.yaml`), the Argo RBAC (`templates/rbac-argo.yaml`) and
 thirty-odd more. The chart has no `fullname`/`nameOverride` helper, and `.Release.Name` appears on
 exactly one line of it: `templates/_helpers.tpl:46`, the `app.kubernetes.io/instance` selector
 label. A second `helm install` into the same namespace therefore collides on object-name ownership.
@@ -1909,7 +1963,7 @@ together, in one maintenance window.
 
 #### What the dev stand has verified
 
-A deployment is checked by `deploy/remote/verify-k8s.sh`, which `deploy-k8s.sh` runs on the node after every install. It proves the install is wired: every Deployment rolled to the built tag, the Argo executor selected and connected, the persistent credstore backend and its migration, the VHP plugin registered, observation and health written to the real database with the leak canary clean, the runner-`Secret` write into the Argo namespace, the Keycloak realm and discovery through nginx, and the metric catalog scraped and moving. It does not launch a run.
+A deployment is checked by `deploy/remote/verify-k8s.sh`, which `deploy-k8s.sh` runs on the node after every install. It proves the install is wired: every Deployment rolled to the built tag, the Argo executor selected and connected, the persistent credstore backend and its migration, the VHP plugin registered, observation and health written to the real database with the leak canary clean, the gears holding no rights on Secrets and the Workflow guard admitting only qa-runs' shape, the runner-credential route answering 404 at the public origin, no new runner `Secret` in the Argo namespace, the Keycloak realm and discovery through nginx, and the metric catalog scraped and moving. It does not launch a run.
 
 Runs have executed on the dev stand: the dispatch-latency windows of 2026-09-21 (§3.11, "The dispatch-latency window, and the measurement that was retracted") and the zero-result count of 2026-09-29 (§3.5) were measured there. The scenarios in `E2E-SCENARIOS.md` have no automated runner, and no run of the whole set on the stand is recorded.
 
@@ -1934,13 +1988,13 @@ included):
 | `log_buffer_lines` | runs | how many live-stream lines are buffered |
 | `argo.namespace`, `argo.runner_image`, `argo.runner_command`, `argo.image_pull_policy` | runs | the workflow the adapter submits |
 | `argo.workflow_ttl_seconds`, `argo.status_poll_seconds`, `argo.log_follow_idle_seconds` | runs | workflow lifetime, status-poll period, and how long a pod-log follow may go without a single line before it gives up. The follow bound belongs to the **executor** block: `QaRunsConfig` is `deny_unknown_fields` too, so writing it beside `log_buffer_lines` at the gear's top level is a startup parse failure |
-| `argo.workflow_service_account`, `argo.secret_name_prefix`, `argo.secret_key` | runs | identity and secret naming for the workflow |
-| `argo.run_as_user`, `argo.fs_group` | runs | The runner pod's non-root posture: `runAsUser` and `fsGroup`, both default `65534` (`nobody`). `fs_group` is what makes a mounted `Secret` file readable to that uid; without it the file is `root:root` and a suite reading its SSH key fails with `PermissionError` |
+| `argo.workflow_service_account` | runs | the identity the runner pod runs as. The former `argo.secret_name_prefix` and `argo.secret_key` are gone: no workflow references a Kubernetes `Secret` since finding #94, and `ArgoExecutorConfig` is `deny_unknown_fields`, so a leftover key is a startup parse failure |
+| `argo.run_as_user`, `argo.fs_group` | runs | The runner pod's non-root posture: `runAsUser` and `fsGroup`, both default `65534` (`nobody`). `fs_group` sets the group of the pod's volumes; it was introduced when credentials were `Secret`-volume files owned `root:root` (a suite reading its SSH key failed with `PermissionError`), and since finding #94 the runner writes them itself into memory-backed `emptyDir`s |
 | `argo.runner_resources.cpu_request`, `.memory_request`, `.cpu_limit`, `.memory_limit` | runs | The runner container's requests and limits (defaults `100m`, `256Mi`, `1`, `1Gi`); deployment-level only, no product override |
 | `argo.kubeconfig_path` | runs | Kubeconfig the adapter reaches the API server with, for a deployment whose host kubeconfig names a loopback the container cannot reach; unset uses in-cluster credentials |
-| `argo.bundle_base_url` | runs | Base URL a **workflow pod** uses to reach this subsystem's HTTP API when downloading a node's test bundle; unset submits no `TEST_BUNDLE_URL`. There is no companion credential block: the pod authorises itself with the per-bundle HMAC tag qa-catalog mints, rendered into that URL's `?sig=`, not with a client-credentials exchange of its own. `ArgoExecutorConfig` is `deny_unknown_fields`, so a leftover `argo.bundle_auth` mapping from before that change is a startup parse failure, not an ignored key |
+| `argo.bundle_base_url` | runs | Base URL a **workflow pod** uses to reach this subsystem's HTTP API when downloading a node's test bundle and, since finding #94, when fetching its credentials (`QA_CREDENTIALS_URL`, `POST /qa/v1/runner-credentials`); unset submits no `TEST_BUNDLE_URL` and no credential variables. There is no companion credential block: the pod authorises itself with the per-bundle HMAC tag qa-catalog mints, rendered into that URL's `?sig=`, not with a client-credentials exchange of its own. `ArgoExecutorConfig` is `deny_unknown_fields`, so a leftover `argo.bundle_auth` mapping from before that change is a startup parse failure, not an ignored key |
 | `max_variables` | environments | Max variables returned per env-assembly query (default 500) |
-| `argo.kubeconfig_path`, `argo.namespace`, `argo.secret_prefix`, `argo.secret_key` | environments | Only meaningful under the non-default `runner-secret` cargo feature: how the runner-`Secret` writer reaches the Argo cluster and names what it writes. Defaults: `namespace` `argo`, `secret_prefix` `qa-platform-`, `secret_key` `value`. The Helm chart sets `kubeconfig_path` to `/etc/qa-platform/secret-writer-kubeconfig.yaml`, a kubeconfig for the `qa-platform-secret-writer` ServiceAccount, because the pod's own `qa-platform-gears` account holds no `secrets` grant; unset falls back to `Config::infer()` |
+| `argo.namespace`, `argo.runner_service_account` | environments | Used by the runner credential route (`runner-credentials` cargo feature): the namespace the runner pods run in (default `argo`) and the ServiceAccount whose token the `TokenReview` must name (default `qa-platform-runner`, the chart's `argo.workflowServiceAccount`). `ArgoObserverConfig` is `deny_unknown_fields`, so a leftover `secret_prefix`, `secret_key` or `kubeconfig_path` is a startup parse failure |
 | `observation.enabled`, `observation.poll_interval_seconds`, `observation.observe_timeout_seconds` | environments | Whether the background observation ticker runs (default `true`), how often (default 300 s, floored at 60 s), and how long one environment's observation may take before it is recorded as a timeout, on the ticker and on refresh alike (default 300 s, floored at 1 s) |
 | `vendor`, `priority` | vhp-plugin | The VHP plugin's selection keys under `qa-vhp-product-plugin.config`: `vendor` is matched by exact string equality when a deployment selects between product plugins, and the lower `priority` wins (defaults `virtuozzo-vhp` and 100). Nothing else about the plugin is configurable, and any other key is a startup parse failure |
 | `vendor`, `priority` | vhi-plugin | The same two keys under `qa-vhi-product-plugin.config` (defaults `virtuozzo-vhi` and 100) |
