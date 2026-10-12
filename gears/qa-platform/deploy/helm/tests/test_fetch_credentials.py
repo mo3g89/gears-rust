@@ -169,3 +169,110 @@ def test_no_url_means_nothing_to_fetch(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(os, "environ", {})
     fc.main()
     assert "no QA_CREDENTIALS_URL" in capsys.readouterr().out
+
+
+def test_a_proxy_variable_does_not_divert_the_token(tmp_path, monkeypatch):
+    d = tmp_path / "kube"; d.mkdir()
+    seen = []
+    server, url = serve([(200, {"files": [file(d / "kubeconfig", 0o400, b"KUBE")]})], seen)
+    proxy_seen = []
+    proxy, proxy_url = serve([(200, {"files": []})], proxy_seen)
+    e = env(tmp_path, url, [d])
+    e.update({"http_proxy": proxy_url, "HTTP_PROXY": proxy_url, "ALL_PROXY": proxy_url})
+    monkeypatch.setattr(os, "environ", e)
+    try:
+        fc.main()
+    finally:
+        server.shutdown(); proxy.shutdown()
+    assert proxy_seen == [], "the token went to the proxy"
+    assert seen and seen[0]["X-QA-Runner-Token"] == "TOKEN-CANARY"
+
+
+def test_a_mode_with_special_bits_is_refused(tmp_path, monkeypatch):
+    d = tmp_path / "kube"; d.mkdir()
+    server, url = serve([(200, {"files": [file(d / "kubeconfig", 0o4755, b"x")]})], [])
+    monkeypatch.setattr(os, "environ", env(tmp_path, url, [d]))
+    try:
+        with pytest.raises(SystemExit):
+            fc.main()
+    finally:
+        server.shutdown()
+    assert not (d / "kubeconfig").exists()
+
+
+def test_a_failed_write_removes_the_files_already_written(tmp_path, monkeypatch):
+    a = tmp_path / "a"; a.mkdir(); b = tmp_path / "b"; b.mkdir()
+    server, url = serve([(200, {"files": [file(a / "one", 0o400, b"1"), file(b / "two", 0o400, b"2")]})], [])
+    monkeypatch.setattr(os, "environ", env(tmp_path, url, [a, b]))
+    real_write = fc.write
+
+    def failing(path, mode, content):
+        if path.endswith("two"):
+            raise OSError("disk full")
+        real_write(path, mode, content)
+
+    monkeypatch.setattr(fc, "write", failing)
+    try:
+        with pytest.raises(SystemExit):
+            fc.main()
+    finally:
+        server.shutdown()
+    assert not (a / "one").exists(), "a half-filled set of credentials was left behind"
+
+
+def test_a_missing_ca_file_is_a_clean_refusal(tmp_path, monkeypatch, capsys):
+    d = tmp_path / "kube"; d.mkdir()
+    e = env(tmp_path, "https://127.0.0.1:1/x", [d]); e["TEST_BUNDLE_CA_CERT"] = str(tmp_path / "nope.pem")
+    monkeypatch.setattr(os, "environ", e)
+    with pytest.raises(SystemExit) as info:
+        fc.main()
+    assert info.value.code == 1
+    assert "TEST_BUNDLE_CA_CERT" in capsys.readouterr().err
+
+
+def test_an_oversized_response_is_refused(tmp_path, monkeypatch):
+    d = tmp_path / "kube"; d.mkdir()
+    big = "A" * (fc.MAX_RESPONSE_BYTES + 1)
+    server, url = serve([(200, {"files": [], "pad": big})], [])
+    monkeypatch.setattr(os, "environ", env(tmp_path, url, [d]))
+    try:
+        with pytest.raises(SystemExit):
+            fc.main()
+    finally:
+        server.shutdown()
+
+
+def test_a_redirect_is_refused_and_the_token_does_not_follow(tmp_path, monkeypatch):
+    d = tmp_path / "kube"; d.mkdir()
+    elsewhere_log = []
+
+    class Elsewhere(http.server.BaseHTTPRequestHandler):
+        # urllib follows a 302 by re-sending the request as a GET.
+        def do_GET(self):
+            elsewhere_log.append(str(self.headers))
+            self.send_response(200); self.end_headers()
+        do_POST = do_GET
+        def log_message(self, *args): pass
+
+    elsewhere = http.server.HTTPServer(("127.0.0.1", 0), Elsewhere)
+
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:%d/x" % elsewhere.server_port)
+            self.end_headers()
+        def log_message(self, *args): pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+    for s in (elsewhere, server):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    url = "http://127.0.0.1:%d/qa/v1/runner-credentials" % server.server_port
+    monkeypatch.setattr(os, "environ", env(tmp_path, url, [d]))
+    try:
+        with pytest.raises(SystemExit) as exited:
+            fc.main()
+    finally:
+        server.shutdown(); elsewhere.shutdown()
+    assert exited.value.code != 0
+    assert elsewhere_log == [], "the redirect was followed"
+    assert "TOKEN-CANARY" not in "".join(elsewhere_log)

@@ -65,6 +65,9 @@ MSG_SA = "workflow-guard: spec.serviceAccountName must be the runner ServiceAcco
 MSG_TEMPLATE = "workflow-guard: template key not in the qa-runs allowlist"
 MSG_DAG = "workflow-guard: dag task key not in the qa-runs allowlist"
 MSG_VOLUME = "workflow-guard: volume not in the qa-runs allowlist"
+MSG_CONTAINER = "workflow-guard: container key not in the qa-runs allowlist"
+MSG_CONTAINER_SC = "workflow-guard: container securityContext outside the qa-runs shape"
+MSG_POD_SC = "workflow-guard: pod securityContext outside the qa-runs shape"
 
 
 def render(*extra, with_api=True):
@@ -143,7 +146,7 @@ def validation(docs, message):
 
 def rs_array(name):
     text = WORKFLOW_RS.read_text()
-    m = re.search(r'pub const %s: &\[&str\] = &\[(.*?)\];' % name, text, re.S)
+    m = re.search(r'pub const %s: &\[&str\] =\s*&\[(.*?)\];' % name, text, re.S)
     if not m:
         return None
     return set(re.findall(r'"([^"]+)"', m.group(1)))
@@ -211,7 +214,10 @@ def check_allowlist_matches_qa_runs(docs, failures):
     for const, message in (("ADMITTED_SPEC_KEYS", MSG_SPEC),
                            ("ADMITTED_TEMPLATE_KEYS", MSG_TEMPLATE),
                            ("ADMITTED_DAG_TASK_KEYS", MSG_DAG),
-                           ("ADMITTED_VOLUME_KEYS", MSG_VOLUME)):
+                           ("ADMITTED_VOLUME_KEYS", MSG_VOLUME),
+                           ("ADMITTED_CONTAINER_KEYS", MSG_CONTAINER),
+                           ("ADMITTED_CONTAINER_SECURITY_CONTEXT_KEYS", MSG_CONTAINER_SC),
+                           ("ADMITTED_POD_SECURITY_CONTEXT_KEYS", MSG_POD_SC)):
         keys = rs_array(const)
         v = validation(docs, message)
         if keys is None:

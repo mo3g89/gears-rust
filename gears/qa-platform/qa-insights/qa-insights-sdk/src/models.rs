@@ -389,7 +389,7 @@ pub struct NewJiraBug {
 /// absent variable and an empty one, which is why this is recorded on the
 /// contract rather than left to the implementer (plan Task 34, Step 0).
 ///
-/// `SKIP_TESTS_WITH_BUGS` is also one of the eleven names in
+/// `SKIP_TESTS_WITH_BUGS` is also in
 /// `qa_environments_sdk::RESERVED_VARIABLE_NAMES`, so no operator variable can
 /// overwrite the assembled value.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -565,7 +565,7 @@ where
     /// The PEP decision is compiled **before** qa-runs is asked anything.
     /// Otherwise a caller with no grant could still learn which runs exist, which
     /// is the same reason
-    /// [`crate::domain::service::reconcile::ReconcileService::rebuild`] compiles
+    /// [`crate::domain::service::reconcile::ReconcileService::rebuild_after`] compiles
     /// its scope first.
     /// `a_denied_caller_reads_nothing_and_does_not_reach_qa_runs` asserts the
     /// listing count and not just the error, because asserting the error alone

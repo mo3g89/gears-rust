@@ -119,9 +119,8 @@ derived from our credential material, and suppressing it would leave operators d
     tenant and run labels only say where to look. qa-environments then asks qa-runs
     (`resolve_runner_pod`) for that run, and qa-runs answers only when the run is live, its owning
     tenant equals the pod's tenant label, and its execution handle (`execution_ref`) equals the
-    owner workflow's name. The binding is therefore the controller ownerReference plus
-    `execution_ref`: workflow names are unique in the namespace, so only pods of the Workflow
-    qa-runs submitted for that run pass.
+    owner workflow's name. *(Superseded 2026-10-12: the binding is the Workflow's uid, not its name;
+    see the amendment below.)*
   - Only the mounts that the environment's plugin returns from `prepare_run_access` are resolved
     through credstore, and only refs among the environment's own stored credentials are served. A
     nil pod tenant, a foreign ref, or a call over its 30 s deadline is refused. Every 403 has one
@@ -153,33 +152,177 @@ derived from our credential material, and suppressing it would leave operators d
   What remains:
   * Bad, because tenant test code can re-request its own run's credentials while its pod is alive.
     This is not a widening: the same files are already in the pod's tmpfs.
-  * Bad, because the guard does not restrict the runner image, its command or the container's
-    capabilities beyond privilege escalation.
+  * Bad, because the guard does not restrict the runner image or its command. *(Narrowed
+    2026-10-12: it now allowlists the container and pod securityContext; see the amendment.)*
   * Bad, because Kubernetes 1.30 or later is required (ValidatingAdmissionPolicy v1).
   * Bad, because `qa-platform-gears` can create a `TokenReview` for any token. That tells it whether
     a token is valid, and nothing more.
   * Bad, because a product plugin's `access.service_account` override would now be denied by the
     pinned-ServiceAccount rule. No in-tree plugin uses it.
-  * Bad, because the guard matches `qa-platform-gears` only. Any other principal allowed to create
-    Workflows in the Argo namespace can still run arbitrary pods as the runner ServiceAccount and
-    mount a token for the runner audience. Such a pod cannot claim another tenant's run: its
-    controller ownerReference names that principal's own Workflow, never the Workflow qa-runs
-    recorded as the run's `execution_ref`, and template metadata cannot set ownerReferences.
-    What remains is narrower: a principal that can create **pods** directly in the Argo namespace
-    can write any `ownerReferences` it likes (the API server accepts them; the
-    `OwnerReferencesPermissionEnforcement` plugin gates only `blockOwnerDeletion`), so it could name
-    a live run's Workflow and claim that run's credentials while the run is live. That principal can
-    already run any image as any ServiceAccount in the namespace; `qa-platform-gears` cannot create
-    pods. Closing it would mean also checking the pod against the owner Workflow's `status.nodes`,
-    which is not done.
+  * Bad, because the guard matches `qa-platform-gears` only, and the Workflow-name binding was
+    defeated by delete-and-recreate. *(Superseded 2026-10-12: the binding is now the Workflow uid
+    and a second policy keeps other principals off qa-runs Workflows, runner pods and runner
+    tokens; see the amendment.)*
   * Bad, because credentials and the runner's token now cross the pod network in plain HTTP to the
     gears Service. Before, a mounted Secret travelled API server to kubelet over TLS. The runner
     NetworkPolicy limits who the runner talks to, not who can observe that traffic on the node or
-    the CNI.
+    the CNI. *(2026-10-12: this is an open owner decision, recorded in DESIGN §3.14 "Accepted
+    residues and open owner decisions".)*
   * Bad, because a product whose `RunnerSpec` sets a custom image or `command` that bypasses
     `entrypoint.sh` must run `fetch_credentials.py` itself, or its credential directories stay
-    empty (documented on `RunnerSpec`).
+    empty (documented on `RunnerSpec`). *(2026-10-12: the image's entrypoint is now the launcher
+    `launch.py`; such a product bypasses it and must also do its own scrub, running any credential
+    fetch with the platform's names only. See the last amendment.)*
   *(Added 2026-09-30, second review, finding #94.)*
+
+### Amendment 2026-10-12: re-verification of #94
+
+An independent re-verification of the branch found these gaps. Each is closed as follows.
+
+* **Binding by uid.** The earlier text said a pod "can never" name the Workflow qa-runs recorded.
+  That was false for delete-and-recreate: a Workflow deleted and resubmitted under the same name
+  passed the name comparison. qa-runs now records the Workflow's uid when it starts a run
+  (`qa_runs.execution_uid`, migration `m20261012_000007`), and `resolve_runner_pod` answers only
+  when the pod's controller `ownerReference` uid equals the recorded one. An empty uid and a run
+  with no recorded uid are refused. The name stays as a first filter.
+* **The runner guard.** The chart's `qa-platform-runner-guard-<release namespace>`
+  ValidatingAdmissionPolicy lets only `qa-platform-gears` and the Argo workflow-controller
+  (`argo.controllerServiceAccount`, default `argo-workflows-workflow-controller`) write qa-runs
+  Workflows, or Workflows that name the runner ServiceAccount (also through `templateDefaults`,
+  `executor`, `podSpecPatch` and inline templates). Only the controller may create or update runner
+  pods; the garbage collector may update (finalizers, ownerReferences). Nobody may add an ephemeral
+  container to a runner pod. No new ServiceAccount-token Secret may name the runner
+  ServiceAccount, so its tokens come only from kubelets (the projected volume) once any
+  pre-existing token Secret naming it has been deleted (UPGRADING.md, "2026-10-12 (second):
+  runner environment and guards", item 4). This
+  changes what operators can do: a cluster-admin, the Argo UI's stop, retry and resubmit, and
+  `kubectl label` or `kubectl debug` on runner pods or qa-runs Workflows are now denied. Deleting
+  still works. Known residue: a foreign Workflow that reaches the runner ServiceAccount through a
+  WorkflowTemplate, ClusterWorkflowTemplate or CronWorkflow, or through an escaped `podSpecPatch`,
+  is not matched. Its pods get only the runner ServiceAccount's own RBAC and no credentials,
+  because their controlling Workflow's uid is not one qa-runs recorded.
+* **The trusted identities are guarded.** The runner guard's exemptions are only as strong as who
+  can act as the exempt principals: anyone who could run a pod as the controller's ServiceAccount,
+  or mint its token, could create a runner pod with a forged ownerReference (a live Workflow's name
+  and uid are readable). The guard's `trustedServiceAccounts` (decided at render time) lists the
+  controller's ServiceAccount when it runs in `argo.namespace`, and `qa-platform-gears` when
+  `argo.namespace` is the release namespace. For each, no new ServiceAccount-token Secret may name
+  it, so its tokens come only from kubelets (the projected volume) once any pre-existing token
+  Secret naming it has been deleted (same UPGRADING item); only the
+  ReplicaSet controller (`system:serviceaccount:kube-system:replicaset-controller`, or
+  `system:kube-controller-manager` where kube-controller-manager does not use per-controller
+  credentials) may create a pod running as it, only the garbage collector may update one, and
+  nobody may add an ephemeral container to one. On the stand the controller pod's managedFields
+  show the ReplicaSet controller's create and only status writes after it.
+* **The securityContext allowlist.** The Workflow guard also allowlists container keys, a
+  container `securityContext` of `allowPrivilegeEscalation` and `capabilities: {drop: [ALL]}`, and
+  a pod `securityContext` with `runAsUser` above 0, `fsGroup` above 0 if set, and seccomp
+  `RuntimeDefault`, plus the isolation label. The guard therefore restricts capabilities; it still
+  does not restrict the runner image or its command.
+* **Fetchers ignore proxies; `PYTEST_ADDOPTS` is reserved.** `fetch_credentials.py` and
+  `fetch_bundle.py` use an opener with an empty `ProxyHandler`, cap responses (1 MiB and 1 GiB),
+  and roll back partial writes. The entrypoint runs them, and the collect report, with
+  `env -u LOCALDOMAIN -u RES_OPTIONS -u HOSTALIASES python3 -I`, and unsets `PYTEST_ADDOPTS`. The
+  resolver variables matter because the gears' in-cluster name has fewer dots than `ndots:5`, so
+  glibc tries the search list first, and `LOCALDOMAIN` replaces it: a run variable
+  `LOCALDOMAIN=evil.example` would otherwise send the token and the credentials to that host.
+  `PYTEST_ADDOPTS` joins the reserved names (16 in all at the time; the floor has since grown, see
+  the next amendment), because pytest reads it as extra options
+  that could deselect failing tests; stored variables with a reserved name are dropped with a WARN.
+  Proxy and resolver variables are not reserved: a suite may need them to reach its targets, and
+  only the platform's own fetches must ignore them (`test_runner_fetch_resolver_env.sh`).
+
+What remains:
+
+* Bad, because tenant code can re-request its own run's credentials while its pod lives. The same
+  files are already in the pod's tmpfs.
+* Bad, because the runner image and command are not restricted.
+* Bad, because a foreign Workflow can still reach the runner ServiceAccount through a
+  WorkflowTemplate, ClusterWorkflowTemplate or CronWorkflow indirection, or an escaped
+  `podSpecPatch`. Its pods get only the runner ServiceAccount's own RBAC and no credentials: their
+  controlling Workflow's uid is not one qa-runs recorded.
+* Bad, because a principal that can create or patch a Deployment or ReplicaSet whose pod template
+  runs as the Argo controller's ServiceAccount, or exec into the controller pod, can still act as
+  the controller, and so create a runner pod with a forged ownerReference and fetch that run's
+  credentials. The runner guard does not match Deployments or ReplicaSets. Run the controller in
+  its own namespace (`argo.controllerNamespace`), so that write access to `argo.namespace` does not
+  reach it; the guard then lists no controller in `trustedServiceAccounts`, and that namespace's
+  own RBAC is what protects it.
+* Bad, because principals with `pods/exec` or `pods/attach` in the Argo namespace can read a live
+  runner pod's files. They are cluster operators by this ADR's trust boundary, and blocking exec
+  would only hamper debugging.
+* Bad, because credentials and the runner's token cross the pod network in plain HTTP to the
+  gears Service (unchanged from above). This is an open owner decision, recorded in DESIGN §3.14
+  "Accepted residues and open owner decisions": the api-gateway system gear has no TLS listener,
+  and TLS needs a sidecar or a gateway change, which is a feature.
+* Bad, because runs submitted before `m20261012_000007` are refused credentials after the upgrade
+  (fail closed). A runner fetches once, at start, so only a pod that starts after the upgrade under
+  a pre-upgrade submit is affected.
+
+### Amendment 2026-10-12: the trust boundary after a further review
+
+A further independent review of the branch, after the amendment above, found that the runner's
+environment, its results and its tokens still had paths around the guards, and that this ADR left
+some of the trust boundary unstated. Each item is either closed as described or recorded as part of
+the boundary.
+
+* **Runner environment.** The image's `/entrypoint.sh` is now `deploy/runner/launch.py`, run with
+  `python3 -I`. It saves the pod's whole environment to a private file and runs the bash run script
+  with the platform's own names only, so the credential fetch, the bundle fetch and `pip install`
+  never see a run variable; `with_tenant_env.py` applies the tenant environment to pytest alone.
+  The fix had to sit outside the script: bash sources `BASH_ENV` before line one of any script, so
+  no check inside it can come first. A name allowlist was not an option, because the PRD says run
+  variables reach tests verbatim. `pip` running platform-only means no run variable chooses the
+  package index. The reserved floor now names classes as well as instances: the prefixes in
+  `qa_runs::domain::params::RESERVED_PREFIXES` (`GIT_`, `LD_`, `PIP_`, `PYTEST_`, `PYTHON`,
+  `QA_CREDENTIAL`, `QA_RUNNER_`, `TEST_BUNDLE_`) and exact names for bash's startup and expansion
+  controls, other interpreters' code-loading controls and module paths, programs that tools run on
+  demand (`BROWSER`, `SSH_ASKPASS`), and the platform's `COLLECT_ONLY` and `VHP_COLLECT_URL`. git is
+  in the runner image and honours many command-running variables, so `GIT_` is reserved as a
+  prefix rather than name by name. The floor bounds what the tenant environment can do to the test
+  processes, which still see it.
+* **Results.** The qa-runs log drain follows only pods whose one controller `ownerReference` carries
+  the Workflow uid the run recorded and that run as the Workflow's ServiceAccount; a pod that only
+  wears the Workflow's label is not read, so, with the chart's runner guard, it cannot print a
+  passing result into the run. The account is the one the Workflow names, which every qa-runs
+  Workflow does when deployed with the chart, which sets the runner account. A Workflow that names
+  none is checked against the configured runner account (`qa-runs.argo.workflow_service_account`),
+  and with neither, no pod's log is read. The verdict is bound to the uid too: when the Workflow under the run's name is no longer the one it
+  submitted, the watch ends without a verdict. Residue: a run submitted before `m20261012_000007`
+  has no recorded uid, and its watcher pins the uid of the live Workflow it first sees. Failing
+  closed instead would erase the results of every run in flight at the upgrade. A delete-and-recreate
+  under the same name before that first sight is therefore not caught, for those runs only.
+* **Token Secrets.** The runner guard refuses a ServiceAccount-token Secret that names the runner
+  ServiceAccount or a trusted one, so the token controller cannot be asked for a long-lived token
+  outside any kubelet. An UPDATE of a token Secret that already named the same account (the token
+  controller filling `data`) is not a new mint and is admitted, and the upgrade deletes nothing.
+  Residue: a token Secret created before the upgrade keeps a working long-lived token until an
+  operator deletes it. Once every such Secret is gone, a guarded account's tokens come only from
+  kubelets, through the projected volume (UPGRADING.md, "2026-10-12 (second): runner environment
+  and guards", item 4).
+* **Impersonation is a cluster-operator right.** Principals who may `impersonate` ServiceAccounts
+  in the Argo namespace are cluster operators, like holders of `pods/exec` and `pods/attach`.
+  Admission sees the impersonated name, not the impersonator, so no guard can tell them from the
+  account they act as. The built-in `edit` and `admin` roles carry that verb; `UPGRADING.md` tells
+  operators not to grant either in the Argo namespace to non-operators.
+* **`workflowtaskresults`.** Any runner pod may create or patch any `WorkflowTaskResult` in the
+  namespace. RBAC cannot narrow `create` by name, and Argo names results by node id at run time;
+  Argo's own executor Role has the same shape. Recorded as a residue.
+* **`system:kube-controller-manager` is trusted** for creates and garbage-collector updates of pods
+  running as a trusted ServiceAccount. On clusters where kube-controller-manager does not use
+  per-controller credentials, that identity is every built-in controller.
+* **Mounts are resolved at fetch, not at submit.** The route asks the environment's plugin for its
+  mounts when the runner fetches, while the pod's credential directories were fixed at submit. If
+  the environment's mounts changed in between, the response no longer matches those directories
+  and the fetch fails closed (`check_one_per_directory` in `deploy/runner/fetch_credentials.py`). A
+  credential replaced under the same mount is served as it stands at fetch time.
+* **Denial of service.** The credential route reads the token's claims, unverified, before it takes
+  a `TokenReview` permit (`plausible` in `qa-environments/qa-environments/src/infra/pod_identity.rs`),
+  so junk is shed without costing one, and a plausible request waits up to 5 s for a permit. A
+  plausible-but-forged flood still competes for the 16 permits (`MAX_CONCURRENT_REVIEWS`). The
+  runner's fetchers and the collect report refuse redirects.
+* **Plain HTTP** is an open owner decision, recorded in DESIGN §3.14 "Accepted residues and open
+  owner decisions".
 
 ### Confirmation
 

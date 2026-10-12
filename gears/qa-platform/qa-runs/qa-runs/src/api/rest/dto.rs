@@ -279,10 +279,10 @@ impl TryFrom<RunTargetDto> for sdk::RunTarget {
             // arm - but an arm that refuses what the other one produces is the
             // asymmetry `every_target_kind_round_trips` exists to catch.
             //
-            // It grants no capability a caller did not already have:
-            // `VHP_COLLECT_URL` is **not** in `domain::params::RESERVED_NAMES`
-            // (see the SECURITY NOTE there), so a launch parameter could always
-            // set it on any run.
+            // It grants no capability a caller did not already have: a collect
+            // run is a plain run whose statics carry `COLLECT_ONLY` and
+            // `VHP_COLLECT_URL`, and a launch parameter can no longer set
+            // either (both are in `domain::params::RESERVED_NAMES`).
             "collect" => Ok(Self::Collect {
                 repo_id: required(dto.repo_id, "repo_id", "collect")?,
                 collect_url: within_column(

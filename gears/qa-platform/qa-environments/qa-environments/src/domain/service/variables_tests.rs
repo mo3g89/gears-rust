@@ -534,6 +534,45 @@ async fn upsert_refuses_every_reserved_name_on_both_paths() {
     }
 }
 
+/// The reserved floor names classes: bash's startup controls, interpreter and
+/// loader controls, and the runner's own namespaces are refused on both write
+/// paths, including names that are in no list but sit under a reserved prefix.
+#[tokio::test]
+async fn upsert_refuses_interpreter_loader_and_runner_control_classes() {
+    let tenant_id = Uuid::new_v4();
+    let environment_id = Uuid::new_v4();
+
+    for reserved in [
+        "BASH_ENV", "bash_env", "PYTHONSTARTUP", "LD_PRELOAD", "TEST_BUNDLE_CA_CERT",
+        "QA_RUNNER_WORKDIR", "QA_RUNNER_ANYTHING_NEW", "GIT_SSH_COMMAND", "_JAVA_OPTIONS",
+    ] {
+        for scope in [None, Some(environment_id)] {
+            let variables_repo = Arc::new(MockVariablesRepository::empty());
+            let environments_repo = Arc::new(MockEnvironmentsRepository::none());
+            let authz = Arc::new(RecordingAuthZ::new());
+            let svc = build_service(variables_repo.clone(), environments_repo, authz).await;
+
+            let err = svc
+                .upsert(
+                    &ctx(tenant_id),
+                    NewVariable {
+                        environment_id: scope,
+                        name: reserved.to_owned(),
+                        value: "hijack".to_owned(),
+                    },
+                )
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(&err, DomainError::Validation { field, message }
+                    if field == "name" && message.contains("is reserved by the test runner")),
+                "expected the reserved-name refusal for {reserved}, got {err:?}"
+            );
+        }
+    }
+}
+
 /// Case-insensitive, matching the source system's `eq_ignore_ascii_case`
 /// (`../testrunner/manager/src/routes/settings.rs:80-88`).
 ///

@@ -28,6 +28,11 @@
 //!   [`no_resolvable_markdown_citation_carries_a_line_number`], which is a rule
 //!   about the citation's *form* and needs no line to be read. See that test
 //!   for why Markdown is the case where the trade goes the other way.
+//! * **Out of the top-level `docs/*.md` files and the chart's `UPGRADING.md`
+//!   (living operator documentation), a line number into code is banned
+//!   too** — by
+//!   [`no_resolvable_code_citation_in_the_design_record_carries_a_line_number`].
+//!   Code-to-code citations keep their line numbers, as the first bullet says.
 //! * **Citing sites are `.rs`, `.ts`, `.tsx`, `.sh` under `gears/qa-platform`,
 //!   plus the top-level `docs/*.md` files** — `DESIGN.md`, `PRD.md`,
 //!   `E2E-SCENARIOS.md` and any future direct child of `docs/`.
@@ -89,7 +94,9 @@ const CODE_EXTENSIONS: &[&str] = &["rs", "tsx", "ts", "sh"];
 /// would pull in dated planning notes (see [`is_scanned_top_level_doc`]), but
 /// *recognising* a `.md` target when one is cited from a file this guard does
 /// scan is always safe to check.
-const CITATION_TARGET_EXTENSIONS: &[&str] = &["rs", "tsx", "ts", "sh", "md"];
+const CITATION_TARGET_EXTENSIONS: &[&str] = &[
+    "rs", "tsx", "ts", "sh", "md", "py", "yaml", "yml", "json", "tpl",
+];
 
 /// Is `file` one of the top-level `docs/*.md` files — `docs/DESIGN.md`,
 /// `docs/PRD.md`, and so on, but not anything under `docs/ADR/`,
@@ -114,6 +121,14 @@ fn is_scanned_top_level_doc(file: &str) -> bool {
             !rest.contains('/') && Path::new(rest).extension().is_some_and(|ext| ext == "md")
         })
 }
+
+/// Living operator documentation outside `docs/`: edited with every release
+/// that changes what an operator must do, so it rots like the design record.
+/// Scanned only by
+/// [`no_resolvable_code_citation_in_the_design_record_carries_a_line_number`];
+/// its older sections cite a past tree on purpose, so the existence rule does
+/// not read it.
+const LIVING_OPERATOR_DOCS: &[&str] = &["deploy/helm/qa-platform/UPGRADING.md"];
 
 /// `gears/qa-platform`, derived from this crate's own location.
 fn subsystem_root() -> PathBuf {
@@ -357,6 +372,115 @@ fn no_resolvable_markdown_citation_carries_a_line_number() {
          \"Execution events\" — never a line. A line number that is right today \
          and wrong next week is a trap; a heading is greppable forever. Do not \
          add an exemption, and do not \"helpfully\" restore the numbers.",
+        offenders.len(),
+        offenders.join("\n  "),
+    );
+}
+
+/// The living design record cites code by **path plus symbol, key or
+/// heading**, never by line number. So does the living operator
+/// documentation, [`LIVING_OPERATOR_DOCS`] (the chart's `UPGRADING.md`):
+/// `keycloak-deployment.yaml:67-68` there had drifted two lines off the guard
+/// it named.
+///
+/// `DESIGN.md`, `PRD.md` and `E2E-SCENARIOS.md` are edited as often as the
+/// code they describe, so a line number written there is stale within a
+/// branch: `reconcile.rs:2071` went into DESIGN in one task and the code moved
+/// in the next, so the citation pointed at the wrong code within a day. A
+/// code file cites another code file by line number legitimately, as the
+/// module header says — the two move together and a reviewer sees both in one
+/// diff — so this rule scans **only** the files [`is_scanned_top_level_doc`]
+/// selects, plus [`LIVING_OPERATOR_DOCS`].
+///
+/// [`citations`] only recognises a citation that carries `:N`, so "found and
+/// resolvable" already means "carries a line number"; no other condition is
+/// needed. Resolution is the same path-suffix match the sibling guards use, so
+/// legacy-tree citations (`manager/src/...`), which resolve to nothing here,
+/// are not flagged.
+///
+/// Exactly what counts as resolvable: a citation resolves when it path-suffix
+/// matches a file under `gears/qa-platform`, **or** when it starts with a real
+/// top-level directory of the repository root (read from the tree, which must
+/// hold a `Cargo.toml`) and `repo_root/<path>` is an existing file — so
+/// `gears/system/oagw/oagw/src/gear.rs:N` is caught although it lies outside
+/// this subsystem. `.md` targets are skipped: they have their own rule.
+#[test]
+fn no_resolvable_code_citation_in_the_design_record_carries_a_line_number() {
+    let root = subsystem_root();
+    let files = all_files(&root);
+    assert!(
+        files.len() > 300,
+        "the walk of {} found {} files, which cannot be right — a broken walk \
+         would make this whole test vacuous",
+        root.display(),
+        files.len(),
+    );
+
+    let index: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+    let repo_root = root
+        .parent()
+        .and_then(Path::parent)
+        .expect("gears/qa-platform sits two levels under the repository root")
+        .to_owned();
+    assert!(
+        repo_root.join("Cargo.toml").is_file(),
+        "{} holds no Cargo.toml, so it is not the repository root",
+        repo_root.display(),
+    );
+    // Real top-level directories of the repository, each as `name/`.
+    let repo_dirs: Vec<String> = fs::read_dir(&repo_root)
+        .expect("the repository root is readable")
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !NOT_SOURCE.contains(&name.as_str()))
+        .map(|name| format!("{name}/"))
+        .collect();
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    for file in &files {
+        if !is_scanned_top_level_doc(file) && !LIVING_OPERATOR_DOCS.contains(&file.as_str()) {
+            continue;
+        }
+        scanned += 1;
+        let Ok(text) = fs::read_to_string(root.join(file)) else {
+            continue;
+        };
+        for cited in citations(&text) {
+            // `citations()` already restricts to recognised targets; only
+            // Markdown has its own rule.
+            if Path::new(cited.as_str())
+                .extension()
+                .is_some_and(|ext| ext == "md")
+            {
+                continue;
+            }
+            let suffix = cited.rsplit_once(".../").map_or(cited.as_str(), |x| x.1);
+            let in_subsystem = index
+                .iter()
+                .any(|known| *known == suffix || known.ends_with(&format!("/{suffix}")));
+            let in_repository = repo_dirs.iter().any(|dir| cited.starts_with(dir.as_str()))
+                && repo_root.join(&cited).is_file();
+            if in_subsystem || in_repository {
+                offenders.push(format!("{file}: `{cited}:N`"));
+            }
+        }
+    }
+    assert!(
+        scanned >= 4,
+        "only {scanned} docs were scanned; DESIGN, PRD, E2E-SCENARIOS and \
+         UPGRADING are expected, so the scan is vacuous",
+    );
+    offenders.sort();
+    offenders.dedup();
+    assert!(
+        offenders.is_empty(),
+        "{} citation(s) in the living design record or operator docs carry a \
+         line number into code:\n  {}\n\nCite the file plus a symbol, key or \
+         heading instead — `reconcile.rs`, `drain_run` — never a line. DESIGN, \
+         PRD, E2E-SCENARIOS and UPGRADING are edited as often as the code, so a \
+         line number there is stale within a branch. Do not add an exemption.",
         offenders.len(),
         offenders.join("\n  "),
     );

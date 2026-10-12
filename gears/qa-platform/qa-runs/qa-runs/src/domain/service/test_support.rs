@@ -268,6 +268,9 @@ pub struct MockRunsRepository {
     /// now that there is a per-node column to read rather than a scan of
     /// the archived text.
     positions: Mutex<HashMap<Uuid, HashMap<String, OffsetDateTime>>>,
+    /// The uid `set_execution_ref` last recorded per run, read back by
+    /// `execution_uid` under the same scope check as the row.
+    execution_uids: Mutex<HashMap<Uuid, String>>,
 }
 
 /// A one-shot rendezvous between a test and one gated `append_log` call, added
@@ -317,6 +320,7 @@ impl MockRunsRepository {
             fail_next_append: Mutex::new(false),
             append_gate: Mutex::new(None),
             positions: Mutex::new(HashMap::new()),
+            execution_uids: Mutex::new(HashMap::new()),
         }
     }
 
@@ -627,11 +631,43 @@ impl RunsRepository for MockRunsRepository {
     async fn set_execution_ref<C: DBRunner>(
         &self,
         _runner: &C,
-        _scope: &AccessScope,
-        _id: Uuid,
-        _execution_ref: &str,
+        scope: &AccessScope,
+        id: Uuid,
+        execution_ref: &str,
+        execution_uid: Option<&str>,
     ) -> Result<bool, DomainError> {
-        Err(unsupported("set_execution_ref"))
+        let mut rows = self.rows.lock().unwrap();
+        let Some((_, run)) = rows.iter_mut().find(|(tenant_id, run)| {
+            run.id == id && scope.contains_uuid(OWNER_TENANT_ID, *tenant_id)
+        }) else {
+            return Ok(false);
+        };
+        run.execution_ref = Some(execution_ref.to_owned());
+        let mut uids = self.execution_uids.lock().unwrap();
+        match execution_uid {
+            Some(uid) => {
+                uids.insert(id, uid.to_owned());
+            }
+            None => {
+                uids.remove(&id);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn execution_uid<C: DBRunner>(
+        &self,
+        _runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<String>, DomainError> {
+        let rows = self.rows.lock().unwrap();
+        Ok(rows
+            .iter()
+            .find(|(tenant_id, run)| {
+                run.id == id && scope.contains_uuid(OWNER_TENANT_ID, *tenant_id)
+            })
+            .and_then(|_| self.execution_uids.lock().unwrap().get(&id).cloned()))
     }
 
     /// Not reached by the launch path: `bundle_ids` is written empty at insert

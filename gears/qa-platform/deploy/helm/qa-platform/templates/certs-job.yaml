@@ -122,9 +122,19 @@ metadata:
     "helm.sh/hook-weight": "-11"
     "helm.sh/hook-delete-policy": before-hook-creation
 rules:
+  # `create` cannot be narrowed by name (Kubernetes ignores resourceNames on
+  # create: the name is not known at admission of the request's authz).
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "patch"]
+    verbs: ["create"]
+  # `patch` (the server-side apply merge) is limited to the one Secret the job
+  # writes -- the literal `qa-platform-tls` in the manifest below. This Role
+  # outlives the hook, so an unnamed patch would let the SA rewrite any Secret
+  # in the namespace. No `get`: server-side apply issues none.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["patch"]
+    resourceNames: ["qa-platform-tls"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

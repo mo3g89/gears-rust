@@ -4,6 +4,7 @@ mod m20260813_000003_initial;
 mod m20260918_000004_run_log_positions;
 mod m20260921_000005_run_xfail_counter;
 mod m20260921_000006_run_xpass_counter;
+mod m20261012_000007_run_execution_uid;
 
 #[cfg(test)]
 mod schema_behaviour_tests;
@@ -31,6 +32,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260918_000004_run_log_positions::Migration),
             Box::new(m20260921_000005_run_xfail_counter::Migration),
             Box::new(m20260921_000006_run_xpass_counter::Migration),
+            Box::new(m20261012_000007_run_execution_uid::Migration),
         ]
     }
 }

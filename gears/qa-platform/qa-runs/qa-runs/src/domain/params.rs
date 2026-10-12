@@ -85,9 +85,10 @@ use qa_runs_sdk::RunParameter;
 
 /// Names the runner owns; a launch parameter may not shadow any of them.
 ///
-/// Exactly the source system's `RESERVED_PIPELINE_VARIABLE_NAMES`
-/// (`manager/src/routes/settings.rs:15-27`), name for name and in the same
-/// order, and exactly what `cpt-cf-qa-fr-runs-params` enumerates.
+/// It began as exactly the source system's `RESERVED_PIPELINE_VARIABLE_NAMES`
+/// (`manager/src/routes/settings.rs:15-27`), name for name, which is what
+/// `cpt-cf-qa-fr-runs-params` enumerates. The sections below record each name
+/// added since; the array is kept in alphabetical order.
 ///
 /// SECURITY NOTE — inherited parity, verified 2026-08-13: `E2E_VHP_BASE_URL` is
 /// deliberately overridable by a run parameter. This list deliberately does
@@ -123,8 +124,10 @@ use qa_runs_sdk::RunParameter;
 /// the floor, and `a_plugin_that_reserves_nothing_still_cannot_take_test_files`
 /// is what says so.
 ///
-/// An earlier design document once claimed that floor included
-/// `COLLECT_ONLY` and the collect/progress URLs; it never did.
+/// An earlier design document claimed that floor included `COLLECT_ONLY` and
+/// the collect URL before it did. Since 2026-10-12 `COLLECT_ONLY` and
+/// `VHP_COLLECT_URL` are in it (see "Classes" below); the result-callback URL
+/// and `E2E_VHP_BASE_URL` are still not.
 /// PRD §5.4 "Run Orchestration" lists the floor, and
 /// `the_prd_lists_exactly_the_reserved_floor` keeps the list equal to this
 /// array.
@@ -163,23 +166,82 @@ use qa_runs_sdk::RunParameter;
 /// appends its own values after the shared environment, so a same-named run
 /// parameter would lose today; reserving them makes that ordering a belt rather
 /// than the only thing between a launch parameter and the runner's token.
-pub const RESERVED_NAMES: [&str; 15] = [
-    "APP_BUILD",
-    "APP_VERSION",
-    "E2E_K8S_NAMESPACE",
-    "KUBECONFIG",
-    "PRODUCT_KEY",
-    "QA_CREDENTIALS_TOKEN_FILE",
-    "QA_CREDENTIALS_URL",
-    "QA_CREDENTIAL_DIRS",
-    "QA_RUNNER_PYTEST_ARGS",
-    "RP_API_KEY",
-    "RP_PROJECT",
-    "SKIP_TESTS_WITH_BUGS",
-    "TEST_BUNDLE_URL",
-    "TEST_FILES",
-    "TEST_VERSION",
+///
+/// # `PYTEST_ADDOPTS` (re-verification, 2026-10-12)
+///
+/// pytest reads `PYTEST_ADDOPTS` as extra command-line options, so a variable
+/// of that name reopens what reserving `QA_RUNNER_PYTEST_ARGS` closed: flags
+/// such as `-k` that deselect failing tests. The runner also `unset`s it.
+///
+/// # Classes (2026-10-12)
+///
+/// The floor now names classes, not only instances: [`RESERVED_PREFIXES`] plus
+/// more exact names. `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+/// `IFS`, `CDPATH` and `GLOBIGNORE` are bash's startup and expansion controls:
+/// bash reads `BASH_ENV` and sources the file before it runs line one of a
+/// script, so no check inside the script can come first. `NODE_OPTIONS`,
+/// `PERL5OPT`, `PERL5LIB`, `RUBYOPT`, `JAVA_TOOL_OPTIONS` and `GCONV_PATH` do
+/// the same for other interpreters and libc. `COLLECT_ONLY` and
+/// `VHP_COLLECT_URL` are platform controls that sit in the statics tier, which
+/// a run parameter overrides (`domain::runvars::assemble`), so a parameter
+/// could turn a run into a collect-only run or send its collect report
+/// elsewhere. Run parameters of `E2E_VHP_BASE_URL` and the result-callback URL
+/// stay overridable, as the note above says.
+///
+/// The same class has more members, added later the same day:
+/// `_JAVA_OPTIONS` and `JDK_JAVA_OPTIONS` are the JVM's other option
+/// variables, which `java` reads like `JAVA_TOOL_OPTIONS` (`-javaagent:` runs
+/// code). `PERLLIB`, `RUBYLIB` and `NODE_PATH` are the module search paths of
+/// Perl, Ruby and Node, so a variable chooses which file an `import` loads.
+/// `BROWSER` and `SSH_ASKPASS` name a program that tools run on demand:
+/// Python's `webbrowser` module and many CLIs run `$BROWSER`, and ssh runs
+/// `$SSH_ASKPASS` to ask for a passphrase. git, which the runner image ships,
+/// is reserved as a whole prefix in [`RESERVED_PREFIXES`] rather than name by
+/// name.
+pub const RESERVED_NAMES: [&str; 39] = [
+    "APP_BUILD", "APP_VERSION", "BASHOPTS", "BASH_ENV", "BROWSER", "CDPATH", "COLLECT_ONLY",
+    "E2E_K8S_NAMESPACE", "ENV", "GCONV_PATH", "GLOBIGNORE", "IFS", "JAVA_TOOL_OPTIONS",
+    "JDK_JAVA_OPTIONS", "KUBECONFIG", "NODE_OPTIONS", "NODE_PATH", "PERL5LIB", "PERL5OPT",
+    "PERLLIB", "PRODUCT_KEY", "PS4", "PYTEST_ADDOPTS", "QA_CREDENTIALS_TOKEN_FILE",
+    "QA_CREDENTIALS_URL", "QA_CREDENTIAL_DIRS", "QA_RUNNER_PYTEST_ARGS", "RP_API_KEY",
+    "RP_PROJECT", "RUBYLIB", "RUBYOPT", "SHELLOPTS", "SKIP_TESTS_WITH_BUGS", "SSH_ASKPASS",
+    "TEST_BUNDLE_URL", "TEST_FILES", "TEST_VERSION", "VHP_COLLECT_URL", "_JAVA_OPTIONS",
 ];
+
+/// Name prefixes reserved as a class (since 2026-10-12).
+///
+/// * `LD_`, `PYTHON`, `PIP_`, `PYTEST_`: dynamic-loader and interpreter
+///   controls. Each makes a process the runner starts load or run code a run
+///   variable chose.
+/// * `GIT_`: git's own controls. git is installed in the runner image, and it
+///   honours many variables that run a command: `GIT_SSH_COMMAND`,
+///   `GIT_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_PAGER`,
+///   `GIT_EDITOR`, `GIT_EXEC_PATH`, and `GIT_CONFIG_COUNT` with
+///   `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`, which can set any config key,
+///   `core.sshCommand` and `core.fsmonitor` included. Naming them one by one
+///   would miss the next one, so the whole prefix is reserved. A suite loses
+///   harmless ones too, such as `GIT_AUTHOR_NAME`.
+/// * `QA_RUNNER_`, `QA_CREDENTIAL`, `TEST_BUNDLE_`: the runner's own namespaces.
+///   A new runner control under one of them is reserved the day it is added,
+///   without editing this list.
+///
+/// The structural fix is the runner's launcher (`deploy/runner/launch.py`):
+/// the platform's own steps never see the tenant environment. This floor
+/// bounds what the tenant environment can do to the test processes, which do
+/// see it.
+pub const RESERVED_PREFIXES: [&str; 8] = [
+    "GIT_", "LD_", "PIP_", "PYTEST_", "PYTHON", "QA_CREDENTIAL", "QA_RUNNER_", "TEST_BUNDLE_",
+];
+
+/// Whether `name` is on the platform's reserved floor, compared as the launch
+/// check compares it: case-insensitively, as an exact name in
+/// [`RESERVED_NAMES`] or under a prefix in [`RESERVED_PREFIXES`].
+#[must_use]
+pub fn is_reserved(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    RESERVED_NAMES.iter().any(|reserved| *reserved == upper)
+        || RESERVED_PREFIXES.iter().any(|prefix| upper.starts_with(prefix))
+}
 
 /// Most parameters one launch may carry (`MAX_RUN_PARAMETERS`,
 /// `manager/src/routes/settings.rs:32`). Stated by `cpt-cf-qa-fr-runs-params`.
@@ -423,7 +485,9 @@ pub fn validate(parameters: &[RunParameter], contract: &RunVarContract) -> Resul
         // in the runner's shell, but the *intent* to shadow a control variable
         // is what is being refused, and a lowercase spelling expresses it just
         // as well.
-        if reserved.contains(&parameter.name.to_ascii_uppercase()) {
+        if is_reserved(&parameter.name)
+            || reserved.contains(&parameter.name.to_ascii_uppercase())
+        {
             return Err(ParamError::Reserved {
                 name: parameter.name.clone(),
             });
@@ -512,16 +576,16 @@ mod tests {
         }
     }
 
-    /// The fifteen reserved names — eleven legacy, plus the platform's own
-    /// `QA_RUNNER_PYTEST_ARGS` and three runner-credential controls — rejected
-    /// case-insensitively. Enumerated in
-    /// full rather than sampled: the legacy eleven are a frozen contract with
-    /// the runner (`routes/settings.rs:15-27`, matched at `:80-83`) and a
-    /// missing entry is a silent hole.
+    /// Every exact name in [`RESERVED_NAMES`] — the eleven legacy names plus
+    /// the platform's own additions — rejected case-insensitively. Enumerated
+    /// in full rather than sampled: the legacy eleven are a frozen contract
+    /// with the runner (`routes/settings.rs:15-27`, matched at `:80-83`) and a
+    /// missing entry is a silent hole. The prefixes in [`RESERVED_PREFIXES`]
+    /// have their own tests.
     ///
     /// This test iterates [`RESERVED_NAMES`], so it cannot police the list's
     /// *contents* — shrink the constant and it still passes. That is
-    /// `the_reserved_list_is_eleven_legacy_names_plus_four_platform_reservations`'s
+    /// `the_reserved_list_is_its_legacy_names_platform_reservations_and_classes`'s
     /// job, and it writes the literal.
     #[test]
     fn every_reserved_name_is_rejected_case_insensitively() {
@@ -540,14 +604,17 @@ mod tests {
         }
     }
 
-    /// Exactly these fifteen, written as a literal so this test is not its own
+    /// Exactly these thirty-nine, written as a literal so this test is not its own
     /// oracle. Pins the list itself so a future addition is a deliberate spec
     /// amendment rather than a quiet edit.
     ///
     /// The floor used to be exactly the eleven legacy names ported from the
-    /// source system. `QA_RUNNER_PYTEST_ARGS` is the first name
-    /// added since: not a legacy port but a platform reservation, because it
-    /// expands unquoted into pytest's own argv and a launch parameter of that
+    /// source system. Every name added since is a platform reservation, not a
+    /// legacy port: `QA_RUNNER_PYTEST_ARGS`, `PYTEST_ADDOPTS`, the three
+    /// `QA_CREDENTIAL*` controls, and the interpreter, loader and platform
+    /// controls listed under "Classes" in [`RESERVED_NAMES`]'s doc. The first
+    /// of them is the model: it expands
+    /// unquoted into pytest's own argv and a launch parameter of that
     /// name could drop failing tests while the run still exited zero. See
     /// [`RESERVED_NAMES`]'s doc for the full rationale and why the same name
     /// must be reserved in `qa_environments_sdk::RESERVED_VARIABLE_NAMES` too.
@@ -559,26 +626,59 @@ mod tests {
     /// other: that one proves the rule is *applied*, this one proves the list
     /// is *right*.
     #[test]
-    fn the_reserved_list_is_eleven_legacy_names_plus_four_platform_reservations() {
+    fn the_reserved_list_is_its_legacy_names_platform_reservations_and_classes() {
         assert_eq!(
-            RESERVED_NAMES,
+            RESERVED_NAMES.as_slice(),
             [
                 "APP_BUILD",
                 "APP_VERSION",
+                "BASHOPTS",
+                "BASH_ENV",
+                "BROWSER",
+                "CDPATH",
+                "COLLECT_ONLY",
                 "E2E_K8S_NAMESPACE",
+                "ENV",
+                "GCONV_PATH",
+                "GLOBIGNORE",
+                "IFS",
+                "JAVA_TOOL_OPTIONS",
+                "JDK_JAVA_OPTIONS",
                 "KUBECONFIG",
+                "NODE_OPTIONS",
+                "NODE_PATH",
+                "PERL5LIB",
+                "PERL5OPT",
+                "PERLLIB",
                 "PRODUCT_KEY",
+                "PS4",
+                "PYTEST_ADDOPTS",
                 "QA_CREDENTIALS_TOKEN_FILE",
                 "QA_CREDENTIALS_URL",
                 "QA_CREDENTIAL_DIRS",
                 "QA_RUNNER_PYTEST_ARGS",
                 "RP_API_KEY",
                 "RP_PROJECT",
+                "RUBYLIB",
+                "RUBYOPT",
+                "SHELLOPTS",
                 "SKIP_TESTS_WITH_BUGS",
+                "SSH_ASKPASS",
                 "TEST_BUNDLE_URL",
                 "TEST_FILES",
                 "TEST_VERSION",
+                "VHP_COLLECT_URL",
+                "_JAVA_OPTIONS",
             ]
+            .as_slice()
+        );
+        assert_eq!(
+            RESERVED_PREFIXES.as_slice(),
+            [
+                "GIT_", "LD_", "PIP_", "PYTEST_", "PYTHON", "QA_CREDENTIAL", "QA_RUNNER_",
+                "TEST_BUNDLE_",
+            ]
+            .as_slice()
         );
     }
 
@@ -868,5 +968,102 @@ mod tests {
             .collect();
         let floor: BTreeSet<&str> = RESERVED_NAMES.into_iter().collect();
         assert_eq!(listed, floor, "PRD section 5.4 \"The reserved floor\" and RESERVED_NAMES disagree");
+    }
+
+    #[test]
+    fn interpreter_and_loader_controls_are_reserved_as_a_class() {
+        for name in [
+            "BASH_ENV", "bash_env", "SHELLOPTS", "BASHOPTS", "PS4", "ENV", "IFS", "CDPATH",
+            "GLOBIGNORE", "PYTHONSTARTUP", "PYTHONWARNINGS", "pythonpath", "PYTHONHASHSEED",
+            "LD_PRELOAD", "LD_LIBRARY_PATH", "PIP_INDEX_URL", "pip_extra_index_url",
+            "PYTEST_PLUGINS", "PYTEST_ADDOPTS", "NODE_OPTIONS", "PERL5OPT", "PERL5LIB",
+            "RUBYOPT", "JAVA_TOOL_OPTIONS", "GCONV_PATH", "_JAVA_OPTIONS", "_java_options",
+            "JDK_JAVA_OPTIONS", "PERLLIB", "RUBYLIB", "NODE_PATH", "BROWSER", "SSH_ASKPASS",
+            "GIT_SSH_COMMAND", "git_config_count", "GIT_ASKPASS",
+        ] {
+            assert!(is_reserved(name), "{name} must be reserved");
+        }
+    }
+
+    #[test]
+    fn the_runners_own_controls_are_reserved_as_a_class() {
+        for name in [
+            "TEST_BUNDLE_CA_CERT", "TEST_BUNDLE_REF", "TEST_BUNDLE_ANYTHING_NEW",
+            "QA_RUNNER_WORKDIR", "QA_RUNNER_COLLECT_VERBOSE", "QA_RUNNER_ANYTHING_NEW",
+            "QA_CREDENTIALS_URL", "QA_CREDENTIAL_ANYTHING_NEW", "COLLECT_ONLY", "VHP_COLLECT_URL",
+        ] {
+            assert!(is_reserved(name), "{name} must be reserved");
+        }
+    }
+
+    #[test]
+    fn ordinary_suite_variables_are_not_reserved() {
+        // Real suite names (vhp-testrunner's guide, vhi-e2e-tests) must stay usable.
+        for name in [
+            "E2E_MONITORING_BILLING_URL", "VHI_REPROVISION", "VINFRA_METHOD_COMMANDS",
+            "REGION", "MY_SETTING", "QA_TENANT_SETTING", "TEST_TIER", "HTTP_PROXY",
+        ] {
+            assert!(!is_reserved(name), "{name} must stay available to suites");
+        }
+    }
+
+    #[test]
+    fn launch_refuses_a_reserved_prefix_in_any_casing() {
+        for name in [
+            "bash_env", "Pythonstartup", "ld_preload", "Test_Bundle_Ca_Cert", "qa_runner_workdir",
+            "Git_Ssh_Command",
+        ] {
+            let err = floor(&[p(name, "$(id)")]).unwrap_err();
+            assert!(
+                matches!(err, ParamError::Reserved { .. }),
+                "{name} must be refused as reserved, got {err:?}"
+            );
+        }
+    }
+
+    /// PRD §5.4 lists the reserved prefixes, and the list is exactly
+    /// [`RESERVED_PREFIXES`]. Only the paragraph that starts
+    /// `**Reserved prefixes.**` is read, and only its backticked tokens that
+    /// end in `*`.
+    #[test]
+    fn the_prd_lists_exactly_the_reserved_prefixes() {
+        use std::collections::BTreeSet;
+
+        let prd_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/PRD.md");
+        let prd = std::fs::read_to_string(&prd_path).expect("PRD.md is readable");
+        let start = prd
+            .find("**Reserved prefixes.**")
+            .expect("PRD section 5.4 carries a paragraph that starts `**Reserved prefixes.**`");
+        let paragraph = prd[start..].split("\n\n").next().expect("a paragraph");
+        let listed: BTreeSet<&str> = paragraph
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|t| t.len() > 1 && t.ends_with('*'))
+            .map(|t| t.trim_end_matches('*'))
+            .collect();
+        let floor: BTreeSet<&str> = RESERVED_PREFIXES.into_iter().collect();
+        assert_eq!(listed, floor, "PRD section 5.4 \"Reserved prefixes\" and RESERVED_PREFIXES disagree");
+    }
+
+    #[test]
+    fn every_name_the_runner_launcher_keeps_is_reserved() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/runner/launch.py");
+        let source = std::fs::read_to_string(&path).expect("launch.py is readable");
+        let start = source.find("PLATFORM_NAMES = (").expect("launch.py defines PLATFORM_NAMES");
+        let end = source[start..].find(')').map(|end| start + end).expect("closed tuple");
+        let body = &source[start..end];
+        let names: Vec<&str> = body.split('"').skip(1).step_by(2).collect();
+        assert!(names.len() >= 10, "parsed {names:?} from launch.py, which cannot be right");
+        for name in names {
+            if matches!(name, "HOME" | "PATH") {
+                continue; // appended last by the Argo adapter; Kubernetes keeps the last entry
+            }
+            assert!(
+                is_reserved(name),
+                "launch.py passes {name} to the platform steps, so it must be reserved"
+            );
+        }
     }
 }

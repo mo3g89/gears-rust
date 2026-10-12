@@ -46,7 +46,10 @@ Makefile's `helm-tests` target for why each one is invoked directly rather
 than through pytest collection."""
 import pathlib
 import re
+import subprocess
 import sys
+
+import yaml
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
 CHART = TESTS_DIR.parent / "qa-platform"
@@ -128,9 +131,61 @@ def check_tls_secret_name_agrees(failures):
             "same Secret.")
 
 
+def certs_role_rules(failures):
+    out = subprocess.run(
+        ["helm", "template", "qa-platform", str(CHART),
+         "--api-versions", "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy",
+         "--set", "publicOrigin=https://example-tls-guard-test.invalid",
+         "--set", "keycloak.adminPassword=guard-fixture-not-a-real-password",
+         "--set", "argo.workflowClientSecret=guard-fixture-not-a-real-workflow-secret",  # nosec: test fixture only
+         "--set", "postgres.password=guard-fixture-not-a-real-db-password",  # nosec: test fixture only
+         "--set", "bundleDownloadSigningSecret=guard-fixture-not-a-real-bundle-key",
+         "--set", "collectReportSigningSecret=guard-fixture-not-a-real-collect-key"],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        failures.append(f"FAIL: helm template failed: {out.stderr.strip()}")
+        return None
+    for d in yaml.safe_load_all(out.stdout):
+        if d and d.get("kind") == "Role" and \
+                d["metadata"]["name"] == "qa-platform-certs":
+            return d["rules"]
+    failures.append("FAIL: no Role qa-platform-certs rendered.")
+    return None
+
+
+def check_certs_role_is_named(failures):
+    """The certs hook Role survives the hook (before-hook-creation deletes it
+    only on the next run), so it may patch ONLY the Secret the job writes.
+    `create` cannot be narrowed (the API ignores resourceNames on create)
+    and is the only verb allowed without resourceNames."""
+    name = extract_certs_job_secret_name(failures)
+    rules = certs_role_rules(failures)
+    if name is None or rules is None:
+        return
+    for r in rules:
+        if "secrets" not in r.get("resources", []):
+            continue
+        verbs = set(r["verbs"])
+        names = r.get("resourceNames")
+        if not names and verbs - {"create"}:
+            failures.append(
+                f"FAIL: Role qa-platform-certs grants {sorted(verbs)} on "
+                "ALL secrets; only `create` may be unnamed.")
+        if names and names != [name]:
+            failures.append(
+                f"FAIL: Role qa-platform-certs names {names!r}; the job "
+                f"writes {name!r}.")
+    if not any(r.get("resourceNames") == [name] and "patch" in r["verbs"]
+               for r in rules):
+        failures.append(
+            f"FAIL: Role qa-platform-certs has no `patch` rule with "
+            f"resourceNames == [{name!r}].")
+
+
 def main():
     failures = []
     check_tls_secret_name_agrees(failures)
+    check_certs_role_is_named(failures)
     if failures:
         for line in failures:
             print(line, file=sys.stderr)

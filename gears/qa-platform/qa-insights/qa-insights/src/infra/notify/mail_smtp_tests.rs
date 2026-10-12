@@ -737,6 +737,49 @@ async fn a_credential_store_not_found_error_is_the_same_refusal_as_a_miss() {
     );
 }
 
+/// A credential store that fails for any reason other than a miss is an internal
+/// fault, not a settings problem: `Internal`, the same answer `SlackOagwClient`
+/// gives (`a_failing_credential_store_is_internal_and_nothing_is_dialled`), so
+/// both channels answer a credstore outage alike. A regression guard for that
+/// ruling; it passed when written.
+#[tokio::test]
+async fn a_failing_credential_store_is_internal_and_nothing_is_dialled() {
+    let relay = MockRelay::start(Behaviour::Converse(AuthOutcome::Accept)).await;
+
+    let error = client(MockCredStoreClient::always_failing(), Duration::from_secs(5))
+        .send(&ctx(), &message(relay.port, Some(credentials())))
+        .await
+        .expect_err("the store fails");
+
+    assert!(matches!(error, DomainError::Internal(_)), "{error:?}");
+    assert!(
+        relay.transcript().is_empty(),
+        "dialled after a store failure: {:?}",
+        relay.transcript()
+    );
+}
+
+/// A relay transport that cannot be built is the operator's relay
+/// configuration, not an internal fault: `UpstreamEgress`, naming the host.
+///
+/// Tested on the mapping itself, because `lettre` validates the name lazily, at
+/// connect time, so no host string makes `relay()` fail on a healthy build.
+/// The detail renders the TLS layer's own error, never anything about the
+/// credentials, which are not in scope at that point.
+#[test]
+fn a_relay_build_failure_is_an_upstream_egress_failure_naming_the_host() {
+    let error = super::relay_build_failure("smtp.corp.example", &"no usable TLS root certificates");
+
+    assert!(
+        matches!(&error, DomainError::UpstreamEgress { channel, endpoint, failure, detail }
+            if channel == "email"
+                && endpoint == "smtp.corp.example"
+                && *failure == EgressFailure::Unreachable
+                && detail.contains("could not be built")),
+        "{error:?}"
+    );
+}
+
 /// `AccessDenied` and a non-UTF-8 value read the same as a miss: the reference
 /// is caller-supplied, and a second text would tell the caller the name exists
 /// over a store the system actor reads more widely than the caller does.

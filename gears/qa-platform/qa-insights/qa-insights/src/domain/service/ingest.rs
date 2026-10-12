@@ -419,7 +419,7 @@ impl<R: ResultsRepository> IngestService<R> {
     ///
     /// **The check that closes it is the caller's**, and there is one:
     /// [`refuse_scope_beyond_tenant`](crate::domain::service::refuse_scope_beyond_tenant),
-    /// called by `ReconcileService::rebuild` before anything is read. The full
+    /// called by `ReconcileService::rebuild_after` before anything is read. The full
     /// measurement is recorded there and on
     /// [`ResultsRepository::upsert_run_results`](crate::domain::repos::ResultsRepository::upsert_run_results).
     /// This function does not call it itself: its two background callers satisfy
@@ -582,7 +582,7 @@ fn project_rows(
             // A row written while this resolution was wrong **cannot be
             // corrected by a query change** — the analytics read has no second
             // column to consult — so it needs a reprojection: the operator
-            // rebuild (`ReconcileService::rebuild`, Task 16) re-reads the run
+            // rebuild (`ReconcileService::rebuild_after`, Task 16) re-reads the run
             // from qa-runs and rewrites the row. And a run that recorded no
             // branch at all stores `None`, which no branch-filtered analytics
             // read can ever match; it is visible only in the unfiltered one,

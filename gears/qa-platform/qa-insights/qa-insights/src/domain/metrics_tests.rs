@@ -445,6 +445,7 @@ fn the_no_op_port_accepts_every_emission_and_returns_nothing() {
         metrics.bug(outcome);
     }
     metrics.auto_rerun();
+    // The literal is the contract: dashboards and alert rules query these metric names.
     assert_eq!(QA_INSIGHTS_COLLECT, "qa_insights_collect_total");
     assert_eq!(
         QA_INSIGHTS_COLLECT_REPORT,

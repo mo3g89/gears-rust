@@ -80,6 +80,15 @@ REPO_ROOT = Path(__file__).resolve().parents[5]
 
 
 def test_system_gears_are_untouched():
+    have_base = subprocess.run(
+        ["git", "cat-file", "-e", f"{UPSTREAM_BASE}^{{commit}}"],
+        capture_output=True, cwd=REPO_ROOT,
+    ).returncode == 0
+    assert have_base, (
+        f"upstream base {UPSTREAM_BASE} is not in this clone. A shallow checkout "
+        "(actions/checkout's default fetch-depth: 1) cannot run this guard: set "
+        "`fetch-depth: 0` on the job that runs `make helm-tests`."
+    )
     for path in GUARDED:
         diff = subprocess.run(
             ["git", "diff", "--stat", UPSTREAM_BASE, "--", path],

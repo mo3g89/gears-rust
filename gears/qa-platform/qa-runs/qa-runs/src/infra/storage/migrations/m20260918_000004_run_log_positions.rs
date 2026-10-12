@@ -150,6 +150,7 @@ mod tests {
             schedule_id: ActiveValue::Set(None),
             bundle_ids: ActiveValue::Set(serde_json::json!([])),
             execution_ref: ActiveValue::Set(None),
+            execution_uid: ActiveValue::Set(None),
             log_storage_ref: ActiveValue::Set(None),
             timeout_at: ActiveValue::Set(None),
             started_at: ActiveValue::Set(None),

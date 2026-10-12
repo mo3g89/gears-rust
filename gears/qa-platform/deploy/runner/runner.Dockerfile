@@ -1,13 +1,15 @@
-# The qa-platform pytest runner: fetches a test bundle with a service-account
-# token, unpacks it, runs pytest, and emits the log markers qa-runs' Argo
+# The qa-platform pytest runner: fetches its credentials and a test bundle,
+# unpacks the bundle, runs pytest, and emits the log markers qa-runs' Argo
 # adapter parses.
 #
 # WHY THIS IMAGE EXISTS RATHER THAN REUSING THE SOURCE SYSTEM'S. The source
 # system's runner (`vhp-testrunner/runner/`, an 896-line entrypoint) downloads
 # from `TEST_BUNDLE_URL` with NO authentication, because its manager's bundle
-# route had no auth middleware at all. This deployment's route is
-# `.authenticated()`, so a token has to be fetched first -- and that is the one
-# behaviour the source runner cannot be configured into.
+# route had no auth middleware at all. This deployment authenticates both
+# fetches, and that is the one behaviour the source runner cannot be configured
+# into: the runner fetches its credentials with its pod-bound projected token
+# (`fetch_credentials.py`, ADR-0008) and the bundle with an HMAC-signed URL
+# (`fetch_bundle.py`'s header).
 #
 # WHY IT IS BUILT AND IMPORTED RATHER THAN PULLED. There is no registry in this
 # deployment. `docker build` puts an image in the DOCKER daemon's store, which
@@ -159,12 +161,19 @@ COPY gears/qa-platform/deploy/runner/fetch_credentials.py /opt/qa-runner/fetch_c
 COPY gears/qa-platform/deploy/runner/pytest_markers.py /opt/qa-runner/pytest_markers.py
 COPY gears/qa-platform/deploy/runner/collect_reporter.py /opt/qa-runner/collect_reporter.py
 COPY gears/qa-platform/deploy/runner/bundle_layout.py /opt/qa-runner/bundle_layout.py
+COPY gears/qa-platform/deploy/runner/with_tenant_env.py /opt/qa-runner/with_tenant_env.py
 
 # `/entrypoint.sh`, at the root, because that is the path
 # `qa-runs.argo.runner_command` defaults to. A different path here means every
 # deployment has to set that knob.
-COPY gears/qa-platform/deploy/runner/entrypoint.sh /entrypoint.sh
-RUN chmod 0755 /entrypoint.sh
+#
+# It is `launch.py`, a `python3 -I` launcher: it saves the tenant environment to
+# a private file and execs the bash run script (`/opt/qa-runner/run.sh`, the
+# repository's entrypoint.sh) with the platform's names only, so no run
+# variable (BASH_ENV, ...) acts before the credential fetch.
+COPY gears/qa-platform/deploy/runner/launch.py /entrypoint.sh
+COPY gears/qa-platform/deploy/runner/entrypoint.sh /opt/qa-runner/run.sh
+RUN chmod 0755 /entrypoint.sh /opt/qa-runner/run.sh /opt/qa-runner/with_tenant_env.py
 
 # /work is where the bundle is unpacked and pytest's CWD. Created here rather
 # than by the entrypoint so its ownership is the image's, which matters if a

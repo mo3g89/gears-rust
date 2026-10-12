@@ -177,27 +177,81 @@ use crate::domain::state_machine::ExecutorOutcome;
 /// be a cross-tenant cancel, and no type here can stop it, because the
 /// execution plane has no scope to check against.
 #[domain_model]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ExecutionRef(String);
+#[derive(Clone, Debug)]
+pub struct ExecutionRef {
+    reference: String,
+    uid: Option<String>,
+}
+
+// Identity is the reference string alone. The uid is a binding detail that
+// `resolve_runner_pod` reads explicitly; `classify_execution` matches row-built
+// refs (no uid) against `list_active` refs, and a uid on either side must not
+// make a live claim look absent.
+impl PartialEq for ExecutionRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.reference == other.reference
+    }
+}
+
+impl Eq for ExecutionRef {}
+
+impl PartialOrd for ExecutionRef {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ExecutionRef {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.reference.cmp(&other.reference)
+    }
+}
+
+impl std::hash::Hash for ExecutionRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.reference.hash(state);
+    }
+}
 
 impl ExecutionRef {
     /// Wrap an executor-minted reference — from [`RunExecutor::start`] or from
     /// the run row that recorded it.
     #[must_use]
     pub fn new(reference: impl Into<String>) -> Self {
-        Self(reference.into())
+        Self {
+            reference: reference.into(),
+            uid: None,
+        }
+    }
+
+    /// A reference with the uid the executor's backend minted for it — for
+    /// Argo, the Workflow's `metadata.uid`. The uid is what binds a runner
+    /// pod to this run (`resolve_runner_pod`); a name can be recreated.
+    #[must_use]
+    pub fn with_uid(reference: impl Into<String>, uid: impl Into<String>) -> Self {
+        Self {
+            reference: reference.into(),
+            uid: Some(uid.into()),
+        }
     }
 
     /// The reference as the executor spelled it.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.reference
     }
 
-    /// Unwrap for persistence into `qa_runs.execution_ref`.
+    /// The backend-minted uid, when the executor recorded one.
+    #[must_use]
+    pub fn uid(&self) -> Option<&str> {
+        self.uid.as_deref()
+    }
+
+    /// Unwrap the reference for persistence into `qa_runs.execution_ref`.
+    /// The uid, if any, is dropped; persist it via [`Self::uid`].
     #[must_use]
     pub fn into_inner(self) -> String {
-        self.0
+        self.reference
     }
 }
 
@@ -879,6 +933,11 @@ mod tests {
              one env write path and not the others is a name an operator can set \
              on the other"
         );
+        assert_eq!(
+            crate::domain::params::RESERVED_PREFIXES.as_slice(),
+            qa_environments_sdk::RESERVED_VARIABLE_PREFIXES.as_slice(),
+            "the two gears' reserved-prefix lists have drifted"
+        );
     }
 
     /// The composition check the port owes
@@ -940,6 +999,22 @@ mod tests {
         assert_eq!(reference.as_str(), "mock-execution-1");
         assert_ne!(reference, ExecutionRef::new("smoke-tests-1"));
         assert_eq!(reference.into_inner(), "mock-execution-1");
+    }
+
+    /// Identity is the reference string alone: the uid is a binding detail, so a
+    /// row-built ref (no uid) still matches a `list_active` ref that has one.
+    #[test]
+    fn the_uid_is_not_part_of_an_execution_references_identity() {
+        use std::hash::{BuildHasher, RandomState};
+        let bare = ExecutionRef::new("w");
+        let with_uid = ExecutionRef::with_uid("w", "u");
+        assert_eq!(bare, with_uid);
+        assert_eq!(bare.cmp(&with_uid), std::cmp::Ordering::Equal);
+        let state = RandomState::new();
+        assert_eq!(state.hash_one(&bare), state.hash_one(&with_uid));
+        assert_eq!(with_uid.uid(), Some("u"));
+        assert_eq!(bare.uid(), None);
+        assert_ne!(with_uid, ExecutionRef::with_uid("x", "u"));
     }
 
     /// The stream's own contract: events arrive in emission order, and the

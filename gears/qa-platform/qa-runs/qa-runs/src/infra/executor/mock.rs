@@ -343,7 +343,10 @@ impl RunExecutor for MockRunExecutor {
             )));
         }
         state.sequence += 1;
-        let execution_ref = ExecutionRef::new(format!("mock-execution-{}", state.sequence));
+        let execution_ref = ExecutionRef::with_uid(
+            format!("mock-execution-{}", state.sequence),
+            format!("mock-uid-{}", state.sequence),
+        );
         state.executions.insert(execution_ref.clone(), spec.run_id);
         state.active.insert(execution_ref.clone());
         state.submitted.push(Arc::new(spec));
@@ -484,6 +487,7 @@ mod tests {
         let execution_ref = executor.start(spec_for(run_id)).await.unwrap();
 
         assert_eq!(execution_ref.as_str(), "mock-execution-1");
+        assert_eq!(execution_ref.uid(), Some("mock-uid-1"));
         let recorded = executor.submitted();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].run_id, run_id);

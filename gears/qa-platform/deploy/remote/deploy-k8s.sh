@@ -618,7 +618,7 @@ step "Runner image: deploy/runner/build-and-import.sh"
 remote_sh "runner image build + import" "$REMOTE_PATH" <<'BUILDRUNNER'
 set -euo pipefail
 cd "$1/gears/qa-platform"
-bash deploy/runner/build-and-import.sh
+bash deploy/runner/build-and-import.sh < /dev/null
 BUILDRUNNER
 
 # ============================================================ hostAliases ==
@@ -840,7 +840,7 @@ cd "$1"
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 # Report only, so its refusal (an Argo namespace that holds the release) or a
 # failed listing must not fail the deploy; the reason is printed above.
-bash gears/qa-platform/deploy/argo/cleanup-runner-secrets.sh "$2" \
+bash gears/qa-platform/deploy/argo/cleanup-runner-secrets.sh "$2" < /dev/null \
     || echo "NOTE: cleanup-runner-secrets did not list (see above); the deploy continues"
 LEFTOVER
 
@@ -953,7 +953,7 @@ if [ ! -e "$VERIFY_SCRIPT" ]; then
     echo "deploy-k8s: FAIL: $VERIFY_SCRIPT does not exist on the remote, so this deploy cannot be verified. It is part of this repository and is rsynced with it: a missing copy means the rsync or the checkout is broken. Check by hand with 'kubectl -n $3 get pods' and $2, then fix that before trusting this stack." >&2
     exit 1
 fi
-PUBLIC_ORIGIN="$2" NAMESPACE="$3" IMAGE_TAG="$4" DEPLOY_STARTED="$5" bash "$VERIFY_SCRIPT"
+PUBLIC_ORIGIN="$2" NAMESPACE="$3" IMAGE_TAG="$4" DEPLOY_STARTED="$5" bash "$VERIFY_SCRIPT" < /dev/null
 VERIFYK8S
 
 step "Done"

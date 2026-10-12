@@ -1134,11 +1134,11 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
         Ok(response.value)
     }
 
-    /// One self-heal pass over **every** environment this gear knows about,
-    /// across every tenant: observe each against its own cluster, persist the
-    /// outcome, and re-apply its kubeconfig `Secret` in the Argo cluster. This
-    /// is the ticker's per-cycle body — see `crate::gear`'s `observation_ticker`
-    /// for the supervised loop that calls it, and that module's `Tickers` doc
+    /// One observation pass over **every** environment this gear knows about,
+    /// across every tenant: observe each against its own cluster and persist
+    /// the outcome. This is the ticker's per-cycle body — see `crate::gear`'s
+    /// `observation_ticker` for the supervised loop that calls it, and that
+    /// module's `Tickers` doc
     /// for why the ticker's *role* is recorded at spawn time rather than read
     /// back from this method: the same reasoning applies here as there, one
     /// level up.
@@ -1146,9 +1146,9 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// # One environment's failure never aborts the cycle for the others
     ///
     /// Every environment gets its own `Result`, matched individually and logged
-    /// on failure — a credstore miss, a PEP denial, an unreachable cluster, a
-    /// `409` from the self-heal are all just one more warning line, never a
-    /// `return` that would strand every environment after the one that failed.
+    /// on failure — a credstore miss, a PEP denial, an unreachable cluster are
+    /// all just one more warning line, never a `return` that would strand
+    /// every environment after the one that failed.
     /// A panic partway through (which [`crate::gear`]'s supervisor reports,
     /// exactly as it would for any other ticker) is one way this stops short of
     /// every environment it started with; `cancel` firing mid-pass is the
@@ -1251,8 +1251,8 @@ impl<P: EnvironmentsRepository, L: LeasesRepository> EnvironmentsService<P, L> {
     /// on both cycle instruments however many environments it visited.
     #[allow(
         clippy::cognitive_complexity,
-        reason = "inflated by the per-environment branches (nil tenant, observe Err, self-heal \
-                  Err), each of which owes an operator a distinct log line - same diagnosis as \
+        reason = "inflated by the per-environment branches (nil tenant, observe Err), each of \
+                  which owes an operator a distinct log line - same diagnosis as \
                   qa-runs' `service::dispatch::run_tick`/`reconcile_claims`"
     )]
     async fn observe_every_environment(

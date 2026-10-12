@@ -16,7 +16,7 @@ pub(super) fn register_admin_routes(router: Router, openapi: &dyn OpenApiRegistr
     //
     // **`.authenticated()` is not the authorization**, and that is worth saying
     // where a reviewer will look for it: the admin requirement is enforced by
-    // the `PolicyEnforcer` decision `ReconcileService::rebuild` compiles, on
+    // the `PolicyEnforcer` decision `ReconcileService::rebuild_after` compiles, on
     // `qa.test_result` / `rebuild`. Every sibling gear in this subsystem puts
     // authorization in the service and not in the route chain, for the reason
     // `domain::service` states — a fresh scope is derived immediately before
@@ -37,7 +37,8 @@ pub(super) fn register_admin_routes(router: Router, openapi: &dyn OpenApiRegistr
              it does not immediately rewrite, so rows for runs qa-runs no longer has are left \
              standing. The window is walked in pages under a fixed budget, so a window wider \
              than one page is replayed in full rather than truncated: check `complete` on the \
-             response, and when it is false post `resume_from` back as `from` with the same \
+             response, and when it is false post `resume_from` back as `from` and `resume_after_run_id` \
+             back as `after_run_id` (omit it when the response has none) with the same \
              `to` until it is true. It replays the run-completed notification too, and can \
              therefore send Slack messages and email: a run is announced only if this \
              deployment has never decided about it before, or if its send was attempted and \

@@ -9,7 +9,7 @@ use crate::domain::service::DbProvider;
 use authz_resolver_sdk::PolicyEnforcer;
 
 use super::{actions, resources};
-use qa_environments_sdk::{NewVariable, RESERVED_VARIABLE_NAMES, Variable};
+use qa_environments_sdk::{NewVariable, Variable, is_reserved_variable_name};
 use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
@@ -541,10 +541,7 @@ impl<V: VariablesRepository, P: EnvironmentsRepository> VariablesService<V, P> {
     /// qa-runs raises a near-identical message for run *parameters* and an
     /// operator reading a log needs to know which of the two refused them.
     fn validate_not_reserved(name: &str) -> Result<(), DomainError> {
-        if RESERVED_VARIABLE_NAMES
-            .iter()
-            .any(|reserved| reserved.eq_ignore_ascii_case(name))
-        {
+        if is_reserved_variable_name(name) {
             return Err(DomainError::Validation {
                 field: "name".to_owned(),
                 message: format!(

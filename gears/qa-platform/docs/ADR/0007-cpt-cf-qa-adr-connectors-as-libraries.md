@@ -10,8 +10,8 @@ date: 2026-09-08
 
 A product plugin has to reach its environment somehow. The VHP plugin talks to a Kubernetes API;
 the VHI plugin opens SSH sessions and drives a CLI. That transport code is substantial — a Kubernetes
-client with its error taxonomy and secret writer, an SSH session layer with agent handling — and it
-is reusable.
+client with its error taxonomy (it had a secret writer until finding #94), an SSH session layer
+with agent handling — and it is reusable.
 
 The workspace has a plugin mechanism close at hand, and the transports look superficially like the
 same kind of thing a product plugin is. Should a connector be a gear with a GTS identity, resolved

@@ -37,7 +37,7 @@
 //! own maintenance question, not a caller's, so there is no caller to
 //! authorize. That sidesteps the failure mode the paragraph above names: an
 //! operator who has not granted this gear's system actor a cross-tenant PDP
-//! policy still gets a working self-heal ticker, rather than one that silently
+//! policy still gets a working observation ticker, rather than one that silently
 //! evaluates zero environments forever. [`for_observation`] is the
 //! per-environment context of that background work, bound to the tenant
 //! `list_all_with_tenant` paired that environment with; [`for_credential_read`]

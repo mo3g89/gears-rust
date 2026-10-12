@@ -63,7 +63,7 @@ use toolkit_gts::GTS_ID_PREFIX;
 use uuid::Uuid;
 
 use super::{
-    DashboardService, RUN_PAGE, daily_points, dashboard_run, failure_card, flaky_card,
+    DashboardService, daily_points, dashboard_run, failure_card, flaky_card,
     format_duration, is_active, kpi_of, quality_vector_pass_rates, resolve_days, run_trend_points,
     summarize_runs, window_start,
 };
@@ -431,20 +431,26 @@ fn the_window_opens_at_midnight_utc_of_its_first_day() {
 /// shrinks both counts rather than erroring.
 #[tokio::test]
 async fn the_listing_ceiling_is_two_hundred_and_the_service_asks_for_it() {
-    assert_eq!(
-        RUN_PAGE, 200,
-        "the subsystem page default; qa-runs' queue contract and \
-         infra::storage::db::PAGE_LIMITS carry the same number",
-    );
-
     let fx = Fixture::new().await;
     fx.service.stats(&ctx(TENANT), None, None).await.unwrap();
 
     assert_eq!(
         fx.runs.recent_limits(),
-        vec![RUN_PAGE],
+        vec![200],
         "one listing per request, at exactly the documented ceiling",
     );
+}
+
+/// The ceiling as behaviour: 201 queued runs exist, the first page holds 200, so
+/// the queued count reads 200. Literals on purpose; the constant is not named.
+#[tokio::test]
+async fn a_two_hundred_and_first_run_is_not_in_the_first_page() {
+    let fx = Fixture::new().await;
+    for age in 0..201 {
+        fx.runs.add_run(run_in_state(RunState::Queued, age), vec![]);
+    }
+    let stats = fx.service.stats(&ctx(TENANT), None, None).await.unwrap();
+    assert_eq!(stats.queued_runs, 200);
 }
 
 /// A group with no finish instant cannot be attributed to a day and is dropped.

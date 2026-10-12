@@ -50,8 +50,9 @@ for *some* password that makes the render succeed. The two that come to
 hand both make things worse:
 
 - `--set keycloak.adminPassword=admin` (the value this chart shipped as a
-  default before 1.0.0) trips the OTHER new guard —
-  `keycloak-deployment.yaml:67-68` refuses the literal `admin` unless
+  default before 1.0.0) trips the OTHER new guard — the
+  "Refusing to install with the development admin password" `fail` in
+  `templates/keycloak-deployment.yaml` refuses the literal `admin` unless
   `devMode=true` — so the render still fails, now citing `devMode`
   instead.
 - Setting `devMode=true` on a real release to get past *that* is wrong for
@@ -309,11 +310,34 @@ Secret exists any more.
    them with `deploy/argo/cleanup-runner-secrets.sh <argo.namespace>` and remove
    them by adding `--delete`. The script selects only unlabelled Opaque Secrets
    with the writer's name shape (`qa-platform-` + the tenant UUID cut to 34
-   characters + `-` + 16 hex digits), and refuses a namespace that holds the
-   qa-platform release. Older writer builds used other names (for example
-   `qa-platform-qa-environments-credential-<hex>`); the script does not select
-   them but prints every other unlabelled Opaque `qa-platform-*` Secret, which
-   you review and delete by hand.
+   characters + `-` + 16 hex digits), plus the orphaned workflow OIDC Secret
+   (see below), and refuses a namespace that holds the qa-platform release. It
+   prints three shapes:
+   - the writer's name shape: selected;
+   - a Secret carrying both labels `app.kubernetes.io/name=qa-platform` and
+     `app.kubernetes.io/component=argo-workflow-oidc`, whatever its name:
+     selected. That is the old workflow OIDC Secret. Its name came from
+     `argo.workflowSecretName`, so it is `qa-platform-workflow-oidc` unless
+     that value was changed. The chart no longer renders it, but it was created with `helm.sh/resource-policy: keep`,
+     so an install that predates its removal still has it, holding the live
+     secret of the `qa-platform-workflow` client. Deleting it does not change
+     the realm's live secret: Keycloak keeps the value it imported. If the old
+     value may have reached a runner pod, rotate it by upgrading with a new
+     `argo.workflowClientSecret` (see "Also required, from 2026-09-29:
+     `argo.workflowClientSecret`" above for the command), then make sure
+     Keycloak restarts so `--import-realm` re-imports the realm with the new
+     value. The `checksum/realm` pod annotation rolls the Keycloak pod when
+     the value changes; if it did not roll, restart it with
+     `kubectl -n <release namespace> rollout restart deploy/qa-platform-keycloak`;
+   - every other unlabelled Opaque Secret that is `qa-platform-*` or has a
+     `kubeconfig` or `qa-environment` in its name (for example
+     `qa-platform-qa-environments-credential-<hex>`, `smoke-fixture-kubeconfig`,
+     `<x>-qa-environment`): NOT selected, listed for you to review and delete
+     by hand.
+
+   `deploy/remote/verify-k8s.sh` fails while a Secret with those two labels
+   is still in `argo.namespace`, and fails rather than passes when it cannot
+   check.
 
 `argo.namespace` may now equal the release namespace: the render-time refusal
 that existed to protect the chart's own Secrets from the writer is gone.
@@ -323,6 +347,160 @@ To check it afterwards, `helm get manifest <release> | grep secret-writer`
 should print nothing, and
 `kubectl auth can-i create secrets -n <argo.namespace> --as=system:serviceaccount:<ns>:qa-platform-gears`
 should say `no`.
+
+## 2026-10-12: runner credentials bind by Workflow uid
+
+The re-verification of finding #94 tightened who may fetch a run's credentials
+and who may touch qa-runs Workflows and runner pods. Three things to know.
+
+**1. Runs in flight when you upgrade cannot fetch credentials afterwards.**
+qa-runs now records the Argo Workflow's uid when it starts a run
+(`qa_runs.execution_uid`, migration `m20261012_000007`) and refuses a runner
+whose Workflow uid is not the recorded one. A run submitted before the upgrade
+has no uid recorded, so it is refused (fail closed). A runner fetches once, at
+start, so only a pod that starts after the upgrade under a pre-upgrade submit
+is affected: runs already past their fetch finish normally. Drain the queue
+before upgrading, or accept that such runs fail at their credential fetch and
+relaunch them.
+
+**2. New value `argo.controllerServiceAccount`** (default
+`argo-workflows-workflow-controller`, with `argo.controllerNamespace`, empty
+meaning `argo.namespace`). The new runner-guard policy
+(`qa-platform-runner-guard-<release namespace>`) lets only `qa-platform-gears`
+and the Argo workflow-controller write qa-runs Workflows or create and update
+runner pods. Find the controller's ServiceAccount with
+
+```
+kubectl -n <argo.namespace> get deploy -o jsonpath='{..serviceAccountName}'
+```
+
+(the workflow-controller's Deployment, not argo-server's). A wrong name stops
+every run: the controller's own pod creates are refused.
+
+**Under `helm upgrade --reuse-values` the new default is not picked up.**
+`--reuse-values` reuses the old release's values and does not merge in values
+the new chart added, so `argo.controllerServiceAccount` arrives empty. Pass it:
+
+```
+helm upgrade <release> <chart> --reuse-values \
+  --set argo.controllerServiceAccount=<name read above>
+```
+
+(or use `--reset-then-reuse-values`, Helm 3.14+, which starts from the new
+chart's defaults). Without it the render fails on `required` naming
+`argo.controllerServiceAccount`, and the upgrade stops before anything changes:
+it fails safe.
+
+**The out-of-chart path installs neither guard.** `deploy/argo/qa-runs-rbac.yaml`,
+the standalone RBAC for installs that do not use this chart, carries neither the
+Workflow guard (`workflow-guard-admission-policy.yaml`) nor the runner guard
+(`runner-guard-admission-policy.yaml`). Such an install has no admission
+control over what `qa-platform-gears` submits or over who else writes qa-runs
+Workflows, runner pods and runner tokens; the Workflow-uid binding still keeps
+credentials to the Workflows qa-runs recorded.
+
+**Operator impact.** The guard also denies, for everyone else including
+cluster-admin: the Argo UI's stop, retry and resubmit on qa-runs Workflows,
+`kubectl label` or `kubectl debug` (ephemeral containers) on runner pods or
+qa-runs Workflows, and minting a token for the runner ServiceAccount, or
+creating a ServiceAccount-token Secret that names it (its tokens then come
+from kubelets alone, once any pre-existing token Secret naming it has been
+deleted: see item 4 of the next section). Deleting a Workflow or a pod still
+works; cancel runs from the qa-platform UI or API. The guard also protects the
+identities it trusts: in `argo.namespace`, the workflow-controller's
+ServiceAccount (and `qa-platform-gears` when `argo.namespace` is the release
+namespace) gets no new token Secret, so its tokens come from kubelets alone
+once any pre-existing one is deleted; only the ReplicaSet controller may
+create a pod running as one, and nobody may label, patch or `kubectl debug`
+such a pod. Deleting it still works, and its Deployment still rolls it. Run
+the controller in its own namespace (`argo.controllerNamespace`) if you can:
+whoever can write Deployments or ReplicaSets in its namespace can still act as
+it.
+
+**3. `PYTEST_ADDOPTS` is reserved.** It joins the reserved environment names (16
+in all at the time; the next section widens the floor), because pytest
+reads it as extra options and a tenant could use it to deselect failing
+tests. A stored environment or pipeline variable with a
+reserved name is now dropped when a run is built, with a WARN in the gears
+log naming it. Rename any such variable before upgrading; run parameters
+carrying a reserved name were already refused.
+
+## 2026-10-12 (second): runner environment and guards
+
+A further review of the runner found paths around the guards above. Four
+things change for operators.
+
+**1. The reserved floor reserves classes.** Besides exact names, every name
+under the prefixes `GIT_`, `LD_`, `PIP_`, `PYTEST_`, `PYTHON`, `QA_CREDENTIAL`,
+`QA_RUNNER_` and `TEST_BUNDLE_` is now reserved, and so are bash's startup and
+expansion controls (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `IFS`,
+`CDPATH`, `GLOBIGNORE`), other interpreters' code-loading controls and module
+paths (`NODE_OPTIONS`, `NODE_PATH`, `PERL5OPT`, `PERL5LIB`, `PERLLIB`,
+`RUBYOPT`, `RUBYLIB`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`,
+`JDK_JAVA_OPTIONS`, `GCONV_PATH`), programs that tools run on demand
+(`BROWSER`, `SSH_ASKPASS`) and the platform's `COLLECT_ONLY` and
+`VHP_COLLECT_URL`. git is in the runner image and honours many variables that
+run a command, so its whole `GIT_` prefix is reserved: suites lose harmless
+`GIT_*` variables too, such as `GIT_AUTHOR_NAME` and `GIT_COMMITTER_EMAIL`.
+`qa_runs::domain::params::RESERVED_NAMES` and `RESERVED_PREFIXES` are the
+list. A suite that relied on one of them, say `PYTHONHASHSEED`, loses it.
+Stored environment or pipeline variables with a newly reserved name are
+dropped when a run is built, with a WARN in the gears log naming them. A saved
+schedule whose parameters carry such a name fails at dispatch with the
+reserved-name error. Rename such variables and edit such schedules before
+upgrading.
+
+**2. The runner image has a launcher.** The image's `/entrypoint.sh` is now
+`deploy/runner/launch.py`, which saves the pod's environment to a private file
+and runs the bash run script with the platform's own names only: the
+credential fetch, the bundle fetch and `pip install` never see a run variable,
+and the tenant environment reaches pytest alone. A product whose `RunnerSpec`
+sets a custom image or `command` bypasses the launcher and must do its own
+scrub: run any credential fetch with the platform's names only, never under
+the run's variables.
+
+`pip install` is one of those platform steps. Tenant and pipeline
+`HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`, `PIP_INDEX_URL` and every other
+`PIP_*` name no longer reach it, and no platform-level setting replaces them.
+On a cluster that reaches PyPI only through a proxy or a private index, every
+test bundle with a requirements file fails after the upgrade, with the runner's
+`pip install ... FAILED` message. The remedies are a custom runner image that
+already contains the wheels the suites need, or a custom runner image whose own
+pip configuration (`/etc/pip.conf`) names the index. Run variables can no
+longer do it, by design: pip installs code into a pod that holds credentials,
+so a run variable must not choose the package index.
+
+**3. Do not grant `edit` or `admin` in the Argo namespace to non-operators.**
+Both built-in roles carry `impersonate` on ServiceAccounts, and admission sees
+the impersonated name, so such a principal is indistinguishable from the
+workflow-controller or the runner to the runner guard. ADR-0008 treats that
+right as a cluster operator's, like `pods/exec` and `pods/attach`. Check with
+`kubectl auth can-i impersonate serviceaccounts -n <argo.namespace> --as=<user>`.
+
+**4. ServiceAccount-token Secrets for guarded accounts are refused.** The
+runner guard denies creating a Secret of type
+`kubernetes.io/service-account-token` that names a guarded account:
+
+- the runner ServiceAccount, `argo.workflowServiceAccount`;
+- `argo.controllerServiceAccount`, when the controller runs in
+  `argo.namespace` (`argo.controllerNamespace` empty or equal to it);
+- `qa-platform-gears`, when `argo.namespace` is the release namespace.
+
+The rule covers new Secrets only. A token Secret that already names one of
+those accounts is not deleted by the upgrade, the token controller may still
+fill its `data`, and its long-lived token keeps working. List the token
+Secrets with the account each one names:
+
+```
+kubectl get secrets -n <argo.namespace> \
+  --field-selector type=kubernetes.io/service-account-token \
+  -o custom-columns='NAME:.metadata.name,SA:.metadata.annotations.kubernetes\.io/service-account\.name'
+```
+
+and delete every one whose `SA` is a guarded account. Only then do those
+accounts' tokens come from kubelets alone, through the projected volume.
+Whatever used such a token loses that access, for example an Argo Server SSO
+mapping or a CI kubeconfig; give it its own ServiceAccount first.
 
 ## Third-party images are digest-pinned (2026-09-30)
 

@@ -20,6 +20,7 @@ the Helm deployment — not against internals.
 - [S12. Run against a VHI environment over SSH](#s12-run-against-a-vhi-environment-over-ssh)
 - [S13. Scope every list to a product](#s13-scope-every-list-to-a-product)
 - [S14. Install the stack](#s14-install-the-stack)
+- [S15. Runner fetches its credentials](#s15-runner-fetches-its-credentials)
 
 <!-- /toc -->
 
@@ -270,3 +271,21 @@ the Helm deployment — not against internals.
   token bridge on the SSE location.
 * The access log for the SSE location does **not** contain the token; other locations are
   unaffected.
+
+## S15. Runner fetches its credentials
+
+**Preconditions**: an environment whose product plugin mounts a kubeconfig, and a stand with the
+runner guard in place.
+
+1. Launch a VHP run on that environment.
+2. Read the runner pod's log and the gears access log.
+3. From a pod that is not a runner, `curl -X POST` the in-cluster
+   `/qa/v1/runner-credentials` URL.
+4. `POST` the same path through the public origin.
+
+**Must hold**
+
+* The pod log shows `fetch-credentials: wrote 1 file(s)`, and the gears access log shows
+  `POST /qa/v1/runner-credentials … status=200`.
+* The non-runner pod's request gets 403.
+* The request through the public origin gets 404.

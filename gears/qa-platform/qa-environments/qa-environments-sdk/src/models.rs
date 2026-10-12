@@ -679,23 +679,43 @@ pub struct NewVariable {
 /// `qa_runs::domain::params::RESERVED_NAMES` gives: they steer the runner's
 /// credential fetch (where its token is sent, which file is read as the token,
 /// where files may land).
-pub const RESERVED_VARIABLE_NAMES: [&str; 15] = [
-    "APP_BUILD",
-    "APP_VERSION",
-    "E2E_K8S_NAMESPACE",
-    "KUBECONFIG",
-    "PRODUCT_KEY",
-    "QA_CREDENTIALS_TOKEN_FILE",
-    "QA_CREDENTIALS_URL",
-    "QA_CREDENTIAL_DIRS",
-    "QA_RUNNER_PYTEST_ARGS",
-    "RP_API_KEY",
-    "RP_PROJECT",
-    "SKIP_TESTS_WITH_BUGS",
-    "TEST_BUNDLE_URL",
-    "TEST_FILES",
-    "TEST_VERSION",
+///
+/// **`PYTEST_ADDOPTS`**: pytest reads it as extra options, which reopens what
+/// reserving `QA_RUNNER_PYTEST_ARGS` closed.
+///
+/// **Classes (2026-10-12)**: the floor also reserves
+/// the interpreter and loader controls (bash's `BASH_ENV`, `PYTHON*`, `LD_*`,
+/// the JVM's `_JAVA_OPTIONS`, the module paths `PERLLIB`, `RUBYLIB` and
+/// `NODE_PATH`, the helper programs `BROWSER` and `SSH_ASKPASS`, and the
+/// like), the platform's `COLLECT_ONLY` and `VHP_COLLECT_URL`, and whole
+/// prefixes, [`RESERVED_VARIABLE_PREFIXES`], including git's `GIT_*`. See
+/// `qa_runs::domain::params::RESERVED_NAMES` for why. Use
+/// [`is_reserved_variable_name`] rather than testing the arrays by hand.
+pub const RESERVED_VARIABLE_NAMES: [&str; 39] = [
+    "APP_BUILD", "APP_VERSION", "BASHOPTS", "BASH_ENV", "BROWSER", "CDPATH", "COLLECT_ONLY",
+    "E2E_K8S_NAMESPACE", "ENV", "GCONV_PATH", "GLOBIGNORE", "IFS", "JAVA_TOOL_OPTIONS",
+    "JDK_JAVA_OPTIONS", "KUBECONFIG", "NODE_OPTIONS", "NODE_PATH", "PERL5LIB", "PERL5OPT",
+    "PERLLIB", "PRODUCT_KEY", "PS4", "PYTEST_ADDOPTS", "QA_CREDENTIALS_TOKEN_FILE",
+    "QA_CREDENTIALS_URL", "QA_CREDENTIAL_DIRS", "QA_RUNNER_PYTEST_ARGS", "RP_API_KEY",
+    "RP_PROJECT", "RUBYLIB", "RUBYOPT", "SHELLOPTS", "SKIP_TESTS_WITH_BUGS", "SSH_ASKPASS",
+    "TEST_BUNDLE_URL", "TEST_FILES", "TEST_VERSION", "VHP_COLLECT_URL", "_JAVA_OPTIONS",
 ];
+
+/// Name prefixes reserved as a class; the mirror of
+/// `qa_runs::domain::params::RESERVED_PREFIXES`, which it must equal
+/// (`the_two_reserved_name_lists_must_stay_identical`).
+pub const RESERVED_VARIABLE_PREFIXES: [&str; 8] = [
+    "GIT_", "LD_", "PIP_", "PYTEST_", "PYTHON", "QA_CREDENTIAL", "QA_RUNNER_", "TEST_BUNDLE_",
+];
+
+/// Whether `name` is reserved: an exact name in [`RESERVED_VARIABLE_NAMES`] or
+/// under a prefix in [`RESERVED_VARIABLE_PREFIXES`], case-insensitively.
+#[must_use]
+pub fn is_reserved_variable_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    RESERVED_VARIABLE_NAMES.iter().any(|reserved| *reserved == upper)
+        || RESERVED_VARIABLE_PREFIXES.iter().any(|prefix| upper.starts_with(prefix))
+}
 
 /// How a run intends to hold an environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

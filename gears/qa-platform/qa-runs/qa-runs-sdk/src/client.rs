@@ -280,8 +280,10 @@ pub trait QaRunsClientV1: Send + Sync {
     ///
     /// `not_found` for every refusal, deliberately indistinguishable: a nil
     /// tenant, a run that is absent or outside the tenant, a terminal run, a
-    /// `workflow_name` that is not the run's recorded execution handle, or a
-    /// run with no environment.
+    /// `workflow_name` that is not the run's recorded execution handle, a
+    /// `workflow_uid` that differs from the one recorded at submit (or is
+    /// empty), a run with no uid recorded (submitted before migration
+    /// `m20261012_000007`), or a run with no environment.
     async fn resolve_runner_pod(&self, query: &RunnerPodQuery)
     -> Result<RunnerPodRun, QaRunsError>;
 }

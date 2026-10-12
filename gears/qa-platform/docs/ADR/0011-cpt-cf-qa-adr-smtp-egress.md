@@ -68,7 +68,7 @@ enters this process. (This paragraph said the same of the Slack webhook when it 
 turned out to be false — see the Amendment of 2026-09-30.) SMTP has no such path, so `qa_notification_config` gains
 `email_smtp_credstore_ref` (a reference, never a password, beside a plaintext `email_smtp_username`
 — the split `qa_jira_config` already makes) and the adapter resolves it through
-`credstore_sdk::CredStoreClientV1` under the **sending tenant's** own `SecurityContext`, holding
+`credstore_sdk::CredStoreClientV1` under the **sending tenant's** own `SecurityContext` (superseded by the 2026-10-07 amendment below: both secrets are read as the qa-insights system actor bound to the sending tenant), holding
 the value for the length of one `send`.
 
 [ADR-0008](./0008-cpt-cf-qa-adr-credential-containment.md) still binds: nothing derived from that
@@ -131,6 +131,12 @@ distinguishable from "the relay refused this message".
   settings, and `notify_on_failure`/`notify_on_success` decide by outcome — which cuts mail as
   well as adding it, since the default is failures only. DESIGN §3.5, "What actually notifies", is
   the full list.
+* Bad, because a run-completed notification lost to a database or PDP failure is not retried. The
+  owner accepted this residue (second review, finding #112): "A notification lost to a DB or PDP
+  failure is not retried." Re-driving notifications needs a durable outbox, which is a feature,
+  not a fix. Such a loss is not audited either: the `WARN` in `notify_run_completed`
+  (`qa-insights/qa-insights/src/domain/service/reconcile.rs`) is the only record. Send failures
+  are different and are audited, because the notifier swallows them into the audit log itself.
 * Good, because the failure modes are honest: a deployment with no relay fails and is audited, and
   `POST /qa/v1/settings/notifications/test` answers `501` naming the channel instead of a success.
 
@@ -158,6 +164,7 @@ distinguishable from "the relay refused this message".
   four things went wrong (`DomainError::UpstreamEgress`) — it used to be an opaque `500`, which
   told an operator this gear had broken when their own relay had refused their own password.
   `503` is the same answer qa-catalog gives for its own upstream, the git remote.
+  The failures before the relay is reached answer as Slack's do: a credential-store outage is `Internal` (an opaque `500`, a genuine server-side fault), and a TLS transport-build failure for the host is `UpstreamEgress` (`503`) naming the host.
 * Good, because the allow-list is enforced against the value an operator actually typed, which a
   CIDR rule could not have been.
 * Bad, because this gear now holds plaintext credential material in process, which it never did —
@@ -201,7 +208,7 @@ request *header*; none can set the path. Until this amendment the Slack adapter 
 reference itself as a placeholder proxy path, and no Slack message could be delivered (an open item
 at the time). The owner ruled it implemented, by the same means this ADR chose for the SMTP
 password: `infra::notify::slack_oagw` resolves the secret named by `slack_webhook_credstore_ref`
-through `credstore_sdk::CredStoreClientV1` under the sending tenant's own `SecurityContext`, and the
+through `credstore_sdk::CredStoreClientV1` under the sending tenant's own `SecurityContext` (superseded by the 2026-10-07 amendment below: both secrets are read as the qa-insights system actor bound to the sending tenant), and the
 secret holds the full webhook URL.
 
 Unlike SMTP, the send itself still goes through OAGW, so `cpt-cf-qa-contract-egress` gains no new

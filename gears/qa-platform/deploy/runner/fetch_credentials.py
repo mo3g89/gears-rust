@@ -43,18 +43,48 @@ def die(message):
     sys.exit(1)
 
 
+MAX_RESPONSE_BYTES = 1 << 20  # 1 MiB: a few kubeconfigs, never a bundle
+
+
 def ssl_context():
     ca = os.environ.get("TEST_BUNDLE_CA_CERT", "").strip()
-    return ssl.create_default_context(cafile=ca) if ca else None
+    if not ca:
+        return None
+    if not os.path.isfile(ca):
+        die("TEST_BUNDLE_CA_CERT=%s does not exist inside the pod" % ca)
+    return ssl.create_default_context(cafile=ca)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would carry the pod token (or the bundle's ?sig=) to wherever
+    Location points. The platform never redirects these routes, so any
+    redirect is refused: urllib then raises HTTPError with the 3xx code."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def opener():
+    """No proxy: the pod token and the credential files must go to
+    QA_CREDENTIALS_URL itself, never through a proxy a run variable named
+    (re-verification P1). An empty ProxyHandler overrides the environment."""
+    handlers = [urllib.request.ProxyHandler({}), NoRedirect()]
+    context = ssl_context()
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    return urllib.request.build_opener(*handlers)
 
 
 def request_files(url, token):
     attempts = len(BACKOFF_SECONDS) + 1
+    op = opener()
     for attempt in range(attempts):
         request = urllib.request.Request(url, data=b"", method="POST", headers={"X-QA-Runner-Token": token})
         try:
-            with urllib.request.urlopen(request, timeout=60, context=ssl_context()) as response:
-                body = response.read()
+            with op.open(request, timeout=60) as response:
+                body = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    die("credentials response exceeds %d bytes" % MAX_RESPONSE_BYTES)
         except urllib.error.HTTPError as error:
             if error.code == 401 or (error.code == 403 and attempt == attempts - 1):
                 die("credentials refused: HTTP %s after %d attempt(s). The pod's token, the pod or its run "
@@ -98,8 +128,8 @@ def checked(entry, directories):
     if not os.path.isabs(path) or not inside(path, directories):
         die("refusing to write %s: not inside QA_CREDENTIAL_DIRS" % path)
     mode = entry.get("mode")
-    if mode is not None and (isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o7777):
-        die("refusing to write %s: its mode is not a permission integer" % path)
+    if mode is not None and (isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o777):
+        die("refusing to write %s: its mode is not a permission integer without special bits" % path)
     content_b64 = entry.get("content_b64")
     if not isinstance(content_b64, str):
         die("refusing to write %s: it has no content_b64 string" % path)
@@ -155,8 +185,19 @@ def main():
     # response leaves the directories empty rather than half-filled.
     entries = [checked(entry, directories) for entry in files]
     check_one_per_directory([path for path, _, _ in entries], directories)
-    for path, mode, content in entries:
-        write(path, mode, content)
+    written = []
+    try:
+        for path, mode, content in entries:
+            write(path, mode, content)
+            written.append(path)
+    except OSError as error:
+        for path in written:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        die("writing credential files failed (%s); removed the %d already written"
+            % (type(error).__name__, len(written)))
     print("fetch-credentials: wrote %d file(s)" % len(entries))
 
 

@@ -12,7 +12,7 @@
 //!
 //! The tier is the DB-backed one `environments_observation_tests` uses: real
 //! `SeaORM` repositories over in-memory `SQLite`, real migrations, doubles only
-//! for credstore, the runner-`Secret` writer and the product plugin. A cycle is
+//! for credstore and the product plugin. A cycle is
 //! a loop over rows, and a mock repository cannot produce the population these
 //! tests are about.
 #![allow(clippy::unwrap_used, clippy::expect_used)]

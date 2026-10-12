@@ -184,7 +184,7 @@ pub struct RunStatePatch {
 /// |---|---|
 /// | `id`, `created_at`, `updated_at` | the repository, at insert |
 /// | `passed`/`failed`/`skipped`/`in_progress`/`xfail`/`xpass`/`total` | [`RunsRepository::add_result_counts`] |
-/// | `execution_ref` | [`RunsRepository::set_execution_ref`] |
+/// | `execution_ref`, `execution_uid` | [`RunsRepository::set_execution_ref`] |
 /// | `started_at`, `finished_at`, `error` | [`RunsRepository::update_state`] via [`RunStatePatch`] |
 /// | `log_storage_ref` | **nothing, by decision** — see below |
 ///
@@ -735,7 +735,29 @@ pub trait RunsRepository: Send + Sync {
         scope: &AccessScope,
         id: Uuid,
         execution_ref: &str,
+        execution_uid: Option<&str>,
     ) -> Result<bool, DomainError>;
+
+    /// The uid recorded beside `execution_ref` by [`Self::set_execution_ref`]:
+    /// for Argo, the submitted Workflow's `metadata.uid`.
+    ///
+    /// `None` when the run does not exist **in this scope** (the same filter as
+    /// `get`), or when no uid was recorded — a run submitted before the column
+    /// existed, or by an executor that mints none. Callers that bind a runner
+    /// pod to the run must treat `None` as "refuse", not as "any".
+    ///
+    /// Kept off the domain `Run` on purpose: the uid is a binding detail, not
+    /// run data, and nothing that serialises a `Run` should be able to leak it.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::Database`] on a query failure.
+    async fn execution_uid<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<String>, DomainError>;
 
     /// Record the bundles this run's execution nodes were built from.
     ///

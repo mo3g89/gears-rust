@@ -15,16 +15,30 @@
 # own Secrets (qa-platform-postgres, -gears-config, -keycloak-admin, -realm,
 # -tls) match it, and argo.namespace may equal the release namespace.
 #
-# Older writer builds used other names (qa-platform-<credential ref>, e.g.
-# qa-platform-qa-environments-credential-<hex>). They are NOT selected; the
-# script lists every other unlabelled Opaque qa-platform-* Secret for the
-# operator to review and delete by hand.
+# Also selected: the orphaned workflow OIDC Secret. bf8d9c4d0 deleted the
+# chart template that rendered it, but it had `helm.sh/resource-policy: keep`,
+# so every upgrade leaves it behind, holding the live client secret of the
+# `qa-platform-workflow` client. It is labelled, so the unlabelled rule above
+# cannot see it. Its name came from argo.workflowSecretName, which was
+# configurable (qa-platform-workflow-oidc was only the default), so it is
+# matched by the template's two labels, whatever its name:
+# app.kubernetes.io/name=qa-platform AND
+# app.kubernetes.io/component=argo-workflow-oidc. verify-k8s.sh checks the
+# same labels.
+#
+# Never selected, only listed for the operator to review and delete by hand:
+# any other unlabelled Opaque Secret that is qa-platform-* or has a
+# kubeconfig / qa-environment name (older writer builds used other names, e.g.
+# qa-platform-qa-environments-credential-<hex>, and fixtures left
+# smoke-fixture-kubeconfig and <x>-qa-environment, with no qa-platform- prefix).
 #
 # Refuses (exit 1) a namespace that holds the qa-platform release itself.
 set -euo pipefail
 ns=${1:?usage: cleanup-runner-secrets.sh <argo-namespace> [--delete]}
 mode=${2:-list}
-writer_shape='^qa-platform-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{10}-[0-9a-f]{16}$'
+# writer_shape is defined once, in runner-secret-shape.sh, which verify-k8s.sh sources too.
+# shellcheck source=runner-secret-shape.sh
+. "$(dirname "${BASH_SOURCE[0]}")/runner-secret-shape.sh"
 
 secrets=$(kubectl get secrets -n "$ns" -o json)
 release=$(printf '%s' "$secrets" | jq -r '
@@ -40,12 +54,20 @@ unlabelled_opaque='.items[]
   | select((.metadata.labels // {}) == {})
   | .metadata.name'
 names=$(printf '%s' "$secrets" | jq -r --arg re "$writer_shape" "$unlabelled_opaque | select(test(\$re))")
-others=$(printf '%s' "$secrets" | jq -r --arg re "$writer_shape" \
-    "$unlabelled_opaque | select(startswith(\"qa-platform-\")) | select(test(\$re) | not)")
+oidc=$(printf '%s' "$secrets" | jq -r '
+  .items[]
+  | select((.metadata.labels // {})["app.kubernetes.io/name"] == "qa-platform")
+  | select((.metadata.labels // {})["app.kubernetes.io/component"] == "argo-workflow-oidc")
+  | .metadata.name')
+names=$(printf '%s\n%s\n' "$names" "$oidc" | sed '/^$/d')
+review=$(printf '%s' "$secrets" | jq -r --arg re "$writer_shape" '
+  .items[] | select(.type == "Opaque") | select((.metadata.labels // {}) == {})
+  | .metadata.name | select(test($re) | not)
+  | select(startswith("qa-platform-") or test("kubeconfig|qa-environment"))')
 
-if [ -n "$others" ]; then
-    echo "cleanup-runner-secrets: NOT selected -- unlabelled Opaque qa-platform-* Secrets of another name shape. Older writer builds may have left them; review them by hand and delete what is a writer leftover:"
-    printf '%s\n' "$others" | sed 's/^/  /'
+if [ -n "$review" ]; then
+    echo "cleanup-runner-secrets: NOT selected -- unlabelled Opaque Secrets of another name shape (qa-platform-* or a kubeconfig/qa-environment name). Older writer builds or fixtures may have left them; review them by hand and delete what is a leftover:"
+    printf '%s\n' "$review" | sed 's/^/  /'
 fi
 if [ -z "$names" ]; then echo "cleanup-runner-secrets: nothing to remove in $ns"; exit 0; fi
 printf '%s\n' "$names"

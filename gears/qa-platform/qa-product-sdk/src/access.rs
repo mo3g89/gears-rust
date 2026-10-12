@@ -115,7 +115,10 @@ pub struct RunnerSpec {
     /// (or an equivalent `POST` of its projected token to
     /// `QA_CREDENTIALS_URL`) itself, or its credential directories stay empty.
     pub image: Option<String>,
-    /// See [`Self::image`] on what a custom command must still do.
+    /// See [`Self::image`] on what a custom command must still do. A custom
+    /// `command` also owns the environment scrub the stock `/entrypoint.sh`
+    /// does: run any credential fetch with the platform's names only, never
+    /// under the run's variables.
     pub command: Vec<String>,
     pub image_pull_policy: Option<String>,
 }
@@ -146,14 +149,16 @@ impl RunVarContract {
     /// and the collect and progress URLs" — and that list was **not** what
     /// `qa-runs` passes. (`gears/qa-platform/docs/features/product-plugins.md`
     /// does not enumerate the floor at all.) `qa_runs::domain::params::RESERVED_NAMES`
-    /// carries the source system's eleven names verbatim plus a twelfth,
-    /// `QA_RUNNER_PYTEST_ARGS` (added later, not a legacy port), and none of
-    /// the three names below is among them: `COLLECT_ONLY`,
-    /// `VHP_COLLECT_URL` and `VHP_PROGRESS_URL`.
+    /// carries the source system's eleven names plus the platform's own
+    /// reservations (added later, not legacy ports), and
+    /// `qa_runs::domain::params::RESERVED_PREFIXES` reserves whole classes;
+    /// `qa_runs::domain::params::is_reserved` is the test. Since 2026-10-12
+    /// `COLLECT_ONLY` and `VHP_COLLECT_URL` are on the floor; the
+    /// result-callback URL (`VHP_PROGRESS_URL`) still is not.
     ///
     /// That absence is an **inherited parity exposure, not a regression**: the
-    /// source system's own reserved list omits them too, so a run parameter
-    /// named `COLLECT_ONLY` overrides the collect flag there as well.
+    /// source system's own reserved list omits it too, so a run parameter of
+    /// that name overrides the callback URL there as well.
     /// `params::RESERVED_NAMES`' SECURITY NOTE names this class of exposure
     /// and says closing it is a deliberate divergence belonging in a PRD
     /// amendment rather than a quiet edit. So this function documents the

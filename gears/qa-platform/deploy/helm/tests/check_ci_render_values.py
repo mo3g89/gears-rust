@@ -16,6 +16,8 @@ import re
 import subprocess
 import sys
 
+import yaml
+
 REPO = pathlib.Path(__file__).resolve().parents[5]
 CI = REPO / ".github" / "workflows" / "ci.yml"
 CHART = "gears/qa-platform/deploy/helm/qa-platform"
@@ -37,7 +39,27 @@ def invocations(text):
 MANDATORY_POLICY_KINDS = ("ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding")
 
 
+def lint_checkout_is_full_history(text):
+    """The job that runs `make helm-tests` must check out full history:
+    test_no_system_gear_changes.py diffs against a pinned upstream commit, and
+    a depth-1 clone makes it raise, stopping `make helm-tests` before every
+    later guard (re-verification N1). Returns True when the checkout step
+    before the `make helm-tests` step sets `fetch-depth: 0`."""
+    steps = yaml.safe_load(text)["jobs"]["lint"]["steps"]
+    run_at = next((i for i, st in enumerate(steps)
+                   if "make helm-tests" in str(st.get("run", ""))), None)
+    if run_at is None:
+        return False
+    checkout = next((st for st in reversed(steps[:run_at])
+                     if str(st.get("uses", "")).startswith("actions/checkout@")), None)
+    return checkout is not None and checkout.get("with", {}).get("fetch-depth") == 0
+
+
 def main():
+    if not lint_checkout_is_full_history(CI.read_text()):
+        print("FAIL: the lint job's checkout is shallow; make helm-tests needs "
+              "fetch-depth: 0 (test_no_system_gear_changes.py)")
+        return 1
     found = list(invocations(CI.read_text()))
     if len(found) < 2:
         print(f"FAIL: expected helm lint and kubeconform invocations of {CHART} in ci.yml, found {len(found)}")

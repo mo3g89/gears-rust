@@ -818,13 +818,18 @@ impl FinishedRunCursor {
 /// `Workflow` that is the pod's controller `ownerReference`.
 ///
 /// The labels are routing hints, not proof. The binding is the run's recorded
-/// execution handle: a run answers only for the workflow it was submitted as,
-/// and only when `tenant_id` is the run's own tenant.
+/// execution handle and uid: a run answers only for the Workflow it was
+/// submitted as (`workflow_name` equals the recorded handle and `workflow_uid`
+/// equals the recorded uid, so a Workflow deleted and recreated under the same
+/// name is refused), and only when `tenant_id` is the run's own tenant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunnerPodQuery {
     pub tenant_id: Uuid,
     pub run_id: Uuid,
     pub workflow_name: String,
+    /// The controller ownerReference's uid; it must equal the uid qa-runs
+    /// recorded at submit (re-verification P2).
+    pub workflow_uid: String,
 }
 
 /// The one fact the runner-credential route needs about a live run.

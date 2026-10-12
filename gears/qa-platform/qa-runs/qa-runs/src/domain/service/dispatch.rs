@@ -773,19 +773,39 @@ where
             .ok_or(DomainError::RunNotFound { id: run_id })
     }
 
+    /// The Workflow uid `run_id`'s submit recorded, under the same scope
+    /// `read_run` uses.
+    async fn read_execution_uid(
+        &self,
+        ctx: &SecurityContext,
+        run_id: Uuid,
+    ) -> Result<Option<String>, DomainError> {
+        let scope = self.run_scope(ctx, actions::GET, Some(run_id)).await?;
+        let conn = self.db.conn()?;
+        self.runs.execution_uid(&conn, &scope, run_id).await
+    }
+
     /// See [`QaRunsClientV1::resolve_runner_pod`]. Every refusal is
     /// `RunNotFound`, so the route behind it is no oracle.
     ///
     /// Three things bind the pod to the run, and all three must hold:
     ///
-    /// * **The workflow.** `query.workflow_name` is the pod's controller
-    ///   `ownerReference` (qa-environments' `infra::pod_identity`), which the
-    ///   Argo controller sets and no `Workflow` spec can (a principal that can
-    ///   create pods directly can; ADR-0008 records that residue), and it must
-    ///   equal the run's recorded `execution_ref`. Workflow names are unique in
-    ///   the Argo namespace, so only pods of the workflow qa-runs submitted for
-    ///   this run pass. The pod's labels are not this binding: Argo applies template
-    ///   metadata labels after its own, so any `Workflow` author can set them.
+    /// * **The workflow.** The binding is the Workflow's **uid**
+    ///   (`query.workflow_uid`): the pod's controller `ownerReference`
+    ///   (qa-environments' `infra::pod_identity`), which the Argo controller
+    ///   sets and no `Workflow` spec can (a principal that can act as the
+    ///   controller -- a Deployment or ReplicaSet running as its
+    ///   ServiceAccount, or exec into its pod -- can; ADR-0008's "What
+    ///   remains" records that residue). It must equal the uid
+    ///   qa-runs recorded when it submitted the Workflow
+    ///   (`RunsRepository::execution_uid`), so a Workflow deleted and recreated
+    ///   under the same name is refused: its uid is new. The name
+    ///   (`query.workflow_name` against the recorded `execution_ref`) stays as a
+    ///   cheap first filter. A run with no recorded uid (submitted before
+    ///   migration `m20261012_000007`) is refused, and so is an empty
+    ///   `query.workflow_uid`, whatever was recorded. The pod's labels are not this
+    ///   binding: Argo applies template metadata labels after its own, so any
+    ///   `Workflow` author can set them.
     /// * **The tenant.** The tenant label is compared to the run's owner, read
     ///   with the row. The read's scope is not enough: under a PDP that grants
     ///   `qa_runs.system` a covering scope it admits other tenants' runs too.
@@ -811,6 +831,12 @@ where
         if owner != query.tenant_id
             || is_terminal(run.state)
             || run.execution_ref.as_deref() != Some(query.workflow_name.as_str())
+        {
+            return Err(not_found());
+        }
+        let recorded_uid = self.runs.execution_uid(&conn, &scope, query.run_id).await?;
+        if query.workflow_uid.is_empty()
+            || recorded_uid.as_deref() != Some(query.workflow_uid.as_str())
         {
             return Err(not_found());
         }
@@ -865,11 +891,12 @@ where
         ctx: &SecurityContext,
         run_id: Uuid,
         reference: &str,
+        uid: Option<&str>,
     ) -> Result<bool, DomainError> {
         let scope = self.run_scope(ctx, actions::DISPATCH, Some(run_id)).await?;
         let conn = self.db.conn()?;
         self.runs
-            .set_execution_ref(&conn, &scope, run_id, reference)
+            .set_execution_ref(&conn, &scope, run_id, reference, uid)
             .await
     }
 
@@ -1004,7 +1031,10 @@ where
         started: Started,
     ) {
         let reference = started.execution_ref.as_str().to_owned();
-        if let Err(error) = self.record_execution_ref(ctx, run.id, &reference).await {
+        if let Err(error) = self
+            .record_execution_ref(ctx, run.id, &reference, started.execution_ref.uid())
+            .await
+        {
             error!(
                 run_id = %run.id,
                 execution_ref = %reference,
@@ -1987,10 +2017,24 @@ where
             let Some(reference) = run.execution_ref.as_deref() else {
                 continue;
             };
+            // The uid the run recorded at submit is what the log drain binds
+            // pods to. A legacy run has none and gets the plain reference, which
+            // the watcher pins to the live Workflow's uid.
+            let recorded_uid = match self.read_execution_uid(&ctx, run.id).await {
+                Ok(uid) => uid,
+                Err(error) => {
+                    report.note_failure(PASS_WATCH, &error);
+                    continue;
+                }
+            };
+            let execution_ref = match recorded_uid {
+                Some(uid) => ExecutionRef::with_uid(reference, uid),
+                None => ExecutionRef::new(reference),
+            };
             self.watcher.attach(WatchTarget {
                 run_id: run.id,
                 tenant,
-                execution_ref: ExecutionRef::new(reference),
+                execution_ref,
             });
             report.attached += 1;
         }

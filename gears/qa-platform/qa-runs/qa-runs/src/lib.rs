@@ -64,13 +64,23 @@ pub use infra::executor::mock::MockRunExecutor;
 //   and `PluginUnavailable::NoProduct`, which `infra::product_plugin`
 //   constructs from nowhere because every catalog-side failure maps to
 //   `Unresolvable`.
-// * **Seven kept with a per-item `#[allow(dead_code, reason = …)]`.**
-//   `domain::metrics`' `COUNTERS` and `DURATIONS`, the four
-//   `domain::ports::metrics` `ALL` catalogs, and
+// * **Kept with a per-item `#[allow(dead_code, reason = …)]`.** At that
+//   closing, the seven catalogs: `domain::metrics`' `COUNTERS` and
+//   `DURATIONS`, the four `domain::ports::metrics` `ALL` catalogs, and
 //   `domain::state_machine::TERMINAL_STATES`. Each is a declared set that is
-//   its own oracle, read only by the naming and exhaustiveness tests; deleting
-//   one deletes a gate, not a redundancy. `qa-catalog` and `qa-environments`
-//   carry the same allowance on the same constants, worded the same way.
+//   its own oracle, read only by the naming and exhaustiveness tests;
+//   deleting one deletes a gate, not a redundancy. `qa-catalog` and
+//   `qa-environments` carry the same allowance on the same constants, worded
+//   the same way. Allowances added since, each stating its own reason:
+//   - the `ADMITTED_*` allowlists in `infra::executor::argo::workflow`, read
+//     by the allowlist test and, as source text, by the chart's
+//     `check_workflow_guard.py`;
+//   - `domain::service::authz_surface::ENFORCED`, read under `cfg(test)`
+//     only (that module's header says why it is not `#[cfg(test)]` itself);
+//   - `AppServices`' `admission` and `ingest` fields in `domain::service`:
+//     production reaches each service through another holder's `Arc` (the
+//     `Admitter` seam, the watcher), and the field is what the wiring tests
+//     read.
 // * **Two marked `#[cfg(test)]`** — `domain::state_machine`'s
 //   `is_immutable_terminal` and `infra::logs::RunLogBroadcaster`'s
 //   `subscribe`/`forget`/`active_channels`/`retained_runs`. Both are read only

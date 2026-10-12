@@ -407,7 +407,7 @@ export interface paths {
         put?: never;
         /**
          * Replay a time window from qa-runs
-         * @description Re-read every run that finished in [from, to) from qa-runs and rewrite this gear's projection of it, run by run. For a window whose results are known to be wrong or missing. Requires the gts.cf.qa.insights.test_result.v1~/rebuild grant. The window is half-open, so adjoining windows neither skip a run nor replay one, and `to` must be strictly after `from`. It does not move the reconciler's watermark, in either direction: this is a repair for a known window, not a reset. It deletes nothing it does not immediately rewrite, so rows for runs qa-runs no longer has are left standing. The window is walked in pages under a fixed budget, so a window wider than one page is replayed in full rather than truncated: check `complete` on the response, and when it is false post `resume_from` back as `from` with the same `to` until it is true. It replays the run-completed notification too, and can therefore send Slack messages and email: a run is announced only if this deployment has never decided about it before, or if its send was attempted and failed. A run that was already sent, that finished before this deployment began notifying, or whose notification was declined at the time - the channel was off, or had no destination configured - is not announced, so enabling a channel and then rebuilding a window does not mail its history.
+         * @description Re-read every run that finished in [from, to) from qa-runs and rewrite this gear's projection of it, run by run. For a window whose results are known to be wrong or missing. Requires the gts.cf.qa.insights.test_result.v1~/rebuild grant. The window is half-open, so adjoining windows neither skip a run nor replay one, and `to` must be strictly after `from`. It does not move the reconciler's watermark, in either direction: this is a repair for a known window, not a reset. It deletes nothing it does not immediately rewrite, so rows for runs qa-runs no longer has are left standing. The window is walked in pages under a fixed budget, so a window wider than one page is replayed in full rather than truncated: check `complete` on the response, and when it is false post `resume_from` back as `from` and `resume_after_run_id` back as `after_run_id` (omit it when the response has none) with the same `to` until it is true. It replays the run-completed notification too, and can therefore send Slack messages and email: a run is announced only if this deployment has never decided about it before, or if its send was attempted and failed. A run that was already sent, that finished before this deployment began notifying, or whose notification was declined at the time - the channel was off, or had no destination configured - is not announced, so enabling a channel and then rebuilding a window does not mail its history.
          */
         post: operations["qa_insights.rebuild"];
         delete?: never;
@@ -3363,14 +3363,23 @@ export interface components {
              */
             replayed: number;
             /**
+             * Format: uuid
+             * @description The `after_run_id` of the request that continues this one. Present when
+             *     [`Self::resume_from`] names a consumed run; post it back with
+             *     `resume_from` as `from` to resume strictly after that run. Absent means
+             *     resume at `resume_from` inclusive.
+             */
+            resume_after_run_id?: string | null;
+            /**
              * Format: date-time
              * @description The `from` of the request that finishes what this one did not.
              *
              *     `null` exactly when [`Self::complete`] is `true`. Otherwise an RFC 3339
-             *     instant to post straight back as `from`, with the same `to`. The
-             *     continuation re-replays the run it names and anything tied with it — a
-             *     rebuild is idempotent, so overlapping is free where skipping a tie group
-             *     would not be.
+             *     instant to post straight back as `from`, with the same `to`, together
+             *     with [`Self::resume_after_run_id`] as `after_run_id` when that is
+             *     present. When it is absent, the continuation re-replays the run this
+             *     instant names and anything tied with it — a rebuild is idempotent, so
+             *     overlapping is free where skipping a tie group would not be.
              */
             resume_from?: string | null;
             /** @description Runs found in the window and examined. */
@@ -3393,9 +3402,25 @@ export interface components {
          */
         RebuildReq: {
             /**
+             * Format: uuid
+             * @description Optional run id half of the resume key: post back the previous
+             *     response's `resume_after_run_id` together with its `resume_from` as
+             *     `from`, and the walk resumes **strictly after** that run, so a single
+             *     instant holding more runs than one call's page budget is crossed.
+             *     Omitted, `from` is inclusive as before.
+             *
+             *     It must be the `resume_after_run_id` returned **with this
+             *     `resume_from`**. Any other pairing (an id from another response, or
+             *     one with a hand-picked `from`) may skip runs at `from`: the key is
+             *     `(finished_at, id)`, and runs ordered before the id at that instant
+             *     are not replayed.
+             */
+            after_run_id?: string | null;
+            /**
              * Format: date-time
-             * @description Start of the window, **inclusive**. RFC 3339, e.g.
-             *     `2026-08-18T08:00:00Z`.
+             * @description Start of the window, **inclusive** unless `after_run_id` is set (then
+             *     the walk starts strictly after that run at this instant). RFC 3339,
+             *     e.g. `2026-08-18T08:00:00Z`.
              */
             from: string;
             /**

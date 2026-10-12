@@ -276,13 +276,14 @@ pub fn runner() -> RunnerSpec {
 /// # Which names, and why exactly these two
 ///
 /// Parity with `qa-runs::domain::params::RESERVED_NAMES` as it stands today.
-/// Of its fifteen names, thirteen are the platform's own (`TEST_FILES`,
-/// `TEST_BUNDLE_URL`, `TEST_VERSION`, `APP_VERSION`, `APP_BUILD`,
-/// `PRODUCT_KEY`, `RP_PROJECT`, `RP_API_KEY`, `SKIP_TESTS_WITH_BUGS`,
-/// `QA_RUNNER_PYTEST_ARGS` and the three `QA_CREDENTIAL*` runner-credential
-/// controls) and stay with the platform. The two that are facts
-/// about *this product's* target — its Kubernetes namespace and its mounted
-/// kubeconfig — come here.
+/// That floor, its exact names plus the prefixes in `RESERVED_PREFIXES`, is
+/// the platform's own: the runner's controls (`TEST_FILES`, `TEST_BUNDLE_URL`,
+/// `QA_RUNNER_PYTEST_ARGS`, the `QA_CREDENTIAL*` controls and the like), the
+/// run's metadata, and the interpreter and loader controls a run variable
+/// must not set. It stays with the platform. Two of its names are facts about
+/// *this product's* target — its Kubernetes namespace and its mounted
+/// kubeconfig — and this plugin reserves them too, so the product states
+/// them even though the floor already holds both.
 ///
 /// # The two that are conspicuously absent
 ///

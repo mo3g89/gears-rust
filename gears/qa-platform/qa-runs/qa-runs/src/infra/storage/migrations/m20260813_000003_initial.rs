@@ -26,7 +26,7 @@
 //! and `super::super::entity` agree. The `#[cfg(test)] mod tests` at the bottom
 //! is: it runs this migration against an in-memory `SQLite` database and then
 //! round-trips a row through every entity, which is the only thing that
-//! actually exercises all three table names and every column name.
+//! actually exercises every table name and every column name.
 //!
 //! ## The run record is one row, not two
 //!
@@ -737,7 +737,7 @@ DROP TABLE IF EXISTS qa_runs;
 /// each test below issues one against the real migration running on an
 /// in-memory `SQLite` database.
 ///
-/// What they cover: all three table names, every column name (a `SeaORM`
+/// What they cover: every table name, every column name (a `SeaORM`
 /// `INSERT` names them all, and the `SELECT` behind `find_by_id` reads them all
 /// back), both `NOT NULL DEFAULT ''` clauses, both foreign keys, and the
 /// tenant-prefixing of both unique indexes. What they do **not** cover: the
@@ -1160,6 +1160,7 @@ mod tests {
             schedule_id: ActiveValue::Set(Some(uuid(0x12))),
             bundle_ids: ActiveValue::Set(serde_json::json!([uuid(0x13)])),
             execution_ref: ActiveValue::Set(Some("exec-1".to_owned())),
+            execution_uid: ActiveValue::Set(None),
             log_storage_ref: ActiveValue::Set(Some("s3://logs/1".to_owned())),
             timeout_at: ActiveValue::Set(Some(now())),
             started_at: ActiveValue::Set(Some(now())),

@@ -2686,6 +2686,53 @@ async fn a_rebuild_that_spends_its_page_budget_says_so_in_the_outcome() {
     assert_eq!(rest.resume_from, None);
 }
 
+/// A single `finished_at` holding more runs than one call's page budget used to
+/// be re-walked forever, because `resume_from` carried only the instant. The
+/// resume key is now the whole `(finished_at, id)` pair.
+///
+/// Bounded: `page_size = 2`, so the budget is `MAX_PAGES_PER_REBUILD * 2` runs
+/// and the group is that plus three.
+#[tokio::test]
+async fn a_rebuild_resumes_past_a_tie_group_larger_than_its_budget() {
+    let page_size = 2_u32;
+    let f = Fixture::with_lookback(Duration::ZERO, page_size).await;
+    let tied = at("2026-08-18T09:00:00Z");
+    let total = super::MAX_PAGES_PER_REBUILD * page_size + 3;
+    let runs: Vec<_> = (0..total)
+        .map(|_| f.runs.add_finished_run_with_results(tied, 1))
+        .collect();
+    let (from, to) = (at("2026-08-18T08:00:00Z"), at("2026-08-18T10:00:00Z"));
+
+    let first = f
+        .service
+        .rebuild_after(&f.ctx, from, None, to)
+        .await
+        .expect("rebuild succeeds");
+
+    assert!(!first.caught_up, "the group outlasts one call's budget");
+    assert_eq!(first.resume_from, Some(tied));
+    let after = first
+        .resume_after_run_id
+        .expect("the resume key names the last run consumed");
+
+    let second = f
+        .service
+        .rebuild_after(&f.ctx, first.resume_from.unwrap(), Some(after), to)
+        .await
+        .expect("rebuild succeeds");
+
+    assert!(second.caught_up, "the continuation crosses the group");
+    assert_eq!(second.resume_after_run_id, None);
+    assert_eq!(
+        first.scanned + second.scanned,
+        total as usize,
+        "every run is projected exactly once across the two calls"
+    );
+    for run in runs {
+        assert_eq!(f.results_for(run).await.len(), 1);
+    }
+}
+
 /// **A listing that fails after the first page is a partial answer, not an
 /// error** — finding #122's residual D.
 ///

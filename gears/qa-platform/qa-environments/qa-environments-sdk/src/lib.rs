@@ -21,5 +21,6 @@ pub use errors::QaEnvironmentsError;
 pub use models::{
     AcquireOutcome, ClusterHealthView, ClusterStatus, CredentialMaterial, CredentialSubmission,
     Environment, EnvironmentCredential, EnvironmentPatch, LeaseMode, LeaseState, NewEnvironment,
-    NewVariable, NodeCounts, NodeSummary, RESERVED_VARIABLE_NAMES, Variable,
+    NewVariable, NodeCounts, NodeSummary, RESERVED_VARIABLE_NAMES, RESERVED_VARIABLE_PREFIXES, Variable,
+    is_reserved_variable_name,
 };

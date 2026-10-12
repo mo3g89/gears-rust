@@ -1372,6 +1372,7 @@ pub fn a_runner_pod(tenant_id: Uuid) -> VerifiedRunnerPod {
         tenant_id,
         run_id: Uuid::from_u128(0x7777),
         workflow_name: "qa-run-1-abcde".to_owned(),
+        workflow_uid: "wf-uid-1".to_owned(),
     }
 }
 

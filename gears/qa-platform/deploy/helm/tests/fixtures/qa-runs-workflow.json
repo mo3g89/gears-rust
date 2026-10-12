@@ -1,0 +1,257 @@
+{
+  "apiVersion": "argoproj.io/v1alpha1",
+  "kind": "Workflow",
+  "metadata": {
+    "generateName": "verify-k8s-golden-",
+    "labels": {
+      "app": "qa-runs",
+      "qa-runs/run-id": "00000000-0000-0000-0000-000000000000"
+    },
+    "namespace": "argo"
+  },
+  "spec": {
+    "activeDeadlineSeconds": 1800,
+    "entrypoint": "main-dag",
+    "securityContext": {
+      "fsGroup": 65534,
+      "runAsNonRoot": true,
+      "runAsUser": 65534,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "serviceAccountName": "qa-platform-runner",
+    "templates": [
+      {
+        "dag": {
+          "tasks": [
+            {
+              "name": "n-0-a",
+              "template": "n-0-a"
+            },
+            {
+              "name": "n-1-b",
+              "template": "n-1-b"
+            }
+          ]
+        },
+        "name": "main-dag"
+      },
+      {
+        "container": {
+          "command": [
+            "/entrypoint.sh"
+          ],
+          "env": [
+            {
+              "name": "TEST_FILES",
+              "value": "tests/test_smoke.py"
+            },
+            {
+              "name": "TEST_BUNDLE_REF",
+              "value": "/var/lib/qa-catalog/bundles/99999999-9999-4999-8999-999999999999.tar.gz"
+            },
+            {
+              "name": "TEST_BUNDLE_URL",
+              "value": "http://qa-platform-gears.qa-platform.svc.cluster.local:8087/qa/v1/test-bundles/2f1c9a70-0000-4000-8000-000000000001?sig=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            },
+            {
+              "name": "QA_CREDENTIALS_URL",
+              "value": "http://qa-platform-gears.qa-platform.svc.cluster.local:8087/qa/v1/runner-credentials"
+            },
+            {
+              "name": "QA_CREDENTIALS_TOKEN_FILE",
+              "value": "/var/run/secrets/qa-platform/runner-credentials/token"
+            },
+            {
+              "name": "QA_CREDENTIAL_DIRS",
+              "value": "/.kube"
+            },
+            {
+              "name": "HOME",
+              "value": "/tmp"
+            },
+            {
+              "name": "PATH",
+              "value": "$(HOME)/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            }
+          ],
+          "image": "vhp-test-runner:latest",
+          "imagePullPolicy": "IfNotPresent",
+          "resources": {
+            "limits": {
+              "cpu": "1",
+              "memory": "1Gi"
+            },
+            "requests": {
+              "cpu": "100m",
+              "memory": "256Mi"
+            }
+          },
+          "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "capabilities": {
+              "drop": [
+                "ALL"
+              ]
+            }
+          },
+          "volumeMounts": [
+            {
+              "mountPath": "/.kube",
+              "name": "mount-0"
+            },
+            {
+              "mountPath": "/tmp",
+              "name": "tmp"
+            },
+            {
+              "mountPath": "/work",
+              "name": "work"
+            },
+            {
+              "mountPath": "/var/run/secrets/qa-platform/runner-credentials",
+              "name": "runner-credentials",
+              "readOnly": true
+            }
+          ]
+        },
+        "metadata": {
+          "annotations": {
+            "qa-runs/node": "a"
+          },
+          "labels": {
+            "qa-platform/network-isolated": "true",
+            "qa-platform/run-id": "00000000-0000-0000-0000-000000000000",
+            "qa-platform/tenant-id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+          }
+        },
+        "name": "n-0-a"
+      },
+      {
+        "container": {
+          "command": [
+            "/entrypoint.sh"
+          ],
+          "env": [
+            {
+              "name": "TEST_FILES",
+              "value": "tests/test_smoke.py"
+            },
+            {
+              "name": "TEST_BUNDLE_REF",
+              "value": "/var/lib/qa-catalog/bundles/99999999-9999-4999-8999-999999999999.tar.gz"
+            },
+            {
+              "name": "TEST_BUNDLE_URL",
+              "value": "http://qa-platform-gears.qa-platform.svc.cluster.local:8087/qa/v1/test-bundles/2f1c9a70-0000-4000-8000-000000000001?sig=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            },
+            {
+              "name": "QA_CREDENTIALS_URL",
+              "value": "http://qa-platform-gears.qa-platform.svc.cluster.local:8087/qa/v1/runner-credentials"
+            },
+            {
+              "name": "QA_CREDENTIALS_TOKEN_FILE",
+              "value": "/var/run/secrets/qa-platform/runner-credentials/token"
+            },
+            {
+              "name": "QA_CREDENTIAL_DIRS",
+              "value": "/.kube"
+            },
+            {
+              "name": "HOME",
+              "value": "/tmp"
+            },
+            {
+              "name": "PATH",
+              "value": "$(HOME)/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            }
+          ],
+          "image": "vhp-test-runner:latest",
+          "imagePullPolicy": "IfNotPresent",
+          "resources": {
+            "limits": {
+              "cpu": "1",
+              "memory": "1Gi"
+            },
+            "requests": {
+              "cpu": "100m",
+              "memory": "256Mi"
+            }
+          },
+          "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "capabilities": {
+              "drop": [
+                "ALL"
+              ]
+            }
+          },
+          "volumeMounts": [
+            {
+              "mountPath": "/.kube",
+              "name": "mount-0"
+            },
+            {
+              "mountPath": "/tmp",
+              "name": "tmp"
+            },
+            {
+              "mountPath": "/work",
+              "name": "work"
+            },
+            {
+              "mountPath": "/var/run/secrets/qa-platform/runner-credentials",
+              "name": "runner-credentials",
+              "readOnly": true
+            }
+          ]
+        },
+        "metadata": {
+          "annotations": {
+            "qa-runs/node": "b"
+          },
+          "labels": {
+            "qa-platform/network-isolated": "true",
+            "qa-platform/run-id": "00000000-0000-0000-0000-000000000000",
+            "qa-platform/tenant-id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+          }
+        },
+        "name": "n-1-b"
+      }
+    ],
+    "ttlStrategy": {
+      "secondsAfterCompletion": 3600
+    },
+    "volumes": [
+      {
+        "emptyDir": {
+          "medium": "Memory"
+        },
+        "name": "mount-0"
+      },
+      {
+        "emptyDir": {},
+        "name": "tmp"
+      },
+      {
+        "emptyDir": {},
+        "name": "work"
+      },
+      {
+        "name": "runner-credentials",
+        "projected": {
+          "sources": [
+            {
+              "serviceAccountToken": {
+                "audience": "qa-platform-runner-credentials",
+                "expirationSeconds": 600,
+                "path": "token"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

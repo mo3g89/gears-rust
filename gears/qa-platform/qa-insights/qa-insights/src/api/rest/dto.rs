@@ -71,14 +71,28 @@ use crate::domain::service::saved_views::SavedViewInput;
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
 pub struct RebuildReq {
-    /// Start of the window, **inclusive**. RFC 3339, e.g.
-    /// `2026-08-18T08:00:00Z`.
+    /// Start of the window, **inclusive** unless `after_run_id` is set (then
+    /// the walk starts strictly after that run at this instant). RFC 3339,
+    /// e.g. `2026-08-18T08:00:00Z`.
     #[serde(with = "time::serde::rfc3339")]
     pub from: OffsetDateTime,
     /// End of the window, **exclusive**. RFC 3339. Must be strictly after
     /// `from`; an equal pair is refused rather than treated as an empty window.
     #[serde(with = "time::serde::rfc3339")]
     pub to: OffsetDateTime,
+    /// Optional run id half of the resume key: post back the previous
+    /// response's `resume_after_run_id` together with its `resume_from` as
+    /// `from`, and the walk resumes **strictly after** that run, so a single
+    /// instant holding more runs than one call's page budget is crossed.
+    /// Omitted, `from` is inclusive as before.
+    ///
+    /// It must be the `resume_after_run_id` returned **with this
+    /// `resume_from`**. Any other pairing (an id from another response, or
+    /// one with a hand-picked `from`) may skip runs at `from`: the key is
+    /// `(finished_at, id)`, and runs ordered before the id at that instant
+    /// are not replayed.
+    #[serde(default)]
+    pub after_run_id: Option<uuid::Uuid>,
 }
 
 /// What a rebuild did.
@@ -145,12 +159,19 @@ pub struct RebuildOutcomeDto {
     /// The `from` of the request that finishes what this one did not.
     ///
     /// `null` exactly when [`Self::complete`] is `true`. Otherwise an RFC 3339
-    /// instant to post straight back as `from`, with the same `to`. The
-    /// continuation re-replays the run it names and anything tied with it — a
-    /// rebuild is idempotent, so overlapping is free where skipping a tie group
-    /// would not be.
+    /// instant to post straight back as `from`, with the same `to`, together
+    /// with [`Self::resume_after_run_id`] as `after_run_id` when that is
+    /// present. When it is absent, the continuation re-replays the run this
+    /// instant names and anything tied with it — a rebuild is idempotent, so
+    /// overlapping is free where skipping a tie group would not be.
     #[serde(with = "time::serde::rfc3339::option")]
     pub resume_from: Option<OffsetDateTime>,
+    /// The `after_run_id` of the request that continues this one. Present when
+    /// [`Self::resume_from`] names a consumed run; post it back with
+    /// `resume_from` as `from` to resume strictly after that run. Absent means
+    /// resume at `resume_from` inclusive.
+    #[serde(default)]
+    pub resume_after_run_id: Option<uuid::Uuid>,
 }
 
 impl From<ReconcileOutcome> for RebuildOutcomeDto {
@@ -165,6 +186,7 @@ impl From<ReconcileOutcome> for RebuildOutcomeDto {
             stopped_at_gap: o.stopped_at_gap,
             complete: o.caught_up,
             resume_from: o.resume_from,
+            resume_after_run_id: o.resume_after_run_id,
         }
     }
 }
@@ -2923,6 +2945,7 @@ mod tests {
             watermark_at: None,
             caught_up: false,
             resume_from: Some(datetime!(2026-08-18 09:30:00 UTC)),
+            resume_after_run_id: Some(Uuid::from_u128(0xA11)),
             stopped_at_gap: true,
             stopped_at_run: Some(Uuid::from_u128(0x5709)),
             // Deliberately `Some` and deliberately absent from the assertions
@@ -2951,6 +2974,11 @@ mod tests {
             "resume_from must carry ReconcileOutcome::resume_from: the whole point of the \
              field is that a partial rebuild says where to continue"
         );
+        assert_eq!(
+            dto.resume_after_run_id,
+            Some(Uuid::from_u128(0xA11)),
+            "resume_after_run_id must carry ReconcileOutcome::resume_after_run_id"
+        );
     }
 
     /// The two new keys are on the JSON, under the names this response
@@ -2971,6 +2999,7 @@ mod tests {
             watermark_at: None,
             caught_up: false,
             resume_from: Some(datetime!(2026-08-18 09:30:00 UTC)),
+            resume_after_run_id: Some(Uuid::from_u128(0xA11)),
             stopped_at_gap: false,
             stopped_at_run: None,
             // Not on the wire: a log field, never a rebuild's answer.
@@ -2984,6 +3013,11 @@ mod tests {
             json["resume_from"],
             serde_json::json!("2026-08-18T09:30:00Z"),
             "the instant must come back in the form `RebuildReq::from` accepts"
+        );
+        assert_eq!(
+            json["resume_after_run_id"],
+            serde_json::json!("00000000-0000-0000-0000-000000000a11"),
+            "the run id half of the key is on the wire under its own name"
         );
     }
 
@@ -2999,6 +3033,7 @@ mod tests {
             watermark_at: None,
             caught_up: true,
             resume_from: None,
+            resume_after_run_id: None,
             stopped_at_gap: false,
             stopped_at_run: None,
             // Not on the wire: a log field, never a rebuild's answer.
@@ -3012,6 +3047,7 @@ mod tests {
             dto.resume_from, None,
             "nothing to resume from when the window was walked to its end"
         );
+        assert_eq!(dto.resume_after_run_id, None);
     }
 
     /// `#[serde(with = "time::serde::rfc3339")]` on a **request** field, which is
@@ -4729,5 +4765,28 @@ mod tests {
                 "text": { "type": "mrkdwn", "text": "the block text" }
             })]
         );
+    }
+}
+
+#[cfg(test)]
+mod rebuild_req_resume_key_tests {
+    use super::RebuildReq;
+
+    /// Old clients send only `from` and `to`; the new field is optional on the
+    /// request and parses when present.
+    #[test]
+    fn after_run_id_is_optional_on_the_request() {
+        let old: RebuildReq = serde_json::from_value(serde_json::json!({
+            "from": "2026-08-18T08:00:00Z", "to": "2026-08-18T10:00:00Z"
+        }))
+        .expect("a request without after_run_id still parses");
+        assert_eq!(old.after_run_id, None);
+
+        let new: RebuildReq = serde_json::from_value(serde_json::json!({
+            "from": "2026-08-18T08:00:00Z", "to": "2026-08-18T10:00:00Z",
+            "after_run_id": "00000000-0000-0000-0000-000000000a11"
+        }))
+        .expect("a request with after_run_id parses");
+        assert_eq!(new.after_run_id, Some(uuid::Uuid::from_u128(0xA11)));
     }
 }

@@ -14,7 +14,7 @@ use crate::gear::ConcreteAppServices;
 ///
 /// Four lines, and each of the things it does *not* do is deliberate:
 ///
-/// * It does not validate the window. `ReconcileService::rebuild` refuses a
+/// * It does not validate the window. `ReconcileService::rebuild_after` refuses a
 ///   window that is not strictly forward, because that refusal is a property of
 ///   the operation rather than of the transport — the same rule has to hold for
 ///   any future non-HTTP caller.
@@ -25,12 +25,18 @@ use crate::gear::ConcreteAppServices;
 ///   every service in every sibling gear does.
 /// * It does not choose a status code. `?` resolves through
 ///   [`crate::domain::error`]'s boundary mapping.
-#[tracing::instrument(skip(svc, ctx, req), fields(rebuild.from = %req.from, rebuild.to = %req.to))]
+#[tracing::instrument(
+    skip(svc, ctx, req),
+    fields(rebuild.from = %req.from, rebuild.after_run_id = ?req.after_run_id, rebuild.to = %req.to)
+)]
 pub async fn rebuild(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteAppServices>>,
     Json(req): Json<RebuildReq>,
 ) -> ApiResult<Json<RebuildOutcomeDto>> {
-    let outcome = svc.reconcile.rebuild(&ctx, req.from, req.to).await?;
+    let outcome = svc
+        .reconcile
+        .rebuild_after(&ctx, req.from, req.after_run_id, req.to)
+        .await?;
     Ok(Json(RebuildOutcomeDto::from(outcome)))
 }

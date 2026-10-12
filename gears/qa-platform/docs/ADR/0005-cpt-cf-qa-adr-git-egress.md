@@ -92,3 +92,26 @@ the natural home for that file. The corresponding git-side change is the same fi
   only places these options are set, and each carries this ADR's reasoning in full.
 * No credential reaches either transport as anything but a credstore reference resolved at the
   point of use.
+
+## Amendments
+
+### 2026-08-27: SSH remotes and the scheme allow-list
+
+Recorded retroactively on 2026-10-12 from the code: the decision was taken on 2026-08-27, but the
+history of this branch was squashed and no commit in that window carries it, so no hash can be
+cited. What follows is what `qa-catalog/qa-catalog/src/domain/git_url.rs` (lines 21-35, the
+"Accepted forms" and "Userinfo is scheme-dependent" sections) implements today; code comments that
+cite "ADR-0005, amended 2026-08-27" mean this section.
+
+* The accepted forms of a registered remote are `https://host/path` and `http://host/path` with no
+  userinfo, `ssh://[user@]host[:port]/path`, and scp-like `[user@]host:path`.
+* Everything else is refused: empty input, bare local paths, `file://`, `git://`, Windows drive
+  paths and a bare hostname with no path.
+* Userinfo is scheme-dependent. For http(s) any userinfo is credential material and is refused.
+  For ssh a bare `user@` is the username and is permitted; `user:password@` is refused for both
+  schemes.
+* SSH material is a private key held in credstore and reached through `qa-connector-ssh`'s
+  short-lived `ssh-agent` (`connectors/qa-connector-ssh/src/agent.rs`), so the key never becomes a
+  file. The URL scheme alone decides whether `credential_ref` names an SSH key or HTTP basic-auth
+  material.
+* The runtime image installs `openssh-client`, which the SSH path needs.

@@ -264,14 +264,33 @@ pub async fn start(
     })?;
 
     let (sink, stream) = ExecutionStream::channel(CHANNEL_CAPACITY);
-    if existing.is_none() {
+    let Some(existing) = existing else {
         debug!(
             execution_ref = %name,
             "no such workflow; yielding an empty stream, which means 'nothing more to say'"
         );
         drop(sink);
         return Ok(stream);
+    };
+
+    // The uid the run recorded when it submitted this Workflow is what pods
+    // must be controlled by. A legacy run recorded none, so it pins the live
+    // Workflow's uid; the residue is a delete-and-recreate under
+    // the same name before the watcher first attaches.
+    let live_uid = existing.metadata.uid.clone().unwrap_or_default();
+    let workflow_uid = execution_ref
+        .uid()
+        .map_or_else(|| live_uid.clone(), str::to_owned);
+    if execution_ref.uid().is_some() && workflow_uid != live_uid {
+        debug!(
+            execution_ref = %name,
+            "the workflow under this name is not the one the run submitted; \
+             yielding an empty stream"
+        );
+        drop(sink);
+        return Ok(stream);
     }
+    let service_account = watcher_account(&name, &existing, &config);
 
     let mut watcher = Watcher {
         workflows,
@@ -281,6 +300,9 @@ pub async fn start(
         sink,
         started: false,
         drained: HashSet::new(),
+        workflow_uid,
+        service_account,
+        refused: HashSet::new(),
         resume,
         cancel,
     };
@@ -310,6 +332,15 @@ struct Watcher {
     /// the archived log, which `append_log`'s `CONCAT` duplicated on every
     /// re-attach.
     drained: HashSet<String>,
+    /// The uid of the Workflow this run submitted: a pod is read only when its
+    /// controller `ownerReference` carries it. See [`pod_belongs`].
+    workflow_uid: String,
+    /// The account a pod must run as to be read: see [`drain_account`].
+    /// `None` refuses every pod.
+    service_account: Option<String>,
+    /// Pods already warned about, so a forged pod costs one log line rather
+    /// than one per status-poll tick.
+    refused: HashSet<String>,
     /// Where to resume each pod's log read from, keyed by node — see
     /// [`LogResume`]'s own doc. Consulted once per pod, inside
     /// [`Self::open_log`], the first time that pod is followed by *this*
@@ -323,6 +354,82 @@ struct Watcher {
     /// [`Self::follow`] selects on it between log lines. Review findings
     /// #20/#21: before this, nothing ever asked a spawned `Watcher` to stop.
     cancel: CancellationToken,
+}
+
+/// The account a pod must run as for its log to be read: the live Workflow's
+/// `spec.serviceAccountName` when it names one, otherwise the configured
+/// runner account (`qa-runs.argo.workflow_service_account`). Blank values
+/// count as absent. `None` when both are absent, and then [`pod_belongs`]
+/// refuses every pod.
+fn drain_account(live: Option<&str>, configured: Option<&str>) -> Option<String> {
+    [live, configured]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// [`drain_account`] for one watcher, with the WARN it owes when there is no
+/// account at all. Called once per watcher, so the WARN is too.
+fn watcher_account(
+    name: &str,
+    workflow: &DynamicObject,
+    config: &ArgoExecutorConfig,
+) -> Option<String> {
+    let account = drain_account(
+        workflow.data["spec"]["serviceAccountName"].as_str(),
+        config.workflow_service_account.as_deref(),
+    );
+    if account.is_none() {
+        warn!(
+            execution_ref = %name,
+            "the workflow names no serviceAccountName and qa-runs.argo.workflow_service_account \
+             is unset, so no pod can be checked against the runner account; no pod log of \
+             this workflow is read",
+        );
+    }
+    account
+}
+
+/// Whether `pod` is one the Argo controller made for THIS Workflow: exactly one
+/// controller ownerReference, to an `argoproj.io` Workflow carrying `workflow_uid`,
+/// running as `service_account` (see [`drain_account`]). With no account to
+/// check against, no pod belongs.
+///
+/// The label `workflows.argoproj.io/workflow` is only the list selector. Anyone
+/// who can create a pod in the Argo namespace can wear it, and print
+/// `=== TEST_RESULT … PASSED ===` into the run's results. The account check
+/// is what makes the owner check mean something: the runner guard admits only
+/// the Argo controller to create pods as the runner `ServiceAccount`, while an
+/// ownerReference alone is free text any pod creator may write.
+fn pod_belongs(pod: &Pod, workflow_uid: &str, service_account: Option<&str>) -> bool {
+    let mut controllers = pod
+        .metadata
+        .owner_references
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|owner| owner.controller == Some(true));
+    let owned = match (controllers.next(), controllers.next()) {
+        (Some(owner), None) => {
+            owner.kind == "Workflow"
+                && owner
+                    .api_version
+                    .split_once('/')
+                    .is_some_and(|(group, _)| group == "argoproj.io")
+                && !workflow_uid.is_empty()
+                && owner.uid == workflow_uid
+        }
+        _ => false,
+    };
+    let account_matches = service_account.is_some_and(|expected| {
+        pod.spec
+            .as_ref()
+            .and_then(|spec| spec.service_account_name.as_deref())
+            == Some(expected)
+    });
+    owned && account_matches
 }
 
 /// How far a log read got: one pod's, in [`Watcher::follow`], or one whole
@@ -423,7 +530,18 @@ impl Watcher {
                     return;
                 }
                 result = self.workflows.get_opt(&self.name) => match result {
-                    Ok(Some(workflow)) => workflow,
+                    Ok(Some(workflow)) if self.is_ours(&workflow) => workflow,
+                    // Deleted and recreated under the same name: the run's
+                    // Workflow is gone, and the new one's phase is not its
+                    // verdict. Ends like a garbage-collected one.
+                    Ok(Some(_)) => {
+                        warn!(
+                            execution_ref = %self.name,
+                            "the workflow under this name is no longer the one the run \
+                             submitted; ending this observation without a verdict"
+                        );
+                        return;
+                    }
                     // Garbage-collected mid-observation: end the stream. Not a
                     // failure, and not a `Finished` either — there is nothing left
                     // to report an outcome from.
@@ -530,9 +648,10 @@ impl Watcher {
     /// (295 s, connector-level) rather than by anything this file adds.
     async fn finish(&self, observed: DynamicObject) {
         let workflow = match self.workflows.get_opt(&self.name).await {
-            Ok(Some(fresh)) => fresh,
-            // Collected in the moment between the last drain and this read; the
-            // phase we already observed is still the right answer.
+            Ok(Some(fresh)) if self.is_ours(&fresh) => fresh,
+            // Collected (or replaced by a recreated Workflow) in the moment between
+            // the last drain and this read; the phase we already observed is still
+            // the right answer.
             _ => observed,
         };
         let (outcome, message) = outcome_of(&workflow);
@@ -551,6 +670,28 @@ impl Watcher {
                 message,
             })
             .await;
+    }
+
+    /// Whether `workflow` is the one this run submitted, by uid. The name alone
+    /// can be recreated.
+    fn is_ours(&self, workflow: &DynamicObject) -> bool {
+        workflow.metadata.uid.as_deref().unwrap_or_default() == self.workflow_uid
+    }
+
+    /// Whether `pod` is refused because it is not this Workflow's (see
+    /// [`pod_belongs`]). Warns once per pod, not once per status-poll tick.
+    fn refuse_foreign(&mut self, pod: &Pod, pod_name: &str) -> bool {
+        if pod_belongs(pod, &self.workflow_uid, self.service_account.as_deref()) {
+            return false;
+        }
+        if self.refused.insert(pod_name.to_owned()) {
+            warn!(
+                execution_ref = %self.name,
+                pod = %pod_name,
+                "a pod wears this workflow's label but is not controlled by it (uid or ServiceAccount mismatch); its log is not read",
+            );
+        }
+        true
     }
 
     /// Follow every not-yet-drained pod's log to end-of-file, and report how
@@ -633,6 +774,9 @@ impl Watcher {
         for pod in pods {
             let pod_name = pod.name_any();
             if self.drained.contains(&pod_name) {
+                continue;
+            }
+            if self.refuse_foreign(&pod, &pod_name) {
                 continue;
             }
             // A pod with no container started yet has no log endpoint, and
@@ -1034,10 +1178,7 @@ impl Watcher {
             container: Some(MAIN_CONTAINER.to_owned()),
             follow: true,
             timestamps: true,
-            since_time: self
-                .resume
-                .last_emitted_for(node)
-                .and_then(since_time_of),
+            since_time: self.resume.last_emitted_for(node).and_then(since_time_of),
             ..LogParams::default()
         };
         match self.pods.log_stream(pod_name, &params).await {
@@ -1124,7 +1265,12 @@ fn since_time_of(instant: OffsetDateTime) -> Option<jiff::Timestamp> {
 /// would simply fail to match, and the whole case would be silently
 /// dropped, not partially decoded. The parser's input has to stay raw to
 /// avoid that.
-async fn handle_line(sink: &ExecutionSink, parser: &mut MarkerParser, node: &str, line: String) -> bool {
+async fn handle_line(
+    sink: &ExecutionSink,
+    parser: &mut MarkerParser,
+    node: &str,
+    line: String,
+) -> bool {
     // Defensive fallback for a line kubelet did not prefix — see
     // `split_kubelet_timestamp`'s own doc for why this is not expected to
     // happen on a stream this module always opens with `timestamps: true`.
@@ -1224,6 +1370,9 @@ mod tests {
     //! These run under `--features argo`, which is this module's own gate —
     //! no separate `#[cfg]` needed on the module itself.
 
+    /// The uid every fixture Workflow carries and every fixture pod names.
+    const WF_UID: &str = "wf-uid-1";
+
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1236,12 +1385,14 @@ mod tests {
     use kube::api::Api;
     use tokio_util::sync::CancellationToken;
 
-    use super::{FollowOutcome, Watcher, handle_line, since_time_of, workflow_resource};
-    use crate::config::ArgoExecutorConfig;
-    use crate::domain::ports::run_executor::{ExecutionEvent, ExecutionStream};
-    use crate::domain::repos::{
-        LogPosition, LogResume, MAX_LINE_BYTES, TRUNCATION_MARKER_MAX,
+    use k8s_openapi::api::core::v1::Pod;
+
+    use super::{
+        FollowOutcome, Watcher, handle_line, pod_belongs, since_time_of, workflow_resource,
     };
+    use crate::config::ArgoExecutorConfig;
+    use crate::domain::ports::run_executor::{ExecutionEvent, ExecutionRef, ExecutionStream};
+    use crate::domain::repos::{LogPosition, LogResume, MAX_LINE_BYTES, TRUNCATION_MARKER_MAX};
     use crate::infra::executor::argo::markers::MarkerParser;
 
     /// **A kubelet-prefixed line is parsed and stripped before it reaches
@@ -1296,9 +1447,7 @@ mod tests {
         let (sink, mut stream) = ExecutionStream::channel(4);
         let mut parser = MarkerParser::new("node-1");
 
-        assert!(
-            handle_line(&sink, &mut parser, "node-1", "no timestamp here".to_owned()).await
-        );
+        assert!(handle_line(&sink, &mut parser, "node-1", "no timestamp here".to_owned()).await);
         drop(sink);
 
         let event = stream.recv().await.expect("one Log event");
@@ -1416,12 +1565,15 @@ mod tests {
                     chosen.unwrap_or_default().as_bytes().to_vec()
                 } else if path.contains("/pods") {
                     br#"{"apiVersion":"v1","kind":"PodList","metadata":{},
-                         "items":[{"metadata":{"name":"pod-1","namespace":"ns"},
+                         "items":[{"metadata":{"name":"pod-1","namespace":"ns",
+                                    "ownerReferences":[{"apiVersion":"argoproj.io/v1alpha1",
+                                      "kind":"Workflow","name":"wf-1","uid":"wf-uid-1",
+                                      "controller":true}]},
                                    "status":{"phase":"Running"}}]}"#
                         .to_vec()
                 } else {
                     br#"{"apiVersion":"argoproj.io/v1alpha1","kind":"Workflow",
-                         "metadata":{"name":"wf-1","namespace":"ns"},
+                         "metadata":{"name":"wf-1","namespace":"ns","uid":"wf-uid-1"},
                          "status":{"phase":"Running"}}"#
                         .to_vec()
                 };
@@ -1449,6 +1601,9 @@ mod tests {
             sink,
             started: false,
             drained: std::collections::HashSet::new(),
+            workflow_uid: WF_UID.to_owned(),
+            service_account: None,
+            refused: std::collections::HashSet::new(),
             resume,
             cancel: CancellationToken::new(),
         };
@@ -1458,7 +1613,10 @@ mod tests {
     /// Drop `watcher` (closing its sink) and drain everything its `follow`
     /// call already put in `stream` — the same "drop then drain" shape
     /// this module's other `Watcher`-level tests use.
-    async fn drain_and_events(watcher: Watcher, mut stream: ExecutionStream) -> Vec<ExecutionEvent> {
+    async fn drain_and_events(
+        watcher: Watcher,
+        mut stream: ExecutionStream,
+    ) -> Vec<ExecutionEvent> {
         drop(watcher);
         let mut events = Vec::new();
         while let Some(event) = stream.recv().await {
@@ -1595,7 +1753,6 @@ mod tests {
         }
     }
 
-
     /// A response body that never produces a frame — modelling a wedged
     /// API-server connection from this process' point of view: the
     /// connection is up and the response headers already arrived (so
@@ -1712,6 +1869,9 @@ mod tests {
             sink,
             started: false,
             drained: std::collections::HashSet::new(),
+            workflow_uid: WF_UID.to_owned(),
+            service_account: None,
+            refused: std::collections::HashSet::new(),
             resume: LogResume::default(),
             cancel: cancel.clone(),
         };
@@ -1781,6 +1941,9 @@ mod tests {
             sink,
             started: false,
             drained: std::collections::HashSet::new(),
+            workflow_uid: WF_UID.to_owned(),
+            service_account: None,
+            refused: std::collections::HashSet::new(),
             resume: LogResume::default(),
             cancel: CancellationToken::new(),
         };
@@ -1909,19 +2072,41 @@ mod tests {
     /// A `Workflow` `DynamicObject`, `status.phase: Succeeded` — terminal, so
     /// `Watcher::run` reaches `finish` unless the drain stopped it first.
     fn succeeded_workflow_json() -> Vec<u8> {
-        br#"{"apiVersion":"argoproj.io/v1alpha1","kind":"Workflow",
-             "metadata":{"name":"wf-1","namespace":"ns"},
-             "status":{"phase":"Succeeded"}}"#
-            .to_vec()
+        serde_json::to_vec(&serde_json::json!({
+            "apiVersion": "argoproj.io/v1alpha1", "kind": "Workflow",
+            "metadata": { "name": "wf-1", "namespace": "ns", "uid": WF_UID },
+            "status": { "phase": "Succeeded" }
+        }))
+        .unwrap()
+    }
+
+    /// A running pod as the Argo controller makes it: controlled by the
+    /// Workflow `uid`, running as `service_account`.
+    fn running_pod(name: &str, uid: &str, service_account: &str) -> serde_json::Value {
+        serde_json::json!({
+            "metadata": {
+                "name": name, "namespace": "ns",
+                "ownerReferences": [{
+                    "apiVersion": "argoproj.io/v1alpha1", "kind": "Workflow",
+                    "name": "wf-1", "uid": uid, "controller": true
+                }]
+            },
+            "spec": { "serviceAccountName": service_account, "containers": [] },
+            "status": { "phase": "Running" }
+        })
+    }
+
+    fn pod_list(items: &[serde_json::Value]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": items
+        }))
+        .unwrap()
     }
 
     /// A `PodList` holding one pod in a phase `drain_pods` will follow. No
     /// node annotation, so `node_of` falls back to the pod name.
     fn one_running_pod_list_json() -> Vec<u8> {
-        br#"{"apiVersion":"v1","kind":"PodList","metadata":{},
-             "items":[{"metadata":{"name":"pod-1","namespace":"ns"},
-                       "status":{"phase":"Running"}}]}"#
-            .to_vec()
+        pod_list(&[running_pod("pod-1", WF_UID, "default")])
     }
 
     /// A `PodList` holding two pods, `pod-1` before `pod-2` — the shape a
@@ -1931,12 +2116,19 @@ mod tests {
     /// stable ordering that made the regression permanent rather than
     /// intermittent.
     fn two_running_pods_list_json() -> Vec<u8> {
-        br#"{"apiVersion":"v1","kind":"PodList","metadata":{},
-             "items":[{"metadata":{"name":"pod-1","namespace":"ns"},
-                       "status":{"phase":"Running"}},
-                      {"metadata":{"name":"pod-2","namespace":"ns"},
-                       "status":{"phase":"Running"}}]}"#
-            .to_vec()
+        pod_list(&[
+            running_pod("pod-1", WF_UID, "default"),
+            running_pod("pod-2", WF_UID, "default"),
+        ])
+    }
+
+    /// `pod-1` is the Workflow's; `pod-2` wears its label but names another
+    /// uid and prints a PASSED line. Nothing about it may reach the sink.
+    fn one_owned_one_forged_pod_list_json() -> Vec<u8> {
+        pod_list(&[
+            running_pod("pod-1", WF_UID, "default"),
+            running_pod("pod-2", "forged-uid", "default"),
+        ])
     }
 
     /// Run one `Watcher` against [`one_pod_cluster`] to completion and report
@@ -1975,6 +2167,10 @@ mod tests {
             sink,
             started: false,
             drained: std::collections::HashSet::new(),
+            workflow_uid: WF_UID.to_owned(),
+            // The account the scripted pods run as; `None` would refuse them all.
+            service_account: Some("default".to_owned()),
+            refused: std::collections::HashSet::new(),
             resume: LogResume::default(),
             cancel: CancellationToken::new(),
         };
@@ -2135,6 +2331,281 @@ mod tests {
             "one pod's log is still unread, so this observation must report no verdict at \
              all -- a `Finished` here retires the run out of `active_states()`, got {events:?}"
         );
+    }
+
+    fn pod_owned_by(uid: &str, controller: bool, service_account: &str) -> Pod {
+        serde_json::from_value(serde_json::json!({
+            "metadata": {
+                "name": "wf-main-1",
+                "ownerReferences": [{
+                    "apiVersion": "argoproj.io/v1alpha1", "kind": "Workflow",
+                    "name": "wf", "uid": uid, "controller": controller
+                }]
+            },
+            "spec": { "serviceAccountName": service_account, "containers": [] }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pod_controlled_by_the_recorded_workflow_and_its_account_belongs() {
+        assert!(pod_belongs(
+            &pod_owned_by("uid-1", true, "qa-platform-runner"),
+            "uid-1",
+            Some("qa-platform-runner")
+        ));
+    }
+
+    #[test]
+    fn a_pod_naming_another_workflow_uid_does_not_belong() {
+        assert!(!pod_belongs(
+            &pod_owned_by("uid-2", true, "qa-platform-runner"),
+            "uid-1",
+            Some("qa-platform-runner")
+        ));
+    }
+
+    #[test]
+    fn a_pod_whose_owner_is_not_its_controller_does_not_belong() {
+        assert!(!pod_belongs(
+            &pod_owned_by("uid-1", false, "qa-platform-runner"),
+            "uid-1",
+            Some("qa-platform-runner")
+        ));
+    }
+
+    #[test]
+    fn a_pod_running_as_another_account_does_not_belong() {
+        // The runner guard admits only the Argo controller to create pods as the
+        // runner account; a pod as `default` with a forged owner is anyone's.
+        assert!(!pod_belongs(
+            &pod_owned_by("uid-1", true, "default"),
+            "uid-1",
+            Some("qa-platform-runner")
+        ));
+    }
+
+    #[test]
+    fn a_pod_with_no_owner_does_not_belong() {
+        let pod: Pod = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "x" }, "spec": { "containers": [] }
+        }))
+        .unwrap();
+        assert!(!pod_belongs(&pod, "uid-1", None));
+    }
+
+    /// No expected account means nothing to check against: refused.
+    #[test]
+    fn a_pod_with_no_expected_account_does_not_belong() {
+        assert!(!pod_belongs(
+            &pod_owned_by("uid-1", true, "qa-platform-runner"),
+            "uid-1",
+            None
+        ));
+    }
+
+    /// A pod that wears the Workflow's label but names another uid is never
+    /// followed: its log is not requested, so its forged PASSED line never
+    /// reaches the sink. `drained` is what a followed pod ends up in.
+    #[tokio::test]
+    async fn a_forged_pod_wearing_the_workflow_label_is_never_followed() {
+        let client = scripted_cluster(one_owned_one_forged_pod_list_json, |pod| {
+            if pod == "pod-1" {
+                ScriptedBody::Whole(Some(Bytes::from_static(b"owned line\n")))
+            } else {
+                ScriptedBody::Whole(Some(Bytes::from_static(
+                    b"forged line\n=== TEST_RESULT: t PASSED ===\n",
+                )))
+            }
+        });
+
+        let (drained, events) = observe_cluster(client, 1).await;
+
+        assert_eq!(
+            drained,
+            vec!["pod-1".to_owned()],
+            "only the owned pod is followed"
+        );
+        let lines = logged_lines(&events);
+        assert!(
+            lines.contains(&"owned line"),
+            "the owned pod is read, got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("forged")),
+            "the forged pod's log must not be read, got {lines:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::TestResult(_))),
+            "no TestResult from the forged pod may reach the sink, got {events:?}"
+        );
+    }
+
+    /// A cluster whose Workflow has uid `live_uid` and `service_account`, and
+    /// whose pods are `pods`; each pod's log is `"<pod> line"`.
+    fn cluster_of(
+        live_uid: &'static str,
+        service_account: Option<&'static str>,
+        pods: Vec<serde_json::Value>,
+    ) -> Client {
+        responsive_client(move |path| {
+            if let Some(pod) = pod_in_log_path(path) {
+                format!("{pod} line\n").into_bytes()
+            } else if path.contains("/pods") {
+                pod_list(&pods)
+            } else {
+                serde_json::to_vec(&serde_json::json!({
+                    "apiVersion": "argoproj.io/v1alpha1", "kind": "Workflow",
+                    "metadata": { "name": "wf-1", "namespace": "ns", "uid": live_uid },
+                    "spec": { "serviceAccountName": service_account },
+                    "status": { "phase": "Succeeded" }
+                }))
+                .unwrap()
+            }
+        })
+    }
+
+    async fn events_of(client: Client, execution_ref: ExecutionRef) -> Vec<ExecutionEvent> {
+        let config = ArgoExecutorConfig {
+            workflow_service_account: Some("qa-platform-runner".to_owned()),
+            ..ArgoExecutorConfig::default()
+        };
+        events_under(client, execution_ref, config).await
+    }
+
+    /// [`events_of`] under a given executor config.
+    async fn events_under(
+        client: Client,
+        execution_ref: ExecutionRef,
+        config: ArgoExecutorConfig,
+    ) -> Vec<ExecutionEvent> {
+        let mut stream = super::start(
+            client,
+            config,
+            &execution_ref,
+            LogResume::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(20), stream.recv())
+            .await
+            .expect("the stream must end")
+        {
+            events.push(event);
+        }
+        events
+    }
+
+    /// A recreated Workflow under the same name must not drive the verdict.
+    #[tokio::test]
+    async fn a_recreated_workflow_under_the_same_name_emits_no_verdict() {
+        let client = scripted_cluster(empty_pod_list_json, |_| ScriptedBody::Wedged);
+        let (mut watcher, mut stream) = watcher_over(client, LogResume::default());
+        watcher.workflow_uid = "an-older-uid".to_owned();
+        tokio::time::timeout(Duration::from_secs(20), watcher.run())
+            .await
+            .expect("run() must end");
+        drop(watcher);
+        let mut events = Vec::new();
+        while let Some(event) = stream.recv().await {
+            events.push(event);
+        }
+        assert!(
+            !finished(&events),
+            "no Finished from another Workflow, got {events:?}"
+        );
+        assert!(events.is_empty(), "got {events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_recorded_uid_that_is_not_the_live_workflows_yields_an_empty_stream() {
+        let client = cluster_of(
+            WF_UID,
+            None,
+            vec![running_pod("pod-1", "recorded-uid", "default")],
+        );
+        let events = events_of(client, ExecutionRef::with_uid("wf-1", "recorded-uid")).await;
+        assert!(events.is_empty(), "got {events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_legacy_run_pins_the_live_uid_so_its_owned_pod_is_followed() {
+        let client = cluster_of(
+            WF_UID,
+            None,
+            vec![
+                running_pod("pod-1", WF_UID, "qa-platform-runner"),
+                running_pod("pod-2", "forged-uid", "qa-platform-runner"),
+            ],
+        );
+        let events = events_of(client, ExecutionRef::new("wf-1")).await;
+        let lines = logged_lines(&events);
+        assert!(lines.contains(&"pod-1 line"), "got {lines:?}");
+        assert!(!lines.contains(&"pod-2 line"), "got {lines:?}");
+    }
+
+    /// A Workflow that names no `serviceAccountName` does not switch the
+    /// account check off: the drain falls back to the configured runner
+    /// account, so an owned pod running as `default` is still refused.
+    #[tokio::test]
+    async fn a_workflow_naming_no_account_is_checked_against_the_configured_runner_account() {
+        let client = cluster_of(
+            WF_UID,
+            None,
+            vec![
+                running_pod("pod-1", WF_UID, "qa-platform-runner"),
+                running_pod("pod-2", WF_UID, "default"),
+            ],
+        );
+        let config = ArgoExecutorConfig {
+            workflow_service_account: Some("qa-platform-runner".to_owned()),
+            ..ArgoExecutorConfig::default()
+        };
+        let events = events_under(client, ExecutionRef::with_uid("wf-1", WF_UID), config).await;
+        let lines = logged_lines(&events);
+        assert!(lines.contains(&"pod-1 line"), "got {lines:?}");
+        assert!(!lines.contains(&"pod-2 line"), "got {lines:?}");
+    }
+
+    /// With no account on the Workflow and none configured, there is nothing
+    /// to check a pod against, so no pod is read (fail closed).
+    #[tokio::test]
+    async fn with_no_account_anywhere_every_pod_is_refused() {
+        let client = cluster_of(
+            WF_UID,
+            None,
+            vec![
+                running_pod("pod-1", WF_UID, "qa-platform-runner"),
+                running_pod("pod-2", WF_UID, "default"),
+            ],
+        );
+        let config = ArgoExecutorConfig {
+            workflow_service_account: None,
+            ..ArgoExecutorConfig::default()
+        };
+        let events = events_under(client, ExecutionRef::with_uid("wf-1", WF_UID), config).await;
+        let lines = logged_lines(&events);
+        assert!(lines.is_empty(), "no pod may be read, got {lines:?}");
+    }
+
+    #[tokio::test]
+    async fn a_pod_owned_by_the_workflow_but_not_running_as_its_account_is_not_followed() {
+        let client = cluster_of(
+            WF_UID,
+            Some("qa-platform-runner"),
+            vec![
+                running_pod("pod-1", WF_UID, "qa-platform-runner"),
+                running_pod("pod-2", WF_UID, "default"),
+            ],
+        );
+        let events = events_of(client, ExecutionRef::with_uid("wf-1", WF_UID)).await;
+        let lines = logged_lines(&events);
+        assert!(lines.contains(&"pod-1 line"), "got {lines:?}");
+        assert!(!lines.contains(&"pod-2 line"), "got {lines:?}");
     }
 
     /// **A terminal workflow with one pod stopped part-way reports no
@@ -2356,6 +2827,9 @@ mod tests {
             sink,
             started: false,
             drained: std::collections::HashSet::new(),
+            workflow_uid: WF_UID.to_owned(),
+            service_account: None,
+            refused: std::collections::HashSet::new(),
             resume: LogResume::default(),
             cancel: CancellationToken::new(),
         };
@@ -2425,6 +2899,9 @@ mod tests {
             sink,
             started: false,
             drained: std::collections::HashSet::new(),
+            workflow_uid: WF_UID.to_owned(),
+            service_account: None,
+            refused: std::collections::HashSet::new(),
             resume: LogResume::default(),
             cancel: cancel.clone(),
         };
@@ -2474,6 +2951,9 @@ mod tests {
             sink,
             started: false,
             drained: std::collections::HashSet::new(),
+            workflow_uid: WF_UID.to_owned(),
+            service_account: None,
+            refused: std::collections::HashSet::new(),
             resume: LogResume::default(),
             cancel: cancel.clone(),
         };

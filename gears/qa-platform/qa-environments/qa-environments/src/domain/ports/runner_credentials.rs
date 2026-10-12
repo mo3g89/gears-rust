@@ -17,15 +17,18 @@ use uuid::Uuid;
 
 /// A pod the verifier has proved: token reviewed, uid matched, phase live.
 /// `tenant_id` and `run_id` are read off its labels and are routing hints.
-/// `workflow_name` is its controller `ownerReference` (an Argo `Workflow`),
-/// which a `Workflow` author cannot set; [`RunnerPodResolver`] binds the three
-/// by requiring the run's tenant and `execution_ref` to match.
+/// `workflow_name` and `workflow_uid` are its controller `ownerReference` (an
+/// Argo `Workflow`), which a `Workflow` author cannot set; [`RunnerPodResolver`]
+/// binds the three by requiring the run's tenant, `execution_ref` and recorded
+/// Workflow uid to match. The uid is the binding; the name alone can be reused
+/// by a recreated Workflow.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedRunnerPod {
     pub pod_name: String,
     pub tenant_id: Uuid,
     pub run_id: Uuid,
     pub workflow_name: String,
+    pub workflow_uid: String,
 }
 
 /// Why a token did not prove a runner pod.

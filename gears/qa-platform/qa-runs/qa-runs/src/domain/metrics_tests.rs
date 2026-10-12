@@ -317,6 +317,7 @@ fn the_no_op_port_accepts_every_emission_and_returns_nothing() {
     for outcome in IngestOutcome::ALL {
         metrics.ingest_batch(outcome, std::time::Duration::from_millis(1));
     }
+    // The literal is the contract: dashboards and alert rules query these metric names.
     assert_eq!(QA_RUNS_DISPATCH, "qa_runs_dispatch_total");
     assert_eq!(QA_RUNS_INGEST, "qa_runs_ingest_total");
 }

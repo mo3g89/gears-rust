@@ -37,6 +37,7 @@ impl RunnerPodResolver for HubRunnerPodResolver {
             tenant_id: pod.tenant_id,
             run_id: pod.run_id,
             workflow_name: pod.workflow_name.clone(),
+            workflow_uid: pod.workflow_uid.clone(),
         };
         match runs.resolve_runner_pod(&query).await {
             Ok(run) => Ok(run.environment_id),
@@ -243,6 +244,7 @@ mod tests {
         assert_eq!(asked[0].tenant_id, pod.tenant_id);
         assert_eq!(asked[0].run_id, pod.run_id);
         assert_eq!(asked[0].workflow_name, pod.workflow_name);
+        assert_eq!(asked[0].workflow_uid, pod.workflow_uid);
     }
 
     #[tokio::test]

@@ -184,7 +184,7 @@
 //!
 //! # The rebuild is the same replay with the watermark taken out
 //!
-//! [`ReconcileService::rebuild`] is Task 16's operator endpoint, and it is in
+//! [`ReconcileService::rebuild_after`] is Task 16's operator endpoint, and it is in
 //! this module rather than beside a service of its own because it is the sweep's
 //! algorithm minus two steps: it does not read the watermark to find its floor
 //! (the operator supplies both bounds) and it does not write one at the end.
@@ -197,7 +197,7 @@
 //! The page walk is the most recent thing to become shared, and it was the last
 //! divergence in this module: until 2026-09-21 the rebuild read **one** page and
 //! truncated, which the sweep's own fix had just established as the shape that
-//! strands data permanently. See [`ReconcileService::rebuild`] for what that
+//! strands data permanently. See [`ReconcileService::rebuild_after`] for what that
 //! cost and for the budget that replaced it.
 //!
 //! Four decisions it carries, each with what was rejected:
@@ -222,7 +222,7 @@
 //!    without noticing: `manager/src/services/argo.rs:2654`,
 //!    `backfill_test_case_results`, rebuilds its projection with a per-run
 //!    `DELETE … WHERE run_id = $1` and re-insert inside a loop over runs, never
-//!    a range delete. See [`ReconcileService::rebuild`] for what else that
+//!    a range delete. See [`ReconcileService::rebuild_after`] for what else that
 //!    citation does and does not support.
 //! 2. **The window is `[from, to)` — inclusive lower, exclusive upper.** The
 //!    convention is already recorded on
@@ -427,7 +427,7 @@ const DIFF_UPPER_SLACK: Duration = Duration::seconds(1);
 /// reports; `POST /qa/v1/insights/rebuild` over the window is the remedy.
 const MAX_PAGES_PER_SWEEP: u32 = 50;
 
-/// How many pages one [`ReconcileService::rebuild`] will walk before answering
+/// How many pages one [`ReconcileService::rebuild_after`] will walk before answering
 /// that it did not finish.
 ///
 /// The rebuild pages on the same keyset cursor the sweep does, so its bound is
@@ -473,7 +473,7 @@ pub struct ReconcileOutcome {
     /// **What that means differs between the two callers, deliberately.** For
     /// [`ReconcileService::reconcile_once`] it is the runs that had *no*
     /// projection, because a sweep skips whatever the diff says already landed.
-    /// For [`ReconcileService::rebuild`] it is every run in the window, because
+    /// For [`ReconcileService::rebuild_after`] it is every run in the window, because
     /// a rebuild's whole premise is that the existing projection is the thing
     /// that is wrong. The field was named for the sweep, which arrived first;
     /// renaming it would have churned Task 15's tests for a word, and inventing
@@ -514,7 +514,7 @@ pub struct ReconcileOutcome {
     /// consecutive passes reporting the same instant is therefore evidence
     /// about the row, not about the walk. `None` means this tenant has no mark
     /// at all — the gear has never swept it, or (for
-    /// [`ReconcileService::rebuild`]) the pass deliberately neither read nor
+    /// [`ReconcileService::rebuild_after`]) the pass deliberately neither read nor
     /// wrote one.
     pub watermark_at: Option<OffsetDateTime>,
     /// Whether the walk ended because qa-runs had **nothing further** past the
@@ -527,7 +527,7 @@ pub struct ReconcileOutcome {
     /// separates "this tenant's mark has not moved because there is nothing to
     /// move it to" from "this tenant's mark has not moved and there is".
     ///
-    /// From [`ReconcileService::rebuild`] it is the same fact about the
+    /// From [`ReconcileService::rebuild_after`] it is the same fact about the
     /// operator's window rather than about the tenant: `true` means every run
     /// that finished in `[from, to)` was reached. It was `false` unconditionally
     /// until the rebuild learned to page, because a rebuild that read one page
@@ -536,7 +536,7 @@ pub struct ReconcileOutcome {
     /// Where the next request must start to finish what this pass did not.
     ///
     /// `Some(at)` exactly when [`Self::caught_up`] is `false` on a
-    /// [`ReconcileService::rebuild`] — the pass ran out of its page budget, or
+    /// [`ReconcileService::rebuild_after`] — the pass ran out of its page budget, or
     /// stopped on a gap — and it is the `from` of the request that continues it.
     /// The instant is the one of the last run this pass *consumed*, so the
     /// continuation re-replays that run and anything tied with it; a rebuild is
@@ -556,6 +556,14 @@ pub struct ReconcileOutcome {
     /// because a pass that spends its budget behind its own mark advances it
     /// nowhere. See [`MAX_PAGES_PER_SWEEP`].
     pub resume_from: Option<OffsetDateTime>,
+    /// The run id half of the resume key: present when the resume point is a
+    /// run this pass consumed, absent when it is only an instant (a first page
+    /// that never advanced). Together with [`Self::resume_from`] it is the whole
+    /// `(finished_at, id)` key, and the continuation that carries both resumes
+    /// **strictly after** that run, so a single `finished_at` holding more runs
+    /// than one pass' page budget is stepped over rather than re-walked.
+    /// `None` whenever `resume_from` is.
+    pub resume_after_run_id: Option<Uuid>,
     /// Whether the sweep stopped early on a failed backfill. `true` means the
     /// page was not fully consumed and the next sweep resumes at the gap.
     pub stopped_at_gap: bool,
@@ -614,6 +622,13 @@ pub struct ReconcileOutcome {
 }
 
 impl ReconcileOutcome {
+    /// Record `cursor` as the resume key: the instant, and the run id when the
+    /// cursor stands on a consumed run.
+    fn set_resume(&mut self, cursor: FinishedRunCursor) {
+        self.resume_from = Some(cursor.at());
+        self.resume_after_run_id = cursor.after_id();
+    }
+
     /// Fold one page's counters into a walk's running total.
     ///
     /// The three counters and nothing else: every other field is a decision
@@ -857,7 +872,7 @@ pub struct ReconcileService<R, W> {
     /// repository is a type this module never otherwise mentions, and
     /// [`RunCompletionNotifier`]'s own doc carries why the seam is a trait.
     notifier: Arc<dyn RunCompletionNotifier>,
-    /// Used by [`Self::rebuild`] and by nothing else in this type.
+    /// Used by [`Self::rebuild_after`] and by nothing else in this type.
     ///
     /// The sweep does **not** touch it, and that asymmetry is the module's
     /// scoping decision made visible in one struct: the sweep is a ticker with
@@ -1029,7 +1044,22 @@ where
         Ok(outcome)
     }
 
+    /// Test shorthand for [`Self::rebuild_after`] with no `after_run_id`.
+    #[cfg(test)]
+    pub async fn rebuild(
+        &self,
+        ctx: &SecurityContext,
+        from: OffsetDateTime,
+        to: OffsetDateTime,
+    ) -> Result<ReconcileOutcome, DomainError> {
+        self.rebuild_after(ctx, from, None, to).await
+    }
+
     /// Replay a closed window from qa-runs, on an operator's behalf.
+    ///
+    /// The window starts at `from`, inclusive, or strictly after
+    /// `(from, after_run_id)` when `after_run_id` is given — the resume key a
+    /// previous partial answer returned (see "The resume key" below).
     ///
     /// `POST /qa/v1/insights/rebuild`. **It neither reads nor writes the
     /// watermark**, which is the whole point of the endpoint rather than an
@@ -1117,12 +1147,14 @@ where
     /// a log line: `caught_up` is `false` and `resume_from` says where to pick
     /// up, both on the wire as `complete` and `resume_from`.
     ///
-    /// The one shape a resume still cannot step over is a single instant
-    /// holding more than `MAX_PAGES_PER_REBUILD * page_size` runs — 2,000 at
-    /// the defaults, against the 54 the outage burst's widest tie group held —
-    /// because `resume_from` carries the instant and not the whole key. That
-    /// would report the same `resume_from` twice in a row, which is visible;
-    /// the wall it replaces was not.
+    /// The resume key is the whole `(finished_at, id)` pair:
+    /// [`ReconcileOutcome::resume_from`] and
+    /// [`ReconcileOutcome::resume_after_run_id`]. A continuation that posts both
+    /// back resumes strictly after the last run consumed, so a tie group of any
+    /// size — one instant holding more than `MAX_PAGES_PER_REBUILD * page_size`
+    /// runs — is crossed in as many calls as it takes. A continuation that posts
+    /// only the instant (an older client) keeps the inclusive bound and
+    /// re-replays that instant's group, as before.
     ///
     /// # Errors
     ///
@@ -1153,10 +1185,11 @@ where
     /// carrying [`ReconcileOutcome::resume_from`], not an error; see
     /// `Self::replay_window`. A *per-run* failure is not an error either — see
     /// [`Self::reconcile_once`], which says the same thing for the same reason.
-    pub async fn rebuild(
+    pub async fn rebuild_after(
         &self,
         ctx: &SecurityContext,
         from: OffsetDateTime,
+        after_run_id: Option<Uuid>,
         to: OffsetDateTime,
     ) -> Result<ReconcileOutcome, DomainError> {
         let tenant = TenantBound::new(ctx.subject_tenant_id()).ok_or_else(|| {
@@ -1184,17 +1217,21 @@ where
         // `refuse_scope_beyond_tenant`.
         refuse_scope_beyond_tenant(&scope, resources::TEST_RESULT_NAME)?;
 
-        let outcome = self.replay_window(ctx, tenant, &scope, from, to).await?;
+        let outcome = self
+            .replay_window(ctx, tenant, &scope, from, after_run_id, to)
+            .await?;
 
         info!(
             tenant_id = %tenant.get(),
             %from,
+            after_run_id = ?after_run_id,
             %to,
             scanned = outcome.scanned,
             replayed = outcome.backfilled,
             result_rows_written = outcome.result_rows_written,
             complete = outcome.caught_up,
             resume_from = ?outcome.resume_from,
+            resume_after_run_id = ?outcome.resume_after_run_id,
             stopped_at_gap = outcome.stopped_at_gap,
             stopped_at_run = ?outcome.stopped_at_run,
             "operator rebuild finished",
@@ -1207,7 +1244,7 @@ where
 
     /// Walk `[from, to)` page by page, replaying every run in it.
     ///
-    /// Split out of [`Self::rebuild`] for the same reason [`Self::sweep`] is
+    /// Split out of [`Self::rebuild_after`] for the same reason [`Self::sweep`] is
     /// split out of [`Self::reconcile_once`] — so the shape of the operation is
     /// the body of the function rather than something to reconstruct from it.
     /// The two walks are deliberately close to each other and deliberately not
@@ -1238,9 +1275,13 @@ where
         tenant: TenantBound,
         scope: &AccessScope,
         from: OffsetDateTime,
+        after_run_id: Option<Uuid>,
         to: OffsetDateTime,
     ) -> Result<ReconcileOutcome, DomainError> {
-        let mut cursor = FinishedRunCursor::starting_at(from);
+        let mut cursor = after_run_id.map_or_else(
+            || FinishedRunCursor::starting_at(from),
+            |id| FinishedRunCursor::after(from, id),
+        );
         let mut outcome = ReconcileOutcome::default();
 
         for page_number in 1..=MAX_PAGES_PER_REBUILD {
@@ -1257,15 +1298,17 @@ where
                     // `caught_up` stays `false`; the pages before this one are
                     // replayed and `cursor` stands on the last run they
                     // consumed. See this function's doc.
-                    outcome.resume_from = Some(cursor.at());
+                    outcome.set_resume(cursor);
                     warn!(
                         tenant_id = %tenant.get(),
                         page = page_number,
                         scanned = outcome.scanned,
                         resume_from = %cursor.at(),
+                        resume_after_run_id = ?cursor.after_id(),
                         %error,
                         "the rebuild could not list qa-runs part way through the window; the \
-                         response carries the instant to resume from",
+                         response carries the resume key (resume_from, and \
+                         resume_after_run_id when set)",
                     );
                     return Ok(outcome);
                 }
@@ -1298,7 +1341,7 @@ where
                 // The run before the failure, or the page's own start when the
                 // failure was the first run on it. Either way the continuation
                 // re-reaches the run that failed rather than stepping past it.
-                outcome.resume_from = Some(consumed.map_or(cursor.at(), FinishedRunCursor::at));
+                outcome.set_resume(consumed.unwrap_or(cursor));
                 return Ok(outcome);
             }
 
@@ -1314,7 +1357,7 @@ where
                 // non-empty and every run on it carries an instant. Answered
                 // rather than asserted, because a walk that met it with another
                 // identical listing would spin.
-                outcome.resume_from = Some(cursor.at());
+                outcome.set_resume(cursor);
                 return Ok(outcome);
             };
             cursor = next;
@@ -1323,14 +1366,15 @@ where
         // The budget is spent with the window not exhausted. `caught_up` stays
         // `false` and the answer carries the resume point; see this type's
         // `resume_from` for why that is a field and not a `WARN`.
-        outcome.resume_from = Some(cursor.at());
+        outcome.set_resume(cursor);
         warn!(
             tenant_id = %tenant.get(),
             pages = MAX_PAGES_PER_REBUILD,
             scanned = outcome.scanned,
             resume_from = %cursor.at(),
+            resume_after_run_id = ?cursor.after_id(),
             "the rebuild spent its page budget before reaching the end of the window; the \
-             response carries the instant to resume from",
+             response carries the resume key (resume_from, and resume_after_run_id when set)",
         );
         Ok(outcome)
     }
@@ -1861,7 +1905,7 @@ where
     /// Re-project one run, reading before any transaction opens and writing
     /// inside one.
     ///
-    /// Shared by the sweep and by [`Self::rebuild`], which is the point: two
+    /// Shared by the sweep and by [`Self::rebuild_after`], which is the point: two
     /// separate projections would diverge only after an outage — or only after
     /// an operator reached for the rebuild — which is the worst possible time to
     /// find out. The `scope` is the caller's, and it is the only thing that

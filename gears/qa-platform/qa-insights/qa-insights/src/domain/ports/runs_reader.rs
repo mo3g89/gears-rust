@@ -57,7 +57,7 @@
 //!
 //! **Task 16 is the first of those, and Task 18 is the second**, and it is why
 //! the sentence above was written in the conditional and is now not:
-//! [`ReconcileService::rebuild`](crate::domain::service::reconcile::ReconcileService::rebuild)
+//! [`ReconcileService::rebuild_after`](crate::domain::service::reconcile::ReconcileService::rebuild_after)
 //! lists under the *operator's* context, so the set of runs a rebuild can reach
 //! is the set qa-runs is willing to show that operator. Its per-run re-read
 //! still goes through a system actor, which is a real asymmetry with a bound: it

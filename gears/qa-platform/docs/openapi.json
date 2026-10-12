@@ -2851,8 +2851,16 @@
             "minimum": 0,
             "type": "integer"
           },
+          "resume_after_run_id": {
+            "description": "The `after_run_id` of the request that continues this one. Present when\n[`Self::resume_from`] names a consumed run; post it back with\n`resume_from` as `from` to resume strictly after that run. Absent means\nresume at `resume_from` inclusive.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "resume_from": {
-            "description": "The `from` of the request that finishes what this one did not.\n\n`null` exactly when [`Self::complete`] is `true`. Otherwise an RFC 3339\ninstant to post straight back as `from`, with the same `to`. The\ncontinuation re-replays the run it names and anything tied with it — a\nrebuild is idempotent, so overlapping is free where skipping a tie group\nwould not be.",
+            "description": "The `from` of the request that finishes what this one did not.\n\n`null` exactly when [`Self::complete`] is `true`. Otherwise an RFC 3339\ninstant to post straight back as `from`, with the same `to`, together\nwith [`Self::resume_after_run_id`] as `after_run_id` when that is\npresent. When it is absent, the continuation re-replays the run this\ninstant names and anything tied with it — a rebuild is idempotent, so\noverlapping is free where skipping a tie group would not be.",
             "format": "date-time",
             "type": [
               "string",
@@ -2880,8 +2888,16 @@
       "RebuildReq": {
         "description": "`POST /qa/v1/insights/rebuild` — the window to replay.\n\n**Half-open: `[from, to)`.** Same convention as\n`ResultsRepository::ingested_run_ids_between`, so two rebuilds that share an\nendpoint neither skip a run nor replay one. Documented on the field rather\nthan only in the endpoint description, because this is the field an operator\ngets wrong.",
         "properties": {
+          "after_run_id": {
+            "description": "Optional run id half of the resume key: post back the previous\nresponse's `resume_after_run_id` together with its `resume_from` as\n`from`, and the walk resumes **strictly after** that run, so a single\ninstant holding more runs than one call's page budget is crossed.\nOmitted, `from` is inclusive as before.\n\nIt must be the `resume_after_run_id` returned **with this\n`resume_from`**. Any other pairing (an id from another response, or\none with a hand-picked `from`) may skip runs at `from`: the key is\n`(finished_at, id)`, and runs ordered before the id at that instant\nare not replayed.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "from": {
-            "description": "Start of the window, **inclusive**. RFC 3339, e.g.\n`2026-08-18T08:00:00Z`.",
+            "description": "Start of the window, **inclusive** unless `after_run_id` is set (then\nthe walk starts strictly after that run at this instant). RFC 3339,\ne.g. `2026-08-18T08:00:00Z`.",
             "format": "date-time",
             "type": "string"
           },
@@ -6760,7 +6776,7 @@
     },
     "/qa/v1/insights/rebuild": {
       "post": {
-        "description": "Re-read every run that finished in [from, to) from qa-runs and rewrite this gear's projection of it, run by run. For a window whose results are known to be wrong or missing. Requires the gts.cf.qa.insights.test_result.v1~/rebuild grant. The window is half-open, so adjoining windows neither skip a run nor replay one, and `to` must be strictly after `from`. It does not move the reconciler's watermark, in either direction: this is a repair for a known window, not a reset. It deletes nothing it does not immediately rewrite, so rows for runs qa-runs no longer has are left standing. The window is walked in pages under a fixed budget, so a window wider than one page is replayed in full rather than truncated: check `complete` on the response, and when it is false post `resume_from` back as `from` with the same `to` until it is true. It replays the run-completed notification too, and can therefore send Slack messages and email: a run is announced only if this deployment has never decided about it before, or if its send was attempted and failed. A run that was already sent, that finished before this deployment began notifying, or whose notification was declined at the time - the channel was off, or had no destination configured - is not announced, so enabling a channel and then rebuilding a window does not mail its history.",
+        "description": "Re-read every run that finished in [from, to) from qa-runs and rewrite this gear's projection of it, run by run. For a window whose results are known to be wrong or missing. Requires the gts.cf.qa.insights.test_result.v1~/rebuild grant. The window is half-open, so adjoining windows neither skip a run nor replay one, and `to` must be strictly after `from`. It does not move the reconciler's watermark, in either direction: this is a repair for a known window, not a reset. It deletes nothing it does not immediately rewrite, so rows for runs qa-runs no longer has are left standing. The window is walked in pages under a fixed budget, so a window wider than one page is replayed in full rather than truncated: check `complete` on the response, and when it is false post `resume_from` back as `from` and `resume_after_run_id` back as `after_run_id` (omit it when the response has none) with the same `to` until it is true. It replays the run-completed notification too, and can therefore send Slack messages and email: a run is announced only if this deployment has never decided about it before, or if its send was attempted and failed. A run that was already sent, that finished before this deployment began notifying, or whose notification was declined at the time - the channel was off, or had no destination configured - is not announced, so enabling a channel and then rebuilding a window does not mail its history.",
         "operationId": "qa_insights.rebuild",
         "requestBody": {
           "content": {

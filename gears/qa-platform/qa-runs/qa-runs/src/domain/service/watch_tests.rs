@@ -398,7 +398,7 @@ async fn a_live_run(h: &Harness, name: &str, environment_id: Option<Uuid>) -> Uu
         .await
         .unwrap();
     OrmRunsRepository
-        .set_execution_ref(&conn, &scope(OWNER_TENANT), run.id, reference.as_str())
+        .set_execution_ref(&conn, &scope(OWNER_TENANT), run.id, reference.as_str(), None)
         .await
         .unwrap();
     run.id
@@ -659,7 +659,7 @@ async fn an_execution_the_executor_has_forgotten_retires_nothing() {
     // A reference the executor has never heard of: `watch` yields an empty
     // stream, which means "nothing more to say" and never "this failed".
     OrmRunsRepository
-        .set_execution_ref(&conn, &scope(OWNER_TENANT), run.id, "never-started")
+        .set_execution_ref(&conn, &scope(OWNER_TENANT), run.id, "never-started", None)
         .await
         .unwrap();
 
@@ -913,7 +913,7 @@ impl ResumeHarness {
             .await
             .unwrap();
         OrmRunsRepository
-            .set_execution_ref(&conn, &scope(OWNER_TENANT), run.id, reference.as_str())
+            .set_execution_ref(&conn, &scope(OWNER_TENANT), run.id, reference.as_str(), None)
             .await
             .unwrap();
         run.id

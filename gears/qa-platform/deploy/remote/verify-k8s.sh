@@ -1428,19 +1428,34 @@ fi
 echo "PASS: qa-platform-gears can create workflows in namespace $ARGO_NAMESPACE"
 
 GEARS="system:serviceaccount:$NAMESPACE:qa-platform-gears"
-for verb in create patch get list; do
-    # stdout only: kubectl may print warnings to stderr, which is kept for the message.
-    out=$(kubectl auth can-i "$verb" secrets -n "$ARGO_NAMESPACE" --as="$GEARS" 2> "$WORKDIR/cani-$verb.err" || true)
-    if ! printf '%s\n' "$out" | grep -qx 'no'; then
-        echo "FAIL: qa-platform-gears can $verb secrets in $ARGO_NAMESPACE (got: $out $(cat "$WORKDIR/cani-$verb.err"))" >&2; exit 1
-    fi
+# Every verb, in BOTH namespaces: argo.namespace may equal the release
+# namespace, and the release namespace holds the chart's own credential Secrets
+# (postgres, keycloak-admin, realm, tls). The rendered chart binds
+# qa-platform-gears to no Role or ClusterRole that names secrets anywhere
+# (only workflows/pods/pods/log in $ARGO_NAMESPACE and tokenreviews), so no
+# namespace needs a narrower check.
+for ns in "$ARGO_NAMESPACE" "$NAMESPACE"; do
+    for verb in create patch update delete deletecollection get list watch; do
+        # stdout only: kubectl may print warnings to stderr, which is kept for the message.
+        out=$(kubectl auth can-i "$verb" secrets -n "$ns" --as="$GEARS" 2> "$WORKDIR/cani-$ns-$verb.err" || true)
+        if ! printf '%s\n' "$out" | grep -qx 'no'; then
+            echo "FAIL: qa-platform-gears can $verb secrets in $ns (got: $out $(cat "$WORKDIR/cani-$ns-$verb.err"))" >&2; exit 1
+        fi
+    done
 done
-echo "PASS: qa-platform-gears has no create/patch/get/list on secrets in $ARGO_NAMESPACE"
+echo "PASS: qa-platform-gears has no verb on secrets in $ARGO_NAMESPACE or $NAMESPACE"
 # stdout only: kubectl 1.36 warns "resource 'tokenreviews' is not namespace scoped" on stderr.
 out=$(kubectl auth can-i create tokenreviews.authentication.k8s.io --as="$GEARS" 2> "$WORKDIR/cani-tr.err" || true)
 [ "$out" = "yes" ] || { echo "FAIL: qa-platform-gears cannot create tokenreviews (got: $out $(cat "$WORKDIR/cani-tr.err"))" >&2; exit 1; }
 echo "PASS: qa-platform-gears can create tokenreviews"
-if kubectl get sa qa-platform-secret-writer -n "$NAMESPACE" >/dev/null 2>&1; then
+# Absent only on a clean empty answer: an error is not "absent" (as for the
+# orphaned OIDC Secret below).
+rc=0
+writer_sa=$(kubectl get sa qa-platform-secret-writer -n "$NAMESPACE" --ignore-not-found -o name 2> "$WORKDIR/secret-writer-sa.err") || rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "FAIL: could not check for the qa-platform-secret-writer ServiceAccount in $NAMESPACE:" >&2; cat "$WORKDIR/secret-writer-sa.err" >&2; exit 1
+fi
+if [ -n "$writer_sa" ]; then
     echo "FAIL: the qa-platform-secret-writer ServiceAccount still exists" >&2; exit 1
 fi
 kubectl get validatingadmissionpolicies.v1.admissionregistration.k8s.io "qa-platform-workflow-guard-$NAMESPACE" >/dev/null \
@@ -1449,17 +1464,19 @@ kubectl get validatingadmissionpolicies.v1.admissionregistration.k8s.io "qa-plat
 RUNNER_SA=$(kubectl get cm qa-platform-gears-argo-qa-runs -n "$NAMESPACE" -o json \
     | jq -r '.data[]' | sed -n 's/^ *workflow_service_account: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' | head -1)
 [ -n "$RUNNER_SA" ] || { echo "FAIL: workflow_service_account not found in the qa-platform-gears-argo-qa-runs ConfigMap" >&2; exit 1; }
-guard_case() {  # $1 = label, $2 = expect admit|deny, stdin = Workflow YAML
-    local label=$1 expect=$2 rc=0
+guard_case() {  # $1 = label, $2 = expect admit|deny, $3 = (deny) the exact message of the rule that must fire, stdin = Workflow YAML
+    local label=$1 expect=$2 want=${3:-workflow-guard:} rc=0
     kubectl create -f - --dry-run=server --as="$GEARS" -n "$ARGO_NAMESPACE" > "$WORKDIR/guard-$label.txt" 2>&1 || rc=$?
     if [ "$expect" = admit ] && [ "$rc" -ne 0 ]; then
         echo "FAIL: guard denied the qa-runs-shaped Workflow ($label):" >&2; cat "$WORKDIR/guard-$label.txt" >&2; exit 1
     fi
-    if [ "$expect" = deny ] && { [ "$rc" -eq 0 ] || ! grep -q "workflow-guard:" "$WORKDIR/guard-$label.txt"; }; then
-        echo "FAIL: guard admitted $label:" >&2; cat "$WORKDIR/guard-$label.txt" >&2; exit 1
+    if [ "$expect" = deny ] && { [ "$rc" -eq 0 ] || ! grep -qF "$want" "$WORKDIR/guard-$label.txt"; }; then
+        echo "FAIL: guard admitted $label, or denied it by a rule other than \"$want\":" >&2; cat "$WORKDIR/guard-$label.txt" >&2; exit 1
     fi
     echo "PASS: workflow guard ${expect}s $label"
 }
+# The deny cases below mutate this minimal shape. The ADMIT case is not this
+# function: it is the golden file qa-runs' own test pins to workflow::build().
 wf() {  # $1 = extra spec YAML (indented 2), $2 = extra volume YAML (indented 4)
 cat <<EOF
 apiVersion: argoproj.io/v1alpha1
@@ -1468,13 +1485,14 @@ metadata: {generateName: verify-k8s-guard-}
 spec:
   entrypoint: main
   serviceAccountName: $RUNNER_SA
-  securityContext: {runAsNonRoot: true, runAsUser: 1000}
+  securityContext: {runAsNonRoot: true, runAsUser: 1000, seccompProfile: {type: RuntimeDefault}}
   templates:
     - name: main
+      metadata: {labels: {qa-platform/network-isolated: "true"}}
       container:
         image: busybox:1.36
         command: ["true"]
-        securityContext: {allowPrivilegeEscalation: false}
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
   volumes:
     - {name: tmp, emptyDir: {}}
     - name: runner-credentials
@@ -1483,18 +1501,33 @@ $2
 $1
 EOF
 }
-wf "" "" | guard_case qa-runs-shape admit
-wf "" "    - {name: s, secret: {secretName: anything}}" | guard_case secret-volume deny
-wf "  podSpecPatch: '{}'" "" | guard_case podSpecPatch deny
-wf "" "" | sed "s/serviceAccountName: $RUNNER_SA/serviceAccountName: default/" | guard_case other-service-account deny
-wf "" "" | sed 's/      container:/      script:/' | guard_case script-template deny
+GOLDEN=gears/qa-platform/deploy/helm/tests/fixtures/qa-runs-workflow.json
+[ -f "$GOLDEN" ] || { echo "FAIL: $GOLDEN is missing from the synced tree" >&2; exit 1; }
+jq --arg sa "$RUNNER_SA" --arg ns "$ARGO_NAMESPACE" \
+   '.spec.serviceAccountName = $sa | .metadata.namespace = $ns' "$GOLDEN" \
+   | guard_case qa-runs-golden admit
+wf "" "    - {name: s, secret: {secretName: anything}}" | guard_case secret-volume deny "workflow-guard: volume not in the qa-runs allowlist"
+wf "  podSpecPatch: '{}'" "" | guard_case podSpecPatch deny "workflow-guard: spec key not in the qa-runs allowlist"
+wf "" "" | sed "s/serviceAccountName: $RUNNER_SA/serviceAccountName: default/" | guard_case other-service-account deny "workflow-guard: spec.serviceAccountName must be the runner ServiceAccount"
+wf "" "" | sed 's/      container:/      script:/' | guard_case script-template deny "workflow-guard: template key not in the qa-runs allowlist"
+wf "" "" | sed 's/securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: \[ALL\]}}/securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, runAsUser: 0, runAsNonRoot: false}/' | guard_case container-root deny "workflow-guard: container securityContext outside the qa-runs shape"
+wf "" "" | sed 's/capabilities: {drop: \[ALL\]}/capabilities: {add: [SYS_MODULE], drop: [ALL]}/' | guard_case capability-add deny "workflow-guard: container securityContext outside the qa-runs shape"
+wf "" "" | sed 's/runAsUser: 1000, seccompProfile: {type: RuntimeDefault}/runAsUser: 1000, seccompProfile: {type: Unconfined}/' | guard_case seccomp-unconfined deny "workflow-guard: pod securityContext outside the qa-runs shape"
+wf "" "" | sed 's/      metadata: {labels: {qa-platform\/network-isolated: "true"}}/      metadata: {labels: {other: x}}/' | guard_case no-isolation-label deny "workflow-guard: runner template must carry the network-isolation label"
+# Prove the sed below changes the YAML: an unchanged shape would be ADMITTED and
+# fail this case for the wrong reason, or worse, a later edit to wf() could make
+# the substitution a no-op that still "passes" on some other rule.
+wf "" "" | sed 's/runAsUser: 1000, seccompProfile/runAsUser: 1000, fsGroup: 0, seccompProfile/' > "$WORKDIR/guard-fsgroup-root.yaml"
+grep -q 'fsGroup: 0' "$WORKDIR/guard-fsgroup-root.yaml" \
+    || { echo "FAIL: the fsGroup-root case's sed no longer matches wf()'s pod securityContext" >&2; exit 1; }
+guard_case fsgroup-root deny "workflow-guard: pod securityContext outside the qa-runs shape" < "$WORKDIR/guard-fsgroup-root.yaml"
 # Status is the Argo controller's. Only meaningful while the Workflow CRD has no
 # status subresource (Argo's CRDs do not declare one): with one, the API server
 # drops status from a main-resource write before admission ever sees it.
 STATUS_SUBRESOURCE=$(kubectl get crd workflows.argoproj.io \
     -o jsonpath='{.spec.versions[?(@.name=="v1alpha1")].subresources.status}' 2>/dev/null || true)
 if [ -z "$STATUS_SUBRESOURCE" ]; then
-    { wf "" ""; echo "status: {phase: Succeeded}"; } | guard_case status-on-create deny
+    { wf "" ""; echo "status: {phase: Succeeded}"; } | guard_case status-on-create deny "workflow-guard: a created Workflow may not carry a status"
 else
     echo "NOTE: workflows.argoproj.io serves a status subresource; the API server itself keeps status out of a gears CREATE/UPDATE, so the guard's status rules are not exercised"
 fi
@@ -1534,6 +1567,186 @@ if [ "$upd_ok_rc" -ne 0 ]; then
 fi
 echo "PASS: workflow guard admits the cancel patch (spec.shutdown)"
 
+# The runner guard (runner-guard-admission-policy.yaml): no principal but the
+# gears, the Argo workflow-controller and the kubelets may write qa-runs
+# Workflows, runner pods or runner tokens, and nobody may act as the
+# controller (or the gears) by running a pod as it or minting its token, through
+# `serviceaccounts/token` or a ServiceAccount-token Secret. Exercised as a throwaway
+# ServiceAccount holding a Role with exactly the verbs each case needs, so a
+# deny here is the guard's and not RBAC's (each deny case also greps the exact
+# runner-guard message). Deleted on exit, whatever the outcome.
+kubectl get validatingadmissionpolicies.v1.admissionregistration.k8s.io "qa-platform-runner-guard-$NAMESPACE" >/dev/null \
+    || { echo "FAIL: the runner guard policy is missing" >&2; exit 1; }
+INTRUDER=verify-k8s-intruder
+INTRUDER_USER="system:serviceaccount:$ARGO_NAMESPACE:$INTRUDER"
+RUNNER_GUARD_WF=""
+runner_guard_cleanup() {
+    [ -z "$RUNNER_GUARD_WF" ] || kubectl delete "$RUNNER_GUARD_WF" -n "$ARGO_NAMESPACE" --wait=false >/dev/null 2>&1 || true
+    kubectl delete rolebinding,role "$INTRUDER" -n "$ARGO_NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete sa "$INTRUDER" -n "$ARGO_NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
+}
+trap 'runner_guard_cleanup; rm -rf "$WORKDIR"' EXIT
+rc=0
+{ kubectl create sa "$INTRUDER" -n "$ARGO_NAMESPACE" \
+  && kubectl create role "$INTRUDER" -n "$ARGO_NAMESPACE" --verb=create,get,patch,update \
+       --resource=workflows.argoproj.io,pods,pods/ephemeralcontainers,serviceaccounts/token,secrets \
+  && kubectl create rolebinding "$INTRUDER" -n "$ARGO_NAMESPACE" --role="$INTRUDER" \
+       --serviceaccount="$ARGO_NAMESPACE:$INTRUDER"; } > "$WORKDIR/intruder.txt" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "FAIL: could not create the $INTRUDER ServiceAccount/Role/RoleBinding in $ARGO_NAMESPACE:" >&2; cat "$WORKDIR/intruder.txt" >&2; exit 1
+fi
+runner_case() {  # $1 = label, $2 = admit|deny, $3 = (deny) exact runner-guard message, then the command; stdin passes through
+    local label=$1 expect=$2 want=$3 rc=0; shift 3
+    "$@" > "$WORKDIR/runner-$label.txt" 2>&1 || rc=$?
+    if [ "$expect" = admit ] && [ "$rc" -ne 0 ]; then
+        echo "FAIL: runner guard denied $label:" >&2; cat "$WORKDIR/runner-$label.txt" >&2; exit 1
+    fi
+    if [ "$expect" = deny ] && { [ "$rc" -eq 0 ] || ! grep -qF "$want" "$WORKDIR/runner-$label.txt"; }; then
+        echo "FAIL: runner guard admitted $label, or it was denied by something other than \"$want\":" >&2; cat "$WORKDIR/runner-$label.txt" >&2; exit 1
+    fi
+    if [ "$expect" = admit ]; then echo "PASS: runner guard admits $label"; else echo "PASS: runner guard denies $label"; fi
+}
+MSG_RG_WORKFLOW="runner-guard: only qa-platform-gears and the Argo controller may write qa-runs Workflows or Workflows running as the runner ServiceAccount"
+MSG_RG_POD="runner-guard: only the Argo controller may create or change pods running as the runner ServiceAccount"
+MSG_RG_TRUSTED_POD="runner-guard: only the ReplicaSet controller may create, and only the garbage collector may change, pods running as a ServiceAccount the guard trusts"
+MSG_RG_EPHEMERAL="runner-guard: no one may add an ephemeral container to a pod running as the runner ServiceAccount or a ServiceAccount the guard trusts"
+MSG_RG_TOKEN="runner-guard: only a kubelet may mint tokens for the runner ServiceAccount or a ServiceAccount the guard trusts"
+MSG_RG_SECRET="runner-guard: no one may create a ServiceAccount token Secret for the runner ServiceAccount or a ServiceAccount the guard trusts"
+jq --arg sa "$RUNNER_SA" --arg ns "$ARGO_NAMESPACE" \
+   '.spec.serviceAccountName = $sa | .metadata.namespace = $ns' "$GOLDEN" > "$WORKDIR/runner-golden.json"
+runner_case intruder-golden-workflow deny "$MSG_RG_WORKFLOW" \
+    kubectl create -f "$WORKDIR/runner-golden.json" --dry-run=server --as="$INTRUDER_USER" -n "$ARGO_NAMESPACE"
+# Scoped, not a namespace-wide block: the same Workflow with another
+# ServiceAccount and no app=qa-runs label is the intruder's business.
+jq '.spec.serviceAccountName = "default" | del(.metadata.labels.app)' "$WORKDIR/runner-golden.json" > "$WORKDIR/runner-foreign.json"
+runner_case intruder-foreign-workflow admit "" \
+    kubectl create -f "$WORKDIR/runner-foreign.json" --dry-run=server --as="$INTRUDER_USER" -n "$ARGO_NAMESPACE"
+jq --arg sa "$RUNNER_SA" '.spec.templates[1].serviceAccountName = $sa' "$WORKDIR/runner-foreign.json" > "$WORKDIR/runner-template-sa.json"
+runner_case intruder-template-service-account deny "$MSG_RG_WORKFLOW" \
+    kubectl create -f "$WORKDIR/runner-template-sa.json" --dry-run=server --as="$INTRUDER_USER" -n "$ARGO_NAMESPACE"
+cat > "$WORKDIR/runner-pod.yaml" <<EOF
+apiVersion: v1
+kind: Pod
+metadata: {generateName: verify-k8s-intruder-, namespace: $ARGO_NAMESPACE}
+spec:
+  serviceAccountName: $RUNNER_SA
+  containers: [{name: main, image: busybox:1.36, command: ["true"]}]
+EOF
+runner_case intruder-runner-pod deny "$MSG_RG_POD" \
+    kubectl create -f "$WORKDIR/runner-pod.yaml" --dry-run=server --as="$INTRUDER_USER" -n "$ARGO_NAMESPACE"
+runner_case intruder-runner-token deny "$MSG_RG_TOKEN" \
+    kubectl create token "$RUNNER_SA" -n "$ARGO_NAMESPACE" --audience qa-platform-runner-credentials --as="$INTRUDER_USER"
+# A Secret of type kubernetes.io/service-account-token naming an account is
+# filled by the token controller with a long-lived token: a second way to mint
+# one, outside any kubelet. Server dry-run, so nothing is stored or filled.
+token_secret() {  # $1 = ServiceAccount the Secret names
+    printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  generateName: verify-k8s-token-\n  annotations:\n    kubernetes.io/service-account.name: %s\ntype: kubernetes.io/service-account-token\n' "$1"
+}
+token_secret "$RUNNER_SA" > "$WORKDIR/runner-token-secret.yaml"
+runner_case intruder-runner-token-secret deny "$MSG_RG_SECRET" \
+    kubectl create -f "$WORKDIR/runner-token-secret.yaml" -n "$ARGO_NAMESPACE" --dry-run=server --as="$INTRUDER_USER"
+# Scoped, not a Secret block: an ordinary Secret is the intruder's business.
+printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  generateName: verify-k8s-opaque-\ntype: Opaque\n' > "$WORKDIR/opaque-secret.yaml"
+runner_case intruder-opaque-secret admit "" \
+    kubectl create -f "$WORKDIR/opaque-secret.yaml" -n "$ARGO_NAMESPACE" --dry-run=server --as="$INTRUDER_USER"
+# Scoped by account, not by type: the Opaque case above never reaches the
+# account-name comparison, this one does. A token Secret for the intruder's
+# own, unguarded ServiceAccount is admitted.
+token_secret "$INTRUDER" > "$WORKDIR/own-token-secret.yaml"
+runner_case intruder-own-token-secret admit "" \
+    kubectl create -f "$WORKDIR/own-token-secret.yaml" -n "$ARGO_NAMESPACE" --dry-run=server --as="$INTRUDER_USER"
+# The identities the guard exempts are guarded too: whoever could run a pod as
+# the Argo controller's ServiceAccount, or mint its token, would BE the
+# controller and could create a runner pod with a forged ownerReference. Which
+# ServiceAccounts the guard trusts in $ARGO_NAMESPACE is decided at render time
+# (the controller's when it lives there, qa-platform-gears when the release
+# shares the namespace), so it is read back from the deployed policy rather
+# than restated here. `kubectl create token` has no --dry-run: a guard that
+# wrongly admitted would mint a real token, so it is kept to the 10m minimum
+# and lands only in $WORKDIR.
+rc=0
+TRUSTED_SAS=$(kubectl get validatingadmissionpolicies.v1.admissionregistration.k8s.io "qa-platform-runner-guard-$NAMESPACE" -o json 2> "$WORKDIR/trusted.err" \
+    | jq -er '.spec.variables[] | select(.name == "trustedServiceAccounts") | .expression') || rc=$?
+if [ "$rc" -ne 0 ] || [[ ! "$TRUSTED_SAS" =~ ^\[(\'[a-z0-9.-]+\'(,\ \'[a-z0-9.-]+\')*)?\]$ ]]; then
+    echo "FAIL: could not read trustedServiceAccounts as a CEL list of names from the runner guard policy (got '$TRUSTED_SAS'):" >&2; cat "$WORKDIR/trusted.err" >&2; exit 1
+fi
+TRUSTED_LIST=$(printf '%s' "$TRUSTED_SAS" | tr -d "[]' " | tr ',' ' ')
+TRUSTED_JSON=$(jq -cn --arg l "$TRUSTED_LIST" '$l | split(" ") | map(select(. != ""))')
+# A token Secret made before the guard matched Secrets still holds a live
+# long-lived token for its account: the guard refuses new ones, not old ones.
+rc=0
+existing=$(kubectl get secrets -n "$ARGO_NAMESPACE" -o json 2> "$WORKDIR/token-secrets.err" \
+    | jq -r --arg runner "$RUNNER_SA" --argjson trusted "$TRUSTED_JSON" '
+  .items[] | select(.type == "kubernetes.io/service-account-token")
+  | select(.metadata.annotations["kubernetes.io/service-account.name"] as $sa | ($sa == $runner) or ($trusted | index($sa)))
+  | .metadata.name') || rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "FAIL: could not list Secrets in $ARGO_NAMESPACE:" >&2; cat "$WORKDIR/token-secrets.err" >&2; exit 1
+fi
+if [ -n "$existing" ]; then
+    echo "FAIL: ServiceAccount-token Secret(s) in $ARGO_NAMESPACE name the runner ServiceAccount or one the runner guard trusts: $(tr '\n' ' ' <<< "$existing"). Each holds a long-lived token; delete it." >&2; exit 1
+fi
+echo "PASS: no ServiceAccount-token Secret in $ARGO_NAMESPACE names the runner ServiceAccount or one the runner guard trusts"
+if [ -z "$TRUSTED_LIST" ]; then
+    echo "SKIP: the runner guard trusts no ServiceAccount in $ARGO_NAMESPACE (the controller runs in argo.controllerNamespace, the gears in their own namespace)"
+else
+    for sa in $TRUSTED_LIST; do
+        runner_case "intruder-token-$sa" deny "$MSG_RG_TOKEN" \
+            kubectl create token "$sa" -n "$ARGO_NAMESPACE" --duration=10m --as="$INTRUDER_USER"
+        token_secret "$sa" > "$WORKDIR/trusted-token-secret-$sa.yaml"
+        runner_case "intruder-token-secret-$sa" deny "$MSG_RG_SECRET" \
+            kubectl create -f "$WORKDIR/trusted-token-secret-$sa.yaml" -n "$ARGO_NAMESPACE" --dry-run=server --as="$INTRUDER_USER"
+        sed "s/^  serviceAccountName: .*/  serviceAccountName: $sa/" "$WORKDIR/runner-pod.yaml" > "$WORKDIR/trusted-pod-$sa.yaml"
+        runner_case "intruder-pod-as-$sa" deny "$MSG_RG_TRUSTED_POD" \
+            kubectl create -f "$WORKDIR/trusted-pod-$sa.yaml" --dry-run=server --as="$INTRUDER_USER" -n "$ARGO_NAMESPACE"
+    done
+    TRUSTED_SA=${TRUSTED_LIST%% *}
+    # Presence is required for the PASS below: an empty read FAILs.
+    TRUSTED_POD=$(kubectl get pods -n "$ARGO_NAMESPACE" -o json 2>/dev/null \
+        | jq -r --arg sa "$TRUSTED_SA" '[.items[] | select(.spec.serviceAccountName == $sa and .status.phase == "Running")][0].metadata.name // empty' || true)
+    if [ -z "$TRUSTED_POD" ]; then
+        echo "FAIL: no Running pod in $ARGO_NAMESPACE runs as $TRUSTED_SA, which the runner guard trusts there" >&2; exit 1
+    fi
+    runner_case "intruder-patch-$TRUSTED_SA-pod" deny "$MSG_RG_TRUSTED_POD" \
+        kubectl label pod "$TRUSTED_POD" -n "$ARGO_NAMESPACE" verify-k8s/intruder=x --dry-run=server --as="$INTRUDER_USER"
+    runner_case "intruder-ephemeral-$TRUSTED_SA-pod" deny "$MSG_RG_EPHEMERAL" \
+        kubectl patch pod "$TRUSTED_POD" -n "$ARGO_NAMESPACE" --subresource=ephemeralcontainers --type=strategic \
+        -p '{"spec":{"ephemeralContainers":[{"name":"verify-k8s-intruder","image":"busybox:1.36","command":["true"]}]}}' \
+        --dry-run=server --as="$INTRUDER_USER"
+fi
+# A live runner pod, made the only legitimate way: the gears submit, the Argo
+# controller creates the pod. That the pod appears at all is the ADMIT proof
+# for the controller (a wrong argo.controllerServiceAccount stops every run
+# right here). The pod's image and outcome do not matter; it is deleted with
+# its Workflow by the cleanup above.
+rc=0
+RUNNER_GUARD_WF=$(wf "  activeDeadlineSeconds: 300" "" | kubectl create -f - -o name --as="$GEARS" -n "$ARGO_NAMESPACE" 2> "$WORKDIR/runner-wf.err") || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$RUNNER_GUARD_WF" ]; then
+    echo "FAIL: could not create the Workflow whose pod the runner-guard UPDATE cases patch:" >&2; cat "$WORKDIR/runner-wf.err" >&2; exit 1
+fi
+RUNNER_POD=""
+for _ in $(seq 1 60); do
+    RUNNER_POD=$(kubectl get pods -n "$ARGO_NAMESPACE" -o name \
+        -l "workflows.argoproj.io/workflow=${RUNNER_GUARD_WF#*/}" 2>/dev/null | head -1 || true)
+    [ -n "$RUNNER_POD" ] && break
+    sleep 2
+done
+if [ -z "$RUNNER_POD" ]; then
+    echo "FAIL: the Argo controller made no pod for $RUNNER_GUARD_WF in 120s. If its events or the controller's log show 'runner-guard:', argo.controllerServiceAccount/controllerNamespace do not name the controller:" >&2
+    kubectl get "$RUNNER_GUARD_WF" -n "$ARGO_NAMESPACE" -o jsonpath='{.status.message}{"\n"}' >&2 || true
+    exit 1
+fi
+echo "PASS: runner guard admits the Argo controller's runner pod ($RUNNER_POD)"
+runner_case intruder-patch-runner-pod deny "$MSG_RG_POD" \
+    kubectl label "$RUNNER_POD" -n "$ARGO_NAMESPACE" verify-k8s/intruder=x --dry-run=server --as="$INTRUDER_USER"
+runner_case intruder-ephemeral-container deny "$MSG_RG_EPHEMERAL" \
+    kubectl patch "$RUNNER_POD" -n "$ARGO_NAMESPACE" --subresource=ephemeralcontainers --type=strategic \
+    -p '{"spec":{"ephemeralContainers":[{"name":"verify-k8s-intruder","image":"busybox:1.36","command":["true"]}]}}' \
+    --dry-run=server --as="$INTRUDER_USER"
+runner_guard_cleanup
+RUNNER_GUARD_WF=""
+trap 'rm -rf "$WORKDIR"' EXIT
+
 step "k8s 4/4: /realms serves Keycloak's discovery document through the UI nginx"
 # THIS CHECK ALSO COVERS "Keycloak's own advertised issuer": a deployment that
 # exposed Keycloak's own https listener at a separate origin could probe it
@@ -1570,18 +1783,43 @@ step "no runner Secrets were created in \$ARGO_NAMESPACE by this deploy (finding
 if [ -z "${DEPLOY_STARTED:-}" ]; then
     echo "NOTE: DEPLOY_STARTED is unset (deploy-k8s.sh exports it), so Secrets created by this deploy cannot be told from older ones. Skipping the count."
 else
-    new_secrets=$(kubectl get secrets -n "$ARGO_NAMESPACE" -o json | jq -r --arg since "$DEPLOY_STARTED" '
+    # Selected by the retired writer's NAME SHAPE (one definition, shared with
+    # cleanup-runner-secrets.sh), not by a missing managed-by label: when
+    # argo.namespace equals the release namespace on a first install, the
+    # chart's own Secrets carry no managed-by label and would fail this check.
+    # shellcheck source=../argo/runner-secret-shape.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/../argo/runner-secret-shape.sh"
+    new_secrets=$(kubectl get secrets -n "$ARGO_NAMESPACE" -o json | jq -r --arg since "$DEPLOY_STARTED" --arg re "$writer_shape" '
         .items[]
         | select(.type == "Opaque")
-        | select(.metadata.name | startswith("qa-platform-"))
-        | select((.metadata.labels // {}) | has("app.kubernetes.io/managed-by") | not)
+        | select(.metadata.name | test($re))
         | select(.metadata.creationTimestamp >= $since)
         | .metadata.name')
     if [ -n "$new_secrets" ]; then
-        echo "FAIL: Opaque Secret(s) named qa-platform-* were created in $ARGO_NAMESPACE since $DEPLOY_STARTED -- something is still writing runner credentials as Secrets:" >&2
+        echo "FAIL: Opaque Secret(s) of the runner writer's name shape (qa-platform-<uuid>-<digest>) were created in $ARGO_NAMESPACE since $DEPLOY_STARTED -- something is still writing runner credentials as Secrets:" >&2
         printf '%s\n' "$new_secrets" >&2; exit 1
     fi
-    echo "PASS: no unlabelled Opaque qa-platform-* Secrets were created in $ARGO_NAMESPACE since $DEPLOY_STARTED"
+    echo "PASS: no Opaque Secret of the runner writer's name shape was created in $ARGO_NAMESPACE since $DEPLOY_STARTED"
 fi
+
+step "the orphaned workflow OIDC Secret is not left in \$ARGO_NAMESPACE"
+# The chart stopped rendering it, but it was created with
+# helm.sh/resource-policy: keep, so an upgraded install still holds it, with the
+# live qa-platform-workflow client secret. Selected by the old template's
+# labels, as cleanup-runner-secrets.sh selects it: its name came from the
+# configurable argo.workflowSecretName (default qa-platform-workflow-oidc).
+# `-o name` prints nothing and exits 0 only when no such Secret exists;
+# Forbidden or a network error exits non-zero, which must not read as "absent".
+OIDC_LABELS="app.kubernetes.io/name=qa-platform,app.kubernetes.io/component=argo-workflow-oidc"
+rc=0
+orphan=$(kubectl get secrets -n "$ARGO_NAMESPACE" -l "$OIDC_LABELS" --ignore-not-found -o name 2> "$WORKDIR/orphan-oidc.err") || rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "FAIL: could not check for the orphaned workflow OIDC Secret ($OIDC_LABELS) in $ARGO_NAMESPACE:" >&2; cat "$WORKDIR/orphan-oidc.err" >&2; exit 1
+fi
+if [ -n "$orphan" ]; then
+    echo "FAIL: $(tr '\n' ' ' <<< "$orphan")in $ARGO_NAMESPACE carries $OIDC_LABELS. The chart no longer uses it and it holds a live client secret; run deploy/argo/cleanup-runner-secrets.sh $ARGO_NAMESPACE --delete (see UPGRADING.md)." >&2
+    exit 1
+fi
+echo "PASS: no Secret labelled $OIDC_LABELS in $ARGO_NAMESPACE"
 echo
 echo "VERIFY-K8S: every check above passed individually"

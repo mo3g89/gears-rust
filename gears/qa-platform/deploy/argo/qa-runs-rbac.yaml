@@ -4,11 +4,13 @@
 #
 #   * The **workflow pod's** identity, which needs `create` on
 #     `workflowtaskresults.argoproj.io` or every run fails with `exit code 64`
-#     *after* producing all of its output. The `argo-workflows` Helm chart
-#     creates that account (`argo-workflow`) when installed with
-#     `workflow.serviceAccount.create=true` and `workflow.rbac.create=true`, and
-#     qa-runs names it through `qa-runs.argo.workflow_service_account`.
-#     Nothing in this file concerns it.
+#     *after* producing all of its output. The qa-platform chart creates that
+#     account itself, named by `argo.workflowServiceAccount` (default
+#     `qa-platform-runner`, `templates/argo-runner-serviceaccount.yaml`, with
+#     its Role in `templates/rbac-argo-runner.yaml`), and qa-runs names it
+#     through `qa-runs.argo.workflow_service_account`. An install from this
+#     file alone must create that account and its Role by hand. Nothing in
+#     this file concerns it.
 #
 #   * The **qa-runs process'** identity, which is what this file grants. It is
 #     the account whose credentials `qa-runs.argo.kubeconfig_path` points at, or
@@ -35,8 +37,12 @@
 #   * the mandatory Workflow admission guard
 #     (`templates/workflow-guard-admission-policy.yaml`), without which this
 #     Role's `workflows: create` lets the holder submit a Workflow that mounts
-#     any Secret in the namespace or runs as any ServiceAccount there.
-# Apply both by hand, adapted to this ServiceAccount, or use the chart.
+#     any Secret in the namespace or runs as any ServiceAccount there;
+#   * the runner guard (`templates/runner-guard-admission-policy.yaml`),
+#     without which any other principal with write rights in this namespace
+#     can patch qa-runs Workflows and runner pods, run a pod as the runner or
+#     the workflow-controller ServiceAccount, or mint their tokens.
+# Apply all three by hand, adapted to this ServiceAccount, or use the chart.
 #
 # `delete` on `workflows` is deliberately absent: the adapter never deletes one
 # — `ttlStrategy.secondsAfterCompletion` is what reclaims them. Note that

@@ -136,6 +136,20 @@ argo:
   # away from what argo-runner-serviceaccount.yaml actually creates is a boot
   # failure, not a quiet privilege change.
   workflowServiceAccount: qa-platform-runner
+  # THE ARGO WORKFLOW-CONTROLLER'S SERVICEACCOUNT. runner-guard-admission-
+  # policy.yaml lets only the gears and this account write qa-runs Workflows,
+  # and only this account create or change pods that run as
+  # workflowServiceAccount: the controller updates Workflows (spec keys,
+  # status) and creates and labels the runner pods. Anyone else is denied.
+  # Read it on a cluster with
+  #   kubectl -n argo get deploy -o jsonpath='{..serviceAccountName}'
+  # (the controller's Deployment, not argo-server's). A wrong name here stops
+  # every run: the controller's own pod creates are refused.
+  controllerServiceAccount: argo-workflows-workflow-controller
+  # The namespace the workflow-controller runs in. Empty means argo.namespace,
+  # which is where the Argo chart puts it by default. Read it with
+  #   kubectl get deploy -A -o jsonpath='{range .items[*]}{.metadata.namespace} {..serviceAccountName}{"\n"}{end}'
+  controllerNamespace: ""
   # qa-runs' ArgoExecutorConfig fields the Argo fragment ConfigMap renders,
   # restated here so the chart has one source for them rather than a second
   # copy baked into the template. kubeconfig_path is deliberately NOT one of
@@ -179,9 +193,15 @@ argo:
   # own comment.
   # The `qa-platform-workflow` client's secret in the realm fixture.
   #
-  # NO LONGER REACHES A RUNNER POD. The Secret in Argo's namespace is gone (see
-  # above) and nothing in qa-runs emits a reference to it. What still uses this
-  # client is `deploy/remote/verify-k8s.sh` check 16, which needs SOME
+  # NO LONGER REACHES A RUNNER POD. The chart no longer renders the Secret in
+  # Argo's namespace and nothing in qa-runs emits a reference to it. An install
+  # that predates bf8d9c4d0 still has that Secret (named by the old
+  # `argo.workflowSecretName`, default `qa-platform-workflow-oidc`), because it
+  # was created with `helm.sh/resource-policy: keep`. It holds the live
+  # `qa-platform-workflow` client secret; `deploy/argo/cleanup-runner-secrets.sh`
+  # selects it by its labels, `app.kubernetes.io/name=qa-platform` and
+  # `app.kubernetes.io/component=argo-workflow-oidc` (UPGRADING). What still uses this
+  # client is `deploy/remote/verify-k8s.sh` check 9b, which needs SOME
   # non-browser token to prove the product-plugin catalogue is non-empty on a
   # stand, and the realm's only other client (qa-platform-ui) has
   # directAccessGrantsEnabled off on purpose. It is therefore a
@@ -205,7 +225,7 @@ argo:
   # be at least 16 characters once trimmed, in devMode too: `checksum/realm`
   # on the Keycloak pod is a sha256 of the rendered realm, readable with
   # `get pods`, so a short secret is an offline guess. The client
-  # itself stays: verify-k8s.sh check 16 needs a non-browser credential and
+  # itself stays: verify-k8s.sh check 9b needs a non-browser credential and
   # the realm's only other client (qa-platform-ui) has direct grants off on
   # purpose.
   #

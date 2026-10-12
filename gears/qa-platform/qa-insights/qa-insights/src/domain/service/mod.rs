@@ -113,7 +113,7 @@
 //! scope anywhere in this gear.
 //!
 //! **Task 16 is the first request-driven caller, and it does use the PEP.**
-//! [`reconcile::ReconcileService::rebuild`] compiles its scope from
+//! [`reconcile::ReconcileService::rebuild_after`] compiles its scope from
 //! [`PolicyEnforcer`] and hands it down, which is why
 //! [`ingest::IngestService::write_run_projection`] (the write half of what
 //! `reproject_run` used to be as one function — Task 5a's split, on

@@ -849,6 +849,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          # test_no_system_gear_changes.py diffs against a pinned upstream
+          # commit; a depth-1 clone fails it and stops `make helm-tests`
+          # before every later chart guard (re-verification N1).
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0

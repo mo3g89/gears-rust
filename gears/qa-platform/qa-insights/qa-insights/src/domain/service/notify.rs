@@ -1390,7 +1390,7 @@ impl<N: NotifyRepository + Clone + 'static> NotifyService<N> {
     /// channel had no destination configured — left the table saying nothing
     /// about the run at all, which two callers then read differently. A sweep
     /// does not care, because `already_ingested` stops it re-projecting the
-    /// run. [`ReconcileService::rebuild`](crate::domain::service::reconcile::ReconcileService::rebuild)
+    /// run. [`ReconcileService::rebuild_after`](crate::domain::service::reconcile::ReconcileService::rebuild_after)
     /// has no such diff: it re-projects **every** run in the operator's
     /// window, reaches this path again, and — with the channel turned on in
     /// the meantime — announced every run that had previously been declined,

@@ -25,6 +25,7 @@ fn a_slack_incoming_webhook_url_is_accepted_and_proxied_under_the_host_alias() {
         hook.proxy_path(),
         "/hooks.slack.com/services/T000/B000/XXXXXXXX"
     );
+    // The literal is the contract: the egress allowlist and the outbound proxy alias read this host.
     assert_eq!(SLACK_WEBHOOK_HOST, "hooks.slack.com");
 }
 

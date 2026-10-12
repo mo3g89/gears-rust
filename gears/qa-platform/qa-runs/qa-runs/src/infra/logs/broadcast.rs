@@ -954,14 +954,41 @@ mod tests {
         );
     }
 
-    /// The retention bounds' **values**, which are the contract: they are the sole
-    /// bound on this type's resident memory, and every other test here uses them
-    /// symbolically, so widening any of them to any number was green.
-    #[test]
-    fn the_retention_bounds_are_the_numbers_they_promise() {
-        assert_eq!(MAX_RETAINED_LINES_PER_RUN, 5_000);
-        assert_eq!(MAX_RETAINED_BYTES_PER_RUN, 512 * 1024);
-        assert_eq!(MAX_RETAINED_RUNS, 32);
+    /// The line bound, as a number a reader can check. Literals on purpose: a
+    /// test that names the constant passes for any value the constant takes.
+    #[tokio::test]
+    async fn a_run_keeps_exactly_five_thousand_lines() {
+        let bus = RunLogBroadcaster::default();
+        for n in 0..5_003 {
+            bus.publish(RUN, format!("l{n}"));
+        }
+        let tail = bus.replay(RUN);
+        // The tail is 5 000 lines plus the truncation marker, and the oldest kept line is l3.
+        assert_eq!(tail.len(), 5_001, "{:?}", &tail[..2]);
+        assert!(tail.iter().any(|line| line == "l3") && !tail.iter().any(|line| line == "l2"));
+    }
+
+    /// The byte bound: 512 KiB holds exactly 512 lines of 1 KiB, and the 513th
+    /// pushes the oldest out.
+    #[tokio::test]
+    async fn a_run_keeps_at_most_half_a_mebibyte() {
+        let bus = RunLogBroadcaster::default();
+        let line = "x".repeat(1024);
+        for _ in 0..600 {
+            bus.publish(RUN, line.clone());
+        }
+        let kept: usize = bus.replay(RUN).iter().filter(|l| l.len() == 1024).count();
+        assert_eq!(kept, 512, "512 KiB of 1 KiB lines");
+    }
+
+    /// The run bound: thirty-two tails are kept, the thirty-third evicts one.
+    #[tokio::test]
+    async fn thirty_two_runs_keep_a_tail_and_the_thirty_third_evicts_one() {
+        let bus = RunLogBroadcaster::default();
+        for n in 0..33u128 {
+            bus.publish(Uuid::from_u128(0xB000 + n), "x".to_owned());
+        }
+        assert_eq!(bus.retained_runs(), 32);
     }
 
     /// The bound doing its job. Capacity 2, four lines published before a single
@@ -1065,13 +1092,15 @@ mod tests {
         drop(sub);
     }
 
-    /// The cap's **value**, which is the contract: it is the sole bound on how
-    /// many SSE connections one caller can hold against one run, each for up to
-    /// `MAX_STREAM_DURATION`. Every other test here uses the constant
-    /// symbolically, so widening it to any number was green.
-    #[test]
-    fn the_subscriber_cap_is_the_number_it_promises() {
-        assert_eq!(MAX_SUBSCRIBERS_PER_RUN, 16);
+    /// The subscriber cap as a number: sixteen fit, the seventeenth is refused.
+    #[tokio::test]
+    async fn sixteen_subscribers_fit_and_the_seventeenth_does_not() {
+        let bus = Arc::new(RunLogBroadcaster::default());
+        let subs: Vec<_> = (0..16)
+            .map(|_| bus.subscribe(RUN).expect("within the cap"))
+            .collect();
+        assert!(bus.subscribe(RUN).is_none());
+        drop(subs);
     }
 
     /// **The connection cap**, and the exposure it does and does not close.

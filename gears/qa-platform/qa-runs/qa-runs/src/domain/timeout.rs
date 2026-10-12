@@ -398,9 +398,14 @@ mod tests {
                 "{kind:?}"
             );
         }
+        // Seven days, as literals: one second past it is clamped, the ceiling itself passes.
         assert_eq!(
-            MAX_LAUNCH_TIMEOUT_SECONDS, 604_800,
-            "seven days; if this ceiling moves, say why in its doc comment"
+            resolve_timeout_seconds(Some(604_801), Some(7200), 900, RunKind::Plan),
+            604_800
+        );
+        assert_eq!(
+            resolve_timeout_seconds(Some(604_800), Some(7200), 900, RunKind::Plan),
+            604_800
         );
     }
 
@@ -484,10 +489,15 @@ mod tests {
                 "{kind:?}"
             );
         }
+        // One second is the smallest value that is still a deadline: zero is raised to it
+        // and it passes unchanged.
         assert_eq!(
-            MIN_LAUNCH_TIMEOUT_SECONDS, 1,
-            "the floor has to be above zero or the clamp changes nothing; one second \
-             is the smallest value that is still a deadline"
+            resolve_timeout_seconds(Some(0), Some(7200), 900, RunKind::Plan),
+            1
+        );
+        assert_eq!(
+            resolve_timeout_seconds(Some(1), Some(7200), 900, RunKind::Plan),
+            1
         );
     }
 }

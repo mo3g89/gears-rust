@@ -111,3 +111,41 @@ def test_nothing_to_remove(tmp_path):
     assert out.returncode == 0
     assert "nothing to remove" in out.stdout
     assert deletes == ""
+
+
+OIDC = secret("qa-platform-workflow-oidc",
+              labels={"app.kubernetes.io/name": "qa-platform",
+                      "app.kubernetes.io/component": "argo-workflow-oidc"})
+
+
+def test_the_orphaned_workflow_oidc_secret_is_selected(tmp_path):
+    out, deletes = run(tmp_path, [OIDC, secret(WRITER)], "--delete")
+    assert out.returncode == 0, out.stderr
+    assert "qa-platform-workflow-oidc" in deletes.split()
+    assert WRITER in deletes.split()
+
+
+def test_the_orphan_is_selected_by_its_labels_whatever_its_name(tmp_path):
+    # The old template named it from argo.workflowSecretName, which was
+    # configurable; qa-platform-workflow-oidc was only the default.
+    renamed = secret("custom-workflow-oidc", labels=OIDC["metadata"]["labels"])
+    out, deletes = run(tmp_path, [renamed], "--delete")
+    assert out.returncode == 0, out.stderr
+    assert "custom-workflow-oidc" in deletes.split()
+
+
+def test_a_same_named_secret_without_the_old_component_label_is_not(tmp_path):
+    out, deletes = run(tmp_path, [secret("qa-platform-workflow-oidc", labels={"x": "y"})], "--delete")
+    assert "qa-platform-workflow-oidc" not in deletes
+
+
+def test_the_component_label_alone_is_not_enough(tmp_path):
+    lone = secret("custom-workflow-oidc", labels={"app.kubernetes.io/component": "argo-workflow-oidc"})
+    out, deletes = run(tmp_path, [lone], "--delete")
+    assert "custom-workflow-oidc" not in deletes
+
+
+def test_kubeconfig_shaped_leftovers_without_the_prefix_are_listed_not_deleted(tmp_path):
+    out, deletes = run(tmp_path, [secret("smoke-fixture-kubeconfig"), secret("x1-qa-environment")], "--delete")
+    assert "smoke-fixture-kubeconfig" in out.stdout and "x1-qa-environment" in out.stdout
+    assert "smoke-fixture-kubeconfig" not in deletes and "x1-qa-environment" not in deletes

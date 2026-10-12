@@ -223,23 +223,15 @@ tests:
 
     /// Legacy `default_timeout` → 300 (`plans.rs:15-16` + `:29-31`).
     ///
-    /// **The second assertion is the legacy-contract pin, not a tautology.**
-    /// The first ties the parser's default to [`DEFAULT_TIMEOUT_SECONDS`], and
-    /// would stay green if someone changed the constant; the literal `300` is
-    /// what fails then. A plan file that omits `timeout_seconds` is a contract
-    /// with every repository that already relies on the five-minute ceiling,
-    /// so changing it must be a deliberate edit to this test as well.
+    /// A plan file that omits `timeout_seconds` is a contract with every
+    /// repository that already relies on the five-minute ceiling. The number is a
+    /// literal, so changing the default must be a deliberate edit to this test.
     #[test]
     fn timeout_defaults_to_the_legacy_five_minutes() {
         let p = parse_plan_yaml("name: x\ntests: [a.py]\n").unwrap();
         assert_eq!(
-            p.timeout_seconds, DEFAULT_TIMEOUT_SECONDS,
+            p.timeout_seconds, 300,
             "a plan without `timeout_seconds` ran with a 5-minute ceiling in legacy"
-        );
-        assert_eq!(
-            DEFAULT_TIMEOUT_SECONDS, 300,
-            "the legacy contract: changing the default is a behaviour change for every plan \
-             that omits `timeout_seconds`"
         );
     }
 

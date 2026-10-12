@@ -1078,21 +1078,8 @@ test-qa-platform-features: install-tools
 ## these extract the real decision/render out of the real file by line
 ## markers rather than reimplementing it.
 ##
-## `check_secret_name_parity.sh` is a third of that shape, and closes a gap
-## `qa-runs`' `naming.rs` documented and deliberately left open. The runner
-## `Secret` naming rule is implemented in three Rust files AND in two shell
-## scripts; the three Rust copies check each other, while the shell side was
-## pinned only by literals someone transcribed from one run by hand (two of
-## those copies cite, as their authority, a test name that exists nowhere in
-## the workspace). This extracts `derive_name` / `new_name` / `old_name` out
-## of the real scripts by markers and the expectation tables -- with the
-## tenant and the prefix -- out of the real Rust test files, then runs one
-## against the other. Drift here is not a build failure; it is a pod stuck
-## Pending with FailedMount on a stand.
-##
-## Only `test_no_system_gear_changes.py` and `test_fetch_bundle_extraction.py`
-## are pytest-shaped (each defines `test_*` functions). Every other Python
-## guard here is named `check_*.py`
+## The pytest-shaped files are the `test_*.py` ones; `ls deploy/helm/tests/test_*.py`
+## lists them. Every other Python guard here is named `check_*.py`
 ## (WS3 Task 5 -- these used to be `test_*.py` despite being `main()`
 ## scripts, which made `python3 -m pytest tests/` collect zero items from
 ## them and report a truthful-looking "1 passed" for a nine-file suite;
@@ -1145,19 +1132,19 @@ test-qa-platform-features: install-tools
 ## startup failure) are standalone
 ## scripts -- a `main()` run via `if __name__ == "__main__"` -- so
 ## `python3 -m pytest tests/` collects zero items from them and would
-## silently skip every Python guard but the two pytest-shaped ones.
+## silently skip every Python guard but the `test_*.py` ones.
 ## Each is therefore invoked directly, one recipe line per guard, so every
 ## guard in `deploy/helm/tests/` actually runs; a non-zero exit from any of
 ## them fails this target. `test_nginx_template.sh`,
 ## `test_collect_exit_code.sh`, `check_no_password_in_argv.sh`,
 ## `check_deploy_secrets_not_in_argv.sh`, `test_runner_pytest_args.sh` and
-## `check_secret_name_parity.sh` are bash, invoked the same direct way.
+## `test_runner_fetch_resolver_env.sh` are bash, invoked the same direct way.
 ##
 ## THE GUARD COUNT IS DELIBERATELY NOT WRITTEN HERE ANY MORE. It was, and it
-## was wrong within hours: `check_secret_name_parity.sh` landed the same day
-## as the sentence that said "sixteen", making it seventeen, and the sentence
-## stayed. The recipe below is one line per guard, so counting it is a
-## `grep -c` and reading it is exact; a number in prose is a second,
+## was wrong within hours: a guard landed the same day as a sentence that
+## counted the guards, and the sentence stayed. The recipe below is one
+## line per guard, so counting it is a `grep -c` and reading it is exact; a
+## number in prose is a second,
 ## unenforced copy of that list and goes stale the next time a guard is
 ## added. Adding a guard means adding a recipe line, and nothing else.
 helm-tests:
@@ -1172,6 +1159,7 @@ helm-tests:
 	python3 gears/qa-platform/deploy/helm/tests/check_log_level_redaction.py
 	python3 gears/qa-platform/deploy/helm/tests/check_runner_service_account.py
 	python3 gears/qa-platform/deploy/helm/tests/check_workflow_guard.py
+	python3 gears/qa-platform/deploy/helm/tests/check_runner_guard.py
 	python3 gears/qa-platform/deploy/helm/tests/check_runner_networkpolicy.py
 	python3 gears/qa-platform/deploy/helm/tests/check_release_isolation.py
 	python3 gears/qa-platform/deploy/helm/tests/check_replica_guard.py
@@ -1190,6 +1178,7 @@ helm-tests:
 	bash gears/qa-platform/deploy/helm/tests/check_no_password_in_argv.sh
 	bash gears/qa-platform/deploy/helm/tests/check_deploy_secrets_not_in_argv.sh
 	bash gears/qa-platform/deploy/helm/tests/test_runner_pytest_args.sh
+	bash gears/qa-platform/deploy/helm/tests/test_runner_fetch_resolver_env.sh
 
 ## Re-resolve every pinned base-image digest and re-fetch every published
 ## binary checksum the qa-platform Dockerfiles carry (finding #95). Needs

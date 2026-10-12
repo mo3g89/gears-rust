@@ -308,9 +308,8 @@ impl QaEnvironments {
     }
 
     /// Spawn the observation ticker: list every environment, observe each
-    /// against its own cluster, persist the outcome, and self-heal its
-    /// kubeconfig `Secret` — one cycle per `interval_seconds`, forever, until
-    /// cancelled. The cycle's body
+    /// against its own cluster and persist the outcome — one cycle per
+    /// `interval_seconds`, forever, until cancelled. The cycle's body
     /// ([`crate::domain::service::EnvironmentsService::run_observation_cycle`],
     /// reached through `services.environments`) owns "one environment's failure
     /// never aborts the cycle for the others" *and* stopping early between
@@ -322,9 +321,7 @@ impl QaEnvironments {
     /// No leader election, unlike `qa-runs`' and `qa-insights`' tickers: every
     /// unit of work here is idempotent by construction —
     /// `EnvironmentsRepository::record_observation`'s merge rules converge
-    /// regardless of which replica writes them, and the self-heal's
-    /// server-side apply converges the same `Secret` to the same content no
-    /// matter how many replicas apply it. Two replicas both observing every
+    /// regardless of which replica writes them. Two replicas both observing every
     /// environment every cycle is redundant work, not a correctness hazard, so
     /// there is nothing here for an elector to buy.
     fn observation_ticker(

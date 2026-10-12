@@ -90,6 +90,9 @@
 //! That leaves `VHP_PROGRESS_URL`, `COLLECT_ONLY` and `VHP_COLLECT_URL`
 //! (`argo.rs:438-441`, `:50-59`) as the only statics a pipeline variable can
 //! shadow — and for all three, "last wins" is what the source system delivers.
+//! Since 2026-10-12 `COLLECT_ONLY` and `VHP_COLLECT_URL` are on the reserved
+//! floor (`params::is_reserved`), so a stored variable of either name is
+//! dropped with a WARN; here only `VHP_PROGRESS_URL` is still shadowable.
 //!
 //! # Composition contract — what the dispatcher must do around this
 //!
@@ -220,6 +223,17 @@ pub fn split_by_scope(
 ) -> TieredRunVars {
     let mut tiers = TieredRunVars::default();
     for variable in variables {
+        // Write-time validation (qa-environments' `validate_not_reserved`)
+        // keeps new rows off the floor; this keeps rows written before a name
+        // joined it off the runner (re-verification P6).
+        if crate::domain::params::is_reserved(&variable.name) {
+            tracing::warn!(
+                variable = %variable.name,
+                environment_id = ?variable.environment_id,
+                "a stored variable carries a reserved name and is not passed to the runner; rename or delete it",
+            );
+            continue;
+        }
         match variable.environment_id {
             None => tiers.pipeline.push(variable.into()),
             Some(id) if Some(id) == environment_id => tiers.platform.push(variable.into()),
@@ -248,8 +262,7 @@ pub struct RunVarInputs {
     /// product plugin returns — [`Self::plugin_env`], one tier up.
     ///
     /// Every name here is in [`crate::domain::params::RESERVED_NAMES`] except
-    /// the result-callback URL and the collect-only pair — see the SECURITY
-    /// NOTE there.
+    /// the result-callback URL — see the SECURITY NOTE there.
     ///
     /// Three of the module docs' composition obligations land on this one
     /// field, and a caller filling it in needs all three:
@@ -425,9 +438,10 @@ pub fn assemble(inputs: RunVarInputs) -> BTreeMap<String, String> {
 /// in the shared environment, because there is one bundle and one file list per
 /// node (`service::dispatch_spec::build_spec`).
 ///
-/// Lowest precedence, like every other static: a pipeline variable of the same
-/// name still wins, which this module's header already records as reachable for
-/// exactly these two names plus `VHP_PROGRESS_URL`.
+/// Lowest precedence, like every other static. Both names are on the reserved
+/// floor since 2026-10-12, so no pipeline variable or run parameter reaches
+/// them; this module's header records `VHP_PROGRESS_URL` as the static that
+/// is still shadowable.
 #[must_use]
 pub fn assemble_collect_vars(collect_url: &str) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
@@ -748,6 +762,27 @@ mod tests {
         );
         assert!(tiers.pipeline.is_empty());
         assert!(tiers.platform.is_empty());
+    }
+
+    /// Rows written before a name joined the reserved floor must not reach the
+    /// runner (re-verification P6).
+    #[test]
+    fn a_stored_variable_with_a_reserved_name_never_reaches_the_runner() {
+        let env_id = Uuid::new_v4();
+        let vars = vec![
+            var(None, "QA_CREDENTIALS_URL", "http://attacker/"),
+            var(Some(env_id), "pytest_addopts", "-k not_failing"),
+            var(None, "BASH_ENV", "/tmp/evil"),
+            var(None, "MY_SETTING", "kept"),
+        ];
+        let tiers = split_by_scope(vars, Some(env_id));
+        let names: Vec<_> = tiers
+            .pipeline
+            .iter()
+            .chain(tiers.platform.iter())
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(names, ["MY_SETTING"]);
     }
 
     // ---------- collect-only ----------

@@ -349,6 +349,7 @@ impl RunExecutor for ArgoRunExecutor {
                 .await
             {
                 Ok(created) => {
+                    let uid = created.metadata.uid.clone();
                     let reference = created.metadata.name.unwrap_or(name);
                     info!(
                         run_id = %spec.run_id,
@@ -356,7 +357,10 @@ impl RunExecutor for ArgoRunExecutor {
                         nodes = spec.nodes.len(),
                         "submitted an argo workflow"
                     );
-                    return Ok(ExecutionRef::new(reference));
+                    return Ok(match uid {
+                        Some(uid) => ExecutionRef::with_uid(reference, uid),
+                        None => ExecutionRef::new(reference),
+                    });
                 }
                 Err(kube::Error::Api(api)) if api.code == 409 && attempt + 1 < ATTEMPTS => {
                     warn!(

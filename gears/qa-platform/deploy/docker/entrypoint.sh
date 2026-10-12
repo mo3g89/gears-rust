@@ -18,12 +18,12 @@
 # A FIFTH RENDER, AND IT IS AN INSERTION RATHER THAN A SUBSTITUTION: the
 # TWO fragments, one mechanism. $QA_RUNS_ARGO_CONFIG selects the Argo EXECUTOR
 # for qa-runs; $QA_ENVIRONMENTS_ARGO_CONFIG gives qa-environments the path to
-# the same Argo cluster so decision D4's runner-credential `Secret`s can be
-# written (without it that write falls back to `Config::infer()`, which finds
-# nothing inside this container, and fails on every cycle while observation
-# keeps working -- the 2026-08-28 review's finding I2). They are validated and
-# inserted identically, at two anchors, and setting the first without the
-# second is refused below.
+# the Argo cluster's namespace and the runner ServiceAccount
+# (`argo.namespace`, `argo.runner_service_account`), which the runner-credential
+# route (POST /qa/v1/runner-credentials, ADR-0008) uses to pin a TokenReview's
+# username and to look up the runner pod. Without it that route answers 503.
+# They are validated and inserted identically, at two anchors, and setting the
+# first without the second is refused below.
 #
 # `qa-runs` Argo executor block. $QA_RUNS_ARGO_CONFIG names a YAML FRAGMENT
 # file (mounted into the container) whose lines are inserted after the
@@ -200,8 +200,8 @@ require_anchor '^      # QA_RUNS_ARGO_ANCHOR$' '# QA_RUNS_ARGO_ANCHOR'
 # The sixth anchor, `gears.qa-environments.config`'s, required for exactly the
 # same reason as the fifth: a template that has lost it will silently ignore
 # $QA_ENVIRONMENTS_ARGO_CONFIG on the next deploy that sets it, and the symptom
-# -- D4 Secret writes failing forever while observation looks healthy -- names
-# nothing.
+# -- the runner-credential route answering 503 forever while observation looks
+# healthy -- names nothing.
 require_anchor '^      # QA_ENVIRONMENTS_ARGO_ANCHOR$' '# QA_ENVIRONMENTS_ARGO_ANCHOR'
 
 # The fragment, validated before it is inserted. Every check here corresponds

@@ -64,6 +64,10 @@ pub struct Model {
     /// JSON array of bundle UUIDs, one per repository group.
     pub bundle_ids: Json,
     pub execution_ref: Option<String>,
+    /// The executor backend's uid for the execution `execution_ref` names (for
+    /// Argo, the Workflow's `metadata.uid`). Deliberately not on the domain
+    /// `Run`; read through `RunsRepository::execution_uid`.
+    pub execution_uid: Option<String>,
     pub log_storage_ref: Option<String>,
     pub timeout_at: Option<OffsetDateTime>,
     pub started_at: Option<OffsetDateTime>,

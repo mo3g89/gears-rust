@@ -63,7 +63,7 @@ BANNED_IN_RENDER = [
 ]
 
 # The values that fed them. `argo.workflowClientSecret` is NOT here: the realm
-# still pins it, because `deploy/remote/verify-k8s.sh` check 16 needs a
+# still pins it, because `deploy/remote/verify-k8s.sh` check 9b needs a
 # non-browser token to prove the product-plugin catalogue is non-empty on a
 # stand and the realm's only other client has direct grants disabled. That
 # credential lives in the realm and in this chart; it no longer reaches a pod

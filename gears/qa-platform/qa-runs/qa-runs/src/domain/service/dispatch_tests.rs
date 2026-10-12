@@ -1434,11 +1434,23 @@ async fn a_reconciled_claim_releases_its_lease_and_frees_the_platform() {
 // The timeout sweep
 // ---------------------------------------------------------------------------
 
+/// The uid every fixture run below was "submitted" with.
+const RUN_1_WORKFLOW_UID: &str = "uid-qa-run-1";
+
 fn runner_pod_query(tenant: Uuid, workflow: &str) -> qa_runs_sdk::RunnerPodQuery {
+    runner_pod_query_with_uid(tenant, workflow, RUN_1_WORKFLOW_UID)
+}
+
+fn runner_pod_query_with_uid(
+    tenant: Uuid,
+    workflow: &str,
+    uid: &str,
+) -> qa_runs_sdk::RunnerPodQuery {
     qa_runs_sdk::RunnerPodQuery {
         tenant_id: tenant,
         run_id: RUN_1,
         workflow_name: workflow.to_owned(),
+        workflow_uid: uid.to_owned(),
     }
 }
 
@@ -1448,6 +1460,7 @@ async fn fakes_with_running_run() -> fakes::Fakes {
         run_fixture(RUN_1, Some(PLATFORM_A), true, RunState::Running),
     )]));
     runs.seed_execution_ref(RUN_1, "qa-run-1-abcde", RunState::Running);
+    runs.seed_execution_uid(RUN_1, RUN_1_WORKFLOW_UID);
     Builder::new().runs(runs).build().await
 }
 
@@ -1488,6 +1501,7 @@ async fn a_pod_claiming_another_tenant_is_not_found_even_under_a_covering_scope(
         run_fixture(RUN_1, Some(PLATFORM_A), true, RunState::Running),
     )]));
     runs.seed_execution_ref(RUN_1, "qa-run-1-abcde", RunState::Running);
+    runs.seed_execution_uid(RUN_1, RUN_1_WORKFLOW_UID);
     let covering = Arc::new(fakes::CoveringSystemAuthZ::default());
     let fakes = Builder::new()
         .runs(runs)
@@ -1518,10 +1532,134 @@ async fn a_terminal_run_is_not_found() {
         run_fixture(RUN_1, Some(PLATFORM_A), true, RunState::Succeeded),
     )]));
     runs.seed_execution_ref(RUN_1, "qa-run-1-abcde", RunState::Succeeded);
+    runs.seed_execution_uid(RUN_1, RUN_1_WORKFLOW_UID);
     let fakes = Builder::new().runs(runs).build().await;
     let refused = fakes
         .dispatch
         .resolve_runner_pod(&runner_pod_query(OTHER_TENANT, "qa-run-1-abcde"))
+        .await;
+    assert!(
+        matches!(refused, Err(DomainError::RunNotFound { .. })),
+        "{refused:?}"
+    );
+}
+
+/// An empty uid never binds, even when an empty one was recorded: the
+/// comparison would otherwise succeed on two blanks.
+#[tokio::test]
+async fn an_empty_workflow_uid_is_refused_even_if_an_empty_one_was_recorded() {
+    let runs = Arc::new(FakeRuns::with(vec![(
+        OTHER_TENANT,
+        run_fixture(RUN_1, Some(PLATFORM_A), true, RunState::Running),
+    )]));
+    runs.seed_execution_ref(RUN_1, "qa-run-1-abcde", RunState::Running);
+    runs.seed_execution_uid(RUN_1, "");
+    let fakes = Builder::new().runs(runs).build().await;
+    let refused = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query_with_uid(
+            OTHER_TENANT,
+            "qa-run-1-abcde",
+            "",
+        ))
+        .await;
+    assert!(
+        matches!(refused, Err(DomainError::RunNotFound { id }) if id == RUN_1),
+        "{refused:?}"
+    );
+}
+
+/// The run's Workflow was submitted with one uid; a pod controlled by a
+/// same-named Workflow with another uid (deleted and recreated) is refused.
+#[tokio::test]
+async fn a_workflow_recreated_under_the_same_name_is_refused() {
+    let fakes = fakes_with_running_run().await;
+    let refused = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query_with_uid(
+            OTHER_TENANT,
+            "qa-run-1-abcde",
+            "uid-recreated",
+        ))
+        .await;
+    assert!(
+        matches!(refused, Err(DomainError::RunNotFound { id }) if id == RUN_1),
+        "{refused:?}"
+    );
+    let granted = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query(OTHER_TENANT, "qa-run-1-abcde"))
+        .await;
+    assert!(granted.is_ok(), "{granted:?}");
+}
+
+/// A run submitted before the uid was recorded has none to compare: refused.
+#[tokio::test]
+async fn a_run_with_no_recorded_uid_is_refused() {
+    let runs = Arc::new(FakeRuns::with(vec![(
+        OTHER_TENANT,
+        run_fixture(RUN_1, Some(PLATFORM_A), true, RunState::Running),
+    )]));
+    runs.seed_execution_ref(RUN_1, "qa-run-1-abcde", RunState::Running);
+    let fakes = Builder::new().runs(runs).build().await;
+    let refused = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query_with_uid(
+            OTHER_TENANT,
+            "qa-run-1-abcde",
+            "anything",
+        ))
+        .await;
+    assert!(
+        matches!(refused, Err(DomainError::RunNotFound { .. })),
+        "{refused:?}"
+    );
+}
+
+/// The whole path: a real dispatch submits through the executor, the uid it
+/// minted is recorded, and `resolve_runner_pod` grants that uid and refuses
+/// another.
+#[tokio::test]
+async fn a_dispatched_runs_executor_minted_uid_is_the_one_that_resolves() {
+    let run = run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Dispatching);
+    let row = queued_row(
+        ROW_1,
+        OWNER_TENANT,
+        RUN_1,
+        PLATFORM_A,
+        false,
+        QueueState::Dispatching,
+    );
+    let executor = Arc::new(crate::infra::executor::mock::MockRunExecutor::new());
+    let fakes = Builder::new()
+        .runs(Arc::new(FakeRuns::with(vec![(OWNER_TENANT, run)])))
+        .queue(Arc::new(FakeQueue::with(vec![row])))
+        .executor(Arc::clone(&executor) as Arc<dyn crate::domain::ports::run_executor::RunExecutor>)
+        .build()
+        .await;
+    fakes
+        .dispatch
+        .dispatch_one(&ctx(OWNER_TENANT), RUN_1, Some(ROW_1))
+        .await
+        .expect("the submit succeeds");
+
+    let granted = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query_with_uid(
+            OWNER_TENANT,
+            "mock-execution-1",
+            "mock-uid-1",
+        ))
+        .await
+        .expect("the uid the executor minted resolves");
+    assert_eq!(granted.environment_id, PLATFORM_A);
+    let refused = fakes
+        .dispatch
+        .resolve_runner_pod(&runner_pod_query_with_uid(
+            OWNER_TENANT,
+            "mock-execution-1",
+            "mock-uid-2",
+        ))
         .await;
     assert!(
         matches!(refused, Err(DomainError::RunNotFound { .. })),
@@ -1551,6 +1689,7 @@ async fn a_run_without_an_environment_is_not_found() {
         run_fixture(RUN_1, None, true, RunState::Running),
     )]));
     runs.seed_execution_ref(RUN_1, "qa-run-1-abcde", RunState::Running);
+    runs.seed_execution_uid(RUN_1, RUN_1_WORKFLOW_UID);
     let fakes = Builder::new().runs(runs).build().await;
     let refused = fakes
         .dispatch
@@ -2835,6 +2974,35 @@ async fn the_tick_observes_a_live_run_that_holds_an_execution() {
         "the observer is bound to the run row's own tenant, because ingest stamps \
          that tenant onto every per-test row it writes"
     );
+}
+
+/// The observer is handed the uid the run recorded at submit, because the log
+/// drain binds pods to it. A legacy run recorded none and is handed the bare
+/// reference (the watcher pins the live Workflow's uid then).
+#[tokio::test]
+async fn the_tick_hands_the_observer_the_recorded_workflow_uid() {
+    let mut recorded = run_fixture(RUN_1, Some(PLATFORM_A), false, RunState::Running);
+    recorded.execution_ref = Some("mock-execution-1".to_owned());
+    let mut legacy = run_fixture(RUN_2, Some(PLATFORM_A), false, RunState::Running);
+    legacy.execution_ref = Some("mock-execution-2".to_owned());
+    let runs = Arc::new(FakeRuns::with(vec![
+        (OWNER_TENANT, recorded),
+        (OWNER_TENANT, legacy),
+    ]));
+    runs.seed_execution_uid(RUN_1, "wf-uid-1");
+
+    let fakes = Builder::new().runs(runs).build().await;
+    fakes.dispatch.run_tick().await;
+
+    let attached = fakes.watcher.attached();
+    let uid_of = |run_id| {
+        attached
+            .iter()
+            .find(|target| target.run_id == run_id)
+            .map(|target| target.execution_ref.uid().map(str::to_owned))
+    };
+    assert_eq!(uid_of(RUN_1), Some(Some("wf-uid-1".to_owned())));
+    assert_eq!(uid_of(RUN_2), Some(None), "a legacy run is attached without a uid");
 }
 
 /// **A run with no platform is observed too, and that is the whole reason the

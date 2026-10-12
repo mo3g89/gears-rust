@@ -323,12 +323,21 @@ impl SmtpMailClient {
             TlsMode::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(host),
             TlsMode::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host),
         };
-        built.map_err(|e| {
-            DomainError::Internal(format!(
-                "the SMTP transport for {host} could not be built: {e}"
-            ))
-        })
+        built.map_err(|e| relay_build_failure(host, &e))
     }
+}
+
+/// The TLS relay for `host` could not be built: the operator's relay
+/// configuration or the TLS layer, not a fault in this gear, so
+/// [`DomainError::UpstreamEgress`] naming the host rather than an opaque
+/// `Internal`. `detail` is the TLS layer's own error, which describes the
+/// transport and never the credentials (none are in scope here).
+fn relay_build_failure(host: &str, detail: &dyn std::fmt::Display) -> DomainError {
+    upstream(
+        host,
+        EgressFailure::Unreachable,
+        format!("the SMTP transport could not be built: {detail}"),
+    )
 }
 
 /// Parse one mailbox, naming the settings field it came from.

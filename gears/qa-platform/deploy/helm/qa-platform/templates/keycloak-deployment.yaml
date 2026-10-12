@@ -1,11 +1,11 @@
 {{/* Keycloak runs `start-dev` on its embedded H2 database -- deliberately, not
      an oversight. That is only safe because keycloak-realm-secret.yaml's
-     realm-qa-platform.json pins the qa-platform-workflow client's secret: a
-     pod restart discards H2, `--import-realm` re-imports the realm, and the
-     re-import produces the SAME client secret every time, so the
-     pre-provisioned Kubernetes Secret in the argo namespace (a later task)
-     stays valid across restarts. Do not add KC_DB/a database here -- that
-     would break the "same secret every restart" premise, not improve it.
+     realm-qa-platform.json pins the qa-platform-workflow client's secret
+     (argo.workflowClientSecret): a pod restart discards H2, `--import-realm`
+     re-imports the realm, and the re-import produces the SAME client secret
+     every time, so verify-k8s.sh's check 9b, which reads that secret from the
+     release, keeps working across restarts. Do not add KC_DB/a database here --
+     that would break the "same secret every restart" premise, not improve it.
 
      NO KC_HTTP_RELATIVE_PATH. Keycloak stays at its default root path:
        - entrypoint.sh:137 validates PUBLIC_ISSUER_ORIGIN against a bare

@@ -554,9 +554,46 @@ def check_api_server_egress(failures):
         "on TCP 443, and nothing excepts it back out")
 
 
+def check_workflow_guard_requires_the_label(failures):
+    """The admission policy refuses a runner template without the label the
+    NetworkPolicy selects on. Without it a compromised gears could submit a
+    runner pod outside the policy. The literal is read from workflow.rs, not
+    hardcoded here."""
+    docs, _, rc = render()
+    if rc != 0:
+        return  # already reported
+    key, value = rust_isolation_label()
+    if key is None or value is None:
+        return  # already reported
+    expressions = [
+        v.get("expression", "")
+        for d in docs
+        if d and d.get("kind") == "ValidatingAdmissionPolicy"
+        and d["metadata"]["name"].startswith("qa-platform-workflow-guard-")
+        for v in d["spec"].get("validations", [])
+        if "network-isolation label" in v.get("message", "")
+    ]
+    if len(expressions) != 1:
+        failures.append(
+            "FAIL: the rendered workflow-guard policy must hold exactly one "
+            f"validation about the network-isolation label; found {len(expressions)}.")
+        return
+    expr = expressions[0]
+    present = f"'{key}' in " in expr
+    equal = f"['{key}'] == '{value}'" in expr
+    if not (present and equal):
+        failures.append(
+            f"FAIL: the workflow-guard policy's label rule must require "
+            f"{key!r} == {value!r} (workflow.rs's NETWORK_ISOLATION_LABEL / "
+            f"NETWORK_ISOLATION_LABEL_VALUE); got {expr!r}")
+        return
+    print(f"PASS: the workflow-guard policy requires {key!r} == {value!r} on every runner template")
+
+
 def main():
     failures = []
     check_label_pair_agrees_with_rust(failures)
+    check_workflow_guard_requires_the_label(failures)
     check_namespace_and_default_deny_shape(failures)
     check_dns_and_gears_egress(failures)
     check_target_environment_superset_excludes_private_space(failures)

@@ -6,6 +6,7 @@
 //! The pod's workflow is its controller `ownerReference`, never a label.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec, TokenReviewStatus};
@@ -39,10 +40,68 @@ pub struct ReviewedToken {
     pub pod_uid: String,
 }
 
+/// How many `TokenReview`s may be in flight at once. The route is anonymous
+/// and in-cluster, so this is the most a flood can cost the API server.
+/// Bounded; a plausible request waits up to `PERMIT_WAIT` for one.
+pub const MAX_CONCURRENT_REVIEWS: usize = 16;
+
+/// Longest token the route reads. A projected `ServiceAccount` token is about
+/// 1-2 KiB; anything near this is not one.
+const MAX_TOKEN_BYTES: usize = 8192;
+
+/// How long a plausible request waits for a review permit before it is 503.
+/// Inside the service's 30 s deadline (`RUNNER_CREDENTIALS_DEADLINE`).
+const PERMIT_WAIT: Duration = Duration::from_secs(5);
+
+/// A cheap, UNVERIFIED read of the token's claims, before it costs a permit:
+/// the shape, `aud` naming this route, `sub` naming the runner account, `exp`
+/// in the future. It proves nothing. The `TokenReview` that follows is the proof.
+/// What it buys: junk from any pod is refused without taking one of
+/// [`MAX_CONCURRENT_REVIEWS`] from every tenant's runners, so a junk flood
+/// cannot deny the route to them. A forged-but-plausible flood still competes
+/// for permits; ADR-0008 records that residue.
+fn plausible(token: &str, expected_username: &str, now_unix: i64) -> Result<(), &'static str> {
+    use base64::Engine as _;
+    if token.len() > MAX_TOKEN_BYTES {
+        return Err("the token is too long to be a projected ServiceAccount token");
+    }
+    let mut parts = token.split('.');
+    let (Some(_), Some(payload), Some(_), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err("the token is not a JWT");
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|_| "the token's payload is not base64url")?;
+    let claims: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| "the token's payload is not JSON")?;
+    let audience_ok = match &claims["aud"] {
+        serde_json::Value::String(aud) => aud == AUDIENCE,
+        serde_json::Value::Array(auds) => auds.iter().any(|aud| aud == AUDIENCE),
+        _ => false,
+    };
+    if !audience_ok {
+        return Err("the token is not for this audience");
+    }
+    if claims["sub"].as_str() != Some(expected_username) {
+        return Err("the token is not the runner ServiceAccount's");
+    }
+    if claims["exp"].as_i64().is_none_or(|exp| exp <= now_unix) {
+        return Err("the token has expired");
+    }
+    Ok(())
+}
+
 /// [`PodIdentityVerifier`] over the Argo cluster's API server.
 pub struct KubePodIdentityVerifier {
     namespace: String,
     expected_username: String,
+    /// One client for the verifier's life. `get_or_try_init` never stores a
+    /// failed init, so a transient `Config::infer` failure is retried on the
+    /// next request and does not poison the verifier.
+    client: tokio::sync::OnceCell<Client>,
+    permits: tokio::sync::Semaphore,
 }
 
 impl KubePodIdentityVerifier {
@@ -55,23 +114,44 @@ impl KubePodIdentityVerifier {
         Self {
             namespace,
             expected_username,
+            client: tokio::sync::OnceCell::new(),
+            permits: tokio::sync::Semaphore::new(MAX_CONCURRENT_REVIEWS),
         }
     }
 
-    async fn client() -> Result<Client, PodIdentityRefusal> {
-        let config = Config::infer()
+    async fn client(&self) -> Result<Client, PodIdentityRefusal> {
+        self.client
+            .get_or_try_init(|| async {
+                let config = Config::infer().await.map_err(|_| {
+                    PodIdentityRefusal::Unavailable("no in-cluster Kubernetes config")
+                })?;
+                Client::try_from(config).map_err(|_| {
+                    PodIdentityRefusal::Unavailable("the Kubernetes client could not be built")
+                })
+            })
             .await
-            .map_err(|_| PodIdentityRefusal::Unavailable("no in-cluster Kubernetes config"))?;
-        Client::try_from(config).map_err(|_| {
-            PodIdentityRefusal::Unavailable("the Kubernetes client could not be built")
-        })
+            .cloned()
     }
 }
 
 #[async_trait]
 impl PodIdentityVerifier for KubePodIdentityVerifier {
     async fn verify(&self, token: &str) -> Result<VerifiedRunnerPod, PodIdentityRefusal> {
-        let client = Self::client().await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+        plausible(token, &self.expected_username, now)
+            .map_err(PodIdentityRefusal::Unauthenticated)?;
+        // Bounded, and now briefly queued: a plausible request waits up to
+        // PERMIT_WAIT rather than failing at once, so a burst of real runners is
+        // not turned into 503s.
+        let _permit = tokio::time::timeout(PERMIT_WAIT, self.permits.acquire())
+            .await
+            .map_err(|_| {
+                PodIdentityRefusal::Unavailable("too many runner-credential requests in flight")
+            })?
+            .map_err(|_| PodIdentityRefusal::Unavailable("the review permits are closed"))?;
+        let client = self.client().await?;
         let review = TokenReview {
             spec: TokenReviewSpec {
                 token: Some(token.to_owned()),
@@ -139,17 +219,23 @@ pub fn reviewed_token(
     })
 }
 
-/// The name of the one Argo `Workflow` that is `pod`'s controller owner, or
-/// `None` when there is not exactly one.
+/// The name and uid of the one Argo `Workflow` that is `pod`'s controller
+/// owner, or `None` when there is not exactly one or either is empty.
 ///
-/// The workflow name is the binding to a run (it is compared to the run's
-/// `execution_ref`), so it is read from the controller `ownerReference`, which
-/// the Argo controller sets and a `Workflow` spec cannot. The
+/// The **uid** is the binding to a run (it is compared to the uid qa-runs
+/// recorded when it submitted the Workflow); the name is a cheap first filter.
+/// A Workflow deleted and recreated under the same name has a new uid and is
+/// refused. Both are read from the controller `ownerReference`, which the Argo
+/// controller sets and a `Workflow` spec cannot. The
 /// `workflows.argoproj.io/workflow` label is not used: Argo applies template
 /// metadata labels after its own, so a `Workflow` author can overwrite it.
-/// A principal that can create pods directly can still write any
-/// `ownerReferences`; ADR-0008 records that residue.
-fn controlling_workflow(pod: &Pod) -> Option<String> {
+/// The chart's runner guard lets only the Argo controller create runner pods,
+/// and guards the controller's own ServiceAccount (pods and tokens). What
+/// remains is a principal that can act as the controller anyway -- through a
+/// Deployment or ReplicaSet running as its ServiceAccount, or exec into its
+/// pod -- and so write any `ownerReferences`; ADR-0008's "What remains" (2026-10-12
+/// amendment) records that residue.
+fn controlling_workflow(pod: &Pod) -> Option<(String, String)> {
     let mut workflows = pod
         .metadata
         .owner_references
@@ -165,7 +251,9 @@ fn controlling_workflow(pod: &Pod) -> Option<String> {
                     .is_some_and(|(group, _)| group == WORKFLOW_API_GROUP)
         });
     match (workflows.next(), workflows.next()) {
-        (Some(owner), None) if !owner.name.is_empty() => Some(owner.name.clone()),
+        (Some(owner), None) if !owner.name.is_empty() && !owner.uid.is_empty() => {
+            Some((owner.name.clone(), owner.uid.clone()))
+        }
         _ => None,
     }
 }
@@ -195,12 +283,14 @@ pub fn verified_pod(
         .as_ref()
         .ok_or("the pod has no labels")?;
     let uuid_label = |key: &str| labels.get(key).and_then(|v| Uuid::parse_str(v).ok());
+    let (workflow_name, workflow_uid) = controlling_workflow(pod)
+        .ok_or("the pod is not controlled by exactly one Argo Workflow")?;
     Ok(VerifiedRunnerPod {
         pod_name: reviewed.pod_name.clone(),
         tenant_id: uuid_label(TENANT_LABEL).ok_or("the pod has no tenant label")?,
         run_id: uuid_label(RUN_LABEL).ok_or("the pod has no run label")?,
-        workflow_name: controlling_workflow(pod)
-            .ok_or("the pod is not controlled by exactly one Argo Workflow")?,
+        workflow_name,
+        workflow_uid,
     })
 }
 
@@ -214,7 +304,11 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
     use uuid::Uuid;
 
-    use super::{AUDIENCE, ReviewedToken, reviewed_token, verified_pod};
+    use super::{
+        AUDIENCE, KubePodIdentityVerifier, MAX_CONCURRENT_REVIEWS, MAX_TOKEN_BYTES, PERMIT_WAIT,
+        ReviewedToken, plausible, reviewed_token, verified_pod,
+    };
+    use crate::domain::ports::{PodIdentityRefusal, PodIdentityVerifier};
 
     const USERNAME: &str = "system:serviceaccount:argo:qa-platform-runner";
     const POD: &str = "qa-run-1-abcde-n-0-1234";
@@ -222,6 +316,92 @@ mod tests {
     const TENANT: &str = "11111111-1111-4111-8111-111111111111";
     const RUN: &str = "22222222-2222-4222-8222-222222222222";
     const WORKFLOW: &str = "qa-run-1-abcde";
+    const WORKFLOW_UID: &str = "wf-uid";
+
+    fn jwt(claims: serde_json::Value) -> String {
+        use base64::Engine as _;
+        let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        format!(
+            "{}.{}.{}",
+            enc.encode(br#"{"alg":"RS256"}"#),
+            enc.encode(claims.to_string()),
+            enc.encode(b"sig")
+        )
+    }
+
+    const SUB: &str = "system:serviceaccount:argo:qa-platform-runner";
+    /// Year 2096 in unix seconds: an expiry no test run outlives.
+    const FAR_FUTURE: i64 = 4_000_000_000;
+
+    fn plausible_claims() -> serde_json::Value {
+        serde_json::json!({ "aud": [AUDIENCE], "sub": SUB, "exp": FAR_FUTURE })
+    }
+
+    #[test]
+    fn a_well_formed_runner_token_is_plausible() {
+        assert!(plausible(&jwt(plausible_claims()), SUB, 1_000).is_ok());
+    }
+
+    #[test]
+    fn junk_wrong_audience_wrong_subject_expired_and_oversized_are_not() {
+        assert!(plausible("garbage", SUB, 1_000).is_err());
+        assert!(
+            plausible(
+                &jwt(serde_json::json!({"aud": ["other"], "sub": SUB, "exp": FAR_FUTURE})),
+                SUB,
+                1_000
+            )
+            .is_err()
+        );
+        assert!(
+            plausible(
+                &jwt(serde_json::json!({"aud": AUDIENCE, "sub": "system:serviceaccount:argo:default", "exp": FAR_FUTURE})),
+                SUB,
+                1_000
+            )
+            .is_err()
+        );
+        assert!(
+            plausible(
+                &jwt(serde_json::json!({"aud": [AUDIENCE], "sub": SUB, "exp": 999})),
+                SUB,
+                1_000
+            )
+            .is_err()
+        );
+        assert!(plausible(&"a".repeat(MAX_TOKEN_BYTES + 1), SUB, 1_000).is_err());
+    }
+
+    #[tokio::test]
+    async fn junk_is_refused_without_taking_a_permit() {
+        let verifier = KubePodIdentityVerifier::new("argo".to_owned(), "qa-platform-runner");
+        let _held: Vec<_> = (0..MAX_CONCURRENT_REVIEWS)
+            .map(|_| verifier.permits.try_acquire().unwrap())
+            .collect();
+        let refused = verifier.verify("garbage").await;
+        assert!(
+            matches!(refused, Err(PodIdentityRefusal::Unauthenticated(_))),
+            "{refused:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_plausible_token_waits_for_a_permit_then_is_unavailable() {
+        let verifier = KubePodIdentityVerifier::new("argo".to_owned(), "qa-platform-runner");
+        let _held: Vec<_> = (0..MAX_CONCURRENT_REVIEWS)
+            .map(|_| verifier.permits.try_acquire().unwrap())
+            .collect();
+        let started = tokio::time::Instant::now();
+        let refused = verifier.verify(&jwt(plausible_claims())).await;
+        assert!(
+            matches!(refused, Err(PodIdentityRefusal::Unavailable(_))),
+            "{refused:?}"
+        );
+        assert!(
+            started.elapsed() >= PERMIT_WAIT,
+            "it waited, rather than failing at once"
+        );
+    }
 
     fn extra(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
         pairs
@@ -293,7 +473,7 @@ mod tests {
             api_version: "argoproj.io/v1alpha1".to_owned(),
             kind: "Workflow".to_owned(),
             name: name.to_owned(),
-            uid: "0b7a3c1e-0000-4000-8000-0000000000ff".to_owned(),
+            uid: WORKFLOW_UID.to_owned(),
             controller: Some(true),
             block_owner_deletion: Some(true),
         }
@@ -455,6 +635,13 @@ mod tests {
     }
 
     #[test]
+    fn the_workflow_uid_is_the_controller_owner_references() {
+        let verified =
+            verified_pod(&reviewed(), USERNAME, &pod(UID, "Running", all_labels())).unwrap();
+        assert_eq!(verified.workflow_uid, "wf-uid");
+    }
+
+    #[test]
     fn a_pod_without_the_workflow_label_but_owned_by_a_workflow_is_verified() {
         let mut labels = all_labels();
         labels.remove("workflows.argoproj.io/workflow");
@@ -486,6 +673,10 @@ mod tests {
             ..workflow_owner(WORKFLOW)
         };
         let empty_name = workflow_owner("");
+        let empty_uid = OwnerReference {
+            uid: String::new(),
+            ..workflow_owner(WORKFLOW)
+        };
         let cases: Vec<(&str, Option<Vec<OwnerReference>>)> = vec![
             ("label only, no ownerReferences", None),
             ("an empty ownerReferences list", Some(vec![])),
@@ -495,6 +686,7 @@ mod tests {
             ("a Workflow of another API group", Some(vec![wrong_group])),
             ("a ReplicaSet controller", Some(vec![replica_set])),
             ("an empty owner name", Some(vec![empty_name])),
+            ("an empty owner uid", Some(vec![empty_uid])),
             (
                 "two Workflow controllers",
                 Some(vec![workflow_owner(WORKFLOW), workflow_owner("qa-run-2")]),

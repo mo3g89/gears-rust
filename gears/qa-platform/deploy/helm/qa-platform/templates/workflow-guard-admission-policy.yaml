@@ -97,6 +97,38 @@ spec:
           && (!has(t.container.securityContext.privileged) || t.container.securityContext.privileged == false)))
       message: "workflow-guard: container env or securityContext outside the qa-runs shape"
     - expression: >-
+        request.operation != 'CREATE' ||
+        object.spec.templates.all(t, !has(t.container) ||
+          t.container.all(k, k in ['image','imagePullPolicy','command','env','securityContext','resources','volumeMounts']))
+      message: "workflow-guard: container key not in the qa-runs allowlist"
+    - expression: >-
+        request.operation != 'CREATE' ||
+        object.spec.templates.all(t, !has(t.container) || (
+          has(t.container.securityContext)
+          && t.container.securityContext.all(k, k in ['allowPrivilegeEscalation','capabilities'])
+          && has(t.container.securityContext.capabilities)
+          && t.container.securityContext.capabilities.all(k, k == 'drop')
+          && has(t.container.securityContext.capabilities.drop)
+          && t.container.securityContext.capabilities.drop.exists(c, c == 'ALL')))
+      message: "workflow-guard: container securityContext outside the qa-runs shape"
+    - expression: >-
+        request.operation != 'CREATE' ||
+        (has(object.spec.securityContext)
+         && object.spec.securityContext.all(k, k in ['runAsNonRoot','runAsUser','fsGroup','seccompProfile'])
+         && has(object.spec.securityContext.runAsUser) && object.spec.securityContext.runAsUser > 0
+         && (!has(object.spec.securityContext.fsGroup) || object.spec.securityContext.fsGroup > 0)
+         && has(object.spec.securityContext.seccompProfile)
+         && has(object.spec.securityContext.seccompProfile.type)
+         && object.spec.securityContext.seccompProfile.type == 'RuntimeDefault')
+      message: "workflow-guard: pod securityContext outside the qa-runs shape"
+    - expression: >-
+        request.operation != 'CREATE' ||
+        object.spec.templates.all(t, !has(t.container) || (
+          has(t.metadata) && has(t.metadata.labels)
+          && 'qa-platform/network-isolated' in t.metadata.labels
+          && t.metadata.labels['qa-platform/network-isolated'] == 'true'))
+      message: "workflow-guard: runner template must carry the network-isolation label"
+    - expression: >-
         request.operation != 'CREATE' || !has(object.status)
       message: "workflow-guard: a created Workflow may not carry a status"
     - expression: >-

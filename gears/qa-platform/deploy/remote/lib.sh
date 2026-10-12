@@ -180,23 +180,17 @@ remote_sh() {
 # the deploy reported success.
 #
 # The direct fix is `</dev/null` on every command that could forward stdin.
-# **This comment used to claim that is done at each call site, and it is
-# not** (second review, finding #99): no `remote_sh` body in
-# `deploy-k8s.sh` carries the redirect, and two of them end in a sub-shell
-# that could forward stdin -- `bash deploy/runner/build-and-import.sh` in
-# the BUILDRUNNER heredoc, and `bash "$VERIFY_SCRIPT"` in the VERIFYK8S
-# one. Neither eats anything today, and the reason is positional rather
-# than defensive: each is the **last statement** of its heredoc, so there
-# is nothing after it left to swallow. Add the redirect before adding a
-# line after either.
+# Every `remote_sh` body in `deploy-k8s.sh` that runs a `bash` child (the
+# BUILDRUNNER, LEFTOVER and VERIFYK8S heredocs) redirects that child's stdin
+# from /dev/null, so the child cannot read the rest of the script. To list the
+# bodies, `grep -n 'remote_sh' deploy/remote/*.sh`; read each one before adding
+# a sub-shell or a stdin-forwarding command that lacks the redirect.
 #
-# This function is the fix for the CLASS, and it is what the codebase
-# actually relies on: the body must print a sentinel line as its last act,
-# and a step that exits 0 without printing it is a failure. Any future
-# command that eats the script is then loud instead of invisible. It is
-# also why the two bodies above are `remote_sh` and not this -- neither
-# prints a sentinel, so neither is covered, which is the other half of
-# what the missing redirects cost.
+# `remote_sh_expect` is the safety net for the CLASS: the body must print a
+# sentinel line as its last act, and a step that exits 0 without printing it
+# is a failure. Any future command that eats the script is then loud instead
+# of invisible. A plain `remote_sh` prints no sentinel, so it is covered only
+# by the redirects at its call sites.
 #
 # The cost is that output is captured and printed at the end rather than
 # streamed. Acceptable for the bounded verify-style steps this is used for,

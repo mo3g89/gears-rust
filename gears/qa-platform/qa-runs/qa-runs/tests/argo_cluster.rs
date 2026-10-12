@@ -96,9 +96,11 @@ fn config(command: Vec<String>) -> ArgoExecutorConfig {
         // The image is already in the node's containerd, and this cluster has no
         // registry credentials.
         image_pull_policy: "IfNotPresent".to_owned(),
-        // The Helm chart's workflow account. Without it the pod runs as
-        // `default`, which cannot create `workflowtaskresults` and fails the
-        // run *after* all of its output — see the field's doc.
+        // The argo-workflows Helm chart's default workflow account
+        // (`argo-workflow`), unless `QA_RUNS_ARGO_SERVICE_ACCOUNT` names
+        // another, such as qa-platform's `qa-platform-runner`. Without one the
+        // pod runs as `default`, which cannot create `workflowtaskresults` and
+        // fails the run *after* all of its output — see the field's doc.
         workflow_service_account: Some(
             std::env::var("QA_RUNS_ARGO_SERVICE_ACCOUNT")
                 .unwrap_or_else(|_| "argo-workflow".to_owned()),

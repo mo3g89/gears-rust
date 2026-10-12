@@ -301,6 +301,7 @@ fn run_active_model(tenant_id: Uuid, new: &NewRun) -> Result<RunAM, DomainError>
         // Each of these has exactly one writer, and it is not this one -- see
         // `NewRun`'s table.
         execution_ref: ActiveValue::Set(None),
+        execution_uid: ActiveValue::Set(None),
         log_storage_ref: ActiveValue::Set(None),
         timeout_at: ActiveValue::Set(new.timeout_at),
         started_at: ActiveValue::Set(None),
@@ -501,17 +502,38 @@ impl RunsRepository for OrmRunsRepository {
         scope: &AccessScope,
         id: Uuid,
         execution_ref: &str,
+        execution_uid: Option<&str>,
     ) -> Result<bool, DomainError> {
         let result = RunEntity::update_many()
             .filter(by_id(id))
             .secure()
             .scope_with(scope)
             .col_expr(RunColumn::ExecutionRef, Expr::value(execution_ref))
+            .col_expr(
+                RunColumn::ExecutionUid,
+                Expr::value(execution_uid.map(str::to_owned)),
+            )
             .col_expr(RunColumn::UpdatedAt, Expr::value(OffsetDateTime::now_utc()))
             .exec(runner)
             .await
             .map_err(db_err)?;
         Ok(result.rows_affected == 1)
+    }
+
+    async fn execution_uid<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<String>, DomainError> {
+        let found = RunEntity::find()
+            .filter(by_id(id))
+            .secure()
+            .scope_with(scope)
+            .one(runner)
+            .await
+            .map_err(db_err)?;
+        Ok(found.and_then(|model| model.execution_uid))
     }
 
     /// `bundle_ids = $2`, with the same shape as
@@ -999,7 +1021,7 @@ mod tests {
         );
         assert!(
             !repo
-                .set_execution_ref(&conn, &scope(b), run.id, "hijacked")
+                .set_execution_ref(&conn, &scope(b), run.id, "hijacked", None)
                 .await
                 .unwrap()
         );
@@ -1344,7 +1366,7 @@ mod tests {
         assert_eq!(run.log_storage_ref, None);
 
         assert!(
-            repo.set_execution_ref(&conn, &scope(tenant), run.id, "workflow/vhp-smoke-42")
+            repo.set_execution_ref(&conn, &scope(tenant), run.id, "workflow/vhp-smoke-42", None)
                 .await
                 .unwrap()
         );
@@ -1376,9 +1398,61 @@ mod tests {
         // An id this scope cannot resolve matches no row.
         assert!(
             !repo
-                .set_execution_ref(&conn, &scope(tenant), Uuid::new_v4(), "nowhere")
+                .set_execution_ref(&conn, &scope(tenant), Uuid::new_v4(), "nowhere", None)
                 .await
                 .unwrap()
+        );
+    }
+
+    /// The uid is stored beside the name, written by the same call, and read
+    /// back under the same scope filter as `get`: another tenant's scope sees
+    /// nothing, and a run with no uid (submitted before the column existed, or
+    /// by an executor that mints none) reads `None`.
+    #[tokio::test]
+    async fn set_execution_ref_records_the_workflow_uid() {
+        let db = inmem_db().await;
+        let conn = db.conn().unwrap();
+        let tenant = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let repo = OrmRunsRepository;
+        let run = repo
+            .create(&conn, &scope(tenant), tenant, sample_new_run("uid-1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.execution_uid(&conn, &scope(tenant), run.id).await.unwrap(),
+            None,
+            "a fresh run has no uid"
+        );
+        assert!(
+            repo.set_execution_ref(&conn, &scope(tenant), run.id, "qa-run-uid-1", Some("3f1c-uid"))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            repo.execution_uid(&conn, &scope(tenant), run.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("3f1c-uid")
+        );
+        assert_eq!(
+            repo.execution_uid(&conn, &scope(other), run.id).await.unwrap(),
+            None,
+            "another tenant's scope must not read the uid"
+        );
+        let stored = repo.get(&conn, &scope(tenant), run.id).await.unwrap().unwrap();
+        assert_eq!(stored.execution_ref.as_deref(), Some("qa-run-uid-1"));
+
+        // Re-recording without a uid clears it: the pair is written together.
+        assert!(
+            repo.set_execution_ref(&conn, &scope(tenant), run.id, "qa-run-uid-1", None)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            repo.execution_uid(&conn, &scope(tenant), run.id).await.unwrap(),
+            None
         );
     }
 
@@ -1623,7 +1697,7 @@ mod tests {
         let mut running = sample_new_run("running-with-handle");
         running.state = RunState::Running;
         let running = repo.create(&conn, &scope(a), a, running).await.unwrap();
-        repo.set_execution_ref(&conn, &scope(a), running.id, "exec-running")
+        repo.set_execution_ref(&conn, &scope(a), running.id, "exec-running", None)
             .await
             .unwrap();
 
@@ -1633,7 +1707,7 @@ mod tests {
         let mut mid = sample_new_run("dispatching-with-handle");
         mid.state = RunState::Dispatching;
         let mid = repo.create(&conn, &scope(a), a, mid).await.unwrap();
-        repo.set_execution_ref(&conn, &scope(a), mid.id, "exec-mid")
+        repo.set_execution_ref(&conn, &scope(a), mid.id, "exec-mid", None)
             .await
             .unwrap();
 
@@ -1648,7 +1722,7 @@ mod tests {
         let mut done = sample_new_run("finished-with-handle");
         done.state = RunState::Succeeded;
         let done = repo.create(&conn, &scope(a), a, done).await.unwrap();
-        repo.set_execution_ref(&conn, &scope(a), done.id, "exec-done")
+        repo.set_execution_ref(&conn, &scope(a), done.id, "exec-done", None)
             .await
             .unwrap();
 
@@ -1706,7 +1780,7 @@ mod tests {
                 .create(&conn, &scope(tenant), tenant, run)
                 .await
                 .unwrap();
-            repo.set_execution_ref(&conn, &scope(tenant), created.id, &format!("exec-{i}"))
+            repo.set_execution_ref(&conn, &scope(tenant), created.id, &format!("exec-{i}"), None)
                 .await
                 .unwrap();
             all_ids.push(created.id);

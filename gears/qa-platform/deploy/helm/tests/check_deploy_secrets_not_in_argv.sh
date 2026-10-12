@@ -11,7 +11,7 @@
 # is extracted from the REAL script by markers, or sourced from the real
 # lib.sh, never reimplemented.
 #
-#   1. verify-k8s.sh check 16: the workflow client secret and the bearer token
+#   1. verify-k8s.sh check 9b: the workflow client secret and the bearer token
 #      it buys travel to curl in mode-600 files, not argv.
 #   2. lib.sh helm_secret_files: every chart secret reaches helm through
 #      --set-file, in a mode-600 file, never as --set.
@@ -32,7 +32,7 @@ RUNNER="$DEPLOY/runner/entrypoint.sh"
 for f in "$LIB" "$DEPLOY_K8S" "$VERIFY" "$RUNNER"; do
     [[ -f "$f" ]] || { echo "FAIL: $f not found"; exit 1; }
 done
-command -v jq >/dev/null || { echo "FAIL: jq is required (verify-k8s.sh check 16 uses it)"; exit 1; }
+command -v jq >/dev/null || { echo "FAIL: jq is required (verify-k8s.sh check 9b uses it)"; exit 1; }
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
@@ -79,7 +79,7 @@ if [[ -n "$start" ]]; then
     [[ -n "$rel" ]] && end=$((start + rel - 1))
 fi
 if [[ -z "$start" || -z "$end" ]]; then
-    fail "could not locate verify-k8s.sh check 16's token block (markers moved)"
+    fail "could not locate verify-k8s.sh check 9b's token block (markers moved)"
 else
     block="$(sed -n "${start},${end}p" "$VERIFY")"
     realm_b64="$(printf '{"clients":[{"clientId":"qa-platform-workflow","secret":"%s"}]}' "$WF_SECRET" | base64 -w0)"
@@ -99,13 +99,13 @@ printf 200"
       PUBLIC_ORIGIN=https://guard.invalid CA_CRT="$vwork/ca.crt"
       eval "$block" ) > "$WORKDIR/verify.out" 2>&1 || rc=$?
     if [[ "$rc" -ne 0 ]]; then
-        fail "the extracted check 16 block exited $rc:"; sed 's/^/    /' "$WORKDIR/verify.out"
+        fail "the extracted check 9b block exited $rc:"; sed 's/^/    /' "$WORKDIR/verify.out"
     fi
     argv_has "ZQX1" && fail "the workflow client secret reached curl's argv"
     argv_has "ZQX2" && fail "the bearer token reached curl's argv"
     file_has "600 $WF_SECRET" || fail "curl did not read the client secret from a mode-600 file (client_secret@FILE)"
     file_has "600 Authorization: Bearer $TOKEN" || fail "curl did not read the Authorization header from a mode-600 file (-H @FILE)"
-    [[ "$failures" -eq 0 ]] && pass "check 16 sends the client secret and the bearer token from mode-600 files, never argv"
+    [[ "$failures" -eq 0 ]] && pass "check 9b sends the client secret and the bearer token from mode-600 files, never argv"
 fi
 
 # ---------------------------------------------------------------- 2 --

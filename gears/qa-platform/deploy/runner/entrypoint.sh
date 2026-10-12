@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# The qa-platform pytest runner's entrypoint.
+# The qa-platform pytest runner's run script.
 #
-# `/entrypoint.sh` is the path `qa-runs.argo.runner_command` defaults to, which
-# is in turn the source system's hardwired entrypoint
-# (`manager/src/services/argo.rs:528`) -- so this file's LOCATION is part of the
-# contract with the adapter, not an implementation detail.
+# Started by `/entrypoint.sh` (`launch.py`) under `bash --noprofile --norc` and a
+# platform-only environment. The tenant environment is in `$QA_RUNNER_TENANT_ENV`
+# and reaches pytest only, through `with_tenant_env.py`.
+#
+# This file is installed at `/opt/qa-runner/run.sh` (runner.Dockerfile), the
+# path launch.py's RUN_SCRIPT execs. The location contract with the adapter
+# belongs to launch.py: `/entrypoint.sh` is the path
+# `qa-runs.argo.runner_command` defaults to, which is in turn the source
+# system's hardwired entrypoint (`manager/src/services/argo.rs:528`), and the
+# image installs launch.py there.
 #
 # THE CONTRACT, in both directions:
 #
@@ -65,6 +71,11 @@ set -uo pipefail
 WORK="${QA_RUNNER_WORKDIR:-/work}"
 RUNNER_DIR=/opt/qa-runner
 
+if [[ -z "${QA_RUNNER_TENANT_ENV:-}" || ! -f "$QA_RUNNER_TENANT_ENV" ]]; then
+    echo "runner: QA_RUNNER_TENANT_ENV is not set -- start this script through /entrypoint.sh (launch.py), never directly" >&2
+    exit 1
+fi
+
 echo "runner: image=qa-platform-pytest-runner pwd=$(pwd) python=$(python3 --version 2>&1)"
 echo "runner: TEST_FILES=${TEST_FILES:-<unset>}"
 echo "runner: TEST_BUNDLE_REF=${TEST_BUNDLE_REF:-<unset>}"
@@ -100,11 +111,26 @@ fi
 mkdir -p "$WORK"
 # Credentials first, before any tenant-authored code exists in the pod
 # (finding #94): the bundle is that code.
-if ! python3 "$RUNNER_DIR/fetch_credentials.py"; then
+# -I: ignore PYTHON* variables and the user site, so no run variable can put
+# code in front of the fetchers (re-verification P1). PYTEST_ADDOPTS is
+# reserved (qa-runs params.rs) and also dropped here, because it would
+# reopen what reserving QA_RUNNER_PYTEST_ARGS closed.
+# env -u: the fetch URLs name qa-platform-gears.<ns>.svc.cluster.local, which
+# has fewer dots than ndots:5, so glibc tries the search list first, and
+# glibc honours LOCALDOMAIN, RES_OPTIONS and HOSTALIASES (-I does not clear
+# them). A run variable LOCALDOMAIN=evil.example would otherwise send the
+# token and the credentials to an attacker's host. They are not reserved:
+# tenant tests may need them; only the platform's own fetches drop them
+# (here and in report_collect; test_runner_fetch_resolver_env.sh).
+# Belt and braces since launch.py: this script already runs under a
+# platform-only environment, so neither PYTEST_ADDOPTS nor the resolver
+# variables are here. test_runner_fetch_resolver_env.sh still guards the prefixes.
+unset PYTEST_ADDOPTS
+if ! env -u LOCALDOMAIN -u RES_OPTIONS -u HOSTALIASES python3 -I "$RUNNER_DIR/fetch_credentials.py"; then
     echo "runner: credential fetch failed (its own diagnostic is above) -- no tests were run" >&2
     exit 1
 fi
-if ! python3 "$RUNNER_DIR/fetch_bundle.py" "$WORK"; then
+if ! env -u LOCALDOMAIN -u RES_OPTIONS -u HOSTALIASES python3 -I "$RUNNER_DIR/fetch_bundle.py" "$WORK"; then
     echo "runner: bundle fetch failed (its own diagnostic is above) -- no tests were run" >&2
     exit 1
 fi
@@ -187,6 +213,9 @@ echo "runner: bundle root=$WORK content=$CONTENT config_dir=$QA_CONFIG_DIR confi
 # what the alternative (baking wheels into the image) costs.
 if [[ -n "${QA_REQUIREMENTS:-}" ]]; then
     echo "runner: installing $QA_REQUIREMENTS"
+    # pip runs under the platform-only environment (launch.py), so a run
+    # variable cannot choose the package index (PIP_*, proxies) for code that
+    # is installed into a pod holding credentials.
     if ! python3 -m pip install --no-cache-dir --disable-pip-version-check \
         --root-user-action=ignore -r "$QA_REQUIREMENTS"; then
         echo "runner: pip install -r $QA_REQUIREMENTS FAILED -- no tests were run. Either the pod cannot reach the package index or a requirement does not resolve; pip's own diagnostic is above." >&2
@@ -319,7 +348,8 @@ echo "runner: pytest $(python3 -m pytest --version 2>&1 | head -n1) cwd=$(pwd)"
 # Args: bundle-relative test file, case count. Reads VHP_COLLECT_URL from the
 # environment. Exit status: 0 iff accepted.
 report_collect() {
-    python3 - "$1" "$2" <<'PY'
+    # env -u: same resolver isolation as the fetchers above.
+    env -u LOCALDOMAIN -u RES_OPTIONS -u HOSTALIASES python3 -I - "$1" "$2" <<'PY'
 import json
 import os
 import sys
@@ -352,6 +382,17 @@ payload = json.dumps({"test_file": test_file, "case_count": count}).encode("utf-
 ATTEMPTS = 2
 BACKOFF_SECONDS = 5
 
+# No proxy: the `sig` in this URL must reach VHP_COLLECT_URL itself, never a
+# proxy a run variable named. An empty ProxyHandler overrides the environment.
+# A redirect is refused too: it would carry the `sig` to wherever Location
+# points, and the platform never redirects this route.
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
 for attempt in range(1, ATTEMPTS + 1):
     request = urllib.request.Request(
         url,
@@ -360,7 +401,7 @@ for attempt in range(1, ATTEMPTS + 1):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with opener.open(request, timeout=15) as response:
             retried = " (on retry)" if attempt > 1 else ""
             print(
                 "runner: collect report %s=%d -> HTTP %s%s"
@@ -423,7 +464,8 @@ if [[ "${COLLECT_ONLY:-false}" == "true" ]]; then
         # 230-file cycle must not go silent for minutes, and the counts have to
         # be read back out of the same output.
         capture=$(mktemp)
-        python3 -m pytest \
+        python3 -I "$RUNNER_DIR/with_tenant_env.py" "$QA_RUNNER_TENANT_ENV" -- \
+            python3 -m pytest \
             -p collect_reporter \
             --collect-only \
             -q \
@@ -536,7 +578,8 @@ if [[ -n "${QA_RUNNER_PYTEST_ARGS:-}" ]]; then
     set +f
 fi
 
-python3 -m pytest \
+python3 -I "$RUNNER_DIR/with_tenant_env.py" "$QA_RUNNER_TENANT_ENV" -- \
+    python3 -m pytest \
     -p pytest_markers \
     --color=no \
     -o cache_dir=/tmp/pytest_cache \

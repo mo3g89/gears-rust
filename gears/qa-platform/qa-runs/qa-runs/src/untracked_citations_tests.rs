@@ -34,7 +34,7 @@
 //! `ruling <X>` (in either case) where `<X>` is one capital letter, optionally
 //! followed by a number (`Ruling C`, `ruling G-4`). A label is allowed only
 //! when a tracked document under `gears/qa-platform/docs/` says "labelled
-//! `<label>`", which ADR-0001 and ADR-0008 do for `D4`. The allowed set is read
+//! `<label>`", which ADR-0008 does for `D4`. The allowed set is read
 //! on every run, not written down here.
 //!
 //! # What it does not check
@@ -323,7 +323,7 @@ fn no_tracked_file_cites_a_document_the_repository_does_not_hold() {
     let defined = defined_labels(&repo, &files);
     assert!(
         defined.contains("D4"),
-        "ADR-0001 says the runner-Secret writer is labelled `D4`; reading docs/ found \
+        "ADR-0008 says the runner-Secret writer is labelled `D4`; reading docs/ found \
          {defined:?}, so the reader is wrong"
     );
     let mut offenders = Vec::new();

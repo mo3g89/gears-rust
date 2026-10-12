@@ -1,0 +1,290 @@
+{{/* Keeps every OTHER principal off qa-runs Workflows, runner pods and runner
+     tokens in argo.namespace.
+
+     workflow-guard-admission-policy.yaml constrains what qa-platform-gears
+     submits, and nothing else. qa-environments hands a runner pod its
+     credentials only when the pod's projected token, its pod and its
+     controlling Workflow's uid all match a run the gears submitted. Without
+     this policy, anyone else with write rights in the Argo namespace could
+     still:
+       - patch a live qa-runs Workflow;
+       - create a Workflow or a pod that runs as the runner ServiceAccount;
+       - patch a runner pod (its image, say), or add an ephemeral container;
+       - mint a token for the runner ServiceAccount with
+         `serviceaccounts/token`, bound to a live runner pod, and fetch that
+         run's credentials with it;
+       - create a ServiceAccount-token Secret naming the runner ServiceAccount,
+         which the token controller fills with a long-lived token.
+
+     WHO IS LET THROUGH, measured on the stand (managedFields, 2026-10-12):
+       - qa-runs Workflows: the gears (create, cancel patch) and the Argo
+         workflow-controller (spec keys, status, labels).
+       - runner pods: the workflow-controller alone creates and updates the
+         pod itself. The kubelet writes pods/status, which is not matched.
+       - runner tokens: the kubelet alone (projected volume); no new
+         ServiceAccount-token Secret may name a guarded account (a
+         pre-existing one stays valid until an operator deletes it).
+         NodeRestriction already limits the kubelet to pods bound to its node.
+         The token controller may still fill the `data` of a token Secret
+         that already named the same account (an UPDATE, not a new mint).
+       - the garbage collector may UPDATE (never CREATE) a Workflow or a pod:
+         it removes finalizers and ownerReferences when a Workflow is deleted
+         with foreground or orphan propagation. Without it such a delete hangs
+         (measured on a kind cluster, 2026-10-12). It writes as its own
+         ServiceAccount where kube-controller-manager runs with
+         --use-service-account-credentials (k3s, kubeadm), and as
+         system:kube-controller-manager where it does not.
+     Nobody, the controller included, may add an ephemeral container to a
+     runner pod: the controller never does, and one would run inside the pod
+     that holds the run's credentials. `pods/exec` and `pods/attach` are out
+     of scope: ADR-0008 names them as the trust boundary.
+
+     THE TRUSTED IDENTITIES ARE GUARDED TOO. Exempting the controller (and the
+     gears) is only as strong as who can act as them. Anyone who could run a
+     pod as the controller's ServiceAccount, or mint its token, would become
+     the controller and create a runner pod with a forged ownerReference (a
+     live Workflow's name and uid are readable). So, for each ServiceAccount
+     in `trustedServiceAccounts` -- the controller's when it lives in
+     argo.namespace, and qa-platform-gears when argo.namespace is the release
+     namespace, decided at render time:
+       - their tokens: the kubelet alone (projected volume); no new
+         ServiceAccount-token Secret may name a guarded account (a
+         pre-existing one stays valid until an operator deletes it);
+       - only the ReplicaSet controller may CREATE a pod running as it, and
+         only the garbage collector may UPDATE one. On the stand (k3s,
+         2026-10-12) the controller pod's managedFields show one main-resource
+         writer at creation (the embedded kube-controller-manager, which runs
+         with --use-service-account-credentials=true) and only status after
+         that. The ReplicaSet controller writes as
+         system:kube-controller-manager where that flag is off. A ReplicaSet
+         controller adopt or release patch of such a pod is denied; that only
+         happens to a pod whose labels someone else changed, which is denied
+         first;
+       - nobody may add an ephemeral container to such a pod.
+     A controller in its own namespace (argo.controllerNamespace) is outside
+     this policy's namespaceSelector and is not listed; that namespace's own
+     RBAC is then what protects it, which is why it is recommended.
+
+     KNOWN RESIDUE. A foreign Workflow can still reach the runner
+     ServiceAccount through a WorkflowTemplate, ClusterWorkflowTemplate or
+     CronWorkflow it references, or through a podSpecPatch that spells the name
+     with escapes. The same holds for an Argo inline template
+     (spec.templates[].steps[][].inline and dag.tasks[].inline are covered by
+     namesRunner; one reached only through a reference or an escaped name is
+     not). Such a pod gets the runner ServiceAccount's own RBAC --
+     workflowtaskresults only -- but no credentials: its controlling
+     Workflow's uid is not one the gears recorded (the Workflow-uid binding).
+     A principal that can create or patch Deployments or ReplicaSets whose pod
+     template runs as the controller's ServiceAccount, or exec into the
+     controller pod, can still act as the controller (and then create a runner
+     pod with a forged ownerReference). Run the controller in its own
+     namespace (argo.controllerNamespace) so that write access to
+     argo.namespace does not reach it.
+     `impersonate` on ServiceAccounts in this namespace (the built-in `edit`
+     role has it) is indistinguishable here from the account itself:
+     admission sees the impersonated name. ADR-0008 makes it an operator
+     right, like `pods/exec`.
+     `system:kube-controller-manager` is trusted for creates and GC updates;
+     on clusters without per-controller credentials that is every built-in
+     controller.
+
+     Cluster-scoped, so the name carries the release namespace. */}}
+{{- if not (.Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy") }}
+{{- fail "qa-platform requires Kubernetes 1.30 or later: the admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy API is not served (or, for a render with no cluster, pass --api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy). The runner guard is what keeps other principals off qa-runs Workflows, runner pods and runner tokens." }}
+{{- end }}
+{{- $runnerSa := required "argo.workflowServiceAccount is required: the runner pods' ServiceAccount" .Values.argo.workflowServiceAccount }}
+{{- $gears := printf "system:serviceaccount:%s:qa-platform-gears" .Release.Namespace }}
+{{- $controller := printf "system:serviceaccount:%s:%s" (.Values.argo.controllerNamespace | default .Values.argo.namespace) (required "argo.controllerServiceAccount is required: the Argo workflow-controller's ServiceAccount, the one principal besides the gears that may write qa-runs Workflows and runner pods" .Values.argo.controllerServiceAccount) }}
+{{- $gc := "system:serviceaccount:kube-system:generic-garbage-collector" }}
+{{- $rsController := "system:serviceaccount:kube-system:replicaset-controller" }}
+{{- $trusted := list }}
+{{- if eq (.Values.argo.controllerNamespace | default .Values.argo.namespace) .Values.argo.namespace }}
+{{- $trusted = append $trusted .Values.argo.controllerServiceAccount }}
+{{- end }}
+{{- if eq .Release.Namespace .Values.argo.namespace }}
+{{- $trusted = append $trusted "qa-platform-gears" }}
+{{- end }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: qa-platform-runner-guard-{{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.argo.namespace }}
+    resourceRules:
+      - apiGroups: ["argoproj.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["workflows"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["pods/ephemeralcontainers"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["serviceaccounts/token"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["secrets"]
+  # One policy matches five kinds, so every expression reads `object` as dyn
+  # and guards each field with has(). A branch for one kind is only reached
+  # behind that kind's variables.is* test. `oldObject` is null on CREATE.
+  # request.subResource is ABSENT, not "", on a main-resource write: reading
+  # it bare fails the evaluation ("no such key") and, with failurePolicy Fail,
+  # denies every pod write. Hence has(request.subResource) before each read.
+  variables:
+    - name: user
+      expression: request.userInfo.username
+    - name: gcUpdate
+      expression: >-
+        request.operation == 'UPDATE' && variables.user in ['{{ $gc }}', 'system:kube-controller-manager']
+    - name: isWorkflow
+      expression: request.resource.group == 'argoproj.io' && request.resource.resource == 'workflows'
+    - name: isPod
+      expression: request.resource.group == '' && request.resource.resource == 'pods'
+    - name: isEphemeral
+      expression: >-
+        variables.isPod && has(request.subResource) && request.subResource == 'ephemeralcontainers'
+    - name: isToken
+      expression: >-
+        request.resource.group == '' && request.resource.resource == 'serviceaccounts'
+        && has(request.subResource) && request.subResource == 'token'
+    - name: qaRunsLabel
+      expression: >-
+        variables.isWorkflow && (
+          (has(object.metadata.labels) && object.metadata.labels[?'app'].orValue('') == 'qa-runs')
+          || (oldObject != null && has(oldObject.metadata.labels)
+              && oldObject.metadata.labels[?'app'].orValue('') == 'qa-runs'))
+    # Every place a Workflow object itself can name the ServiceAccount its pods
+    # run as. The Argo controller is exempt below, so a foreign Workflow that
+    # names the runner here would otherwise get a runner pod made for it.
+    # The podSpecPatch substring match also matches the token audience string
+    # `qa-platform-runner-credentials` when the runner SA is named
+    # `qa-platform-runner`; that fails closed, so it is left as is.
+    - name: namesRunner
+      expression: >-
+        variables.isWorkflow && (
+          (has(object.spec.serviceAccountName) && object.spec.serviceAccountName == '{{ $runnerSa }}')
+          || (has(object.spec.templateDefaults) && has(object.spec.templateDefaults.serviceAccountName)
+              && object.spec.templateDefaults.serviceAccountName == '{{ $runnerSa }}')
+          || (has(object.spec.executor) && has(object.spec.executor.serviceAccountName)
+              && object.spec.executor.serviceAccountName == '{{ $runnerSa }}')
+          || (has(object.spec.podSpecPatch) && string(object.spec.podSpecPatch).contains('{{ $runnerSa }}'))
+          || (has(object.spec.templates) && object.spec.templates.exists(t,
+                (has(t.serviceAccountName) && t.serviceAccountName == '{{ $runnerSa }}')
+                || (has(t.executor) && has(t.executor.serviceAccountName)
+                    && t.executor.serviceAccountName == '{{ $runnerSa }}')
+                || (has(t.podSpecPatch) && string(t.podSpecPatch).contains('{{ $runnerSa }}'))
+                || (has(t.steps) && t.steps.exists(g, g.exists(s, has(s.inline)
+                      && ((has(s.inline.serviceAccountName) && s.inline.serviceAccountName == '{{ $runnerSa }}')
+                          || (has(s.inline.executor) && has(s.inline.executor.serviceAccountName)
+                              && s.inline.executor.serviceAccountName == '{{ $runnerSa }}')
+                          || (has(s.inline.podSpecPatch) && string(s.inline.podSpecPatch).contains('{{ $runnerSa }}'))))))
+                || (has(t.dag) && has(t.dag.tasks) && t.dag.tasks.exists(k, has(k.inline)
+                      && ((has(k.inline.serviceAccountName) && k.inline.serviceAccountName == '{{ $runnerSa }}')
+                          || (has(k.inline.executor) && has(k.inline.executor.serviceAccountName)
+                              && k.inline.executor.serviceAccountName == '{{ $runnerSa }}')
+                          || (has(k.inline.podSpecPatch) && string(k.inline.podSpecPatch).contains('{{ $runnerSa }}')))))))
+          || (has(object.spec.templateDefaults) && has(object.spec.templateDefaults.podSpecPatch)
+              && string(object.spec.templateDefaults.podSpecPatch).contains('{{ $runnerSa }}'))
+          || (has(object.spec.templateDefaults) && has(object.spec.templateDefaults.executor)
+              && has(object.spec.templateDefaults.executor.serviceAccountName)
+              && object.spec.templateDefaults.executor.serviceAccountName == '{{ $runnerSa }}')
+          || (oldObject != null && (
+                (has(oldObject.spec.serviceAccountName) && oldObject.spec.serviceAccountName == '{{ $runnerSa }}')
+                || (has(oldObject.spec.templateDefaults) && has(oldObject.spec.templateDefaults.serviceAccountName)
+                    && oldObject.spec.templateDefaults.serviceAccountName == '{{ $runnerSa }}'))))
+    - name: runnerPod
+      expression: >-
+        variables.isPod && (
+          (has(object.spec.serviceAccountName) && object.spec.serviceAccountName == '{{ $runnerSa }}')
+          || (has(object.spec.serviceAccount) && object.spec.serviceAccount == '{{ $runnerSa }}')
+          || (oldObject != null && has(oldObject.spec.serviceAccountName)
+              && oldObject.spec.serviceAccountName == '{{ $runnerSa }}'))
+    # The ServiceAccounts the rules above exempt, when they live in this
+    # namespace: see "THE TRUSTED IDENTITIES ARE GUARDED TOO" in the header.
+    # verify-k8s.sh reads this variable from the deployed policy.
+    - name: trustedServiceAccounts
+      expression: >-
+        [{{ range $i, $sa := $trusted }}{{ if $i }}, {{ end }}'{{ $sa }}'{{ end }}]
+    - name: trustedPod
+      expression: >-
+        variables.isPod && (
+          (has(object.spec.serviceAccountName) && object.spec.serviceAccountName in variables.trustedServiceAccounts)
+          || (has(object.spec.serviceAccount) && object.spec.serviceAccount in variables.trustedServiceAccounts)
+          || (oldObject != null && has(oldObject.spec.serviceAccountName)
+              && oldObject.spec.serviceAccountName in variables.trustedServiceAccounts))
+    # A ServiceAccount-token Secret is a token the token controller mints on
+    # request, outside any kubelet: the second path to a guarded account's
+    # credential, and a long-lived one that outlives every pod, so the
+    # kubelet-only rule on serviceaccounts/token alone does not close it.
+    - name: isSecret
+      expression: request.resource.group == '' && request.resource.resource == 'secrets'
+    - name: guardedTokenSecret
+      expression: >-
+        variables.isSecret && has(object.type) && object.type == 'kubernetes.io/service-account-token'
+        && has(object.metadata.annotations)
+        && (object.metadata.annotations[?'kubernetes.io/service-account.name'].orValue('') == '{{ $runnerSa }}'
+            || object.metadata.annotations[?'kubernetes.io/service-account.name'].orValue('') in variables.trustedServiceAccounts)
+    # An UPDATE of a token Secret that already named that account (the token
+    # controller filling `data`) is not a new mint.
+    - name: wasGuardedTokenSecret
+      expression: >-
+        oldObject != null && has(oldObject.type) && oldObject.type == 'kubernetes.io/service-account-token'
+        && has(oldObject.metadata.annotations) && has(object.metadata.annotations)
+        && oldObject.metadata.annotations[?'kubernetes.io/service-account.name'].orValue('')
+           == object.metadata.annotations[?'kubernetes.io/service-account.name'].orValue('')
+  validations:
+    - expression: >-
+        !(variables.qaRunsLabel || variables.namesRunner)
+        || variables.user in ['{{ $gears }}', '{{ $controller }}'] || variables.gcUpdate
+      message: "runner-guard: only qa-platform-gears and the Argo controller may write qa-runs Workflows or Workflows running as the runner ServiceAccount"
+    - expression: >-
+        !variables.runnerPod || variables.isEphemeral
+        || variables.user == '{{ $controller }}' || variables.gcUpdate
+      message: "runner-guard: only the Argo controller may create or change pods running as the runner ServiceAccount"
+    - expression: >-
+        !variables.trustedPod || variables.isEphemeral
+        || (request.operation == 'CREATE' && variables.user in ['{{ $rsController }}', 'system:kube-controller-manager'])
+        || variables.gcUpdate
+      message: "runner-guard: only the ReplicaSet controller may create, and only the garbage collector may change, pods running as a ServiceAccount the guard trusts"
+    - expression: >-
+        !(variables.runnerPod || variables.trustedPod) || !variables.isEphemeral
+      message: "runner-guard: no one may add an ephemeral container to a pod running as the runner ServiceAccount or a ServiceAccount the guard trusts"
+    - expression: >-
+        !variables.isToken || !(request.name == '{{ $runnerSa }}' || request.name in variables.trustedServiceAccounts)
+        || (variables.user.startsWith('system:node:')
+            && has(request.userInfo.groups) && 'system:nodes' in request.userInfo.groups)
+      message: "runner-guard: only a kubelet may mint tokens for the runner ServiceAccount or a ServiceAccount the guard trusts"
+    - expression: >-
+        !variables.guardedTokenSecret || (request.operation == 'UPDATE' && variables.wasGuardedTokenSecret)
+      message: "runner-guard: no one may create a ServiceAccount token Secret for the runner ServiceAccount or a ServiceAccount the guard trusts"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: qa-platform-runner-guard-{{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: qa-platform
+    app.kubernetes.io/component: gears
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  policyName: qa-platform-runner-guard-{{ .Release.Namespace }}
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.argo.namespace }}

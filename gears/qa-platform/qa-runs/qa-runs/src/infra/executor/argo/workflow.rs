@@ -158,6 +158,34 @@ pub const ADMITTED_DAG_TASK_KEYS: &[&str] = &["name", "template"];
     reason = "read by the allowlist test and, as source text, by the chart's check_workflow_guard.py"
 )]
 pub const ADMITTED_VOLUME_KEYS: &[&str] = &["name", "emptyDir", "projected"];
+/// See [`ADMITTED_SPEC_KEYS`].
+#[allow(
+    dead_code,
+    reason = "read by the allowlist test and, as source text, by the chart's check_workflow_guard.py"
+)]
+pub const ADMITTED_CONTAINER_KEYS: &[&str] = &[
+    "image",
+    "imagePullPolicy",
+    "command",
+    "env",
+    "securityContext",
+    "resources",
+    "volumeMounts",
+];
+/// See [`ADMITTED_SPEC_KEYS`].
+#[allow(
+    dead_code,
+    reason = "read by the allowlist test and, as source text, by the chart's check_workflow_guard.py"
+)]
+pub const ADMITTED_CONTAINER_SECURITY_CONTEXT_KEYS: &[&str] =
+    &["allowPrivilegeEscalation", "capabilities"];
+/// See [`ADMITTED_SPEC_KEYS`].
+#[allow(
+    dead_code,
+    reason = "read by the allowlist test and, as source text, by the chart's check_workflow_guard.py"
+)]
+pub const ADMITTED_POD_SECURITY_CONTEXT_KEYS: &[&str] =
+    &["runAsNonRoot", "runAsUser", "fsGroup", "seccompProfile"];
 
 /// Pod-internal volume name for the `/tmp` `emptyDir` every runner container
 /// mounts.
@@ -1227,8 +1255,10 @@ mod tests {
     #[test]
     fn every_rendered_key_is_inside_the_admission_allowlist() {
         use super::{
-            ADMITTED_DAG_TASK_KEYS, ADMITTED_SPEC_KEYS, ADMITTED_TEMPLATE_KEYS,
-            ADMITTED_VOLUME_KEYS,
+            ADMITTED_CONTAINER_KEYS, ADMITTED_CONTAINER_SECURITY_CONTEXT_KEYS,
+            ADMITTED_DAG_TASK_KEYS, ADMITTED_POD_SECURITY_CONTEXT_KEYS, ADMITTED_SPEC_KEYS,
+            ADMITTED_TEMPLATE_KEYS, ADMITTED_VOLUME_KEYS, NETWORK_ISOLATION_LABEL,
+            NETWORK_ISOLATION_LABEL_VALUE,
         };
         let mut multi_node = spec(vec![node("a"), node("b")]);
         multi_node.access.mounts = vec![secret_mount("r", "/.kube/kubeconfig", Some(0o400))];
@@ -1283,7 +1313,42 @@ mod tests {
                         }
                     }
                 }
+                if let Some(container) = template.get("container") {
+                    for key in keys(container) {
+                        assert!(
+                            ADMITTED_CONTAINER_KEYS.contains(&key.as_str()),
+                            "{shape}: container.{key}"
+                        );
+                    }
+                    for key in keys(&container["securityContext"]) {
+                        assert!(
+                            ADMITTED_CONTAINER_SECURITY_CONTEXT_KEYS.contains(&key.as_str()),
+                            "{shape}: container.securityContext.{key}"
+                        );
+                    }
+                    assert_eq!(
+                        container["securityContext"]["capabilities"],
+                        json!({"drop": ["ALL"]}),
+                        "{shape}"
+                    );
+                    assert_eq!(
+                        template["metadata"]["labels"][NETWORK_ISOLATION_LABEL],
+                        NETWORK_ISOLATION_LABEL_VALUE,
+                        "{shape}"
+                    );
+                }
             }
+            for key in keys(&workflow["spec"]["securityContext"]) {
+                assert!(
+                    ADMITTED_POD_SECURITY_CONTEXT_KEYS.contains(&key.as_str()),
+                    "{shape}: spec.securityContext.{key}"
+                );
+            }
+            assert_eq!(
+                workflow["spec"]["securityContext"]["seccompProfile"]["type"],
+                "RuntimeDefault",
+                "{shape}"
+            );
             for volume in workflow["spec"]["volumes"].as_array().unwrap() {
                 for key in keys(volume) {
                     assert!(
@@ -1661,6 +1726,84 @@ mod tests {
         assert_eq!(
             last["value"], "tests/test_smoke.py",
             "the container runtime takes the last entry, and the node's is last"
+        );
+    }
+
+    /// verify-k8s.sh admits this exact file against the live guard, so a rule that
+    /// denies what qa-runs emits fails the deploy instead of every credentialed
+    /// run (re-verification M1). `spec()` pins `run_id` (nil) and `tenant_id`,
+    /// so the file is byte-stable. Regenerate with
+    /// `QA_RUNS_UPDATE_GOLDEN=1 cargo nextest run -p qa-runs --features argo the_verify_fixture_is_what_build_emits`.
+    #[test]
+    fn the_verify_fixture_is_what_build_emits() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/helm/tests/fixtures/qa-runs-workflow.json");
+        let mut run = spec(vec![node("a"), node("b")]);
+        run.access.mounts = vec![secret_mount("r", "/.kube/kubeconfig", Some(0o400))];
+        let mut config = cfg();
+        config.workflow_service_account = Some("qa-platform-runner".to_owned());
+        config.namespace = "argo".to_owned();
+        config.bundle_base_url =
+            Some("http://qa-platform-gears.qa-platform.svc.cluster.local:8087".to_owned());
+        let mut workflow = build(&run, &config, "verify-k8s-golden");
+        let metadata = workflow["metadata"].as_object_mut().unwrap();
+        metadata.remove("name");
+        metadata.insert("generateName".to_owned(), json!("verify-k8s-golden-"));
+        if std::env::var_os("QA_RUNS_UPDATE_GOLDEN").is_some() {
+            std::fs::write(&path, stable_pretty(&workflow)).unwrap();
+        }
+        let committed = std::fs::read_to_string(&path)
+            .expect("fixture missing: run with QA_RUNS_UPDATE_GOLDEN=1");
+        assert!(
+            golden_matches(&committed, &workflow),
+            "workflow::build() changed; regenerate the verify fixture"
+        );
+    }
+
+    /// Whether the committed golden text is the document `build` emits.
+    /// Compared as parsed `Value`s, whose equality ignores key order under
+    /// either map type; unparsable text does not match.
+    fn golden_matches(committed: &str, emitted: &Value) -> bool {
+        serde_json::from_str::<Value>(committed).is_ok_and(|parsed| &parsed == emitted)
+    }
+
+    /// Pretty JSON with every object's keys sorted, so a regenerated fixture
+    /// does not churn with the build's serde_json features.
+    fn stable_pretty(value: &Value) -> String {
+        fn sorted(value: &Value) -> Value {
+            match value {
+                Value::Object(map) => Value::Object(
+                    map.iter()
+                        .map(|(key, item)| (key.clone(), sorted(item)))
+                        .collect::<BTreeMap<_, _>>()
+                        .into_iter()
+                        .collect(),
+                ),
+                Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+                other => other.clone(),
+            }
+        }
+        serde_json::to_string_pretty(&sorted(value)).unwrap() + "\n"
+    }
+
+    /// serde_json's `preserve_order` is enabled somewhere in the workspace
+    /// (cf-gears-file-parser -> kreuzberg -> serde_toon_format), so whether a
+    /// `Value`'s keys print sorted or in insertion order depends on feature
+    /// unification for the build at hand. The golden compare must not.
+    #[test]
+    fn the_golden_compare_ignores_key_order() {
+        let emitted = json!({"b": 1, "a": {"d": [{"z": 0, "y": 1}], "c": 2}});
+        for text in [
+            "{\"a\":{\"c\":2,\"d\":[{\"y\":1,\"z\":0}]},\"b\":1}",
+            "{\"b\":1,\"a\":{\"d\":[{\"z\":0,\"y\":1}],\"c\":2}}",
+        ] {
+            assert!(golden_matches(text, &emitted), "{text}");
+        }
+        assert!(!golden_matches("{\"b\":1,\"a\":{\"c\":3}}", &emitted));
+        assert_eq!(
+            stable_pretty(&emitted),
+            "{\n  \"a\": {\n    \"c\": 2,\n    \"d\": [\n      {\n        \"y\": 1,\n        \"z\": 0\n      }\n    ]\n  },\n  \"b\": 1\n}\n",
+            "the regenerated fixture is written with sorted keys, whatever the map type"
         );
     }
 }

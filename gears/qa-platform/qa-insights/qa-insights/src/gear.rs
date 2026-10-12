@@ -1984,6 +1984,7 @@ mod tests {
             // A sweep never sets it: the mark is its resume point. See
             // `ReconcileOutcome::resume_from`.
             resume_from: None,
+            resume_after_run_id: None,
             stopped_at_gap: false,
             stopped_at_run: None,
             // The stand's wedge predates the resume cursor; there was none.
@@ -2310,6 +2311,7 @@ mod tests {
             // The page came back short: there is nothing past the cursor.
             caught_up: true,
             resume_from: None,
+            resume_after_run_id: None,
             stopped_at_gap: false,
             stopped_at_run: None,
             // A caught-up pass erases the cursor, so there is none to report.

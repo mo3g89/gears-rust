@@ -720,6 +720,10 @@ pub(in crate::domain::service) mod fakes {
         pub(in crate::domain::service) new_results: Mutex<Vec<NewTestResult>>,
         pub(in crate::domain::service) bundle_writes: Mutex<Vec<(Uuid, Vec<Uuid>)>>,
         pub(in crate::domain::service) execution_writes: Mutex<Vec<(Uuid, String)>>,
+        /// The uid `set_execution_ref` last recorded per run, read back by
+        /// `execution_uid` under the same scope check as the row.
+        pub(in crate::domain::service) execution_uids:
+            Mutex<std::collections::BTreeMap<Uuid, String>>,
         pub(in crate::domain::service) transitions: Mutex<Vec<(Uuid, RunState, RunState)>>,
         /// Every delta `add_result_counts` was handed, in order — the signed
         /// values themselves, which is what a delta bug shows up in and what an
@@ -846,6 +850,13 @@ pub(in crate::domain::service) mod fakes {
                 run.execution_ref = Some(reference.to_owned());
                 run.state = state;
             }
+        }
+
+        pub(in crate::domain::service) fn seed_execution_uid(&self, run_id: Uuid, uid: &str) {
+            self.execution_uids
+                .lock()
+                .unwrap()
+                .insert(run_id, uid.to_owned());
         }
 
         pub(in crate::domain::service) fn seed_deadline(
@@ -1158,12 +1169,29 @@ pub(in crate::domain::service) mod fakes {
             Ok(true)
         }
 
+        async fn execution_uid<C: DBRunner>(
+            &self,
+            _runner: &C,
+            scope: &AccessScope,
+            id: Uuid,
+        ) -> Result<Option<String>, DomainError> {
+            assert_scope_is_for(scope, resources::RUN_NAME, "execution_uid");
+            let rows = self.rows.lock().unwrap();
+            Ok(rows
+                .iter()
+                .find(|(tenant_id, run)| {
+                    run.id == id && scope.contains_uuid(OWNER_TENANT_ID, *tenant_id)
+                })
+                .and_then(|_| self.execution_uids.lock().unwrap().get(&id).cloned()))
+        }
+
         async fn set_execution_ref<C: DBRunner>(
             &self,
             _runner: &C,
             scope: &AccessScope,
             id: Uuid,
             execution_ref: &str,
+            execution_uid: Option<&str>,
         ) -> Result<bool, DomainError> {
             assert_scope_is_for(scope, resources::RUN_NAME, "set_execution_ref");
             if *self.fail_execution_ref.lock().unwrap() {
@@ -1178,6 +1206,15 @@ pub(in crate::domain::service) mod fakes {
                 return Ok(false);
             };
             run.execution_ref = Some(execution_ref.to_owned());
+            let mut uids = self.execution_uids.lock().unwrap();
+            match execution_uid {
+                Some(uid) => {
+                    uids.insert(id, uid.to_owned());
+                }
+                None => {
+                    uids.remove(&id);
+                }
+            }
             self.execution_writes
                 .lock()
                 .unwrap()

@@ -103,7 +103,7 @@ where
     /// `ConstraintsRequiredButAbsent` (`PolicyEnforcer::access_scope` always
     /// requires constraints; `authz-resolver-sdk/src/pep/compiler.rs:84-86`).
     /// That is why there is no explicit nil-tenant refusal here, unlike
-    /// `ReconcileService::rebuild` — that method needs a `TenantBound` for the
+    /// `ReconcileService::rebuild_after` — that method needs a `TenantBound` for the
     /// qa-runs listing it makes *before* any scope exists, and this one has
     /// nothing to do before the scope.
     ///

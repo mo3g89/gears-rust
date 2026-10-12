@@ -86,3 +86,56 @@ def test_the_runner_base_image_supports_extraction_filters():
     match = re.match(r"FROM python:(\d+)\.(\d+)", first)
     assert match, first
     assert (int(match.group(1)), int(match.group(2))) >= (3, 12), first
+
+
+def test_the_bundle_download_ignores_proxy_variables(monkeypatch):
+    import urllib.request
+
+    monkeypatch.setenv("http_proxy", "http://attacker:3128")
+    op = fetch_bundle.opener(None)
+    proxies = [h for h in op.handlers if isinstance(h, urllib.request.ProxyHandler)]
+    assert all(not h.proxies for h in proxies)
+
+
+def test_a_bundle_redirect_is_refused_and_the_signature_does_not_follow(monkeypatch):
+    import http.server
+    import threading
+
+    elsewhere_paths = []
+
+    class Elsewhere(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            elsewhere_paths.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    elsewhere = http.server.HTTPServer(("127.0.0.1", 0), Elsewhere)
+
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header(
+                "Location", "http://127.0.0.1:%d/x?sig=abc" % elsewhere.server_port
+            )
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+    for s in (elsewhere, server):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    monkeypatch.setenv(
+        "TEST_BUNDLE_URL", "http://127.0.0.1:%d/bundle?sig=abc" % server.server_port
+    )
+    try:
+        with pytest.raises(SystemExit) as exited:
+            fetch_bundle.download(None)
+    finally:
+        server.shutdown()
+        elsewhere.shutdown()
+    assert exited.value.code != 0
+    assert not any("sig=" in path for path in elsewhere_paths), elsewhere_paths

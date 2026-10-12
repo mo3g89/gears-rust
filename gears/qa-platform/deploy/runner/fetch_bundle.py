@@ -94,14 +94,38 @@ def ssl_context():
     return context
 
 
+MAX_RESPONSE_BYTES = 1 << 30  # 1 GiB
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would carry the pod token (or the bundle's ?sig=) to wherever
+    Location points. The platform never redirects these routes, so any
+    redirect is refused: urllib then raises HTTPError with the 3xx code."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def opener(context):
+    """No proxy: the bundle URL's `?sig=` must go to TEST_BUNDLE_URL itself,
+    never through a proxy a run variable named (re-verification P1). An empty
+    ProxyHandler overrides the environment."""
+    handlers = [urllib.request.ProxyHandler({}), NoRedirect()]
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    return urllib.request.build_opener(*handlers)
+
+
 def download(context):
     url = required("TEST_BUNDLE_URL")
     # No Authorization header. The `?sig=` already in `url` is the credential,
     # and it authorises this one bundle -- see this module's header.
     request = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(request, timeout=300, context=context) as response:
-            data = response.read()
+        with opener(context).open(request, timeout=300) as response:
+            data = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(data) > MAX_RESPONSE_BYTES:
+                die("bundle exceeds %d bytes" % MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as error:
         hint = ""
         if error.code == 403:
